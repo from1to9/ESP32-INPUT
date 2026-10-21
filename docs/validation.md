@@ -193,8 +193,29 @@ The complete host suite passed with 91 coordinator cases and 23 serial-parser
 cases. The final pinned ESP32-S31 application is 2,423,488 bytes, SHA-256
 `df5f803e04c5ae08ef8c834e4b8464cb140f96b5edf32565f78507ecf080c920`.
 The UI/header/coordinator source hashes remained unchanged during the final
-build. Earlier compact-UI images are superseded. Device deployment, physical
-redraw/touch and host interoperability remain separate acceptance gates.
+build. Earlier compact-UI images are superseded. Subsequent physical evidence is
+recorded below; host interoperability remains a separate acceptance gate.
+
+### Focused UI deployment and Motion investigation
+
+The image above was flashed with verification, preserving NVS. The user confirmed
+working Menu/Keyboard/Mouse touch navigation and AI double-click. A 90.47-second
+capture had nine health samples, stable free internal memory of 72,735 bytes and
+largest internal block of 31,744 bytes. No LCD allocation failure or BLE failure
+was captured. However, repeated `esp_lv_adapter_lock` errors caused the smoke
+result to fail. Source inspection traces the warnings to the coordinator's
+zero-wait presentation lock; they do not prove a 100 ms blocking stall. The
+planned correction transfers presentation consumption to the LVGL owner task,
+without weakening the log parser or increasing lock waits.
+
+A separate 35.03-second capture observed Bluetooth initialized, connected and
+ready, with no BLE failure, but again failed on LVGL lock errors. The user still
+could not enable Motion after selecting USB. Existing periodic logs omit IMU,
+calibration and selected-route readiness, so they cannot establish that cause.
+The user's factory-ROM accelerometer observation is separate evidence of prior
+sensor operation. Retained startup/stream diagnostics and explicit Motion
+availability reasons are required before claiming a fix. These captures are not
+elapsed-time endurance or complete host-input qualification.
 
 ### Long-term power gate
 

@@ -206,7 +206,8 @@ partition layout are plans, not evidence of working control or OTA services.
 
 ## Checkpoint 11: focused workspaces and bounded UI updates
 
-Status: implemented and locally validated; physical acceptance remains pending.
+Status: published at `955877104733af6d756ec358e2c328db3b85a35b`; flashed and
+physical navigation confirmed. The bounded runtime smoke still fails.
 
 - Each mode keeps its core controls. Menu and physical AI double-click open one
   shared panel for mode switching, Status, Settings and Lock. The mouse surface
@@ -222,9 +223,26 @@ Status: implemented and locally validated; physical acceptance remains pending.
 - The complete host suite passed, including 91 coordinator cases. The final
   pinned target build and image identity are recorded in [validation](validation.md).
 
-These results do not yet demonstrate physical touch response, LCD DMA headroom,
-radio compatibility or continuous powered operation. Audio and remote-control
-services remain unavailable/planned as described in their owning contracts.
+The user confirmed touch-based Menu/Keyboard/Mouse navigation and AI double-click
+after flashing the recorded image. The 90-second capture retained stable internal
+memory with no captured LCD allocation failure, but repeated zero-wait LVGL lock
+errors make its result failed. A subsequent capture observed Bluetooth connected
+and ready; host input and physical Motion remain unverified. Motion could not be
+enabled even after the user selected USB. Factory firmware reportedly displays
+accelerometer data, so this does not establish hardware failure. Audio and remote
+control remain unavailable/planned; no long-duration qualification is claimed.
+
+## Checkpoint 12: default brightness
+
+Status: independently reviewed, host-tested and published at
+`550f1a31b45d279e303a8b527dd806c2f2eb8c42`; not yet deployed.
+
+The fallback brightness is 50 percent. Existing schema-1/schema-2 values,
+including explicitly stored 70 percent, remain unchanged. Initialization never
+writes defaults or migrates storage implicitly. Portable settings, 16 production
+store cases and 91 coordinator cases passed with sanitizers. The twelve-file
+review inventory has no open findings. This source change alone does not prove
+physical brightness or a new device image.
 
 ## Next checkpoints
 
@@ -232,7 +250,7 @@ services remain unavailable/planned as described in their owning contracts.
 | --- | --- | --- |
 | Input foundation and device basics | Relevant host suites, pinned target build, independent review | Passed; device gates remain |
 | Nine-cell UI, saved peers and USB switching | Native UI inspection, transport interruption tests, target build, independent review | Passed; device gates remain |
-| Device verification | Actual deployment identity, boot/health evidence, observed input and connection checks | Failed expanded baseline; memory/display repair and retest required |
+| Device verification | Actual deployment identity, boot/health evidence, observed input and connection checks | Compact UI navigation confirmed; runtime lock warnings and Motion diagnosis remain open |
 | Audio and spoken letters | Working drivers, acoustic/recognition evaluation and host qualification | Planned; unavailable in current input firmware |
 | Remote Wi-Fi control and MCP | Authentication, ownership, complete state and failure-path tests | Contract work; provisioning alone is not remote control |
 
