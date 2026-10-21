@@ -42,6 +42,8 @@ Use descriptive names and consistent existing style. C and Python use four-space
 
 Use sanitizers where supported. Test invariants, numerical boundaries and recovery; avoid tests that mirror implementation line for line. Never relax checks just to obtain a pass. If a requirement changes, document the new expected result.
 
+For product UI work, use the original `design/` prototype and [interaction contract](interaction.md) as the baseline. The prototype was introduced in commit `21c30f1`; its simulated host, recognition and audio state must be replaced by truthful runtime capability and connection state, while preserving its navigation and input workflows. Diagnostic screens do not satisfy the product UI acceptance gate. Inspect actual LVGL renders at 480 x 480 and exercise the corresponding production interaction paths. Record feature-level gaps without changing the approved baseline to match incomplete code.
+
 Run `python3 tools/check_repository.py` for first-party text hygiene and local Markdown links. Its CJK check prevents the previous mixed-language regression; it is not a complete language detector. Review wording manually. Run `python3 tools/check.py` for portable C behavior.
 
 Distinguish source-reviewed, host-tested, target-compiled, device-tested, host-compatible and release-qualified evidence. One level does not establish the next. Record SDK/dependency revisions, target and configuration for build evidence; record actual board and host versions for compatibility. Do not invent latency, stability or interoperability results.

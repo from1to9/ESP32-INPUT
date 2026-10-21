@@ -1,0 +1,8 @@
+{
+  "target": "esp32s31",
+  "idf_repository": "https://github.com/espressif/esp-idf.git",
+  "idf_commit": "383dda6c182e3dabf6355160166fe007df775629",
+  "idf_version": "6.2.0",
+  "minimum_python": "3.11",
+  "bsp_commit": "5f10831ddf8697680121e72ba0fd3dce7f7f1799"
+}

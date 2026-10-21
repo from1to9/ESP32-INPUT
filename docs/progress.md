@@ -134,12 +134,33 @@ This checkpoint publishes the adapter and its tests. The final integration
 commit supplies its build/configuration wiring. Actual USB enumeration, host
 input, cable/suspend behavior and electrical/thermal qualification remain gates.
 
+## Checkpoint 8: integrated input and device settings baseline
+
+Status: all 128 first-party code/configuration/test files passed independent
+source review; no blocking findings remain in the sealed baseline.
+
+- Integrated the product UI, Mosaico board/IMU/haptics adapter, measured device
+  status, persistent settings, display wake policy, Wi-Fi setup and BLE/USB input.
+- Switching waits for final release completion, rejects replacement connections,
+  and preserves explicit selection without automatic fallback. Pairing operations
+  distinguish their own asynchronous disconnect from an unrelated replacement.
+- The full host suite passed, including 77 coordinator cases, 16 settings-store
+  cases, BLE/USB/board checks and serial capture regressions. Ten independent
+  review findings were fixed and retested. The native UI has 164 inspected cases.
+- The pinned S31 linked build passed, with a 0x24da80-byte application and 42 percent
+  of the four-MiB application partition free. Source/build evidence is recorded
+  in validation; physical deployment and host input remain separate gates.
+
+Wi-Fi scan/profile management, reconnect priorities and firmware update APIs
+are newly requested extensions. The current factory-only image has no OTA path;
+the next design must provide inactive-slot validation and post-boot rollback.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |
 | --- | --- | --- |
-| Input foundation and device basics | Relevant host suites, pinned target build, independent review | Integration and regression fixes |
-| Nine-cell UI, saved peers and USB switching | Native UI inspection, transport interruption tests, target build, independent review | Implementation |
+| Input foundation and device basics | Relevant host suites, pinned target build, independent review | Passed; device gates remain |
+| Nine-cell UI, saved peers and USB switching | Native UI inspection, transport interruption tests, target build, independent review | Passed; device gates remain |
 | Device verification | Actual deployment identity, boot/health evidence, observed input and connection checks | Pending the reviewed candidate |
 | Audio and spoken letters | Working drivers, acoustic/recognition evaluation and host qualification | Planned; unavailable in current input firmware |
 | Remote Wi-Fi control and MCP | Authentication, ownership, complete state and failure-path tests | Contract work; provisioning alone is not remote control |

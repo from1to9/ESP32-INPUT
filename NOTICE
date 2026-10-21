@@ -6,3 +6,9 @@ third_party/esp-mosaico-bsp is an independent upstream Git submodule;
 its copyright, license and third-party notices remain applicable.
 Behavioral research references are listed in docs/references.md.
 No M5 airmouse implementation or speech model weights are included.
+
+USB console initialization follows the ESP-IDF tusb_console example
+at SDK commit 383dda6c182e3dabf6355160166fe007df775629.
+The example is Copyright 2022-2025 Espressif Systems (Shanghai) CO LTD,
+offered under Unlicense OR CC0-1.0; this project uses its CC0-1.0 option.
+Managed components retain their upstream licenses and dependency-lock provenance.

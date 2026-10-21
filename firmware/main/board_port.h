@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+#include "lvgl.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    const char *name;
+    bool display;
+    bool touch;
+    bool lock_button;
+    bool imu;
+    bool haptics;
+    bool battery;
+    bool brightness;
+} board_capabilities_t;
+
+typedef enum {
+    BOARD_FEEDBACK_CONFIRM,
+    BOARD_FEEDBACK_MODE,
+    BOARD_FEEDBACK_LOCK,
+    BOARD_FEEDBACK_ERROR,
+} board_feedback_t;
+
+typedef enum {
+    BOARD_BUTTON_DOWN,
+    BOARD_BUTTON_UP,
+} board_button_event_t;
+
+typedef void (*board_button_event_callback_t)(board_button_event_t event, uint64_t timestamp_us);
+
+typedef struct {
+    float x_dps;
+    float y_dps;
+    float z_dps;
+    float x_g;
+    float y_g;
+    float z_g;
+    uint64_t timestamp_us;
+} board_imu_sample_t;
+
+typedef enum {
+    BOARD_TRUTH_UNKNOWN,
+    BOARD_TRUTH_NO,
+    BOARD_TRUTH_YES,
+} board_truth_t;
+
+typedef struct {
+    uint64_t timestamp_us;
+    esp_err_t error;
+    bool gauge_available;
+    board_truth_t battery_present;
+    board_truth_t external_power;
+    board_truth_t charging;
+    board_truth_t full;
+    bool percent_valid;
+    uint8_t percent;
+    bool voltage_valid;
+    uint16_t voltage_mv;
+    bool current_valid;
+    int16_t current_ma;
+    bool temperature_valid;
+    float temperature_c;
+} board_power_status_t;
+
+typedef struct {
+    bool requested;
+    uint8_t requested_percent;
+    bool pending;
+    bool applied_known;
+    uint8_t applied_percent;
+    uint64_t applied_at_us;
+    esp_err_t error;
+} board_brightness_status_t;
+
+/* Register once before board_init to select debounced BSP down/up AI events.
+ * The callback must only signal the coordinator and must not block. Raw mode
+ * replaces the legacy long-press callback passed to board_init; the coordinator
+ * owns mutually exclusive click/double-click/900 ms hold classification. */
+esp_err_t board_button_events_register(board_button_event_callback_t callback);
+
+/* Call once before starting transport. Without raw-event registration, a
+ * non-null lock callback receives the legacy physical 900 ms hold. In raw mode
+ * that callback is ignored and may be null. Callbacks must not block. The
+ * coordinator owns lock/unlock and must not treat a touchscreen request as a
+ * trusted physical unlock event. */
+esp_err_t board_init(void (*lock_callback)(void));
+board_capabilities_t board_capabilities(void);
+
+/* Nonblocking latest sample from the 100 Hz BMI270 stream, in BSP sensor axes.
+ * Gyro and acceleration use separate official BSP reads in one acquisition
+ * batch; they are not an atomic six-axis sensor frame. Acceleration is in g.
+ * Acquisition batches over 20 ms are rejected rather than timestamped fresh.
+ * timestamp_us is the monotonic acquisition-completion time, not wall time.
+ * The same timestamp may repeat: consumers must skip duplicates and use actual
+ * timestamp intervals. Samples older than 50 ms fail closed. On failure output
+ * is untouched; unavailable/faulted streams return an error and drop imu. */
+esp_err_t board_imu_read(board_imu_sample_t *sample);
+
+/* Nonblocking cache, polled once per second; stale after five seconds. Always
+ * fills output, including unknown/invalid fields on error. Percent is the
+ * gauge's existing-profile estimate, not a voltage-derived or qualified cell
+ * measurement. No profile is programmed. Charging reflects current direction;
+ * zero current is unknown. This BSP cannot independently sense external power. */
+esp_err_t board_power_read(board_power_status_t *status);
+
+/* Accept the latest brightness request [0,100] for the low-priority worker.
+ * ESP_OK means queued/coalesced; inspect status for actual driver acceptance.
+ * Hardware attempts are limited to one per 20 ms; pending values coalesce.
+ * Zero sets OLED brightness to zero. Values 1..100 restore illumination without
+ * pausing LVGL/touch, Bluetooth or the coordinator. No deep standby is entered. */
+esp_err_t board_brightness_set(int percent);
+board_brightness_status_t board_brightness_status(void);
+
+lv_display_t *board_display_get(void);
+/* UINT32_MAX waits indefinitely. Other values are milliseconds. */
+bool board_display_lock(uint32_t timeout_ms);
+void board_display_unlock(void);
+
+/* Session-only preference, enabled by default when the motor is available.
+ * These functions are task-context only and do not wait for a pulse. */
+bool board_haptics_enabled(void);
+void board_haptics_enable(bool enabled);
+void board_haptic_feedback(board_feedback_t event);
+/* Gate motion while a pulse is pending/active or motor-off is unconfirmed. */
+bool board_haptics_active(void);
+
+#ifdef __cplusplus
+}
+#endif

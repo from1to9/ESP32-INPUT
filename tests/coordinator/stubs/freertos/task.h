@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+#include "FreeRTOS.h"
+void vTaskDelay(TickType_t ticks);
+UBaseType_t uxTaskGetStackHighWaterMark(void *task);

@@ -2,7 +2,7 @@
 
 ## Current evidence
 
-Baseline date: 2026-10-21. Evidence currently covers source research, a browser prototype and host-side logic. SDK source preparation has begun, but no S31 target build, device flash or real pairing is recorded. All hardware acceptance items remain pending.
+Evidence date: 2026-10-21. The pinned S31 toolchain has built the minimal composite HID firmware. Portable behavior, report layout and production BLE callback logic have executable host coverage. The physical development board is identified as Mosaico v1.2 (eFuse `0x0102`) with 16 MB flash, and its original flash contents have been backed up locally. Runtime deployment and host compatibility evidence are recorded separately below; a build does not establish a working HID device or long-term reliability.
 
 | Host | Mouse path | Keyboard checks | Voice/audio | Status |
 | --- | --- | --- | --- | --- |
@@ -16,15 +16,15 @@ For iPhone, check Settings -> Accessibility -> Touch -> AssistiveTouch -> Device
 
 ## Host checks
 
-`python3 tools/check.py` compiles and runs portable C tests for default state, mode/disconnect/lock gates, stale epochs, release acknowledgement, sampling-rate-independent motion, invalid samples and US ANSI encoding. Keyboard mode rejects mouse output. These tests do not validate a BLE descriptor or radio stack.
+`python3 tools/check.py` runs portable state, HID queue and haptic policy tests under strict C11 diagnostics and address/undefined-behavior sanitizers. It also validates the composite report map independently, exercises production BLE callbacks with substitutes at SDK boundaries, and checks the serial-health capture tool using synthetic streams. Coverage includes interruption, stale epochs/generations, release recovery, congestion deadlines, bounded lifetime cycles, motor cancellation races and numerical limits. These checks do not emulate a radio or prove host interoperability. See the [coverage matrix](test-coverage.md) for remaining integration and device cases.
 
-### Baseline record: 2026-10-21
+### Historical design baseline: 2026-10-21
 
 - C11 tests passed under Clang with strict warnings, AddressSanitizer and UndefinedBehaviorSanitizer.
 - Prototype JavaScript syntax passed. Browser checks covered default mouse mode, motion toggle, motion selection of G, the Alpha -> A candidate/confirmation flow, explicit send interrupted by lock, independent audio exit, concurrency simulation and local takeover.
 - Browser connections, audio, speech and sending are simulated. No Bluetooth or microphone permission was requested.
-- The portable core provides epochs and release gates. The real transport, queue, button timing and product LVGL UI remain unimplemented.
-- No S31 build, flashing, pairing, latency or acoustic result is claimed. Next: pin the SDK and build minimum composite HID.
+- At this earlier snapshot, only the portable core provided epochs and release gates; transport, queue and device UI had not yet been implemented.
+- This historical record contains no target-build, flashing, pairing, latency or acoustic result. Current implementation evidence supersedes that scope below.
 
 ### Standards and English-language migration: 2026-10-21
 
@@ -39,12 +39,78 @@ For iPhone, check Settings -> Accessibility -> Touch -> AssistiveTouch -> Device
 1. **Board identity:** record revision, BSP/SDK commits, power and configuration. Abort unsupported eFuse values. Check display, touch, AI, IMU, USB power and temperature.
 2. **Minimum HID:** pair each host family; check report IDs, encryption/bonding, reconnect and sleep/wake. Type `aAzZ09 !?@` and confirm modifier release.
 3. **Mouse:** 60 s stationary, different grips, fast/slow rotation, touch release, fine control, click vibration and interruption during drag. Retain raw/filtered evidence without concealing drift.
-4. **Keyboard:** two-level selection, deletion, space, case, mode changes, 100-character sending and cancellation/disconnect/target changes. Old results must not reach a new target.
+4. **Keyboard:** two-level nine-cell selection, deletion, space, case, mode changes, full 64-character drafts, repeated sends totalling over 100 characters and cancellation/disconnect/target changes. Old results must not reach a new target.
 5. **Spoken letters:** repeated 26-letter/digit/spelling-word trials, confusion matrix and rejection rate, with separate accents/distances/noise conditions. Set thresholds from evidence.
 6. **Independent audio:** capture, playback, meeting echo, mute, gain and HFP codec negotiation. Pairing alone is not an audio result.
 7. **Concurrency:** same-host HID + HFP and HID + A2DP separately, proposed 30-minute interaction runs, then 8-hour powered soak. Record latency, underruns, disconnects and memory.
 
 These durations are acceptance plans, not completed runs. IMU sample rate or report frequency is not end-to-end latency.
+
+## Input firmware engineering record
+
+- Target: `esp32s31`, experimental ESP-IDF 6.2.0 at `383dda6c182e3dabf6355160166fe007df775629`; BSP at `5f10831ddf8697680121e72ba0fd3dce7f7f1799`. Managed dependencies are fixed in `firmware/dependencies.lock`.
+- Tooling is project-local: Python 3.12, official RISC-V compiler, CMake 4.0.3 and Ninja 1.12.1. `tools/idf.py` separates setup/build from deployment.
+- The BLE development build uses one connection, encrypted composite mouse/keyboard reports, bounded input queues and release barriers. The coordinator watchdog has panic enabled with a five-second timeout.
+- The product LVGL UI follows the original top-target/bottom-mode layout, large touchpad, preview-first keyboard and separate unavailable Audio page. Light and Dark themes cover all pages and overlays. Dark is the initial default; Ctrl/Command and haptic settings are explicit and persistent. Only a complete physical AI hold can unlock.
+- Live BMI270 sampling, stationary calibration, wrist motion, touch fine control and local motion selection are implemented. The approved nine-cell grid and 64-character draft use bounded transport batches with accepted-prefix retention. Physical orientation, stationary drift and host outcomes still require device evidence. Audio, speech and remote Wi-Fi input remain unavailable; provisioning does not enable remote control.
+- USB CDC provides read-only diagnostics; composite USB HID and transport switching are being integrated under the same USB owner. Health records include uptime, free/minimum heap, largest internal block, coordinator stack watermark, queue occupancy and lock state. Logs may drop when the host does not read; logging must not block HID.
+- Bluetooth Device Information/Battery services, cross-host compatibility and long-duration qualification remain release gaps. Local battery/About screens are separate from GATT services. The current profile is a development HID subset, not a Bluetooth qualification claim.
+
+### Current expanded integration
+
+The original product implementation passed a frozen independent v3 review and
+target build before the user added device basics, multiple saved peers, a
+nine-cell keyboard and USB selection. Those earlier results do not qualify the
+expanded tree. Standalone reviewed components are published as completed stages
+in [delivery progress](progress.md). The expanded linked candidate, deployment
+and actual Bluetooth/USB host tests require fresh results below before delivery.
+
+The expanded baseline passed independent review of 128 first-party code,
+configuration and test files. The sorted SHA-256 inventory digest is
+`11c200a3d1237b05b3c1a4021a5344dd4b5b0d49e2ce10d431308f26d0a1fe26`.
+All ten review findings are closed for that snapshot. The complete host suite
+passed with 77 coordinator and 16 settings-store cases, both BLE capacity
+configurations, USB lifecycle/identity checks and the existing portable,
+board, provisioning and serial suites. Native UI inspection covered 164 cases.
+
+The exact candidate built for ESP32-S31 has application size `0x24da80` bytes
+and SHA-256 `522fa60eab1bdcca0e0706da25f81bc29d3e2b51677dd9be12304816285e6ea7`.
+Its four-MiB app partition retains 42 percent free. The candidate supports one
+shared CDC/HID USB stack with chip-derived serial identity. These are compiled
+capabilities; the following historical deployment is not this candidate.
+Physical enumeration, input, pairing, wake, persistence and endurance need fresh
+device evidence. New connection-priority/scanning and OTA requirements are
+excluded from this source/build seal and remain separate extension work.
+
+### Runtime evidence
+
+Initial deployment completed on the confirmed Mosaico v1.2. Bootloader,
+partition table and application writes passed esptool data verification. Native
+runtime USB CDC enumerated after reset. The original 16 MiB backup was verified
+again before writing and remains private local evidence.
+
+The first 90.035-second capture observed eight increasing health samples
+(uptime 22 through 92 seconds), queue occupancy zero, internal free memory
+167,683..167,819 bytes, largest internal block 94,208 bytes and coordinator
+stack watermark 2,000 bytes. No reset or runtime error appeared in that captured
+window. This was an idle bring-up observation, not a load or endurance result.
+The capture **failed** because its deadline split the final health line; the
+capture helper was corrected with a fixed one-second grace for an already-started line. Its 21 offline tests preserve malformed/fault/freshness failures.
+
+The host did not discover BLE on this initial image. Investigation found that
+the pinned structured advertising API rejects a two-byte UUID input: it requires
+full 128-bit UUID representations and compresses Bluetooth-base UUIDs on air.
+The correction uses the complete HID service UUID and adds an initialization
+boundary regression. Periodic health diagnostics now retain Bluetooth startup
+failure visibility after late USB attachment. Corrected advertising is included in the product UI replacement; deployment and actual host-input qualification are recorded separately when performed.
+
+Original-firmware backup, build logs, serial captures and identifying details
+remain ignored local evidence. Never commit the factory backup because it can
+contain credentials or pairing data.
+
+### Long-term power gate
+
+The test plan requires 24 hours of powered operation followed by 72 hours after failure cases pass. Cover host sleep/reconnect storms, no USB reader, queue pressure, motor cancellation, storage wear, power interruptions, watchdog recovery and comparable memory checkpoints. Record temperature and power conditions. A short smoke run and 100,000 simulated host cycles are useful evidence but do not satisfy this gate; periodic reboot is not an acceptable substitute for fixing resource growth.
 
 ## Device evidence template
 

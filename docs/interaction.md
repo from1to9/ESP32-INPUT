@@ -12,7 +12,7 @@ Provide a motion toggle, fine gain, large touchpad, separate scroll controls, cl
 
 ### Keyboard
 
-Submodes are **Motion**, **Touch**, **Spoken letters** and **Shortcuts**. Motion and touch share a two-level character grid, preview, case and symbol pages. Motion moves local focus only.
+Submodes are **Motion**, **Touch**, **Spoken letters** and **Shortcuts**. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. The nine-cell layout is an explicit user revision of the original six-cell prototype. Motion moves local focus only; empty cells never receive focus or confirm input.
 
 Flow: choose group -> choose character -> confirm into preview -> send. Keep delete, space and send visible. Sending never includes Enter; expose stop and accepted-prefix progress. An Alpha sample yields an A candidate, which needs confirmation before entering preview. Prefer spelling words for easily confused letter sounds.
 
@@ -53,3 +53,45 @@ Use short haptic feedback for mode changes, confirmations, locking and errors. F
 ## Usability
 
 Settings are not a fourth primary mode; closing them returns to the previous mode. Hidden pages cannot redefine the AI key. Defaults are mouse, motion off, audio off and remote control unauthorized. Show the selected target at all times. Plan high-contrast focus, light/dark appearance, left-handed scroll placement and roughly 44 px touch targets, then verify readability on the actual 2.16-inch display.
+
+## Appearance and product acceptance
+
+Settings includes Light and Dark appearance. Dark uses a black background, near-white text and a light-blue accent for clearer selection and focus; Light retains the original green accent. Every page, focus indicator, disabled control and overlay follows the same theme. Appearance does not change input mode, target, draft or lock state. Dark is the default when no saved preference exists. Theme, brightness, idle timeout, haptics and the host shortcut modifier use validated persistent settings, with coalesced writes and visible save failures.
+
+The original prototype and requirements remain the UI baseline. Diagnostic buttons and sample text cannot replace the touchpad or preview-first keyboard flow. See [design conformance](design-conformance.md) for evidence levels and unresolved hardware acceptance.
+
+
+## Status, connectivity and display
+
+The compact header keeps device/target status separate from actual battery,
+Wi-Fi signal and Bluetooth connection indicators. Bluetooth shows the current
+peer and saved pairings rather than signal bars. Detailed Wi-Fi values and network
+information belong in Connectivity; unknown measurements do not become zero
+or empty battery indicators. Settings has Home, Connectivity, Display, Input
+and About pages, with consistent Back and Done navigation.
+
+Display provides Light/Dark, brightness in ten-percent steps, and Screen timeout:
+Off, 1, 5, 10 or 30 minutes. Defaults are Dark, 70 percent and 5 minutes. Blanking
+leaves radios and enabled mouse control running, while hidden keyboard focus
+pauses. The first complete touch/AI gesture wakes only; the AI wake sequence also
+consumes a rapid second click. A later fresh hold may unlock normally. Changes
+are stored only after explicit edits, not on render/status polling.
+
+Bluetooth actions open a local confirmation before changing pairing admission or
+forgetting saved hosts. Pairing is time-limited and displays a countdown. Forget
+waits for input cancellation, release recovery and disconnection; changing the
+connection while confirmation is open invalidates that confirmation.
+
+Connectivity selects Bluetooth or USB for all primary modes and opens separate
+Bluetooth-host and Wi-Fi detail pages. Selection cancels pending input, waits
+for old-host release completion, and starts a fresh release barrier on the new
+link. An already disconnected old host permits explicit switching, without
+claiming its releases arrived. A connected but suspended/stalled host must
+recover or disconnect; the switch otherwise stops after five seconds and keeps
+the old selection. USB removal never redirects input automatically to Bluetooth.
+Preserve the preview, mode and lock; motion stays off after a switch.
+
+Wi-Fi setup opens a temporary protected hotspot and displays its network name,
+passcode and local browser URL only on the setup page. Leaving setup, explicit
+Stop, expiry or locking closes setup. Saved network forgetting requires local
+confirmation. Failed setup never enables the future remote-control/MCP API.

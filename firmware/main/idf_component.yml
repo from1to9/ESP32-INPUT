@@ -1,4 +1,6 @@
 dependencies:
-  idf: ">=6.2"
+  idf: "==6.2.0"
   esp-mosaico-bsp:
     path: "../../third_party/esp-mosaico-bsp/components/esp-mosaico-bsp"
+  espressif/esp_tinyusb:
+    version: "^2.0.1~1"

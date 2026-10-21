@@ -21,6 +21,7 @@
 - Distinguish unknown, unavailable, rejected and successful outcomes. Missing evidence is not success or zero. Fail closed when continuing requires unavailable evidence.
 - Prefer small, cohesive changes with explicit ownership and bounded resources. Preserve durable state and recovery artifacts; ignored files are not automatically disposable.
 - Keep first-party repository content in English. Communicate with the user in their preferred language. Preserve third-party source, license and provenance rather than translating vendored material.
+- Treat the approved product requirements, interaction contract and original UI prototype as implementation acceptance criteria. Do not substitute diagnostic controls for product flows or rewrite the design to justify an implementation gap. Track unsupported capabilities explicitly; verify the actual rendered device UI against the original layout and behavior before delivery.
 
 ## Validation and delivery
 
