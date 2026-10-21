@@ -1,0 +1,14 @@
+.DS_Store
+build/
+.build/
+managed_components/
+sdkconfig
+sdkconfig.old
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.log
+node_modules/
+.tools/

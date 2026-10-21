@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32-INPUT · 交互设计</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+<main>
+  <header class="page-heading"><div><p class="eyebrow">ESP32-INPUT / DESIGN 0.1</p><h1>一个设备，三种输入方式。</h1></div><span class="prototype-label">交互原型 · 无真实连接</span></header>
+  <div class="workbench">
+    <div class="device-column">
+      <div class="device-shell">
+        <section class="screen" aria-label="Mosaico 480 × 480 界面原型">
+          <header class="device-top"><button id="targetButton" class="target-button">iPad Pro · 已连接</button><button id="settingsButton" aria-label="设置">设置</button></header>
+          <div id="view" class="view"></div>
+          <p id="deviceStatus" class="device-status" aria-live="polite"></p>
+          <nav id="modeNav" aria-label="三种主模式"><button data-mode="mouse" aria-pressed="true">鼠标</button><button data-mode="keyboard" aria-pressed="false">键盘</button><button data-mode="audio" aria-pressed="false">麦克风 / 音响</button></nav>
+          <div id="overlay" class="overlay" hidden></div>
+        </section>
+      </div>
+      <p class="device-caption">480 × 480 逻辑屏幕 · AI 键负责上下文操作，触屏负责精调</p>
+    </div>
+    <aside class="simulator" aria-label="原型模拟器">
+      <p class="eyebrow">操作演示</p><h2>试一下实体 AI 键</h2>
+      <p id="keyHint">单击切换体感，开启后跟随手腕。</p>
+      <div class="three-buttons"><button id="aiShort">单击</button><button id="aiDouble">双击</button><button id="aiLong">长按 · 锁定</button></div>
+      <p class="small">双击打开模式菜单。长按锁定所有输入；解锁后体感关闭、麦克风静音。</p>
+      <hr>
+      <h3>模拟手腕转动</h3><p class="small">鼠标页移动演示指针；键盘体感页只移动本机选字焦点。</p>
+      <div class="direction-pad"><button data-direction="up" aria-label="手腕向上">↑</button><div><button data-direction="left" aria-label="手腕向左">←</button><button data-direction="down" aria-label="手腕向下">↓</button><button data-direction="right" aria-label="手腕向右">→</button></div></div>
+      <hr>
+      <h3>连接与中断</h3>
+      <div class="two-buttons"><button id="connectionButton">模拟断线</button><button id="remoteButton">模拟远程接管</button></div>
+      <label class="check-label"><input id="coexistence" type="checkbox">演示未来的音频并行</label>
+      <p class="small">此开关只演示设计。真实 BLE HID + HFP / A2DP 能力仍待硬件验证。</p>
+      <p id="eventLog" class="event-log" role="status">冷启动：鼠标模式，体感关闭。</p>
+    </aside>
+  </div>
+  <section class="design-notes"><article><span>01 / 鼠标</span><h3>快速指向，触屏收尾</h3><p>体感负责大范围移动。触屏临时接管，精调切换 ¼× / ⅛×；拖动有明确释放状态。</p></article><article><span>02 / 键盘</span><h3>先选字，再发送</h3><p>体感、触屏和语音字母共用预览。Alpha → A 先确认，发送不会附带回车。</p></article><article><span>03 / 音频</span><h3>独立起步，保留并行</h3><p>会议麦克风与音响使用不同链路。同主机并行验证通过后再开放组合；多主机另测。</p></article></section>
+</main>
+</body>
+</html>

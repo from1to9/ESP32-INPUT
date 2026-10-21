@@ -1,0 +1,8 @@
+ESP32-INPUT
+Copyright 2026 ESP32-INPUT contributors
+
+Original project code and documentation are licensed under Apache-2.0.
+third_party/esp-mosaico-bsp is an independent upstream Git submodule;
+its copyright, license and third-party notices remain applicable.
+Behavioral research references are listed in docs/references.md.
+No M5 airmouse implementation or speech model weights are included.
