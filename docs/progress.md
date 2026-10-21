@@ -102,6 +102,22 @@ Status: the exact eight-file UI scope passed independent review and native tests
 This checkpoint publishes the UI and its visual contract, not device-screen or
 transport interoperability evidence. Coordinator and adapter review continue.
 
+## Checkpoint 6: Bluetooth composite HID and saved peers
+
+Status: the exact 21-file adapter scope passed independent review and checks.
+
+- Added encrypted composite input, verified per-bond subscriptions, bounded
+  pairing admission and a truthful cached saved-host list with capacity checks.
+- Preserved durable bond refresh across authentication/disconnect races. A new
+  pairing requires a fresh capacity check, preventing implicit oldest-bond eviction.
+- Independent regression probes closed IR-09. Strict sanitizer suites passed at
+  capacities 15 and 32, each with 100,000 simulated lifecycle transitions.
+- Pinned S31 object compilation and the expanded linked build passed. These do
+  not establish successful over-the-air pairing or actual host input.
+
+Coordinator release ordering and physical host/device checks remain separate
+gates. Nearby scanning and prioritized saved-target selection are later additions.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |
