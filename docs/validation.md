@@ -77,9 +77,10 @@ The exact candidate built for ESP32-S31 has application size `0x24da80` bytes
 and SHA-256 `522fa60eab1bdcca0e0706da25f81bc29d3e2b51677dd9be12304816285e6ea7`.
 Its four-MiB app partition retains 42 percent free. The candidate supports one
 shared CDC/HID USB stack with chip-derived serial identity. These are compiled
-capabilities; the following historical deployment is not this candidate.
-Physical enumeration, input, pairing, wake, persistence and endurance need fresh
-device evidence. New connection-priority/scanning and OTA requirements are
+capabilities; source/build success did not establish a working device. The
+expanded deployment failed the device gate described below. Input, pairing,
+wake, persistence and endurance still need successful device evidence.
+New connection-priority/scanning and OTA requirements are
 excluded from this source/build seal and remain separate extension work.
 
 ### Runtime evidence
@@ -107,6 +108,30 @@ failure visibility after late USB attachment. Corrected advertising is included 
 Original-firmware backup, build logs, serial captures and identifying details
 remain ignored local evidence. Never commit the factory backup because it can
 contain credentials or pairing data.
+
+### Expanded baseline: failed device gate
+
+Commit `f5e724b9b0a5b7cfd36e636d1f1ee8ab4f09a3c2`, application hash
+`522fa60eab1bdcca0e0706da25f81bc29d3e2b51677dd9be12304816285e6ea7`,
+was written and verified successfully. Runtime USB enumerated. The user observed
+the expected dark layout and nine-cell keyboard, but touches produced vibration
+without visible button transitions, with residual content near the top.
+
+The requested 90-second serial capture ended after 46.918 seconds with a serial
+I/O error. Five health samples covered uptime 22 through 62 seconds. Internal
+free memory ranged from 2,991 to 12,435 bytes; the largest internal block ranged
+from 864 to 8,192 bytes, despite roughly 14 MB of total free heap. Repeated LCD
+SPI transfer and LVGL draw failures reported `ESP_ERR_NO_MEM`, followed by
+display-lock and battery telemetry timeouts. Bluetooth initialization had
+returned success, but the later transport failure flag remained set. The
+initial failure event was outside the captured window. A reset was not proven.
+
+This is a **failed physical acceptance gate**. Failed redraws are a supported
+explanation for the unchanged screen and residual pixels, not proof that every
+touch path is correct. The repair must preserve internal/DMA memory, capture
+startup allocation stages, and retest real display transitions and Bluetooth
+readiness before attributing success to a layout change. Native render tests
+cannot establish target memory sufficiency or display transfer completion.
 
 ### Long-term power gate
 

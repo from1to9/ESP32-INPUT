@@ -96,13 +96,36 @@ These additions preserve the original Mouse / Keyboard / Audio workflows.
 
 | ID | Feature | Acceptance |
 | --- | --- | --- |
-| D01 | Power and connection status | A compact status strip shows actual gauge-reported battery percentage/charge state, Wi-Fi state/signal and the selected input transport. Bluetooth shows connection/readiness and the current peer, without signal bars. Unknown, stale and unavailable readings remain distinct. Never derive a host name or external power from a guess. |
+| D01 | Power and connection status | A compact context indicator and on-demand Status panel show actual gauge-reported battery percentage/charge state, Wi-Fi state/signal and the selected input transport. Bluetooth shows connection/readiness and the current peer, without signal bars. Unknown, stale and unavailable readings remain distinct. Never derive a host name or external power from a guess. |
 | D02 | Multiple Bluetooth pairings | Retain multiple saved peers within the configured SDK capacity (15 in the initial build; list storage is bounded at 32), with current-peer marking only when verified. Refuse additional pairing at capacity without evicting existing peers. A visible, bounded pairing window admits additional hosts; existing bonds may reconnect outside it. Show remaining time, readiness and failures. Disconnect retains bonds; forgetting requires local confirmation and safe input cancellation/disconnection. Support one active HID connection initially, without promising peripheral-initiated connection or simultaneous host control. |
 | D03 | Wi-Fi setup | A local action opens a temporary password-protected setup hotspot and a bounded browser form. Remember one network, reconnect with bounded backoff, show actual SSID/IP/signal, and support confirmed forgetting. No remote HID or MCP endpoint is enabled by provisioning. |
 | D04 | Display timeout | Default five minutes; choices are one, five, ten, thirty minutes or Off. Blank only the screen, leaving radios and enabled mouse control running. Apply on all power states so unknown supply telemetry does not defeat the plugged-in use case. |
 | D05 | Safe wake and preferences | The first complete touch/AI gesture wakes only. Pause hidden keyboard selection; preserve the draft and lock state. Brightness, theme, haptics, shortcut modifier and timeout persist through a versioned validated record, coalesced writes and truthful save errors. |
 | D06 | Consistent UI and device information | Use shared layout metrics, aligned text/control grids and both themes on every page. Separate Connectivity, Display, Input and About pages. Show firmware/board/capabilities without secrets; retain explicit unavailable audio and speech. |
 | D07 | Input transport selection | System settings offers Bluetooth and USB, independent of foreground mode. Standard USB composite mouse/keyboard retains diagnostics under one USB stack. Cancel queued input and complete old-host releases before switching; an already disconnected old host permits explicit switching without claiming release delivery. A connected, suspended or stalled host must recover or disconnect, otherwise the switch times out without changing selection. Require fresh zero reports on the new link. Never duplicate input to both hosts or automatically fall back after cable removal. Distinguish selection, physical connection, readiness, switching and unavailable capability. |
+
+### Focused mode workspace revision
+
+The user subsequently requested that each mode show only its core controls,
+opening mode selection, device status and settings through a screen button or
+physical AI double-click. This explicitly supersedes the prototype's persistent
+bottom tabs and detailed header, while preserving its product workflows. Keep
+the menu entry discoverable and at least 44 px, the current mode and input
+context understandable, and lock/remote/recording/error state visible when
+relevant. Do not turn touchpad movement into hidden navigation gestures.
+
+Mouse prioritizes a large relative pad, scroll, motion and click/drag/release.
+Keyboard prioritizes the nine-cell grid, draft and explicit Delete/Space/Send;
+submode and infrequent editing controls are on demand. Audio prioritizes mute,
+volume and true capability/session state. POWER retains hardware power control;
+AI single-click remains contextual, double-click opens the shared menu, and
+long press locks/unlocks. Runtime BOOT access is not assumed.
+
+Reduce hidden-page work, redundant invalidation and eager object allocation
+without weakening whole-gesture wake, local takeover, stale-event rejection or
+credential clearing. Compare actual LVGL object counts and idle drawing before
+and after the change, and measure target internal/DMA memory separately. A
+sparser layout alone does not prove the existing display failure is repaired.
 
 Display brightness defaults to 70 percent, with ten-percent steps from 10 to 100.
 Physical touch/button activity resets inactivity; routine sensor, radio and

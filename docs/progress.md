@@ -155,13 +155,25 @@ Wi-Fi scan/profile management, reconnect priorities and firmware update APIs
 are newly requested extensions. The current factory-only image has no OTA path;
 the next design must provide inactive-slot validation and post-boot rollback.
 
+Deployment of this baseline passed write verification but **failed physical
+acceptance**: touches caused vibration without visible transitions, LCD transfers
+reported memory exhaustion, and Bluetooth latched a later transport failure.
+The [device evidence](validation.md#expanded-baseline-failed-device-gate)
+records the exact image and observed memory limits. Repair and fresh device
+verification are required; source/build approval remains a separate result.
+
+The next UI revision follows the user's explicit request to maximize mode work
+areas. Persistent mode tabs and detailed status give way to an accessible menu;
+core mouse, keyboard and audio workflows remain. The redesign must measure
+object/update overhead and preserve gesture, lock and target-state safeguards.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |
 | --- | --- | --- |
 | Input foundation and device basics | Relevant host suites, pinned target build, independent review | Passed; device gates remain |
 | Nine-cell UI, saved peers and USB switching | Native UI inspection, transport interruption tests, target build, independent review | Passed; device gates remain |
-| Device verification | Actual deployment identity, boot/health evidence, observed input and connection checks | Pending the reviewed candidate |
+| Device verification | Actual deployment identity, boot/health evidence, observed input and connection checks | Failed expanded baseline; memory/display repair and retest required |
 | Audio and spoken letters | Working drivers, acoustic/recognition evaluation and host qualification | Planned; unavailable in current input firmware |
 | Remote Wi-Fi control and MCP | Authentication, ownership, complete state and failure-path tests | Contract work; provisioning alone is not remote control |
 
