@@ -85,6 +85,23 @@ hotspot/browser provisioning, hardware persistence and radio coexistence remain
 device gates. The accompanying remote-control/MCP documents are future contracts;
 this service does not execute network HID commands.
 
+## Checkpoint 5: native nine-cell UI and connection settings
+
+Status: the exact eight-file UI scope passed independent review and native tests.
+
+- Rebuilt the original product layout around aligned nine-cell selection, explicit
+  preview/Send and separate Mouse, Keyboard and Audio modes.
+- Added Light/Dark themes, display and haptic preferences, Bluetooth saved-host
+  pagination/capacity, Wi-Fi setup/status and an independent Bluetooth/USB selector.
+- The production LVGL UI passed sanitizer, geometry and actual pointer-hit checks.
+  Independent review inspected 164 native render cases, including unavailable,
+  disconnected, storage-uncertain and saturated-capacity states.
+- Setup credentials are cleared when the view exits, locks, expires or sleeps.
+  Unsupported audio and recognition capabilities remain visibly unavailable.
+
+This checkpoint publishes the UI and its visual contract, not device-screen or
+transport interoperability evidence. Coordinator and adapter review continue.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |
