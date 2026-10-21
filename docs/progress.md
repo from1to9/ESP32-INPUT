@@ -66,6 +66,25 @@ Status: independently reviewed portable implementation and host checks passed.
 This checkpoint does not yet qualify the full UI, flash adapter, USB/Bluetooth
 switching or physical motion. Those integration and device checks remain below.
 
+## Checkpoint 4: Wi-Fi provisioning service
+
+Status: independent service review and focused host/target checks passed.
+
+- Added explicit protected-hotspot provisioning, one remembered station network,
+  bounded reconnection, signal/status snapshots and local forgetting.
+- Verified that expired or closed setup revokes admission immediately and retries
+  incomplete HTTP/AP shutdown at a bounded one-second interval.
+- Kept runtime configuration separate from durable storage evidence. Failed writes
+  may already have taken effect; uncertainty remains visible until an explicit
+  successful save, forget or read verification.
+- Closed review findings IR-07 and IR-08 with independent failure probes. Supported
+  and unavailable-hardware host tests and pinned S31 object compilation passed.
+
+The service is published separately from firmware entry-point integration. Actual
+hotspot/browser provisioning, hardware persistence and radio coexistence remain
+device gates. The accompanying remote-control/MCP documents are future contracts;
+this service does not execute network HID commands.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |
