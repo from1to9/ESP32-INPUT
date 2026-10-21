@@ -49,6 +49,23 @@ This checkpoint publishes portable components and their tests. It does not yet
 replace the firmware entry point or qualify physical Bluetooth/USB input. The
 component READMEs contain standalone reproduction commands.
 
+## Checkpoint 3: nine-cell interaction and persistent preferences
+
+Status: independently reviewed portable implementation and host checks passed.
+
+- Added the 3 x 3 letter/digit and symbol groups, valid-cell gyro selection and
+  hysteresis. Touch and physical confirmation share the preview-first path.
+- Added display idle/wake policy and a versioned preference codec, including
+  Bluetooth/USB preference. Schema 2 reads valid schema-1 records as Bluetooth;
+  unknown/corrupt records are rejected without changing the caller's value.
+- Strict compiler and sanitizer suites passed. Independent review also exercised
+  400 generated legacy-record migration cases and 16 settings-store cases.
+- Published portable source, headers, registration, documentation and tests match
+  the frozen ten-file review inventory.
+
+This checkpoint does not yet qualify the full UI, flash adapter, USB/Bluetooth
+switching or physical motion. Those integration and device checks remain below.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |
