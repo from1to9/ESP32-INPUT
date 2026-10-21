@@ -31,6 +31,24 @@ Status: design decisions recorded; implementation and qualification in progress.
 This checkpoint changes documentation only. It does not claim that the new
 grid, USB input, audio or multiple-host interoperability has passed device tests.
 
+## Checkpoint 2: portable input and haptic foundations
+
+Status: independently reviewed source and focused host checks passed.
+
+- Added the transport-independent composite HID descriptor, bounded action queue,
+  drag state, accepted-prefix text tracking, cancellation and release recovery.
+- Added portable haptic admission, timed patterns, cancellation generations,
+  cooldown and conservative motor-failure handling.
+- Re-ran strict compiler checks with AddressSanitizer and UndefinedBehaviorSanitizer.
+  HID checks include 100,000 deterministic lifecycle cycles. These are simulated
+  transitions, not an elapsed-time device endurance claim.
+- Verified published code/test hashes against the independent review's frozen
+  inventory; the focused descriptor decoder validates report sizes and semantics.
+
+This checkpoint publishes portable components and their tests. It does not yet
+replace the firmware entry point or qualify physical Bluetooth/USB input. The
+component READMEs contain standalone reproduction commands.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |
