@@ -50,6 +50,15 @@ reserves 64 KiB of internal RAM for requests needing internal/DMA capabilities;
 task stacks remain internal. This reserve is shared, not a guaranteed contiguous
 LCD buffer. Ports without PSRAM need their own qualified resource profile.
 
+The tracked profile sets Wi-Fi static RX buffers and the receive Block Ack
+window to two each, retaining internal DMA headroom at the expense of peak
+network throughput. TCP out-of-order retention is bounded to four pbufs per
+connection. The pinned SDK otherwise defaults to 16/16 and unbounded retention
+when PSRAM network allocation is enabled. Validate a newly generated
+configuration, not only an existing ignored `sdkconfig`; prior local values
+can conceal missing defaults. Network throughput and combined-load endurance
+still require device qualification.
+
 Keep the pinned BSP's TE synchronization and internal DMA bounce path. TE mode
 uses full-frame rendering; reducing LVGL buffer height does not reduce that
 mode's frame or transfer demand. The ten-entry LCD transfer queue can retain

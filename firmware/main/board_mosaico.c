@@ -31,7 +31,10 @@ enum {
     IMU_POLL_MS = 10,
     IMU_MAX_AGE_US = 50000,
     IMU_MAX_BATCH_US = 20000,
-    IMU_START_TIMEOUT_US = 50000,
+    /* BMI270 DS000-08, Table 3: gyro startup is 45 ms at maximum ODR.
+     * Allow a 100 Hz sample period, the 20 ms batch and polling margin at
+     * startup; the running stream retains its separate 50 ms freshness gate. */
+    IMU_START_TIMEOUT_US = 100000,
     IMU_STACK_BYTES = 3072,
     POWER_POLL_MS = 1000,
     POWER_MAX_AGE_US = 5000000,
@@ -508,16 +511,25 @@ static void init_optional_imu(void)
     portEXIT_CRITICAL(&s_status_mux);
     const uint64_t started_us = (uint64_t)esp_timer_get_time();
     board_imu_sample_t first;
-    const char *stage;
+    const char *stage = "first_sample";
     do {
+        const uint64_t before_us = (uint64_t)esp_timer_get_time();
+        if (before_us < started_us || before_us - started_us >= IMU_START_TIMEOUT_US) {
+            result = ESP_ERR_TIMEOUT;
+            stage = "first_sample";
+            break;
+        }
         result = imu_read_hardware(&first, &stage);
-        if (result != ESP_ERR_NOT_FOUND) {
+        if (result != ESP_OK && result != ESP_ERR_NOT_FOUND) {
             break;
         }
         const uint64_t time_us = (uint64_t)esp_timer_get_time();
         if (time_us < started_us || time_us - started_us >= IMU_START_TIMEOUT_US) {
             result = ESP_ERR_TIMEOUT;
             stage = "first_sample";
+            break;
+        }
+        if (result == ESP_OK) {
             break;
         }
         TickType_t wait = pdMS_TO_TICKS(2);

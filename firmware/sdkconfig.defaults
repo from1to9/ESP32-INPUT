@@ -58,3 +58,9 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# Preserve DMA headroom for the display and USB while Wi-Fi is initialized.
+# The pinned SDK otherwise raises both RX defaults to 16 when PSRAM is used.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=2
+CONFIG_ESP_WIFI_RX_BA_WIN=2
+# Bound TCP out-of-order retention even when network allocations prefer PSRAM.
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4

@@ -26,6 +26,8 @@ static struct {
     uint64_t raw_times[8];
     bool sensor_initialized, fail_imu_task;
     uint64_t ready_after_us;
+    uint64_t gyro_ready_after_us;
+    unsigned accel_only_status_reads;
     uint8_t ready_mask;
     int8_t status_error;
     unsigned imu_inits, imu_starts, imu_stops, imu_deinits;
@@ -406,12 +408,19 @@ int8_t bmi2_get_status(uint8_t *status, struct bmi2_dev *device)
     assert(hw.critical_depth == 0 && device == &sensor);
     ++hw.status_reads;
     *status = hw.time_us >= hw.ready_after_us ? hw.ready_mask : 0;
+    if (hw.time_us < hw.gyro_ready_after_us) {
+        *status &= (uint8_t)~BMI2_DRDY_GYR;
+    }
+    if ((*status & (BMI2_DRDY_ACC | BMI2_DRDY_GYR)) == BMI2_DRDY_ACC) {
+        ++hw.accel_only_status_reads;
+    }
     return hw.status_error;
 }
 
 esp_err_t bsp_imu_get_gyro(float *x, float *y, float *z)
 {
     assert(hw.critical_depth == 0);
+    assert(hw.time_us >= hw.gyro_ready_after_us);
     ++hw.gyro_reads;
     hw.time_us += hw.read_delay_us;
     if (hw.during_gyro_read) {
@@ -611,6 +620,48 @@ static void test_imu_real_units_and_nonblocking_cache(void)
     assert(!board_capabilities().imu);
     assert(imu_update() == ESP_ERR_TIMEOUT);
     assert(hw.status_reads == status_reads); /* Faulted stream does not reacquire. */
+}
+
+static void test_imu_start_waits_for_gyro_with_a_finite_deadline(void)
+{
+    reset();
+    const uint64_t start_us = hw.time_us;
+    hw.ready_mask |= 0x10; /* Command-ready bit retained alongside sensor readiness. */
+    hw.ready_after_us = start_us + 2000;
+    hw.gyro_ready_after_us = start_us + 80000;
+    assert(board_init(legacy_hold) == ESP_OK);
+    board_imu_status_t status = board_imu_status();
+    assert(status.available && status.sample_count == 1 && !status.fault_latched);
+    assert(hw.accel_only_status_reads > 0 && hw.gyro_reads == 1 && hw.accel_reads == 1);
+    assert(status.last_sample_us >= hw.gyro_ready_after_us);
+    assert(status.last_sample_us - start_us < 100000 && status.data_ready_bits == 0xd0);
+    hw.time_us = status.last_sample_us + 50001;
+    assert_read_fails_untouched(ESP_ERR_TIMEOUT); /* Startup allowance never widens runtime freshness. */
+    assert(strcmp(board_imu_status().first_fault_stage, "cache_age") == 0);
+
+    reset();
+    const uint64_t timeout_start_us = hw.time_us;
+    hw.ready_mask |= 0x10;
+    hw.ready_after_us = timeout_start_us + 2000;
+    hw.gyro_ready_after_us = timeout_start_us + 120000;
+    assert(board_init(legacy_hold) == ESP_OK);
+    status = board_imu_status();
+    assert(!status.available && status.sample_count == 0 && status.fault_latched);
+    assert(status.first_fault_error == ESP_ERR_TIMEOUT && strcmp(status.first_fault_stage, "first_sample") == 0);
+    assert(status.first_fault_us - timeout_start_us >= 100000);
+    assert(status.first_fault_us - timeout_start_us < 102000);
+    assert(status.data_ready_known && status.data_ready_bits == 0x90);
+    assert(hw.accel_only_status_reads > 0 && hw.gyro_reads == 0 && hw.accel_reads == 0);
+    assert(hw.imu_stops == 1 && hw.imu_deinits == 1 && !hw.sensor_initialized);
+
+    reset();
+    hw.ready_after_us = hw.time_us + 90000;
+    hw.read_delay_us = 6000;
+    assert(board_init(legacy_hold) == ESP_OK);
+    status = board_imu_status();
+    assert(!status.available && status.sample_count == 0 && status.fault_latched);
+    assert(strcmp(status.first_fault_stage, "first_sample") == 0);
+    assert(status.last_hardware_error == ESP_OK); /* A valid batch completed after the startup deadline. */
 }
 
 static void test_optional_sensor_failures(void)
@@ -1034,6 +1085,7 @@ int main(void)
     test_display_spi_diagnostic_is_observational();
     test_raw_button_authority_and_registration();
     test_imu_real_units_and_nonblocking_cache();
+    test_imu_start_waits_for_gyro_with_a_finite_deadline();
     test_optional_sensor_failures();
     test_imu_health_is_nonmutating_and_retains_first_fault();
     test_runtime_faults_and_inflight_cancellation();

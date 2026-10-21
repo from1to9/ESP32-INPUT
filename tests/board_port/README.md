@@ -25,6 +25,16 @@ and distinguish unknown age from a fresh sample. Cache consumption retains the
 existing 50 ms shutdown policy, including a stale consumer during an in-flight
 batch; diagnostics do not recover the stream or change its acceptance limits.
 
+Startup readiness has a separate 100 ms first-sample acceptance window. The
+regression supplies accel-ready/command-ready before gyro-ready, accepts both
+at 80 ms, rejects a missing gyro at the deadline, and rejects a batch completing
+after that deadline. Runtime samples still expire at 50 ms and batches over
+20 ms still fail. Bosch's [BMI270 datasheet, Table 3](https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmi270-ds000.pdf#page=13)
+lists 45 ms gyro suspend-to-normal startup at maximum ODR. The 100 ms window
+budgets startup, a 100 Hz period, bounded acquisition and scheduling margin;
+it is not a claim that the datasheet mandates 100 ms or that device motion has
+passed qualification.
+
 The cached timestamp is monotonic acquisition-completion time. The pinned BSP
 has separate gyro and acceleration getters; the adapter calls both in one
 bounded batch, which is not an atomic six-axis sensor frame. Actual ODR,

@@ -217,6 +217,36 @@ sensor operation. Retained startup/stream diagnostics and explicit Motion
 availability reasons are required before claiming a fix. These captures are not
 elapsed-time endurance or complete host-input qualification.
 
+### IMU startup diagnosis and configuration reproducibility
+
+Diagnostic source `db0d24fbf9d4dbf97a52fe6ae58483c8b4ee2f3d` was built in an
+isolated checkout with freshly generated configuration and flashed with hash
+verification, preserving NVS. The 2,425,376-byte application SHA-256 is
+`ae7adf59c0b58bb64a829224718bcfdd428c02545398ed1e705044d30aa09baa`.
+A 36.001-second capture contained three complete health samples and failed
+on retained errors plus an incomplete final health line; it is not a passing
+runtime smoke test.
+
+The first IMU fault was `first_sample / ESP_ERR_TIMEOUT`, with zero accepted
+samples and status `0x90`: accelerometer and command ready, gyro not ready.
+The selected input was connected and ready. This establishes a sensor startup
+readiness failure rather than a Bluetooth admission failure; it does not prove
+a defective sensor. The startup correction permits 100 ms for the first valid
+sample, with deadline checks before and after acquisition. Runtime freshness
+remains 50 ms and the acquisition batch limit remains 20 ms. Regressions cover
+delayed gyro readiness, permanent absence and late batch completion. Physical
+recovery remains unverified until the corrected image is deployed.
+
+The same diagnostic capture retained an 8,190-byte internal DMA allocation
+failure. Its freshly generated configuration used 16 Wi-Fi static RX buffers
+and a receive Block Ack window of 16, whereas the earlier local configuration
+used two each. Those limits had not been retained in tracked defaults. The
+profile now records 2/2 explicitly and bounds TCP out-of-order retention to
+four pbufs per connection. Fresh configuration generation and a new device
+capture are required; earlier memory observations do not qualify this image.
+The diagnostic image also includes the 50-percent fallback brightness change,
+but physical brightness and preserved settings have not been measured.
+
 ### Long-term power gate
 
 The test plan requires 24 hours of powered operation followed by 72 hours after failure cases pass. Cover host sleep/reconnect storms, no USB reader, queue pressure, motor cancellation, storage wear, power interruptions, watchdog recovery and comparable memory checkpoints. Record temperature and power conditions. A short smoke run and 100,000 simulated host cycles are useful evidence but do not satisfy this gate; periodic reboot is not an acceptable substitute for fixing resource growth.

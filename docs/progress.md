@@ -235,7 +235,8 @@ control remain unavailable/planned; no long-duration qualification is claimed.
 ## Checkpoint 12: default brightness
 
 Status: independently reviewed, host-tested and published at
-`550f1a31b45d279e303a8b527dd806c2f2eb8c42`; not yet deployed.
+`550f1a31b45d279e303a8b527dd806c2f2eb8c42`; included in the later diagnostic
+deployment, with physical brightness still unverified.
 
 The fallback brightness is 50 percent. Existing schema-1/schema-2 values,
 including explicitly stored 70 percent, remain unchanged. Initialization never
@@ -243,6 +244,22 @@ writes defaults or migrates storage implicitly. Portable settings, 16 production
 store cases and 91 coordinator cases passed with sanitizers. The twelve-file
 review inventory has no open findings. This source change alone does not prove
 physical brightness or a new device image.
+
+## Checkpoint 13: Motion startup diagnosis
+
+The diagnostic stage was published at
+`db0d24fbf9d4dbf97a52fe6ae58483c8b4ee2f3d` and deployed with verification.
+The capture identifies the initial IMU readiness timeout: accelerometer data
+was ready, gyro data was not, and no sample had been accepted. Input transport
+readiness was already true. The startup fix extends only the initial acceptance
+window to 100 ms; runtime freshness and batch limits remain unchanged.
+
+Fresh configuration generation also exposed omitted Wi-Fi memory limits,
+causing a retained DMA allocation failure. Tracked defaults now preserve the
+two-buffer/two-window profile and bound TCP out-of-order retention. The failed
+capture remains failed; corrected-image device evidence is still pending.
+See [validation](validation.md#imu-startup-diagnosis-and-configuration-reproducibility)
+for the exact image and evidence boundaries.
 
 ## Next checkpoints
 
