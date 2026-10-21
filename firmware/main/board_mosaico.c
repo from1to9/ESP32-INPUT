@@ -71,6 +71,13 @@ static TaskHandle_t s_imu_task;
 static board_imu_sample_t s_imu_sample;
 static bool s_imu_sample_valid;
 static esp_err_t s_imu_error = ESP_ERR_INVALID_STATE;
+static board_imu_status_t s_imu_status = {
+    .error = ESP_ERR_INVALID_STATE,
+    .first_fault_stage = "none",
+    .last_hardware_stage = "none",
+    .last_hardware_error = ESP_ERR_INVALID_STATE,
+    .last_read_error = ESP_ERR_INVALID_STATE,
+};
 static TaskHandle_t s_power_task;
 static i2c_master_dev_handle_t s_gauge;
 static board_power_status_t s_power = {.error = ESP_ERR_INVALID_STATE};
@@ -298,9 +305,29 @@ static void init_optional_haptics(void)
     }
 }
 
-static void imu_latch_fault(esp_err_t error)
+static void imu_record_fault_locked(esp_err_t error, const char *stage)
+{
+    if (!s_imu_status.fault_latched) {
+        s_imu_status.fault_latched = true;
+        s_imu_status.first_fault_error = error;
+        s_imu_status.first_fault_stage = stage;
+        s_imu_status.first_fault_us = (uint64_t)esp_timer_get_time();
+    }
+}
+
+static void imu_count_sample_locked(void)
+{
+    if (s_imu_status.sample_count != UINT64_MAX) {
+        ++s_imu_status.sample_count;
+    } else {
+        s_imu_status.sample_count_saturated = true;
+    }
+}
+
+static void imu_latch_fault(esp_err_t error, const char *stage)
 {
     portENTER_CRITICAL(&s_status_mux);
+    imu_record_fault_locked(error, stage);
     s_imu_error = error;
     s_imu_sample_valid = false;
     s_caps.imu = false;
@@ -322,39 +349,64 @@ static void imu_cleanup(bool initialized)
     }
 }
 
-static esp_err_t imu_read_hardware(board_imu_sample_t *sample)
+static esp_err_t imu_read_hardware(board_imu_sample_t *sample, const char **stage)
 {
     const uint64_t started_us = (uint64_t)esp_timer_get_time();
+    esp_err_t result = ESP_ERR_INVALID_STATE;
+    bool status_known = false;
+    uint8_t status = 0;
+    *stage = "get_handle";
     struct bmi2_dev *device = bsp_imu_get_handle();
     if (!device) {
-        return ESP_ERR_INVALID_STATE;
+        goto done;
     }
-    uint8_t status = 0;
+    *stage = "status";
     if (bmi2_get_status(&status, device) != BMI2_OK) {
-        return ESP_FAIL;
+        result = ESP_FAIL;
+        goto done;
     }
+    status_known = true;
+    *stage = "data_ready";
     if ((status & (BMI2_DRDY_GYR | BMI2_DRDY_ACC)) != (BMI2_DRDY_GYR | BMI2_DRDY_ACC)) {
-        return ESP_ERR_NOT_FOUND;
+        result = ESP_ERR_NOT_FOUND;
+        goto done;
     }
     board_imu_sample_t candidate;
-    const esp_err_t result = bsp_imu_get_gyro(&candidate.x_dps, &candidate.y_dps, &candidate.z_dps);
+    *stage = "gyro";
+    result = bsp_imu_get_gyro(&candidate.x_dps, &candidate.y_dps, &candidate.z_dps);
     if (result != ESP_OK) {
-        return result;
+        goto done;
     }
-    const esp_err_t accel = bsp_imu_get_accel(&candidate.x_g, &candidate.y_g, &candidate.z_g);
-    if (accel != ESP_OK) {
-        return accel;
+    *stage = "accel";
+    result = bsp_imu_get_accel(&candidate.x_g, &candidate.y_g, &candidate.z_g);
+    if (result != ESP_OK) {
+        goto done;
     }
     candidate.timestamp_us = (uint64_t)esp_timer_get_time();
+    *stage = "batch_time";
     if (candidate.timestamp_us < started_us || candidate.timestamp_us - started_us > IMU_MAX_BATCH_US) {
-        return ESP_ERR_TIMEOUT;
+        result = ESP_ERR_TIMEOUT;
+        goto done;
     }
+    *stage = "finite";
     if (!isfinite(candidate.x_dps) || !isfinite(candidate.y_dps) || !isfinite(candidate.z_dps) ||
             !isfinite(candidate.x_g) || !isfinite(candidate.y_g) || !isfinite(candidate.z_g)) {
-        return ESP_ERR_INVALID_RESPONSE;
+        result = ESP_ERR_INVALID_RESPONSE;
+        goto done;
     }
     *sample = candidate;
-    return ESP_OK;
+    *stage = "sample";
+    result = ESP_OK;
+done:
+    portENTER_CRITICAL(&s_status_mux);
+    s_imu_status.hardware_read_seen = true;
+    s_imu_status.last_hardware_stage = *stage;
+    s_imu_status.last_hardware_error = result;
+    s_imu_status.last_hardware_us = (uint64_t)esp_timer_get_time();
+    s_imu_status.data_ready_known = status_known;
+    s_imu_status.data_ready_bits = status_known ? status : 0;
+    portEXIT_CRITICAL(&s_status_mux);
+    return result;
 }
 
 /* One sampler owns all BSP sensor reads. A fault set by a consumer while a bus
@@ -368,25 +420,32 @@ static esp_err_t imu_update(void)
         return result;
     }
     board_imu_sample_t candidate;
-    result = imu_read_hardware(&candidate);
+    const char *stage;
+    result = imu_read_hardware(&candidate, &stage);
     portENTER_CRITICAL(&s_status_mux);
     if (s_imu_error != ESP_OK) {
         result = s_imu_error;
     } else if (result == ESP_OK) {
         if (s_imu_sample_valid && candidate.timestamp_us <= s_imu_sample.timestamp_us) {
             result = ESP_ERR_INVALID_STATE;
+            stage = "sample_time";
         } else {
             s_imu_sample = candidate;
             s_imu_sample_valid = true;
+            imu_count_sample_locked();
         }
     } else if (result == ESP_ERR_NOT_FOUND) {
         const uint64_t time_us = (uint64_t)esp_timer_get_time();
         result = s_imu_sample_valid && time_us >= s_imu_sample.timestamp_us &&
             time_us - s_imu_sample.timestamp_us <= IMU_MAX_AGE_US ? ESP_OK : ESP_ERR_TIMEOUT;
+        stage = "sample_age";
+    }
+    if (result != ESP_OK) {
+        imu_record_fault_locked(result, stage);
     }
     portEXIT_CRITICAL(&s_status_mux);
     if (result != ESP_OK) {
-        imu_latch_fault(result);
+        imu_latch_fault(result, stage);
     }
     return result;
 }
@@ -394,6 +453,9 @@ static esp_err_t imu_update(void)
 static void imu_worker(void *argument)
 {
     (void)argument;
+    portENTER_CRITICAL(&s_status_mux);
+    s_imu_status.worker_running = true;
+    portEXIT_CRITICAL(&s_status_mux);
     TickType_t poll_ticks = pdMS_TO_TICKS(IMU_POLL_MS);
     if (!poll_ticks) {
         poll_ticks = 1;
@@ -412,43 +474,57 @@ static void imu_worker(void *argument)
         }
     }
     imu_cleanup(true);
+    portENTER_CRITICAL(&s_status_mux);
+    s_imu_status.worker_running = false;
+    portEXIT_CRITICAL(&s_status_mux);
     vTaskDelete(NULL);
 }
 
 static void init_optional_imu(void)
 {
+    portENTER_CRITICAL(&s_status_mux);
+    s_imu_status.initialization_attempted = true;
+    portEXIT_CRITICAL(&s_status_mux);
     esp_err_t result = bsp_imu_init();
     if (result != ESP_OK) {
-        imu_latch_fault(result);
+        imu_latch_fault(result, "init");
         imu_cleanup(false);
         return;
     }
+    portENTER_CRITICAL(&s_status_mux);
+    s_imu_status.initialization_succeeded = true;
+    portEXIT_CRITICAL(&s_status_mux);
     bsp_imu_config_t config = BSP_IMU_CONFIG_DEFAULT();
     config.accel_odr = BMI2_ACC_ODR_100HZ;
     config.gyro_odr = BMI2_GYR_ODR_100HZ;
     result = bsp_imu_start(&config);
     if (result != ESP_OK) {
-        imu_latch_fault(result);
+        imu_latch_fault(result, "start");
         imu_cleanup(true);
         return;
     }
+    portENTER_CRITICAL(&s_status_mux);
+    s_imu_status.start_succeeded = true;
+    portEXIT_CRITICAL(&s_status_mux);
     const uint64_t started_us = (uint64_t)esp_timer_get_time();
     board_imu_sample_t first;
+    const char *stage;
     do {
-        result = imu_read_hardware(&first);
+        result = imu_read_hardware(&first, &stage);
         if (result != ESP_ERR_NOT_FOUND) {
             break;
         }
         const uint64_t time_us = (uint64_t)esp_timer_get_time();
         if (time_us < started_us || time_us - started_us >= IMU_START_TIMEOUT_US) {
             result = ESP_ERR_TIMEOUT;
+            stage = "first_sample";
             break;
         }
         TickType_t wait = pdMS_TO_TICKS(2);
         vTaskDelay(wait ? wait : 1);
     } while (true);
     if (result != ESP_OK) {
-        imu_latch_fault(result);
+        imu_latch_fault(result, stage);
         imu_cleanup(true);
         return;
     }
@@ -456,14 +532,16 @@ static void init_optional_imu(void)
     s_imu_sample = first;
     s_imu_sample_valid = true;
     s_imu_error = ESP_OK;
+    imu_count_sample_locked();
     portEXIT_CRITICAL(&s_status_mux);
     if (xTaskCreate(imu_worker, "imu", IMU_STACK_BYTES, NULL,
                     tskIDLE_PRIORITY + 2, &s_imu_task) != pdPASS) {
-        imu_latch_fault(ESP_ERR_NO_MEM);
+        imu_latch_fault(ESP_ERR_NO_MEM, "worker_create");
         imu_cleanup(true);
         return;
     }
     portENTER_CRITICAL(&s_status_mux);
+    s_imu_status.worker_created = true;
     s_caps.imu = s_imu_error == ESP_OK;
     portEXIT_CRITICAL(&s_status_mux);
 }
@@ -772,14 +850,15 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
         return ESP_ERR_INVALID_ARG;
     }
     portENTER_CRITICAL(&s_status_mux);
+    const uint64_t time_us = (uint64_t)esp_timer_get_time();
     esp_err_t result = s_imu_error;
     if (result == ESP_OK && (!s_caps.imu || !s_imu_sample_valid)) {
         result = ESP_ERR_INVALID_STATE;
     }
     if (result == ESP_OK) {
-        const uint64_t time_us = (uint64_t)esp_timer_get_time();
         if (time_us < s_imu_sample.timestamp_us || time_us - s_imu_sample.timestamp_us > IMU_MAX_AGE_US) {
             result = ESP_ERR_TIMEOUT;
+            imu_record_fault_locked(result, "cache_age");
             s_imu_error = result;
             s_imu_sample_valid = false;
             s_caps.imu = false;
@@ -787,8 +866,27 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
             *sample = s_imu_sample;
         }
     }
+    s_imu_status.read_seen = true;
+    s_imu_status.last_read_error = result;
+    s_imu_status.last_read_us = time_us;
     portEXIT_CRITICAL(&s_status_mux);
     return result;
+}
+
+board_imu_status_t board_imu_status(void)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    board_imu_status_t status = s_imu_status;
+    status.timestamp_us = (uint64_t)esp_timer_get_time();
+    status.available = s_caps.imu;
+    status.sample_valid = s_imu_sample_valid;
+    status.error = s_imu_error;
+    status.last_sample_us = s_imu_sample.timestamp_us;
+    status.sample_age_known = status.sample_count != 0 && status.timestamp_us >= status.last_sample_us;
+    status.sample_age_us = status.sample_age_known ? status.timestamp_us - status.last_sample_us : 0;
+    status.sample_fresh = status.sample_valid && status.sample_age_known && status.sample_age_us <= IMU_MAX_AGE_US;
+    portEXIT_CRITICAL(&s_status_mux);
+    return status;
 }
 
 esp_err_t board_power_read(board_power_status_t *status)

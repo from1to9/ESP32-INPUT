@@ -484,6 +484,13 @@ static void reset(void)
     memset(&s_imu_sample, 0, sizeof(s_imu_sample));
     s_imu_sample_valid = false;
     s_imu_error = ESP_ERR_INVALID_STATE;
+    s_imu_status = (board_imu_status_t){
+        .error = ESP_ERR_INVALID_STATE,
+        .first_fault_stage = "none",
+        .last_hardware_stage = "none",
+        .last_hardware_error = ESP_ERR_INVALID_STATE,
+        .last_read_error = ESP_ERR_INVALID_STATE,
+    };
     s_power_task = NULL;
     s_gauge = NULL;
     s_power = (board_power_status_t){.error = ESP_ERR_INVALID_STATE};
@@ -608,6 +615,9 @@ static void test_imu_real_units_and_nonblocking_cache(void)
 
 static void test_optional_sensor_failures(void)
 {
+    static const char *const stages[] = {
+        "init", "start", "status", "gyro", "accel", "worker_create", "first_sample",
+    };
     for (unsigned fault = 0; fault < 7; ++fault) {
         reset();
         esp_err_t expected = ESP_FAIL;
@@ -624,11 +634,76 @@ static void test_optional_sensor_failures(void)
         assert(!board_capabilities().imu && board_capabilities().lock_button);
         assert_read_fails_untouched(expected);
         assert(hw.imu_deinits == 1 && hw.imu_stops == (fault == 0 ? 0U : 1U));
+        const board_imu_status_t status = board_imu_status();
+        assert(status.initialization_attempted && status.fault_latched && !status.available);
+        assert(status.first_fault_error == expected && strcmp(status.first_fault_stage, stages[fault]) == 0);
+        assert(status.first_fault_us <= status.timestamp_us);
+        assert(status.initialization_succeeded == (fault != 0));
+        assert(status.start_succeeded == (fault != 0 && fault != 1));
+        assert(!status.worker_created && !status.worker_running);
+        assert(status.sample_count == (fault == 5 ? 1U : 0U));
     }
     reset();
     hw.read_delay_us = 11000;
     assert(board_init(legacy_hold) == ESP_OK && !board_capabilities().imu);
     assert_read_fails_untouched(ESP_ERR_TIMEOUT);
+}
+
+static void test_imu_health_is_nonmutating_and_retains_first_fault(void)
+{
+    reset();
+    board_imu_status_t status = board_imu_status();
+    assert(!status.initialization_attempted && !status.initialization_succeeded);
+    assert(!status.available && !status.sample_valid && !status.sample_fresh && !status.sample_age_known);
+    assert(!status.fault_latched && !status.hardware_read_seen && !status.read_seen);
+    assert(status.error == ESP_ERR_INVALID_STATE && hw.status_reads == 0);
+
+    assert(board_init(legacy_hold) == ESP_OK);
+    status = board_imu_status();
+    assert(status.initialization_attempted && status.initialization_succeeded && status.start_succeeded);
+    assert(status.worker_created && status.available && status.sample_valid && status.sample_fresh);
+    assert(status.sample_count == 1 && !status.sample_count_saturated && status.sample_age_known);
+    assert(status.last_sample_us == s_imu_sample.timestamp_us && !status.fault_latched);
+    assert(status.hardware_read_seen && status.last_hardware_error == ESP_OK);
+    assert(strcmp(status.last_hardware_stage, "sample") == 0);
+    assert(status.data_ready_known && status.data_ready_bits == (BMI2_DRDY_GYR | BMI2_DRDY_ACC));
+    assert(!status.read_seen && status.last_read_error == ESP_ERR_INVALID_STATE);
+
+    const unsigned reads = hw.status_reads;
+    hw.time_us = status.last_sample_us + 60000;
+    for (unsigned i = 0; i < 1000; ++i) {
+        status = board_imu_status();
+        assert(status.sample_age_us == 60000 && status.available && status.sample_valid && !status.sample_fresh);
+        assert(!status.fault_latched && status.error == ESP_OK && status.sample_count == 1);
+    }
+    assert(hw.status_reads == reads && s_imu_error == ESP_OK);
+    assert_read_fails_untouched(ESP_ERR_TIMEOUT);
+    status = board_imu_status();
+    const uint64_t fault_us = status.first_fault_us;
+    assert(status.fault_latched && !status.available && !status.sample_valid);
+    assert(strcmp(status.first_fault_stage, "cache_age") == 0);
+    assert(status.first_fault_error == ESP_ERR_TIMEOUT && fault_us == hw.time_us);
+    assert(status.read_seen && status.last_read_error == ESP_ERR_TIMEOUT && status.last_read_us == hw.time_us);
+    hw.time_us += 10000;
+    imu_latch_fault(ESP_FAIL, "later_fault");
+    imu_cleanup(true);
+    status = board_imu_status();
+    assert(status.first_fault_us == fault_us && status.first_fault_error == ESP_ERR_TIMEOUT);
+    assert(strcmp(status.first_fault_stage, "cache_age") == 0 && status.sample_count == 1);
+    assert(status.initialization_succeeded && status.start_succeeded && status.error == ESP_FAIL);
+    assert(status.last_read_error == ESP_ERR_TIMEOUT && hw.status_reads == reads);
+
+    reset();
+    assert(board_init(legacy_hold) == ESP_OK);
+    s_imu_status.sample_count = UINT64_MAX;
+    hw.time_us += 10000;
+    assert(imu_update() == ESP_OK);
+    status = board_imu_status();
+    assert(status.sample_count == UINT64_MAX && status.sample_count_saturated && status.available);
+    hw.time_us = status.last_sample_us - 1;
+    status = board_imu_status();
+    assert(!status.sample_age_known && !status.sample_fresh && status.sample_age_us == 0);
+    assert(!status.fault_latched && status.available);
 }
 
 static void stale_consumer_during_bus_read(void)
@@ -655,6 +730,12 @@ static void test_runtime_faults_and_inflight_cancellation(void)
         assert(imu_update() == expected);
         assert(!board_capabilities().imu);
         assert_read_fails_untouched(expected);
+        if (fault == 5) {
+            const board_imu_status_t status = board_imu_status();
+            assert(strcmp(status.first_fault_stage, "cache_age") == 0 && status.sample_count == 1);
+            assert(status.last_hardware_error == ESP_ERR_TIMEOUT);
+            assert(strcmp(status.last_hardware_stage, "batch_time") == 0); /* Later batch failure retains the cache fault. */
+        }
         hw.gyro_error = hw.accel_error = ESP_OK;
         hw.status_error = 0;
         assert(imu_update() == expected && !board_capabilities().imu);
@@ -689,6 +770,10 @@ static void test_sensor_worker_cleans_up_after_fault(void)
         assert(hw.delay_calls == 1 && hw.imu_stops == 1 && hw.imu_deinits == 1);
         assert(hw.sensor_initialized == (cleanup_fails != 0));
         assert_read_fails_untouched(ESP_FAIL);
+        const board_imu_status_t status = board_imu_status();
+        assert(status.worker_created && !status.worker_running && status.fault_latched);
+        assert(strcmp(status.first_fault_stage, "status") == 0 && status.first_fault_error == ESP_FAIL);
+        assert(!status.data_ready_known && status.last_hardware_error == ESP_FAIL);
     }
 }
 
@@ -950,6 +1035,7 @@ int main(void)
     test_raw_button_authority_and_registration();
     test_imu_real_units_and_nonblocking_cache();
     test_optional_sensor_failures();
+    test_imu_health_is_nonmutating_and_retains_first_fault();
     test_runtime_faults_and_inflight_cancellation();
     test_sensor_worker_cleans_up_after_fault();
     test_long_stream_crosses_32_bit_milliseconds();

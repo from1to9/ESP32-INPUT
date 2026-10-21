@@ -276,6 +276,7 @@ esp_err_t board_init(void (*callback)(void))
     unexpected_boot_boundary();
 }
 board_capabilities_t board_capabilities(void) { return test_capabilities; }
+board_imu_status_t board_imu_status(void) { return (board_imu_status_t){0}; }
 lv_display_t *board_display_get(void) { unexpected_boot_boundary(); }
 bool board_display_lock(uint32_t timeout)
 {

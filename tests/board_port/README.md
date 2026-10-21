@@ -17,6 +17,14 @@ during an in-flight bus read, worker cleanup, clock rollback and 100,000 samples
 across the 32-bit millisecond boundary. Sensor driver doubles assert that no I2C
 operation occurs inside a critical section.
 
+IMU health snapshots verify retained initialization/start milestones, accepted
+sample counts and saturation, last hardware/cache-read status, data-ready bits
+and the first fault's stage/error/time across cleanup and later failures.
+Repeated diagnostic reads perform no bus access, cannot latch an expired cache,
+and distinguish unknown age from a fresh sample. Cache consumption retains the
+existing 50 ms shutdown policy, including a stale consumer during an in-flight
+batch; diagnostics do not recover the stream or change its acceptance limits.
+
 The cached timestamp is monotonic acquisition-completion time. The pinned BSP
 has separate gyro and acceleration getters; the adapter calls both in one
 bounded batch, which is not an atomic six-axis sensor frame. Actual ODR,

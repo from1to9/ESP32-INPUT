@@ -1483,6 +1483,22 @@ void app_main(void)
         if (now - last_health_us >= 10000000) {
             last_health_us = now;
             report_memory_diagnostics();
+            board_imu_status_t imu = board_imu_status();
+            ESP_LOGI(TAG, "Motion imu_available=%d imu_error=%s samples=%llu "
+                     "sample_age_known=%d sample_age_us=%llu calibrated=%d calibrating=%d "
+                     "calibration_samples=%u input_kind=%d input_connected=%d input_ready=%d",
+                     imu.available, esp_err_to_name(imu.error),
+                     (unsigned long long)imu.sample_count, imu.sample_age_known,
+                     (unsigned long long)imu.sample_age_us, s_interaction.view.calibrated,
+                     s_interaction.view.calibrating, (unsigned)s_interaction.view.calibration_samples,
+                     (int)link.kind, link.connected, s_engine.ready);
+            if (imu.fault_latched)
+                ESP_LOGW(TAG, "First IMU fault stage=%s error=%s uptime_us=%llu "
+                         "last_hardware_stage=%s last_hardware_error=%s ready_known=%d ready_bits=%u",
+                         imu.first_fault_stage, esp_err_to_name(imu.first_fault_error),
+                         (unsigned long long)imu.first_fault_us, imu.last_hardware_stage,
+                         esp_err_to_name(imu.last_hardware_error), imu.data_ready_known,
+                         (unsigned)imu.data_ready_bits);
             ESP_LOGI(TAG, "Health uptime_s=%llu heap=%u min_heap=%u queue=%u locked=%d "
                      "free_internal=%u largest_internal=%u stack_bytes=%u "
                      "free_dma=%u largest_dma=%u "

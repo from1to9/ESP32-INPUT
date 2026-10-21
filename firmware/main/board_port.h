@@ -46,6 +46,37 @@ typedef struct {
     uint64_t timestamp_us;
 } board_imu_sample_t;
 
+typedef struct {
+    uint64_t timestamp_us;
+    bool initialization_attempted;
+    bool initialization_succeeded;
+    bool start_succeeded;
+    bool worker_created;
+    bool worker_running;
+    bool available;
+    bool sample_valid;
+    bool sample_fresh;
+    esp_err_t error;
+    uint64_t sample_count;
+    bool sample_count_saturated;
+    uint64_t last_sample_us;
+    bool sample_age_known;
+    uint64_t sample_age_us;
+    bool fault_latched;
+    const char *first_fault_stage;
+    esp_err_t first_fault_error;
+    uint64_t first_fault_us;
+    bool hardware_read_seen;
+    const char *last_hardware_stage;
+    esp_err_t last_hardware_error;
+    uint64_t last_hardware_us;
+    bool data_ready_known;
+    uint8_t data_ready_bits; /* Last observed STATUS byte: gyro bit 6, accel bit 7. */
+    bool read_seen;
+    esp_err_t last_read_error;
+    uint64_t last_read_us;
+} board_imu_status_t;
+
 typedef enum {
     BOARD_TRUTH_UNKNOWN,
     BOARD_TRUTH_NO,
@@ -103,6 +134,14 @@ board_capabilities_t board_capabilities(void);
  * timestamp intervals. Samples older than 50 ms fail closed. On failure output
  * is untouched; unavailable/faulted streams return an error and drop imu. */
 esp_err_t board_imu_read(board_imu_sample_t *sample);
+/* Nonmutating cached diagnostics: no sensor I/O, freshness latch or recovery.
+ * Counts include accepted samples only. Age is meaningful only when known;
+ * sample_valid/available/error describe current adapter state; sample_fresh
+ * additionally evaluates the unchanged 50 ms age gate without latching it.
+ * Initialization, start and worker-created flags retain boot milestones, not current
+ * hardware qualification. Stage strings are static English literals. The first
+ * fault survives cleanup/later errors; last_read covers non-null cache reads. */
+board_imu_status_t board_imu_status(void);
 
 /* Nonblocking cache, polled once per second; stale after five seconds. Always
  * fills output, including unknown/invalid fields on error. Percent is the
