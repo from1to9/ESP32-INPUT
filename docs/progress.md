@@ -118,6 +118,22 @@ Status: the exact 21-file adapter scope passed independent review and checks.
 Coordinator release ordering and physical host/device checks remain separate
 gates. Nearby scanning and prioritized saved-target selection are later additions.
 
+## Checkpoint 7: USB composite input and diagnostics
+
+Status: the exact nineteen-file USB scope passed independent review and checks.
+
+- One TinyUSB owner provides CDC diagnostics plus keyboard/mouse reports, with
+  separate admission, submission and completion state and bounded deadlines.
+- Reset, suspend, cancellation and late completion cannot replay obsolete input.
+  HID failure preserves the diagnostic stack; actual reset is the recovery gate.
+- Real pinned TinyUSB descriptor macros and SDK serial generation were tested
+  under strict compiler diagnostics and sanitizers, including 100,000 lifecycle
+  cycles. Both S31 adapter objects and the expanded linked build passed.
+
+This checkpoint publishes the adapter and its tests. The final integration
+commit supplies its build/configuration wiring. Actual USB enumeration, host
+input, cable/suspend behavior and electrical/thermal qualification remain gates.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |
