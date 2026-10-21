@@ -22,13 +22,18 @@ def main():
                    "-I", str(SUITE / "stubs"),
                    "-I", str(ROOT / "components/hid_engine/include"),
                    "-I", str(ROOT / "components/input_core/include"),
+                   "-I", str(ROOT / "components/device_settings/include"),
                    str(SUITE / "test_ble_hid.c"),
+                   str(ROOT / "firmware/main/ble_hid_store.c"),
                    str(ROOT / "components/hid_engine/hid_engine.c"),
                    str(ROOT / "components/input_core/input_core.c"),
+                   str(ROOT / "components/device_settings/device_settings.c"),
                    "-o", str(binary)]
         for capacity in (15, 32):
             subprocess.run(command + [f"-DCONFIG_BT_SMP_MAX_BONDS={capacity}"], check=True)
             subprocess.run([str(binary)], check=True)
+        subprocess.run(command + ["-DCONFIG_BT_SMP_MAX_BONDS=15", "-DCONFIG_BT_CLASSIC_ENABLED=1"], check=True)
+        subprocess.run([str(binary)], check=True)
 
 
 if __name__ == "__main__":

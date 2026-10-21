@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
 #include "ui_memory.h"
+#include "ui_private_probe.h"
+#include "ui_extension_fixture.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,7 +12,7 @@
 #define IDLE_MS 10000
 #define FRAME_BYTES (WIDTH * HEIGHT * 2U)
 /* design/ui-plan.md: fixed input pages preserve gestures; one panel is dynamic. */
-#define CORE_OBJECT_LIMIT 102
+#define CORE_OBJECT_LIMIT 104 /* Explicit Reject button plus caption. */
 #define PANEL_OBJECT_LIMIT 160
 
 typedef struct {
@@ -30,6 +32,9 @@ static const panel_case_t s_panels[] = {
     {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_ABOUT, 0},
     {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_BLUETOOTH, 0},
     {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_WIFI, 0},
+    {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_MOTION, 0},
+    {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_MOTION_ADVANCED, 0},
+    {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_GESTURES, 0},
     {INPUT_KEYBOARD, APP_OVERLAY_KEYBOARD, 0, 0},
     {INPUT_AUDIO, APP_OVERLAY_AUDIO, 0, 0},
     {INPUT_MOUSE, APP_OVERLAY_WIFI_SETUP, 0, 0},
@@ -38,18 +43,45 @@ static const panel_case_t s_panels[] = {
     {INPUT_MOUSE, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_PAIR_FORGET_ALL},
     {INPUT_MOUSE, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_WIFI_FORGET},
     {INPUT_MOUSE, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_DISCONNECT},
+    {INPUT_MOUSE, APP_OVERLAY_WIFI_NETWORKS, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_WIFI_NETWORK, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_LOCAL_EDITOR, 0, 0},
+    {INPUT_KEYBOARD, APP_OVERLAY_LOCAL_EDITOR, 0, 0},
+    {INPUT_KEYBOARD, APP_OVERLAY_COMMON_KEYS, 0, 0},
+    {INPUT_AUDIO, APP_OVERLAY_RECORDING_STORAGE, 0, 0},
+    {INPUT_AUDIO, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_RECORDING_STORAGE_PREPARE},
+    {INPUT_AUDIO, APP_OVERLAY_MEDIA_OPTIONS, 0, 0},
+    {INPUT_AUDIO, APP_OVERLAY_RECORDING_START, 0, 0},
+    {INPUT_AUDIO, APP_OVERLAY_RECORDINGS, 0, 0},
+    {INPUT_AUDIO, APP_OVERLAY_RECORDING_DETAIL, 0, 0},
+    {INPUT_AUDIO, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_RECORDING_START},
+    {INPUT_AUDIO, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_RECORDING_DELETE},
+    {INPUT_AUDIO, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_RECORDING_CANCEL_DISCARD},
+    {INPUT_MOUSE, APP_OVERLAY_API_CONNECTION, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_API_REVIEW, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_WIFI_PROFILES, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_BLUETOOTH_TARGET, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_REMOTE},
 };
 
 static unsigned char s_draw[FRAME_BYTES];
 static size_t s_flushes, s_flush_bytes;
 static FILE *s_report;
 static bool s_first_result = true;
+static uint64_t s_fixture_editor_session = 1000;
 
 static bool reject_unexpected_intent(app_intent_t *intent)
 {
     (void)intent;
     assert(!"Rendering alone must never submit product intent");
     return false;
+}
+
+static app_local_edit_result_t reject_unexpected_private(const app_local_edit_request_t *request)
+{
+    (void)request;
+    assert(!"Rendering alone must never submit a private draft");
+    return APP_LOCAL_EDIT_UNAVAILABLE;
 }
 
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
@@ -107,6 +139,7 @@ static app_view_t view(input_mode_t mode, bool dark)
     strcpy(state.bluetooth_hosts[0].name, "Hidden saved peer");
     strcpy(state.bluetooth_hosts[0].identity, "AA:BB:CC:DD:EE:01");
     strcpy(state.wifi_ssid, "Synthetic network");
+    ui_fixture_native_networks(&state);
     return state;
 }
 
@@ -130,6 +163,26 @@ static app_view_t panel_view(const panel_case_t *panel, bool dark)
         strcpy(state.wifi_setup_passcode, "TESTONLY-123456789012345");
         strcpy(state.wifi_setup_url, "http://192.0.2.1/");
     }
+    if (panel->overlay == APP_OVERLAY_LOCAL_EDITOR) {
+        state.local_editor = (app_local_editor_view_t){.session = ++s_fixture_editor_session,
+            .purpose = panel->mode == INPUT_MOUSE ? APP_LOCAL_EDIT_WIFI_PASSPHRASE : APP_LOCAL_EDIT_BLUETOOTH_NAME,
+            .seconds_left = 300, .submit_available = true, .wifi_scan_generation = 47,
+            .wifi_record_index = 17, .wifi_remember = true};
+        strcpy(state.local_editor.bluetooth_initial, "Synthetic name");
+    }
+    state.motion_settings = (app_motion_settings_view_t){
+        .available = true, .editable = true, .revision = 17,
+        .gain_x_centi = 400, .gain_y_centi = 400, .deadzone_mdps = 500,
+        .filter_ms = 30, .freeze_ms = 150, .reference = APP_REFERENCE_READY
+    };
+    state.recording_storage = (app_recording_storage_view_t){
+        .state = APP_RECORD_STORE_UNPREPARED, .backend = APP_RECORD_BACKEND_INTERNAL_RESERVED,
+        .generation = 31, .revision = 47, .reserved_region_verified = true, .can_prepare = true
+    };
+    ui_fixture_media(&state);
+    ui_fixture_connections(&state);
+    ui_fixture_remote_review(&state);
+    strcpy(state.recording_storage.reason, "The dedicated internal recording area is not prepared.");
     return state;
 }
 
@@ -149,6 +202,8 @@ static bool idle_case(app_view_t state, bool hidden_changes, bool covered_target
             state.uptime_seconds += 61;
             strcpy(state.firmware_version, elapsed % 200 ? "hidden-version-a" : "hidden-version-b");
             strcpy(state.bluetooth_hosts[0].name, elapsed % 200 ? "Hidden peer A" : "Hidden peer B");
+            strcpy(state.wifi_scan.rows[0].label, elapsed % 200 ? "Hidden Wi-Fi A" : "Hidden Wi-Fi B");
+            strcpy(state.bluetooth_name.effective, elapsed % 200 ? "Hidden name A" : "Hidden name B");
         }
         if (covered_target)
             state.target_name = elapsed % 200 ? "Covered target A" : "Covered target B";
@@ -213,6 +268,7 @@ static bool navigation_case(bool dark)
         app_ui_render(&core);
         advance(100);
         ui_memory_stats_t current = ui_memory_stats();
+        assert(ui_private_buffers_cleared());
         if (current.live_bytes != before.live_bytes || current.live_blocks != before.live_blocks ||
             object_count(lv_screen_active()) != core_objects || timer_count() != core_timers) {
             bounded = false;
@@ -243,6 +299,7 @@ int main(int argc, char **argv)
     lv_display_set_buffers(display, s_draw, NULL, sizeof s_draw, LV_DISPLAY_RENDER_MODE_FULL);
     lv_display_set_flush_cb(display, flush);
     app_ui_create(display, reject_unexpected_intent);
+    app_ui_set_local_edit_submit(reject_unexpected_private);
     fprintf(s_report, "{\n  \"render_mode\":\"FULL\",\"frame_bytes\":%u,\"refresh_ms\":%u,"
                       "\"dpi\":%u,\"results\":[", FRAME_BYTES, LV_DEF_REFR_PERIOD, LV_DPI_DEF);
     bool passed = true;
@@ -258,6 +315,16 @@ int main(int argc, char **argv)
         if (!idle_case(sleeping, true, false)) passed = false;
         panel_case_t settings = {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_HOME, APP_CONFIRM_NONE};
         if (!idle_case(panel_view(&settings, dark != 0), false, true)) passed = false;
+        app_view_t capture = view(INPUT_MOUSE, dark != 0);
+        capture.capture_indicator_required = true;
+        capture.capture_indicator_generation = 91;
+        capture.capture_state = APP_CAPTURE_UNCERTAIN;
+        if (!idle_case(capture, false, false)) passed = false;
+        capture.overlay = APP_OVERLAY_SETTINGS;
+        capture.settings_page = APP_SETTINGS_MOTION;
+        if (!idle_case(capture, false, false)) passed = false;
+        capture.locked = true;
+        if (!idle_case(capture, false, false)) passed = false;
     }
     fprintf(s_report, "\n  ],\"navigation\":[");
     if (!navigation_case(false)) passed = false;

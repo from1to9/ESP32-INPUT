@@ -29,10 +29,22 @@ def main():
                    "-I", str(ROOT / "components/input_core/include"),
                    "-I", str(ROOT / "components/interaction/include"),
                    "-I", str(ROOT / "components/device_settings/include"),
+                   "-I", str(ROOT / "components/audio_engine/include"),
+                   "-I", str(ROOT / "components/spoken_letters/include"),
+                   "-I", str(ROOT / "components/control_protocol/include"),
+                   "-I", str(ROOT / "components/control_protocol"),
                    str(SUITE / "test_coordinator.c"),
+                   str(ROOT / "firmware/main/app_remote_input.c"),
+                   str(ROOT / "firmware/main/app_remote_device.c"),
+                   str(ROOT / "firmware/main/app_remote_media.c"),
+                   str(ROOT / "components/audio_engine/audio_media.c"),
+                   str(ROOT / "firmware/main/app_command_bridge.c"),
+                   *[str(ROOT / "components/control_protocol" / name) for name in
+                     ("control_protocol.c", "control_json.c", "control_registry.c", "control_sha256.c")],
                    str(ROOT / "components/hid_engine/hid_engine.c"),
                    str(ROOT / "components/input_core/input_core.c"),
                    str(ROOT / "components/interaction/interaction.c"),
+        str(ROOT / "components/interaction/interaction_multitouch.c"),
                    str(ROOT / "components/device_settings/device_settings.c"),
                    "-lm", "-o", str(binary)]
         subprocess.run(command, check=True)

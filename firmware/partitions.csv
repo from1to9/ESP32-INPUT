@@ -1,4 +1,12 @@
 # Name, Type, SubType, Offset, Size, Flags
 nvs, data, nvs, 0x9000, 0x6000,
 phy_init, data, phy, 0xf000, 0x1000,
-factory, app, factory, 0x10000, 0x400000,
+# Two full-size application slots fit the combined image and preserve rollback.
+# Installing this table is a separate, backed-up migration. Ordinary OTA cannot
+# rewrite this table or migrate old layouts. NVS/PHY retain their old locations.
+ota_0, app, ota_0, 0x10000, 0x600000,
+ota_1, app, ota_1, 0x610000, 0x600000,
+otadata, data, ota, 0xc10000, 0x2000,
+model, data, spiffs, 0xc20000, 0x300000,
+control, data, nvs, 0xf20000, 0x10000,
+recordings, data, 0x40, 0xf30000, 0xd0000,

@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "lvgl.h"
 #include "driver/i2c_master.h"
+#include "esp_lcd_types.h"
 #define CONFIG_BSP_DISPLAY_ENABLE 1
 #define CONFIG_BSP_DISPLAY_LVGL_ENABLE 1
 #define CONFIG_BSP_MOTOR_ENABLE_PWM 1
@@ -30,6 +31,8 @@ struct bmi2_dev { int identifier; };
 esp_err_t bsp_board_variant_get(bsp_board_variant_t *variant);
 esp_err_t bsp_power_init(void);
 lv_display_t *bsp_display_start_with_config(const bsp_display_config_t *config);
+esp_err_t bsp_display_new(const bsp_display_config_t *, esp_lcd_panel_handle_t *);
+esp_lcd_panel_io_handle_t bsp_display_get_panel_io(void);
 lv_indev_t *bsp_display_get_input_dev(void);
 bool bsp_display_lock(int32_t timeout_ms);
 void bsp_display_unlock(void);

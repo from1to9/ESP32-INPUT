@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
 #include "ui_memory.h"
+#include "ui_private_probe.h"
+#include "ui_extension_fixture.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +21,7 @@ static lv_indev_data_t s_pointer_data;
 static app_view_t s_state;
 static const char *s_output;
 static const char *s_prefix = "";
+static uint64_t s_flush_count;
 
 static bool capture(app_intent_t *intent)
 {
@@ -29,6 +32,7 @@ static bool capture(app_intent_t *intent)
 
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
+    ++s_flush_count;
     for (int y = area->y1; y <= area->y2; ++y) {
         for (int x = area->x1; x <= area->x2; ++x) {
             assert(x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT);
@@ -250,7 +254,7 @@ static void geometry_checks(void)
     const char *grid1[] = {"ABCD", "EFGH", "IJKL"};
     const char *grid2[] = {"MNOP", "QRST", "UVWX"};
     const char *grid3[] = {"YZ01", "2345", "6789"};
-    const char *actions[] = {"Delete", "Space", "Send"};
+    const char *actions[] = {"Delete draft", "Space", "Send"};
     const char *utilities[] = {"Groups", "ABC", "Symbols"};
     row_geometry(grid1, 3);
     row_geometry(grid2, 3);
@@ -451,7 +455,7 @@ static void device_settings_checks(void)
     tap_control("Count unknown");
     s_state.settings_page = APP_SETTINGS_WIFI;
     render();
-    tap_control("Set up Wi-Fi");
+    tap_control("Recovery hotspot");
     assert(action_count(APP_PAIRING_REQUEST) == 0 && action_count(APP_WIFI_SETUP) == 0);
     s_state = original;
     s_state.overlay = APP_OVERLAY_SETTINGS;
@@ -796,7 +800,7 @@ static void text_boundary_checks(void)
     assert(footer);
     lv_area_t footer_area, action_area;
     lv_obj_get_coords(footer, &footer_area);
-    lv_obj_get_coords(control("Delete"), &action_area);
+    lv_obj_get_coords(control("Delete draft"), &action_area);
     assert(footer_area.x1 == 12 && footer_area.y1 == 392 && footer_area.x2 <= 467);
     assert(footer_area.y2 < action_area.y1 && action_area.y1 == 424);
     font = lv_obj_get_style_text_font(footer, LV_PART_MAIN);
@@ -1142,7 +1146,7 @@ static void quick_panel_and_chooser_checks(void)
     screenshot("keyboard-entry-chooser");
     const char *choices[] = {"Motion", "Touch", "Spoken letters", "Shortcuts"};
     for (unsigned i = 0; i < 4; ++i) {
-        assert_rect(control(choices[i]), 12, 64 + (int)i * 88, 456, 76);
+        assert_rect(control(choices[i]), 12, 64 + (int)i * 72, 456, 64);
         clear_intents();
         tap_control(choices[i]);
         assert(action_count(APP_KEYBOARD_SUBMODE) == 1 && last_action(APP_KEYBOARD_SUBMODE)->x == (int)i);
@@ -1314,9 +1318,20 @@ static void setup_cache_lifetime_checks(void)
     puts("PASS: setup secrets clear from live allocator bytes, including cache tails, through deferred lock/sleep/close/expiry");
 }
 
+#include "ui_extensions.inc"
+#include "ui_motion_settings.inc"
+#include "ui_capture_indicator.inc"
+#include "ui_touch_context.inc"
+#include "ui_recording_storage.inc"
+#include "ui_media.inc"
+#include "ui_connections.inc"
+#include "ui_remote_review.inc"
+#include "ui_trust_review.inc"
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
+    assert(!app_ui_touch_context().eligible_pad);
     s_output = argv[1];
     ui_memory_check_observer();
     lv_init();
@@ -1436,8 +1451,20 @@ int main(int argc, char **argv)
         quick_panel_and_chooser_checks();
         deferred_panel_press_checks();
         setup_cache_lifetime_checks();
+        extension_checks();
+        motion_settings_checks();
+        capture_indicator_checks();
+        touch_context_checks();
+        recording_storage_checks();
+        media_checks();
+        connection_checks();
+        remote_review_checks();
+        trust_review_checks();
     }
     lv_deinit();
+    assert(!app_ui_touch_context().eligible_pad);
+    assert(app_ui_capture_indicator_armed_generation() == 0);
+    assert(ui_private_buffers_cleared());
     ui_memory_stats_t final = ui_memory_stats();
     assert(final.live_blocks == 0 && final.live_bytes == 0);
     return 0;

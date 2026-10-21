@@ -52,7 +52,7 @@ All rows are **planned / not run** until an evidence record says otherwise. `H` 
 | O06 | Local long press unlocks after queued remote work | Mode retained, motion off/mic muted, queue empty, local allowance closed; no resumed task or output | H/D/C |
 | O07 | Remote attempts raw physical-button/local-source/presence fields; hidden page activation | Schema rejects spoofed source; semantic action obeys visible focus/mode and presence rules | H/D |
 | O08 | Remote mode change or output-affecting setting while old commands are queued | Epoch increments; old queue cancelled, neutral barrier holds; next command must use returned epoch; no cross-mode output | H/D/C |
-| T01 | Clean WSS close, Wi-Fi loss, AP reboot or TCP blackhole during drag/key/text | Detected close revokes immediately; silent loss bounded by lease/deadman. Trace releases, cancellation and precise progress | H/D/C |
+| T01 | Clean WSS close, Wi-Fi loss, AP reboot or TCP blackhole during drag/key/text | Detected channel close revokes exact input authority and live channel consumers; same-session HTTP management/file recording remain independent. New channel requires fresh acquire; old callbacks/PCM cannot bind to replacement. Silent loss is bounded by lease/deadman. Trace releases, cancellation and precise progress | H/D/C |
 | T02 | Lose only outbound state/results while inbound renewals/commands still work | Fresh-state requirement expires lease; bounded output cannot accumulate indefinitely; UI stale and stops; lost result is unknown | H/D |
 | T03 | BLE disconnect, sleep/wake or selected target replacement with queued input | Revoke/cancel input, change epoch, retain only safe unsent draft; reconnect starts neutral and motion off. Independent audio jobs retain their own link/resource/privacy policy | H/D/C |
 | T04 | Reconnect with same auth session and retransmit prior buffered messages | New channel session, no lease, fresh snapshot/ack; old envelopes rejected; browser/bridge sends no offline queue | H/D |
@@ -119,6 +119,8 @@ All rows are planned, with H/D/C evidence levels as above. These extend the olde
 | API13 | Every advertised audio format/frame/ring/route and shared-resource combination | Exact capability tuple and memory/frame bounds; no relabeled samples, fake gain/mute/AEC/stereo or incompatible fan-out | H/D/C |
 | API14 | Input-first/balanced/management-first requested above ceilings; scan/TLS/flash/audio pressure | Shared schema limits, immutable stop/release priority, finite visible deferral and maintenance policy; no hardcoded client divergence | H/D |
 | API15 | All event topics/statuses, slow consumer, reconnect, schema/profile pagination | Scoped bounded replacement state; accurate unknown/unavailable/accepted/applied/saved/sent/observed; no input/media replay | H/D |
+| API16 | Fresh native network selection, editor beyond 30-second list TTL, replaced list, five-minute ticket expiry/release/replay | Immutable original SSID/auth retained only by explicit ticket; ordinary stale rows still reject, no silent manual conversion, no password in HID/intents/state/logs, editor close cannot cancel a consumed join; local ticket is not remotely borrowable | H/D |
+| API17 | Private local name submission, same change through future common config, tap setting change during a gesture | Shared name validation/manager ACK/save evidence; no forged local editor/gesture, no host-cache claim, no config-triggered click or active-gesture reinterpretation; all current enum actions covered | H/D |
 
 ## Invariants checked across faults
 

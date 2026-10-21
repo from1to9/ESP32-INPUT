@@ -58,11 +58,25 @@ def main():
         args.output_dir = ROOT / ".agent/local/ui-focused-workspace" / stamp
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise SystemExit(f"Evidence directory must be empty: {args.output_dir}")
-    sources = list((ROOT / "tests/ui").glob("*")) + [
+    sources = list((ROOT / "tests/ui").glob("*")) + list((ROOT / "tests/ui/presenter_stubs").rglob("*.h")) + list((ROOT / "tests/display_transfer/stubs").rglob("*.h")) + list((ROOT / "tests/bt_audio/stubs").rglob("*.h")) + list((ROOT / "components/control_protocol/include").glob("*.h")) + [
         ROOT / "firmware/main/app_ui.c", ROOT / "firmware/main/app_ui.h",
+        ROOT / "firmware/main/app_media_ui.h", ROOT / "firmware/main/app_ui_media.inc",
+        ROOT / "firmware/main/app_connection_ui.h", ROOT / "firmware/main/app_ui_connections.inc",
+        ROOT / "firmware/main/app_connectivity_controls.c", ROOT / "firmware/main/app_connectivity_controls.h",
+        ROOT / "firmware/main/app_control_trust.h", ROOT / "firmware/main/app_control_runtime.h",
+        ROOT / "firmware/main/app_control_server.h", ROOT / "firmware/main/app_firmware_update.h",
+        ROOT / "firmware/main/app_wifi.h", ROOT / "firmware/main/app_wifi_profiles.h",
+        ROOT / "firmware/main/ble_hid.h", ROOT / "firmware/main/app_clock.h",
+        ROOT / "components/device_settings/include/device_settings.h", ROOT / "components/audio_engine/include/audio_engine.h",
+        ROOT / "tests/connectivity_controls/review_fixture.h",
+        ROOT / "components/control_protocol/control_registry.c", ROOT / "components/control_protocol/include/control_registry.h",
+        ROOT / "firmware/main/app_remote_review_ui.h", ROOT / "firmware/main/app_ui_remote_review.inc",
+        ROOT / "firmware/main/app_presenter.c", ROOT / "firmware/main/app_presenter.h",
+        ROOT / "firmware/main/board_display_transfer.c", ROOT / "firmware/main/board_display_transfer.h",
         ROOT / "components/input_core/include/input_core.h",
         ROOT / "firmware/dependencies.lock",
         ROOT / "design/ui-plan.md", ROOT / "docs/interaction.md",
+        ROOT / "design/native-wifi-ui.md",
     ]
 
     def hashes():
@@ -94,6 +108,8 @@ def main():
     if args.suite in ("all", "resources"):
         commands.append(("resources", [str(args.build_dir / "ui_resources"),
                                        str(args.output_dir / "resources.json")]))
+    if args.suite == "all":
+        commands.append(("presenter_integration", [str(args.build_dir / "ui_presenter_integration")]))
     binary_before = {name: hashlib.sha256(Path(command[0]).read_bytes()).hexdigest()
                      for name, command in commands}
     for name, command in commands:

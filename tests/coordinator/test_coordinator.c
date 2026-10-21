@@ -26,10 +26,11 @@ static bool test_send_failure;
 static board_capabilities_t test_capabilities;
 static board_imu_sample_t test_sample;
 static esp_err_t test_imu_result;
-static bool test_display_available, test_display_locked;
+static bool test_presenter_available;
 static app_view_t test_view;
-static char test_target[40];
-static size_t test_render_count;
+static char test_target[APP_PRESENTER_TARGET_BYTES];
+static char test_message[APP_PRESENTER_MESSAGE_BYTES];
+static size_t test_publish_count;
 static const char *test_case;
 static board_power_status_t test_power;
 static esp_err_t test_power_error;
@@ -63,6 +64,233 @@ static char test_diagnostic_logs[8][256];
 static size_t test_diagnostic_log_count, test_heap_observation_count;
 static size_t test_heap_free_internal, test_heap_largest_internal;
 static size_t test_heap_free_dma, test_heap_largest_dma;
+static app_wifi_scan_snapshot_t test_scan;
+static app_wifi_scan_record_t test_scan_records[APP_WIFI_SCAN_CAPACITY];
+static app_wifi_selection_t test_selection;
+static esp_err_t test_scan_error, test_join_error, test_selection_error;
+static unsigned test_scans, test_scan_cancels, test_selections, test_selection_releases, test_joins;
+static uint32_t test_released_selection;
+static app_wifi_join_request_t test_join_request;
+static ble_hid_name_snapshot_t test_name;
+static esp_err_t test_name_error;
+static unsigned test_name_requests;
+static bool test_clock_override;
+static uint64_t test_clock_ms;
+static uint32_t test_selection_lifetime_ms;
+static bool test_boot_boundary_enabled, test_boot_lock_allowed, test_boot_locked;
+static bool test_boot_active;
+static lv_display_t *test_boot_display;
+static unsigned test_boot_lock_calls, test_boot_create_calls, test_boot_update_calls;
+static app_boot_ui_view_t test_boot_view;
+
+/* Media boundary substitutes observe the real coordinator's decisions. Audio,
+ * recognizer, persistence and UI adapters have separate production suites. */
+static app_media_snapshot_t test_media_snapshot;
+static app_presenter_indicator_status_t test_indicator;
+static ae_environment_t test_media_environment;
+static app_media_controls_context_t test_media_context;
+static unsigned test_media_stops;
+static bool test_media_speech_context;
+static app_media_controls_effect_t test_media_effect;
+static bool test_media_handle;
+static unsigned test_media_handles;
+static bool test_control_session_alive;
+static cp_device_state_t test_control_state;
+static cp_result_t test_control_result;
+static unsigned test_control_completions;
+static bool test_control_completion_reject;
+static app_update_snapshot_t test_update_snapshot;
+static app_update_authority_t test_update_authority;
+static cp_error_t test_update_authority_error = CP_UNAVAILABLE;
+static bool test_update_busy, test_wifi_maintenance;
+static unsigned test_update_health_requests;
+static board_haptic_status_t test_haptic_status;
+static board_imu_status_t test_update_imu;
+static app_presenter_status_t test_update_presentation;
+static ble_hid_target_snapshot_t test_update_target;
+static bt_audio_bond_list_t test_classic_bonds;
+static app_wifi_profiles_snapshot_t test_wifi_profiles;
+static app_device_restart_status_t test_restart_status;
+static esp_err_t test_restart_error;
+static bool test_restart_authorized, test_restart_maintenance;
+static unsigned test_restart_requests;
+static bool test_remote_target_accept, test_remote_wifi_forget_accept, test_remote_haptic_accept, test_remote_bond_forget_accept;
+static unsigned test_remote_target_calls, test_remote_wifi_forget_calls, test_remote_haptic_calls, test_remote_bond_forget_calls;
+static ble_hid_target_preferences_request_t test_remote_target_request;
+static uint64_t test_remote_wifi_forget_revision;
+static bool test_remote_wifi_forget_acknowledge;
+static ble_hid_bond_forget_snapshot_t test_remote_bond_forget;
+void *heap_caps_calloc(size_t count, size_t bytes, uint32_t caps) { (void)caps; return calloc(count, bytes); }
+void heap_caps_free(void *memory) { free(memory); }
+void esp_fill_random(void *memory, size_t bytes) { memset(memory, 0x17, bytes); }
+esp_err_t app_control_runtime_init(const app_control_host_t *host) { (void)host; return ESP_OK; }
+esp_err_t app_control_runtime_attach_usb_stdio(void) { return ESP_OK; }
+esp_err_t app_control_runtime_publish_state(const cp_device_state_t *state) { test_control_state = *state; return ESP_OK; }
+esp_err_t app_control_runtime_complete(uint64_t key, const cp_result_t *result)
+{ assert(key == result->command_key); if (test_control_completion_reject) return ESP_ERR_INVALID_STATE;
+  test_control_result = *result; ++test_control_completions; return ESP_OK; }
+void app_control_runtime_physical_override(bool locked) { (void)locked; }
+bool app_control_runtime_session_alive(const uint8_t session[CP_ID_BYTES], const uint8_t principal[CP_ID_BYTES])
+{ return test_control_session_alive && session[0] && principal[0]; }
+bool app_control_runtime_wall_time(uint64_t *seconds) { (void)seconds; return false; }
+cp_error_t app_control_runtime_update_authority(const cp_command_t *command, app_update_authority_t *out)
+{ (void)command; *out = test_update_authority; return test_update_authority_error; }
+void app_update_snapshot(app_update_snapshot_t *out) { *out = test_update_snapshot; }
+bool app_update_flash_busy(void) { return test_update_busy; }
+esp_err_t app_update_confirm_health(bool gates)
+{ assert(gates); ++test_update_health_requests; return ESP_OK; }
+void app_wifi_set_maintenance(bool active) { test_wifi_maintenance = active; }
+esp_err_t ble_hid_target_select(uint64_t revision, const ble_hid_target_t *target)
+{
+    ++test_remote_target_calls;
+    test_remote_target_request.expected_bond_revision = revision;
+    test_remote_target_request.target = *target;
+    test_remote_target_request.selected = true;
+    if (!test_remote_target_accept) return ESP_ERR_INVALID_STATE;
+    ++test_update_target.request_id; test_update_target.target = *target;
+    test_update_target.selected = true; test_update_target.request_status = BLE_HID_TARGET_PENDING;
+    return ESP_OK;
+}
+ble_hid_target_snapshot_t ble_hid_target_snapshot(void) { return test_update_target; }
+esp_err_t board_haptics_request(board_haptic_operation_t operation, board_feedback_t pattern, uint64_t *id)
+{
+    ++test_remote_haptic_calls;
+    if (!test_remote_haptic_accept) return ESP_ERR_INVALID_STATE;
+    *id = ++test_haptic_status.request_id;
+    test_haptic_status.operation = operation; test_haptic_status.pattern = pattern;
+    test_haptic_status.state = BOARD_HAPTIC_PENDING; test_haptic_status.worker_available = true;
+    return ESP_OK;
+}
+board_haptic_status_t board_haptics_status(void) { return test_haptic_status; }
+esp_err_t board_haptics_cancel(uint64_t id)
+{
+    if (!id || id != test_haptic_status.request_id) return ESP_ERR_INVALID_STATE;
+    test_haptic_status.state = BOARD_HAPTIC_CANCELLED;
+    test_haptic_status.off_confirmed = true;
+    return ESP_OK;
+}
+bt_audio_bond_list_t bt_audio_bond_list(void) { return test_classic_bonds; }
+void bt_audio_pairing_close(void) {}
+void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out) { *out = test_wifi_profiles; }
+esp_err_t app_wifi_profiles_forget_all(uint64_t revision, bool acknowledge)
+{ (void)revision; (void)acknowledge; return ESP_ERR_INVALID_STATE; }
+esp_err_t app_wifi_profiles_forget_all_request(uint64_t revision, bool acknowledge, uint64_t *id)
+{
+    ++test_remote_wifi_forget_calls; test_remote_wifi_forget_revision = revision;
+    test_remote_wifi_forget_acknowledge = acknowledge;
+    if (!test_remote_wifi_forget_accept) return ESP_ERR_INVALID_STATE;
+    *id = ++test_wifi_profiles.request_id; test_wifi_profiles.operation_pending = true;
+    return ESP_OK;
+}
+esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_request_t *request, uint64_t *id)
+{
+    ++test_remote_target_calls; test_remote_target_request = *request;
+    if (!test_remote_target_accept) return ESP_ERR_INVALID_STATE;
+    *id = ++test_update_target.request_id; test_update_target.target = request->target;
+    test_update_target.selected = request->selected; test_update_target.request_status = BLE_HID_TARGET_PENDING;
+    return ESP_OK;
+}
+bool ble_hid_forget_bonds_without_pairing(uint64_t generation)
+{ ++test_pair_forgets; test_forget_generation = generation; return test_pair_accept; }
+esp_err_t ble_hid_forget_bond_request(uint64_t generation, uint64_t revision, const ble_hid_target_t *target, uint64_t *id)
+{
+    ++test_remote_bond_forget_calls;
+    if (!test_remote_bond_forget_accept) return ESP_ERR_INVALID_STATE;
+    *id = ++test_remote_bond_forget.request_id;
+    test_remote_bond_forget.generation = generation; test_remote_bond_forget.bond_revision = revision;
+    test_remote_bond_forget.target = *target; test_remote_bond_forget.status = BLE_HID_BOND_FORGET_PENDING;
+    test_remote_bond_forget.cancellable = true;
+    return ESP_OK;
+}
+esp_err_t ble_hid_forget_bond_cancel(uint64_t id)
+{
+    if (id != test_remote_bond_forget.request_id || !test_remote_bond_forget.cancellable) return ESP_ERR_INVALID_STATE;
+    test_remote_bond_forget.status = BLE_HID_BOND_FORGET_CANCELLED; return ESP_OK;
+}
+ble_hid_bond_forget_snapshot_t ble_hid_bond_forget_snapshot(void) { return test_remote_bond_forget; }
+esp_err_t app_device_restart_init(void) { return test_restart_error; }
+esp_err_t app_device_restart_request(uint64_t deadline_ms, uint64_t *id)
+{
+    ++test_restart_requests;
+    if (test_restart_error != ESP_OK || deadline_ms <= s_now_ms) return ESP_ERR_INVALID_STATE;
+    test_restart_status.request_id++; *id = test_restart_status.request_id;
+    test_restart_status.state = APP_DEVICE_RESTART_PENDING;
+    return ESP_OK;
+}
+void app_device_restart_authorize(uint64_t id, bool authorized, bool ready)
+{ assert(id == test_restart_status.request_id); test_restart_authorized = authorized; test_restart_maintenance = ready; }
+esp_err_t app_device_restart_cancel(uint64_t id)
+{
+    if (id != test_restart_status.request_id || test_restart_status.state != APP_DEVICE_RESTART_PENDING) return ESP_ERR_INVALID_STATE;
+    test_restart_status.state = APP_DEVICE_RESTART_CANCELLED; return ESP_OK;
+}
+app_device_restart_status_t app_device_restart_status(void) { return test_restart_status; }
+ae_result_t app_recording_store_init(const app_recording_store_config_t *config)
+{ (void)config; return AE_UNAVAILABLE; }
+ae_store_port_t app_recording_store_port(void) { return (ae_store_port_t){0}; }
+bool app_recording_store_snapshot(app_recording_store_snapshot_t *out)
+{ memset(out, 0, sizeof(*out)); return false; }
+ae_codec_port_t board_audio_mosaico_port(void) { return (ae_codec_port_t){0}; }
+cp_error_t app_control_runtime_capture_authority(const cp_capture_authority_request_t *request,
+    cp_capture_authority_t *out)
+{ (void)request; memset(out, 0, sizeof(*out)); return CP_FORBIDDEN; }
+bool app_control_trust_grant(const uint8_t id[CP_ID_BYTES], cp_capture_grant_t *out)
+{ (void)id; memset(out, 0, sizeof(*out)); return false; }
+ae_result_t app_media_runtime_set_remote_authority(const app_media_remote_authority_t *port)
+{ (void)port; return AE_UNAVAILABLE; }
+ae_result_t app_media_runtime_submit_remote(const app_remote_media_request_t *request)
+{ (void)request; return AE_UNAVAILABLE; }
+bool app_media_runtime_poll_remote(uint64_t token, app_audio_result_t *out)
+{ (void)token; (void)out; return false; }
+void app_media_runtime_release_remote_result(uint64_t token) { (void)token; }
+void app_media_runtime_cancel_remote(uint64_t token, const cp_identity_t *identity, ae_stop_reason_t reason)
+{ (void)token; (void)identity; (void)reason; }
+cp_error_t app_media_runtime_read_recordings(const cp_identity_t *identity, const char *resource,
+    char *json, size_t capacity, size_t *length)
+{ (void)identity; (void)resource; (void)json; (void)capacity; *length = 0; return CP_UNAVAILABLE; }
+ae_result_t app_media_runtime_route(ae_route_t route, ae_route_capabilities_t *out)
+{ (void)route; memset(out, 0, sizeof(*out)); return AE_UNAVAILABLE; }
+ae_result_t app_media_runtime_confirm(uint64_t token, uint64_t epoch, uint64_t revision, char *candidate)
+{ (void)token; (void)epoch; (void)revision; (void)candidate; return AE_UNAVAILABLE; }
+ae_result_t app_media_runtime_reject(uint64_t token, uint64_t epoch, uint64_t revision)
+{ (void)token; (void)epoch; (void)revision; return AE_UNAVAILABLE; }
+ae_result_t app_media_runtime_copy_records(uint64_t token, ae_record_metadata_t *records, size_t capacity)
+{ (void)token; (void)records; (void)capacity; return AE_UNAVAILABLE; }
+ae_result_t app_media_runtime_copy_record_data(uint64_t token, size_t offset, void *data, size_t bytes)
+{ (void)token; (void)offset; (void)data; (void)bytes; return AE_UNAVAILABLE; }
+ae_result_t app_media_runtime_copy_remote_records(uint64_t token, ae_record_metadata_t *records, size_t capacity)
+{ (void)token; (void)records; (void)capacity; return AE_UNAVAILABLE; }
+ae_result_t app_media_runtime_copy_remote_data(uint64_t token, size_t offset, void *data, size_t bytes)
+{ (void)token; (void)offset; (void)data; (void)bytes; return AE_UNAVAILABLE; }
+ae_result_t app_media_runtime_init(const app_media_services_t *services)
+{ (void)services; return AE_UNAVAILABLE; }
+bool app_media_runtime_snapshot(app_media_snapshot_t *snapshot)
+{ *snapshot = test_media_snapshot; return snapshot->initialized; }
+void app_media_runtime_environment(const ae_environment_t *environment, uint64_t epoch,
+    uint64_t revision, bool speech)
+{ (void)epoch; (void)revision; test_media_environment = *environment; test_media_speech_context = speech; }
+void app_media_runtime_stop(ae_stop_reason_t reason)
+{ assert(reason == AE_STOP_PRIVACY || reason == AE_STOP_MAINTENANCE); ++test_media_stops; }
+esp_err_t app_presenter_bind_display(lv_display_t *display) { (void)display; return ESP_OK; }
+app_presenter_indicator_status_t app_presenter_indicator_status(void) { return test_indicator; }
+bool app_media_controls_init(void) { return true; }
+void app_media_controls_context(const app_media_controls_context_t *context) { test_media_context = *context; }
+bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_effect_t *effect)
+{
+    (void)intent; ++test_media_handles;
+    if (test_media_handle) *effect = test_media_effect;
+    return test_media_handle;
+}
+void app_media_controls_poll(uint64_t now, app_media_controls_effect_t *effect)
+{ (void)now; (void)effect; }
+void app_media_controls_fill(app_view_t *view) { (void)view; }
+bool app_connectivity_controls_init(void) { return true; }
+void app_connectivity_controls_context(const app_connectivity_controls_context_t *context) { (void)context; }
+bool app_connectivity_controls_handle(const app_intent_t *intent, app_connectivity_controls_effect_t *effect)
+{ (void)intent; (void)effect; return false; }
+void app_connectivity_controls_poll(uint64_t now, app_connectivity_controls_effect_t *effect)
+{ (void)now; (void)effect; }
+void app_connectivity_controls_fill(app_view_t *view) { (void)view; }
 
 usb_hid_snapshot_t usb_hid_snapshot(void) { return test_usb; }
 void usb_hid_set_enabled(bool enabled)
@@ -141,6 +369,57 @@ esp_err_t app_wifi_get_setup_info(app_wifi_setup_info_t *info)
 esp_err_t app_wifi_start_setup(void) { ++test_wifi_starts; return test_wifi_start_error; }
 esp_err_t app_wifi_stop_setup(void) { ++test_wifi_stops; return test_wifi_stop_error; }
 esp_err_t app_wifi_forget_network(void) { ++test_wifi_forgets; return test_wifi_forget_error; }
+esp_err_t app_wifi_scan_start(void) { ++test_scans; return test_scan_error; }
+esp_err_t app_wifi_scan_cancel(void) { ++test_scan_cancels; return test_scan_error; }
+void app_wifi_get_scan_snapshot(app_wifi_scan_snapshot_t *snapshot) { assert(snapshot); *snapshot = test_scan; }
+esp_err_t app_wifi_get_scan_record(uint32_t generation, uint16_t index, app_wifi_scan_record_t *record)
+{
+    assert(record);
+    if (test_scan.state != APP_WIFI_SCAN_READY || generation != test_scan.generation ||
+        index >= test_scan.count || index >= APP_WIFI_SCAN_CAPACITY) return ESP_ERR_INVALID_STATE;
+    *record = test_scan_records[index];
+    return ESP_OK;
+}
+esp_err_t app_wifi_select_scan_record(uint32_t generation, uint16_t index, app_wifi_selection_t *selection)
+{
+    assert(selection);
+    ++test_selections;
+    if (test_selection_error != ESP_OK) return test_selection_error;
+    app_wifi_scan_record_t record;
+    esp_err_t result = app_wifi_get_scan_record(generation, index, &record);
+    if (result != ESP_OK) return result;
+    test_selection = (app_wifi_selection_t){.id = 31, .scan_generation = generation,
+        .record_index = index, .remaining_ms = test_selection_lifetime_ms, .record = record};
+    *selection = test_selection;
+    return ESP_OK;
+}
+esp_err_t app_wifi_release_selection(uint32_t id)
+{
+    assert(id);
+    ++test_selection_releases;
+    test_released_selection = id;
+    return ESP_OK;
+}
+esp_err_t app_wifi_join(const app_wifi_join_request_t *request)
+{
+    assert(request);
+    ++test_joins;
+    test_join_request = *request;
+    return test_join_error;
+}
+ble_hid_name_snapshot_t ble_hid_name_snapshot(void) { return test_name; }
+esp_err_t ble_hid_name_request(const char *name, size_t length, uint64_t *request_id)
+{
+    assert(device_settings_bluetooth_name_valid(name, length));
+    ++test_name_requests;
+    if (test_name_error != ESP_OK) return test_name_error;
+    ++test_name.request_id;
+    test_name.status = BLE_HID_NAME_PENDING;
+    memset(test_name.requested, 0, sizeof test_name.requested);
+    memcpy(test_name.requested, name, length);
+    if (request_id) *request_id = test_name.request_id;
+    return ESP_OK;
+}
 bool ble_hid_pairing_open(uint32_t duration_ms)
 {
     assert(duration_ms == BLE_HID_PAIRING_DEFAULT_MS);
@@ -192,6 +471,11 @@ BaseType_t xQueueReset(QueueHandle_t queue)
     queue->head = 0;
     queue->count = 0;
     return pdPASS;
+}
+UBaseType_t uxQueueMessagesWaiting(QueueHandle_t queue)
+{
+    assert(queue && queue->count <= queue->capacity);
+    return (UBaseType_t)queue->count;
 }
 
 bool ble_hid_send_generation(uint64_t generation, uint8_t id,
@@ -276,19 +560,56 @@ esp_err_t board_init(void (*callback)(void))
     unexpected_boot_boundary();
 }
 board_capabilities_t board_capabilities(void) { return test_capabilities; }
-board_imu_status_t board_imu_status(void) { return (board_imu_status_t){0}; }
-lv_display_t *board_display_get(void) { unexpected_boot_boundary(); }
+lv_display_t *board_display_get(void)
+{
+    if (!test_boot_boundary_enabled) unexpected_boot_boundary();
+    return test_boot_display;
+}
 bool board_display_lock(uint32_t timeout)
 {
-    assert(timeout == 0 && !test_display_locked);
-    test_display_locked = test_display_available;
-    return test_display_locked;
+    if (!test_boot_boundary_enabled) unexpected_boot_boundary();
+    assert(timeout == 100 && !test_boot_locked);
+    ++test_boot_lock_calls;
+    test_boot_locked = test_boot_lock_allowed;
+    return test_boot_locked;
 }
 void board_display_unlock(void)
 {
-    assert(test_display_locked);
-    test_display_locked = false;
+    if (!test_boot_boundary_enabled) unexpected_boot_boundary();
+    assert(test_boot_locked);
+    test_boot_locked = false;
 }
+board_imu_status_t board_imu_status(void) { return test_update_imu; }
+esp_err_t app_presenter_init(void) { unexpected_boot_boundary(); }
+bool app_boot_ui_create(lv_display_t *display)
+{
+    if (!test_boot_boundary_enabled) unexpected_boot_boundary();
+    assert(display && display == test_boot_display && test_boot_locked && !test_boot_active);
+    ++test_boot_create_calls;
+    test_boot_active = true;
+    return true;
+}
+bool app_boot_ui_update(const app_boot_ui_view_t *view)
+{
+    if (!test_boot_boundary_enabled) unexpected_boot_boundary();
+    assert(view && test_boot_locked && test_boot_active);
+    test_boot_view = *view;
+    ++test_boot_update_calls;
+    return true;
+}
+void app_boot_ui_destroy(void) { unexpected_boot_boundary(); }
+bool app_boot_ui_active(void)
+{
+    if (!test_boot_boundary_enabled) unexpected_boot_boundary();
+    assert(test_boot_locked);
+    return test_boot_active;
+}
+void app_ui_set_local_edit_submit(app_local_edit_submit_fn submit)
+{
+    (void)submit;
+    unexpected_boot_boundary();
+}
+app_presenter_status_t app_presenter_status(void) { return test_update_presentation; }
 void app_ui_create(lv_display_t *display, app_submit_fn submit)
 {
     (void)display;
@@ -297,12 +618,22 @@ void app_ui_create(lv_display_t *display, app_submit_fn submit)
 }
 void app_ui_render(const app_view_t *view)
 {
-    assert(test_display_locked && view);
+    (void)view;
+    unexpected_boot_boundary(); /* Runtime coordinator must only publish. */
+}
+app_presenter_result_t app_presenter_publish(const app_view_t *view)
+{
+    assert(view);
+    if (!test_presenter_available) return APP_PRESENTER_UNAVAILABLE;
+    /* Capture publication only. Acceptance is not rendering or acknowledgement;
+     * tests/presenter separately executes the actual handoff implementation. */
     test_view = *view;
-    assert(strlen(view->target_name) < sizeof test_target);
-    strcpy(test_target, view->target_name);
-    test_view.target_name = test_target;
-    ++test_render_count;
+    snprintf(test_target, sizeof test_target, "%s", view->target_name ? view->target_name : "");
+    snprintf(test_message, sizeof test_message, "%s", view->message ? view->message : "");
+    test_view.target_name = view->target_name ? test_target : NULL;
+    test_view.message = view->message ? test_message : NULL;
+    ++test_publish_count;
+    return APP_PRESENTER_ACCEPTED;
 }
 esp_err_t ble_hid_init(void) { unexpected_boot_boundary(); }
 ble_hid_snapshot_t ble_hid_snapshot(void) { return test_link; }
@@ -328,7 +659,10 @@ const char *esp_err_to_name(esp_err_t error)
     if (error == ESP_ERR_TIMEOUT) return "ESP_ERR_TIMEOUT";
     return "TEST_UNKNOWN_ERROR";
 }
-int64_t esp_timer_get_time(void) { return (int64_t)(s_now_ms * 1000U); }
+int64_t esp_timer_get_time(void)
+{
+    return (int64_t)((test_clock_override ? test_clock_ms : s_now_ms) * 1000U);
+}
 esp_err_t esp_task_wdt_add(void *task)
 {
     (void)task;
@@ -387,7 +721,12 @@ static hid_engine_step_result_t step(void)
 static void expect_report(uint8_t id, const uint8_t *bytes, size_t length)
 {
     const size_t before = trace_count;
-    assert(step() == HID_ENGINE_STEP_SENT && trace_count == before + 1);
+    hid_engine_step_result_t result = step();
+    if (result != HID_ENGINE_STEP_SENT || trace_count != before + 1)
+        fprintf(stderr, "%s: expected one report; step=%d reports=%zu time=%llu motion=%u block=%d\n",
+            test_case, (int)result, trace_count - before, (unsigned long long)s_now_ms,
+            (unsigned)s_interaction.view.motion_status, (int)s_interaction.view.motion_block_reason);
+    assert(result == HID_ENGINE_STEP_SENT && trace_count == before + 1);
     const report_t *report = &trace[before];
     assert(report->id == id && report->length == length);
     if (memcmp(report->bytes, bytes, length) != 0) {
@@ -403,6 +742,8 @@ static void expect_report(uint8_t id, const uint8_t *bytes, size_t length)
 static void release_barrier(void)
 {
     static const uint8_t zero[8] = {0};
+    if (!s_engine.state.release_pending)
+        fprintf(stderr, "%s: expected a pending neutral-release barrier\n", test_case);
     assert(s_engine.state.release_pending);
     expect_report(1, zero, 8);
     assert(s_engine.state.release_pending);
@@ -422,8 +763,8 @@ static void expect_idle(void)
 
 static void expect_empty_intents(void)
 {
-    app_intent_t intent;
-    assert(xQueueReceive(s_intents, &intent, 0) == pdFALSE);
+    coordinator_event_t event;
+    assert(xQueueReceive(s_intents, &event, 0) == pdFALSE);
 }
 
 static app_intent_t make_intent(app_action_t action, int x, int y, const char *text)
@@ -441,9 +782,10 @@ static app_intent_t make_intent(app_action_t action, int x, int y, const char *t
 
 static void consume_one(void)
 {
-    app_intent_t intent;
-    assert(xQueueReceive(s_intents, &intent, 0) == pdTRUE);
-    handle_intent(&intent, &test_link);
+    coordinator_event_t event;
+    assert(xQueueReceive(s_intents, &event, 0) == pdTRUE);
+    if (event.contacts) handle_contacts(&event);
+    else handle_intent(&event.value.intent, &test_link);
 }
 
 static void deliver(app_intent_t intent)
@@ -454,6 +796,59 @@ static void deliver(app_intent_t intent)
 
 static void setup(input_mode_t mode)
 {
+    free(s_remote_input); free(s_command_bridge);
+    free(s_remote_device); s_remote_device = NULL;
+    free(s_remote_media); s_remote_media = NULL;
+    s_remote_media_immediate_ready = false;
+    memset(&s_remote_media_immediate, 0, sizeof(s_remote_media_immediate));
+    memset(s_remote_device_jobs, 0, sizeof(s_remote_device_jobs));
+    memset(s_remote_device_reviews, 0, sizeof(s_remote_device_reviews));
+    memset(s_remote_device_local_review, 0, sizeof(s_remote_device_local_review));
+    memset(&s_update_gate, 0, sizeof(s_update_gate));
+    s_update_maintenance = false; s_update_health_since = 0;
+    test_update_snapshot = (app_update_snapshot_t){.state = APP_UPDATE_UNAVAILABLE};
+    test_update_authority = (app_update_authority_t){0};
+    test_update_authority_error = CP_UNAVAILABLE;
+    test_update_busy = test_wifi_maintenance = false;
+    test_update_health_requests = 0;
+    test_haptic_status = (board_haptic_status_t){0};
+    test_update_imu = (board_imu_status_t){0};
+    test_update_presentation = (app_presenter_status_t){0};
+    test_update_target = (ble_hid_target_snapshot_t){0};
+    test_classic_bonds = (bt_audio_bond_list_t){0};
+    test_wifi_profiles = (app_wifi_profiles_snapshot_t){0};
+    test_restart_status = (app_device_restart_status_t){0};
+    test_restart_error = ESP_ERR_INVALID_STATE;
+    test_restart_authorized = test_restart_maintenance = false;
+    test_restart_requests = 0;
+    test_remote_target_accept = test_remote_wifi_forget_accept = test_remote_haptic_accept = test_remote_bond_forget_accept = false;
+    test_remote_target_calls = test_remote_wifi_forget_calls = test_remote_haptic_calls = test_remote_bond_forget_calls = 0;
+    test_remote_target_request = (ble_hid_target_preferences_request_t){0};
+    test_remote_wifi_forget_revision = 0; test_remote_wifi_forget_acknowledge = false;
+    test_remote_bond_forget = (ble_hid_bond_forget_snapshot_t){0};
+    s_remote_device_maintenance_active = false;
+    s_remote_device_maintenance_revision = 1;
+    remote_device_restart_available = false;
+    s_remote_input = NULL; s_command_bridge = NULL;
+    s_remote_transport_pending = s_applying_remote_safety = false;
+    s_control_state_published = false;
+    s_management_generation = s_state_sequence = 1;
+    s_remote_allowance_generation = 1;
+    s_remote_allowed = false;
+    test_control_session_alive = false; test_control_completion_reject = false;
+    test_control_completions = 0;
+    test_control_state = (cp_device_state_t){0};
+    test_control_result = (cp_result_t){0};
+    test_media_snapshot = (app_media_snapshot_t){0};
+    test_indicator = (app_presenter_indicator_status_t){0};
+    test_media_environment = (ae_environment_t){0};
+    test_media_context = (app_media_controls_context_t){0};
+    test_media_stops = test_media_handles = 0;
+    test_media_speech_context = test_media_handle = false;
+    test_media_effect = (app_media_controls_effect_t){0};
+    test_clock_override = false;
+    test_clock_ms = 0;
+    test_selection_lifetime_ms = 300000;
     test_diagnostic_logs_enabled = test_heap_observation_enabled = false;
     test_diagnostic_log_count = test_heap_observation_count = 0;
     memset(test_diagnostic_logs, 0, sizeof test_diagnostic_logs);
@@ -465,9 +860,11 @@ static void setup(input_mode_t mode)
     s_allocation_failure_function = NULL;
     memset(s_boot_memory, 0, sizeof s_boot_memory);
     s_boot_memory_count = 0;
-    s_intents = xQueueCreateStatic(INTENT_CAPACITY, sizeof(app_intent_t),
+    s_intents = xQueueCreateStatic(INTENT_CAPACITY, sizeof(coordinator_event_t),
                                    s_intent_bytes, &s_intent_storage);
     s_priority_requests = 0;
+    interaction_multitouch_init(&s_multitouch);
+    s_multitouch_available = s_multitouch_consuming = s_multitouch_eligible = false;
     memset(s_touch_emergency, 0, sizeof s_touch_emergency);
     memset(s_touch_emergency_pending, 0, sizeof s_touch_emergency_pending);
     s_overlay = APP_OVERLAY_NONE;
@@ -476,13 +873,16 @@ static void setup(input_mode_t mode)
     s_audio_kind = APP_AUDIO_VOICE;
     s_dark_theme = true;
     s_ui_revision = 1;
+    s_settings_revision = 1;
     s_now_ms = 1000;
     device_settings_defaults(&s_settings);
+    s_durable_settings = s_settings;
     device_idle_init(&s_idle, s_now_ms);
     s_settings_page = APP_SETTINGS_HOME;
     s_bluetooth_page = 0;
     s_input_transport = s_requested_transport = APP_INPUT_BLUETOOTH;
     s_transport_switch_pending = false;
+    s_transport_switch_persist = true;
     s_transport_switch_deadline_ms = 0;
     s_transport_origin_generation = 0;
     s_confirmation = APP_CONFIRM_NONE;
@@ -491,6 +891,16 @@ static void setup(input_mode_t mode)
     memset(s_confirmation_stored_ssid, 0, sizeof s_confirmation_stored_ssid);
     s_confirmation_storage_known = s_confirmation_storage_present = false;
     s_confirmation_storage_uncertain = false;
+    s_wifi_page = 0;
+    s_wifi_selection_generation = 0;
+    s_wifi_selection_index = 0;
+    memset(&s_wifi_reserved, 0, sizeof s_wifi_reserved);
+    memset(&s_local_editor, 0, sizeof s_local_editor);
+    memset(&s_local_submission, 0, sizeof s_local_submission);
+    s_local_submission_pending = false;
+    s_editor_sequence = s_editor_deadline_ms = 0;
+    s_name_request_id = 0;
+    s_name_should_persist = false;
     s_pair_operation = APP_CONFIRM_NONE;
     s_pair_deadline_ms = 0;
     s_pair_origin_generation = 0;
@@ -524,6 +934,7 @@ static void setup(input_mode_t mode)
     memset(s_button_edges, 0, sizeof s_button_edges);
     hid_engine_init(&s_engine);
     interaction_init(&s_interaction);
+    assert(configure_motion_preferences(&s_settings));
     test_link = (ble_hid_snapshot_t){
         .initialized = true, .connected = true, .ready = true,
         .encrypted = true, .generation = 17
@@ -559,11 +970,20 @@ static void setup(input_mode_t mode)
     test_usb_recovers = test_usb_send_attempts = test_ble_send_attempts = 0;
     test_usb_enable_count = 0;
     test_ble_after_accept = test_usb_after_accept = NULL;
+    test_scan = (app_wifi_scan_snapshot_t){0};
+    memset(test_scan_records, 0, sizeof test_scan_records);
+    test_selection = (app_wifi_selection_t){0};
+    test_scan_error = test_join_error = test_selection_error = ESP_OK;
+    test_scans = test_scan_cancels = test_selections = test_selection_releases = test_joins = 0;
+    test_released_selection = 0;
+    memset(&test_join_request, 0, sizeof test_join_request);
+    test_name = (ble_hid_name_snapshot_t){.active_known = true, .active = "ESP32-INPUT"};
+    test_name_error = ESP_OK;
+    test_name_requests = 0;
     test_sample = (board_imu_sample_t){0};
     test_imu_result = ESP_FAIL;
-    test_display_available = true;
-    test_display_locked = false;
-    test_render_count = 0;
+    test_presenter_available = true;
+    test_publish_count = 0;
     trace_count = 0;
     hid_engine_set_link(&s_engine, true, true);
     assert(hid_engine_set_mode(&s_engine, mode));
@@ -581,7 +1001,8 @@ static void fill_intents(void)
     /* Fill the boundary queue without requesting overflow cancellation, so
      * the explicit emergency request below is solely responsible for safety. */
     while (s_intents->count < s_intents->capacity) assert(submit_intent(&intent));
-    assert(xQueueSend(s_intents, &intent, 0) == pdFALSE);
+    const coordinator_event_t rejected = {.value.intent = intent};
+    assert(xQueueSend(s_intents, &rejected, 0) == pdFALSE);
 }
 
 static void press(input_mode_t mode)
@@ -801,7 +1222,9 @@ static void sample_after(uint64_t delay_ms, float x_dps, float y_dps)
 {
     s_now_ms += delay_ms;
     test_sample = (board_imu_sample_t){
-        .timestamp_us = s_now_ms * 1000U, .x_dps = y_dps, .z_dps = -x_dps, .z_g = 1
+        /* Screen-up display frame: world-up yaw is +Z and pitch is +X.
+         * Board mounting rotation is tested in the board adapter suite. */
+        .timestamp_us = s_now_ms * 1000U, .x_dps = y_dps, .z_dps = x_dps, .z_g = 1
     };
     test_imu_result = ESP_OK;
     sync_interaction();
@@ -817,7 +1240,8 @@ static void calibrate(void)
     assert(s_interaction.view.calibrated && !s_interaction.view.calibrating);
     interaction_config_t config = s_interaction.config;
     config.filter_seconds = 0;
-    config.pointer_gain = 10;
+    config.pointer_gain_x = 10;
+    config.pointer_gain_y = 10;
     assert(interaction_configure(&s_interaction, &config));
 }
 
@@ -1081,6 +1505,9 @@ static void motion_gates_and_local_keyboard_focus(void)
     expect_idle();
     sample_after(10, 25, 0);
     expect_idle(); /* First valid sample reestablishes time. */
+    assert(!(s_interaction.view.motion_status & INTERACTION_MOTION_GRAVITY_READY));
+    for (unsigned i = 0; i < 12; ++i) { sample_after(10, 0, 0); expect_idle(); }
+    assert(s_interaction.view.motion_status & INTERACTION_MOTION_GRAVITY_READY);
     sample_after(10, 25, 0);
     expect_report(2, moved, sizeof moved);
     test_capabilities.imu = false;
@@ -1105,7 +1532,7 @@ static void rendered_state_is_truthful(void)
     setup(INPUT_KEYBOARD);
     fill_preview(2);
     render_view(&test_link, ESP_OK);
-    assert(test_render_count == 1 && !test_display_locked);
+    assert(test_publish_count == 1);
     assert(strcmp(test_view.preview, "AB") == 0 && test_view.microphone_muted);
     assert(!test_view.audio_available && !test_view.audio_active &&
            !test_view.recognition_available && !test_view.listening);
@@ -1122,14 +1549,19 @@ static void rendered_state_is_truthful(void)
     render_view(&test_link, ESP_FAIL);
     assert(!test_view.connected && !test_view.ready && test_view.transport_error);
     assert(strcmp(test_target, "No Bluetooth host") == 0);
-    test_display_available = false;
+    test_presenter_available = false;
     render_view(&test_link, ESP_OK);
-    assert(test_render_count == 3 && !test_display_locked);
+    assert(test_publish_count == 3);
 }
 
 static void touch_lifecycle_rejects_ended_gesture(void)
 {
     setup(INPUT_MOUSE);
+    /* This case exercises fine movement in the selectable movement-only mode. */
+    s_settings.tap_to_click = false;
+    interaction_touch_config_t config = s_interaction.touch_config;
+    config.tap_to_click = false;
+    assert(interaction_touch_configure(&s_interaction, &config));
     action(APP_GAIN, 4);
     touch(APP_TOUCH_BEGIN, 12, 0, 0);
     touch(APP_TOUCH_MOVE, 12, 3, 0);
@@ -1147,10 +1579,14 @@ static void touch_release_has_one_freeze_interval(void)
     setup(INPUT_MOUSE);
     calibrate();
     action(APP_MOTION, 0);
-    touch(APP_TOUCH_BEGIN, 17, 0, 0);
+    app_intent_t control = make_intent(APP_TOUCH_BEGIN, 0, 0, NULL);
+    control.gesture = 17;
+    control.surface = APP_SURFACE_CONTROL;
+    deliver(control);
     sample_after(10, 25, 0);
     expect_idle();
-    touch(APP_TOUCH_END, 17, 0, 0);
+    control.action = APP_TOUCH_END;
+    deliver(control);
     for (unsigned i = 0; i < 14; ++i) { sample_after(10, 25, 0); expect_idle(); }
     sample_after(10, 25, 0);
     const uint8_t moved[] = {0, 2, 0, 0};
@@ -3701,12 +4137,1068 @@ static void wifi_setup_safe_menu_exits_clear_credentials_and_reject_stale_restar
     }
 }
 
+static void pad_at(app_action_t kind, uint32_t gesture, uint64_t time, int x, int y)
+{
+    s_now_ms = time;
+    touch(kind, gesture, x, y);
+}
+
+static void pad_click_pair(void)
+{
+    static const uint8_t down[4] = {1,0,0,0}, up[4] = {0};
+    expect_report(2, down, sizeof down);
+    expect_report(2, up, sizeof up);
+}
+
+static void coordinator_touch_hold(void)
+{
+    setup(INPUT_MOUSE);
+    assert(s_settings.tap_to_click);
+    pad_at(APP_TOUCH_BEGIN, 2001, 1000, 100, 100);
+    pad_at(APP_TOUCH_END, 2001, 1020, 100, 100);
+    pad_click_pair();
+    pad_at(APP_TOUCH_BEGIN, 2002, 1100, 100, 100);
+    static const uint8_t down[4] = {1,0,0,0};
+    expect_report(2, down, sizeof down);
+    assert(interaction_touch_holding(&s_interaction) && s_engine.mouse_buttons == 1);
+}
+
+static void pad_single_double_and_drag_use_actual_hid_reports(void)
+{
+    for (unsigned drag = 0; drag < 2; ++drag) {
+        coordinator_touch_hold();
+        if (drag) {
+            pad_at(APP_TOUCH_MOVE, 2002, 1110, 12, 3);
+            const uint8_t moved[4] = {1,12,3,0};
+            expect_report(2, moved, sizeof moved);
+        }
+        pad_at(APP_TOUCH_MOVE, 2002, 1120, 0, 0); /* Stationary physical heartbeat. */
+        expect_idle();
+        pad_at(APP_TOUCH_END, 2002, 1130, drag ? 112 : 100, drag ? 103 : 100);
+        const uint8_t up[4] = {0};
+        expect_report(2, up, sizeof up);
+        assert(!interaction_touch_holding(&s_interaction) && !s_engine.mouse_buttons);
+        assert(trace_count == (drag ? 5U : 4U));
+        deliver(make_intent(APP_TOUCH_END, 100, 100, NULL));
+        expect_idle();
+    }
+}
+
+static void queued_pad_events_use_native_time_and_raw_out_and_back_slop(void)
+{
+    for (unsigned scenario = 0; scenario < 3; ++scenario) {
+        setup(INPUT_MOUSE);
+        const uint32_t gesture = 2100U + scenario;
+        s_now_ms = 1000;
+        app_intent_t begin = make_intent(APP_TOUCH_BEGIN, 100, 100, NULL);
+        begin.gesture = gesture; begin.surface = APP_SURFACE_TOUCHPAD;
+        assert(submit_intent(&begin));
+        if (scenario == 2) {
+            s_now_ms = 1010;
+            app_intent_t move = make_intent(APP_TOUCH_MOVE, 9, 0, NULL);
+            move.gesture = gesture; move.surface = APP_SURFACE_TOUCHPAD;
+            assert(submit_intent(&move));
+            s_now_ms = 1020; move.x = -9;
+            assert(submit_intent(&move));
+        }
+        s_now_ms = scenario == 1 ? 1300 : 1030;
+        app_intent_t end = begin; end.action = APP_TOUCH_END;
+        assert(submit_intent(&end));
+        s_now_ms = 1400;
+        while (uxQueueMessagesWaiting(s_intents)) consume_one();
+        if (scenario == 0) pad_click_pair();
+        else assert(trace_count == 0); /* Long press or queued swipe is not a tap. */
+        expect_idle();
+        assert(!interaction_touch_holding(&s_interaction));
+    }
+}
+
+static void queued_drag_with_lost_live_contact_is_neutralized(void)
+{
+    setup(INPUT_MOUSE);
+    pad_at(APP_TOUCH_BEGIN, 2201, 1000, 100, 100);
+    pad_at(APP_TOUCH_END, 2201, 1020, 100, 100);
+    pad_click_pair();
+    const size_t before = trace_count;
+    s_now_ms = 1100;
+    app_intent_t intent = make_intent(APP_TOUCH_BEGIN, 100, 100, NULL);
+    intent.gesture = 2202; intent.surface = APP_SURFACE_TOUCHPAD;
+    assert(submit_intent(&intent));
+    s_now_ms = 1110; intent.action = APP_TOUCH_MOVE; intent.x = 20; intent.y = 0;
+    assert(submit_intent(&intent));
+    s_now_ms = 1120; intent.action = APP_TOUCH_END; intent.x = 120; intent.y = 100;
+    assert(submit_intent(&intent));
+    s_now_ms = 1140;
+    while (uxQueueMessagesWaiting(s_intents)) consume_one();
+    (void)apply_touch_result(interaction_touch_tick(&s_interaction, s_now_ms, s_ui_revision));
+    assert(!interaction_touch_holding(&s_interaction) && s_engine.state.release_pending);
+    release_barrier();
+    for (size_t i = before; i < trace_count; ++i)
+        for (size_t byte = 0; byte < trace[i].length; ++byte) assert(trace[i].bytes[byte] == 0);
+    expect_idle();
+}
+
+static void tap_preference_preserves_movement_and_explicit_drag(void)
+{
+    setup(INPUT_MOUSE);
+    settings_page(APP_SETTINGS_INPUT);
+    action(APP_TAP_TO_CLICK, 0);
+    release_barrier(); sync_interaction();
+    assert(!s_settings.tap_to_click && !s_interaction.touch_config.tap_to_click);
+    assert(test_storage_requests == 1 && !test_saved_request.tap_to_click);
+    action(APP_CLOSE, 0);
+    pad_at(APP_TOUCH_BEGIN, 2301, 2000, 100, 100);
+    pad_at(APP_TOUCH_MOVE, 2301, 2010, 6, -3);
+    const uint8_t moved[4] = {0,6,253,0};
+    expect_report(2, moved, sizeof moved);
+    pad_at(APP_TOUCH_END, 2301, 2020, 106, 97);
+    expect_idle();
+    action(APP_DRAG, 0);
+    const uint8_t down[4] = {1,0,0,0};
+    expect_report(2, down, sizeof down);
+    pad_at(APP_TOUCH_BEGIN, 2302, 2100, 100, 100);
+    pad_at(APP_TOUCH_MOVE, 2302, 2110, 5, 2);
+    const uint8_t dragged[4] = {1,5,2,0};
+    expect_report(2, dragged, sizeof dragged);
+    pad_at(APP_TOUCH_END, 2302, 2120, 105, 102);
+    assert(s_drag_requested && s_engine.mouse_buttons == 1 && !interaction_touch_holding(&s_interaction));
+    expect_idle();
+    action(APP_DRAG, 0);
+    release_barrier(); sync_interaction();
+    assert(!s_drag_requested && !s_engine.mouse_buttons && test_storage_requests == 1);
+}
+
+static void touch_drag_boundaries_and_contact_deadman_release(void)
+{
+    for (unsigned boundary = 0; boundary < 6; ++boundary) {
+        coordinator_touch_hold();
+        const size_t before = trace_count;
+        s_now_ms = 1110;
+        if (boundary == 0) touch(APP_TOUCH_CANCEL, 2002, 100, 100);
+        if (boundary == 1) {
+            app_intent_t lock = make_intent(APP_LOCK, 0, 0, NULL);
+            assert(submit_intent(&lock) && process_priority());
+        }
+        if (boundary == 2) action(APP_MENU, APP_OVERLAY_MODES);
+        if (boundary == 3) action(APP_MODE, INPUT_KEYBOARD);
+        if (boundary == 4) {
+            test_link.connected = test_link.ready = false;
+            hid_engine_set_link(&s_engine, false, false);
+        }
+        if (boundary == 5) s_now_ms = 2100; /* Exact last-contact +1000 ms. */
+        sync_interaction();
+        (void)apply_touch_result(interaction_touch_tick(&s_interaction, s_now_ms, s_ui_revision));
+        assert(!interaction_touch_holding(&s_interaction) && s_engine.state.release_pending);
+        if (boundary == 4) {
+            test_link.connected = test_link.ready = true;
+            ++test_link.generation;
+            hid_engine_set_link(&s_engine, true, true);
+        }
+        release_barrier(); sync_interaction();
+        for (size_t i = before; i < trace_count; ++i)
+            for (size_t byte = 0; byte < trace[i].length; ++byte) assert(trace[i].bytes[byte] == 0);
+        expect_idle();
+    }
+}
+
+static void touch_release_survives_congestion_and_refused_down_never_drags(void)
+{
+    coordinator_touch_hold();
+    test_link.congested = true;
+    assert(!hid_engine_observe_transport(&s_engine, 1110, true));
+    sync_interaction();
+    pad_at(APP_TOUCH_END, 2002, 1120, 100, 100);
+    assert(!interaction_touch_holding(&s_interaction) && s_engine.mouse_buttons == 1);
+    assert(step() == HID_ENGINE_STEP_BLOCKED);
+    test_link.congested = false;
+    assert(!hid_engine_observe_transport(&s_engine, 1130, false));
+    sync_interaction();
+    const uint8_t up[4] = {0};
+    expect_report(2, up, sizeof up);
+    assert(!s_engine.mouse_buttons);
+    setup(INPUT_MOUSE);
+    pad_at(APP_TOUCH_BEGIN, 2401, 1000, 100, 100);
+    pad_at(APP_TOUCH_END, 2401, 1020, 100, 100);
+    pad_click_pair();
+    for (unsigned i = 0; i < 31; ++i)
+        assert(hid_engine_enqueue_mouse_move(&s_engine, s_engine.state.epoch, INPUT_LOCAL, 0, 0) == HID_ENGINE_ENQUEUE_OK);
+    pad_at(APP_TOUCH_BEGIN, 2402, 1100, 100, 100);
+    assert(!interaction_touch_holding(&s_interaction) && s_engine.count == 31);
+    pad_at(APP_TOUCH_MOVE, 2402, 1110, 20, 0);
+    pad_at(APP_TOUCH_END, 2402, 1120, 120, 100);
+    assert(s_engine.count == 31 && trace_count == 2);
+    cancel_input(); release_barrier(); expect_idle();
+}
+
+static void common_keys_are_explicit_and_preserve_preview(void)
+{
+    setup(INPUT_KEYBOARD); fill_preview(4);
+    action(APP_MENU, APP_OVERLAY_COMMON_KEYS);
+    release_barrier(); sync_interaction();
+    const unsigned usages[] = {0x29,0x28,0x2a,0x2b,0x4a,0x4c,0x4d,0x4f,0x50,0x51,0x52};
+    for (size_t i = 0; i < sizeof usages / sizeof usages[0]; ++i) {
+        action(APP_KEY, (int)usages[i]);
+        const uint8_t down[8] = {0,0,(uint8_t)usages[i],0,0,0,0,0}, up[8] = {0};
+        expect_report(1, down, sizeof down); expect_report(1, up, sizeof up);
+    }
+    const int invalid[] = {0,1,2,3,4,0x4b,0x4e,0x66};
+    for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; ++i) action(APP_KEY, invalid[i]);
+    deliver(make_intent(APP_KEY, 0x28, 1, NULL));
+    action(APP_CLEAR, 0); action(APP_SEND, 0); action(APP_MODE, INPUT_MOUSE);
+    assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+    assert(s_overlay == APP_OVERLAY_COMMON_KEYS && s_engine.state.mode == INPUT_KEYBOARD);
+    app_intent_t stale = make_intent(APP_KEY, 0x28, 0, NULL);
+    action(APP_CLOSE, 0); deliver(stale);
+    expect_idle();
+    assert(test_storage_requests == 0);
+    setup(INPUT_MOUSE);
+    const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+    action(APP_MENU, APP_OVERLAY_COMMON_KEYS);
+    assert(s_overlay == APP_OVERLAY_NONE && s_engine.state.epoch == epoch && s_ui_revision == revision);
+}
+
+static bool memory_has_text(const void *memory, size_t bytes, const char *text)
+{
+    size_t length = strlen(text);
+    for (size_t i = 0; length <= bytes && i <= bytes - length; ++i)
+        if (memcmp((const uint8_t *)memory + i, text, length) == 0) return true;
+    return false;
+}
+
+static void expect_cleared_submission(void)
+{
+    const uint8_t *bytes = (const uint8_t *)&s_local_submission;
+    for (size_t i = 0; i < sizeof s_local_submission; ++i) assert(bytes[i] == 0);
+    assert(!s_local_submission_pending);
+}
+
+static void local_control_contact(uint32_t gesture)
+{
+    app_intent_t intent = make_intent(APP_TOUCH_BEGIN, 100, 100, NULL);
+    intent.gesture = gesture; intent.surface = APP_SURFACE_CONTROL;
+    deliver(intent);
+    intent.action = APP_TOUCH_END;
+    deliver(intent);
+}
+
+static app_local_edit_request_t editor_request(uint32_t gesture, const char *value)
+{
+    app_local_edit_request_t request = {.purpose = s_local_editor.purpose,
+        .epoch = s_engine.state.epoch, .ui_revision = s_ui_revision,
+        .editor_session = s_local_editor.session, .gesture = gesture};
+    if (request.purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE) {
+        request.value.wifi.scan_generation = s_local_editor.wifi_scan_generation;
+        request.value.wifi.record_index = s_local_editor.wifi_record_index;
+        request.value.wifi.remember = s_local_editor.wifi_remember;
+        request.value.wifi.length = strlen(value);
+        assert(request.value.wifi.length < sizeof request.value.wifi.password);
+        memcpy(request.value.wifi.password, value, strlen(value) + 1);
+    } else {
+        request.value.bluetooth.length = strlen(value);
+        assert(request.value.bluetooth.length < sizeof request.value.bluetooth.name);
+        memcpy(request.value.bluetooth.name, value, strlen(value) + 1);
+    }
+    return request;
+}
+
+static void open_name_editor(void)
+{
+    setup(INPUT_MOUSE);
+    settings_page(APP_SETTINGS_BLUETOOTH);
+    action(APP_BLUETOOTH_NAME_EDIT, 0);
+    release_barrier(); sync_interaction();
+    assert(s_overlay == APP_OVERLAY_LOCAL_EDITOR && s_local_editor.purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME);
+}
+
+static void open_network_editor_for(bool remember, uint32_t lifetime_ms)
+{
+    setup(INPUT_MOUSE);
+    test_selection_lifetime_ms = lifetime_ms;
+    test_wifi.initialized = true; test_wifi.state = APP_WIFI_IDLE;
+    settings_page(APP_SETTINGS_WIFI);
+    action(APP_WIFI_SCAN, 1);
+    release_barrier(); sync_interaction();
+    assert(s_overlay == APP_OVERLAY_WIFI_NETWORKS && test_scans == 1);
+    test_scan = (app_wifi_scan_snapshot_t){.state = APP_WIFI_SCAN_READY, .generation = 7,
+        .count = 1, .remaining_ms = 30000};
+    test_scan_records[0] = (app_wifi_scan_record_t){.ssid = "REAL-NET", .ssid_length = 8,
+        .label = "Display-only label", .rssi_dbm = -55, .security = APP_WIFI_SECURITY_WPA2,
+        .availability = APP_WIFI_JOIN_AVAILABLE};
+    app_intent_t select = make_intent(APP_WIFI_NETWORK_SELECT, 0, 0, NULL);
+    select.wifi_scan_generation = 7; select.wifi_record_index = 0;
+    deliver(select); release_barrier(); sync_interaction();
+    assert(s_overlay == APP_OVERLAY_WIFI_NETWORK);
+    app_intent_t open = make_intent(APP_WIFI_CREDENTIAL_OPEN, remember ? 1 : 0, 0, NULL);
+    open.wifi_scan_generation = 7; open.wifi_record_index = 0;
+    deliver(open); release_barrier(); sync_interaction();
+    assert(s_overlay == APP_OVERLAY_LOCAL_EDITOR && s_wifi_reserved.id == 31);
+}
+
+static void open_network_editor(bool remember)
+{
+    open_network_editor_for(remember, 300000);
+}
+
+static void local_name_persists_only_matching_verified_acknowledgement(void)
+{
+    open_name_editor(); local_control_contact(2501);
+    app_local_edit_request_t request = editor_request(2501, "Desk Pad");
+    assert(submit_local_edit(&request) == APP_LOCAL_EDIT_ACCEPTED);
+    assert(submit_local_edit(&request) == APP_LOCAL_EDIT_BUSY);
+    memset(request.value.bluetooth.name, 'X', request.value.bluetooth.length);
+    service_local_editor();
+    assert(test_name_requests == 1 && strcmp(test_name.requested, "Desk Pad") == 0);
+    assert(s_name_should_persist && test_storage_requests == 0 && strcmp(s_settings.bluetooth_name, "ESP32-INPUT") == 0);
+    expect_cleared_submission();
+    const uint64_t id = test_name.request_id;
+    test_name.status = BLE_HID_NAME_APPLIED; ++test_name.request_id;
+    strcpy(test_name.active, "Desk Pad"); service_bluetooth_name();
+    assert(test_storage_requests == 0);
+    test_name.request_id = id; test_name.active_known = false; service_bluetooth_name();
+    assert(test_storage_requests == 0);
+    test_name.active_known = true; service_bluetooth_name();
+    assert(test_storage_requests == 1 && !s_name_should_persist && strcmp(s_settings.bluetooth_name, "Desk Pad") == 0);
+    service_bluetooth_name();
+    assert(test_storage_requests == 1 && strcmp(test_saved_request.bluetooth_name, "Desk Pad") == 0);
+    release_barrier(); expect_idle();
+}
+
+static void failed_or_stale_local_names_cannot_change_preferences(void)
+{
+    for (unsigned fault = 0; fault < 6; ++fault) {
+        open_name_editor(); local_control_contact(2601);
+        app_local_edit_request_t request = editor_request(2601, "Desk Pad");
+        if (fault == 0) --request.epoch;
+        if (fault == 1) --request.ui_revision;
+        if (fault == 2) ++request.editor_session;
+        assert(submit_local_edit(&request) == APP_LOCAL_EDIT_ACCEPTED);
+        if (fault == 3) test_name_error = ESP_FAIL;
+        service_local_editor();
+        if (fault < 3) assert(test_name_requests == 0);
+        if (fault >= 4) {
+            test_name.status = fault == 4 ? BLE_HID_NAME_FAILED : BLE_HID_NAME_UNCERTAIN;
+            service_bluetooth_name();
+            test_name.status = BLE_HID_NAME_APPLIED;
+            strcpy(test_name.active, "Desk Pad"); service_bluetooth_name();
+        }
+        assert(!s_name_should_persist && test_storage_requests == 0 && strcmp(s_settings.bluetooth_name, "ESP32-INPUT") == 0);
+        expect_cleared_submission();
+        release_barrier(); expect_idle();
+    }
+}
+
+static void private_wifi_submission_waits_for_touch_fifo_and_cancel(void)
+{
+    const char *secret = "secret-local-9";
+    for (unsigned cancel = 0; cancel < 2; ++cancel) {
+        open_network_editor(true);
+        app_local_edit_request_t request = editor_request(2701, secret);
+        app_intent_t contact = make_intent(APP_TOUCH_BEGIN, 100, 100, NULL);
+        contact.gesture = 2701; contact.surface = APP_SURFACE_CONTROL;
+        assert(submit_intent(&contact));
+        contact.action = cancel ? APP_TOUCH_CANCEL : APP_TOUCH_END;
+        assert(submit_intent(&contact));
+        assert(submit_local_edit(&request) == APP_LOCAL_EDIT_ACCEPTED);
+        service_local_editor();
+        assert(test_joins == 0 && s_local_submission_pending);
+        render_view(&test_link, ESP_OK);
+        assert(!memory_has_text(&test_view, sizeof test_view, secret));
+        assert(!memory_has_text(s_intent_bytes, sizeof s_intent_bytes, secret));
+        consume_one(); service_local_editor();
+        assert(test_joins == 0 && s_local_submission_pending);
+        consume_one(); service_local_editor();
+        assert(test_joins == (cancel ? 0U : 1U));
+        if (!cancel) {
+            assert(strcmp(test_join_request.ssid, "REAL-NET") == 0 && strcmp(test_join_request.password, secret) == 0);
+            assert(test_join_request.remember && test_join_request.selection_id == 31);
+        }
+        expect_cleared_submission();
+        assert(!s_wifi_reserved.id && test_selection_releases == 1);
+        assert(test_wifi.state == APP_WIFI_IDLE && !test_wifi.lan_ready && test_storage_requests == 0);
+        release_barrier(); expect_idle();
+    }
+}
+
+static void wifi_editor_uses_reserved_identity_after_scan_expiry(void)
+{
+    open_network_editor(false);
+    test_scan.state = APP_WIFI_SCAN_EXPIRED; ++test_scan.generation;
+    memcpy(test_scan_records[0].ssid, "REPLACED", 8);
+    s_now_ms += 31000;
+    local_control_contact(2801);
+    app_local_edit_request_t request = editor_request(2801, "secret-local-9");
+    assert(submit_local_edit(&request) == APP_LOCAL_EDIT_ACCEPTED);
+    service_local_editor();
+    assert(test_joins == 1 && !test_join_request.remember && test_join_request.scan_generation == 7);
+    assert(test_join_request.selection_id == 31 && strcmp(test_join_request.ssid, "REAL-NET") == 0);
+    assert(test_selection_releases == 1 && !s_wifi_reserved.id);
+    expect_cleared_submission(); release_barrier(); expect_idle();
+}
+
+static void private_editor_deadline_and_lock_clear_secret_and_ticket(void)
+{
+    for (unsigned locked = 0; locked < 2; ++locked) {
+        open_network_editor(true); local_control_contact(2901);
+        app_local_edit_request_t request = editor_request(2901, "secret-local-9");
+        assert(submit_local_edit(&request) == APP_LOCAL_EDIT_ACCEPTED);
+        const size_t reports = trace_count;
+        const uint64_t epoch = s_engine.state.epoch;
+        if (locked) {
+            app_intent_t lock = make_intent(APP_LOCK, 0, 0, NULL);
+            assert(submit_intent(&lock) && process_priority());
+        } else s_now_ms = s_editor_deadline_ms;
+        service_local_editor();
+        assert(test_joins == 0 && s_local_editor.purpose == APP_LOCAL_EDIT_NONE && !s_wifi_reserved.id);
+        assert(test_selection_releases == 1 && test_released_selection == 31);
+        expect_cleared_submission();
+        render_view(&test_link, ESP_OK);
+        assert(!memory_has_text(&test_view, sizeof test_view, "secret-local-9"));
+        if (locked) release_barrier();
+        else assert(!s_engine.state.release_pending && s_engine.state.epoch == epoch && trace_count == reports);
+        expect_idle();
+    }
+}
+
+static void mouse_pad_wake_is_consumed_before_fresh_takeover_and_click(void)
+{
+    for (unsigned remote = 0; remote < 2; ++remote) {
+        setup(INPUT_MOUSE);
+        if (remote) {
+            assert(hid_engine_set_owner(&s_engine, INPUT_REMOTE));
+            release_barrier(); sync_interaction();
+        }
+        const size_t before = trace_count;
+        display_at(301000); brightness_applied(0);
+        pad_at(APP_TOUCH_BEGIN, 3001, 301010, 100, 100);
+        brightness_applied(50);
+        pad_at(APP_TOUCH_END, 3001, 301030, 100, 100);
+        assert(trace_count == before && !interaction_touch_holding(&s_interaction));
+        assert(s_engine.state.owner == (remote ? INPUT_REMOTE : INPUT_LOCAL));
+        expect_idle();
+        pad_at(APP_TOUCH_BEGIN, 3002, 301100, 100, 100);
+        if (remote) release_barrier();
+        pad_at(APP_TOUCH_END, 3002, 301120, 100, 100);
+        if (!remote) pad_click_pair();
+        else expect_idle(); /* The fresh takeover press is consumed as well. */
+        assert(s_engine.state.owner == INPUT_LOCAL);
+        pad_at(APP_TOUCH_BEGIN, 3003, 302000, 100, 100);
+        pad_at(APP_TOUCH_END, 3003, 302020, 100, 100);
+        pad_click_pair(); expect_idle();
+        assert(!interaction_touch_holding(&s_interaction));
+    }
+}
+
+static void queued_expired_pad_and_real_clock_refresh_never_replay(void)
+{
+    setup(INPUT_MOUSE);
+    app_intent_t intent = make_intent(APP_TOUCH_BEGIN, 100, 100, NULL);
+    intent.gesture = 3101; intent.surface = APP_SURFACE_TOUCHPAD;
+    assert(submit_intent(&intent));
+    s_now_ms = 1020; intent.action = APP_TOUCH_END;
+    assert(submit_intent(&intent));
+    s_now_ms = 2020;
+    consume_one(); consume_one();
+    expect_idle();
+    assert(trace_count == 0);
+    coordinator_touch_hold();
+    test_clock_override = true; test_clock_ms = 1110; /* Callback after the loop's 1100-ms sample. */
+    touch(APP_TOUCH_MOVE, 2002, 0, 0);
+    assert(s_now_ms == 1110 && s_interaction.touch.contact_ms == 1110 && interaction_touch_holding(&s_interaction));
+    intent = make_intent(APP_TOUCH_MOVE, 0, 0, NULL);
+    intent.gesture = 2002; intent.surface = APP_SURFACE_TOUCHPAD; intent.event_ms = 1111;
+    handle_intent(&intent, &test_link); /* An actually future timestamp is still rejected. */
+    test_clock_override = false;
+    assert(s_engine.state.release_pending && !interaction_touch_holding(&s_interaction));
+    release_barrier(); expect_idle();
+}
+
+static void short_selection_ticket_expires_even_while_scan_is_fresh(void)
+{
+    open_network_editor_for(true, 2000);
+    assert(s_editor_deadline_ms == 3000 && test_scan.state == APP_WIFI_SCAN_READY);
+    local_control_contact(3201);
+    app_local_edit_request_t request = editor_request(3201, "secret-local-9");
+    s_now_ms = 2999;
+    assert(submit_local_edit(&request) == APP_LOCAL_EDIT_ACCEPTED);
+    s_now_ms = 3000;
+    service_local_editor();
+    assert(test_joins == 0 && test_selection_releases == 1 && !s_wifi_reserved.id);
+    assert(s_local_editor.purpose == APP_LOCAL_EDIT_NONE && test_scan.state == APP_WIFI_SCAN_READY);
+    expect_cleared_submission(); expect_idle();
+}
+
+static void common_keys_route_from_keyboard_chooser_rejects_other_origins(void)
+{
+    navigation_with_draft(INPUT_KEYBOARD);
+    action(APP_MENU, APP_OVERLAY_KEYBOARD); release_barrier(); sync_interaction();
+    action(APP_MENU, APP_OVERLAY_COMMON_KEYS); release_barrier(); sync_interaction();
+    assert(s_overlay == APP_OVERLAY_COMMON_KEYS && strcmp(s_interaction.view.preview, "ABAB") == 0);
+    action(APP_KEY, 0x29);
+    const uint8_t escape[8] = {0,0,0x29,0,0,0,0,0}, zero[8] = {0};
+    expect_report(1, escape, sizeof escape); expect_report(1, zero, sizeof zero);
+    const app_overlay_t origins[] = {APP_OVERLAY_MODES, APP_OVERLAY_TARGET, APP_OVERLAY_SETTINGS};
+    for (size_t i = 0; i < sizeof origins / sizeof origins[0]; ++i) {
+        setup(INPUT_KEYBOARD); action(APP_MENU, (int)origins[i]); release_barrier(); sync_interaction();
+        const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+        action(APP_MENU, APP_OVERLAY_COMMON_KEYS);
+        assert(s_overlay == origins[i] && s_engine.state.epoch == epoch && s_ui_revision == revision);
+        expect_idle();
+    }
+    setup(INPUT_AUDIO); action(APP_MENU, APP_OVERLAY_AUDIO); release_barrier(); sync_interaction();
+    action(APP_MENU, APP_OVERLAY_COMMON_KEYS);
+    assert(s_overlay == APP_OVERLAY_AUDIO); expect_idle();
+}
+
+static void network_detail_back_returns_to_list_only_from_valid_origin(void)
+{
+    open_network_editor(false);
+    action(APP_CLOSE, 0); /* Leave the editor and release its ticket first. */
+    assert(test_selection_releases == 1 && !s_wifi_reserved.id);
+    settings_page(APP_SETTINGS_WIFI);
+    action(APP_WIFI_SCAN, 1); release_barrier(); sync_interaction();
+    app_intent_t select = make_intent(APP_WIFI_NETWORK_SELECT, 0, 0, NULL);
+    select.wifi_scan_generation = 7; select.wifi_record_index = 0;
+    deliver(select); release_barrier(); sync_interaction();
+    assert(s_overlay == APP_OVERLAY_WIFI_NETWORK);
+    action(APP_MENU, APP_OVERLAY_WIFI_NETWORKS); release_barrier(); sync_interaction();
+    assert(s_overlay == APP_OVERLAY_WIFI_NETWORKS && test_selections == 1 && test_joins == 0);
+    render_view(&test_link, ESP_OK);
+    assert(test_view.wifi_scan.row_count == 1 && test_view.wifi_scan.rows[0].record_index == 0);
+    const app_overlay_t origins[] = {APP_OVERLAY_NONE, APP_OVERLAY_MODES, APP_OVERLAY_TARGET, APP_OVERLAY_SETTINGS};
+    for (size_t i = 0; i < sizeof origins / sizeof origins[0]; ++i) {
+        setup(INPUT_MOUSE);
+        if (origins[i] != APP_OVERLAY_NONE) { action(APP_MENU, (int)origins[i]); release_barrier(); sync_interaction(); }
+        const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+        action(APP_MENU, APP_OVERLAY_WIFI_NETWORKS);
+        assert(s_overlay == origins[i] && s_engine.state.epoch == epoch && s_ui_revision == revision);
+        assert(test_scans == 0 && test_selections == 0); expect_idle();
+    }
+}
+
+static void boot_fault_uses_actual_display_after_partial_board_start(void)
+{
+    test_boot_boundary_enabled = true;
+    test_boot_lock_allowed = true;
+    test_boot_locked = test_boot_active = false;
+    test_boot_lock_calls = test_boot_create_calls = test_boot_update_calls = 0;
+    test_boot_display = NULL;
+    present_boot(APP_BOOT_UI_FAULT, "board initialization", "ESP_FAIL");
+    assert(test_boot_lock_calls == 0 && test_boot_update_calls == 0);
+    /* An opaque retained display handle models a late board-init failure;
+     * no overall success flag is supplied to the production helper. */
+    test_boot_display = (lv_display_t *)(void *)&test_boot_view;
+    test_boot_lock_allowed = false;
+    present_boot(APP_BOOT_UI_FAULT, "board initialization", "ESP_FAIL");
+    assert(test_boot_lock_calls == 1 && test_boot_update_calls == 0);
+    test_boot_lock_allowed = true;
+    present_boot(APP_BOOT_UI_FAULT, "board initialization", "ESP_FAIL");
+    assert(test_boot_create_calls == 1 && test_boot_update_calls == 1 && !test_boot_locked);
+    assert(test_boot_view.state == APP_BOOT_UI_FAULT && !test_boot_view.steps_known);
+    assert(strcmp(test_boot_view.stage, "board initialization") == 0);
+    assert(strcmp(test_boot_view.detail, "ESP_FAIL") == 0);
+    present_boot(APP_BOOT_UI_FAULT, "physical button events", "ESP_ERR_TIMEOUT");
+    assert(test_boot_create_calls == 1 && test_boot_update_calls == 2 && !test_boot_locked);
+    assert(strcmp(test_boot_view.stage, "physical button events") == 0);
+    test_boot_boundary_enabled = false;
+}
+
+static void motion_settings_are_independent_versioned_and_validated(void)
+{
+    setup(INPUT_MOUSE);
+    settings_page(APP_SETTINGS_INPUT);
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_settings.available && test_view.motion_settings.editable);
+    assert(test_view.motion_settings.gain_x_centi == 400 && test_view.motion_settings.gain_y_centi == 400);
+    const unsigned writes = test_storage_requests;
+    app_intent_t intent = make_intent(APP_MOTION_CONFIG, 0, 0, NULL);
+    intent.motion_patch = (app_motion_patch_t){.field = APP_MOTION_FIELD_GAIN_X,
+        .expected_settings_revision = s_settings_revision, .value.gain_centi = 1200};
+    deliver(intent);
+    assert(s_settings.motion_gain_x_centi == 1200 && s_settings.motion_gain_y_centi == 400);
+    assert(s_interaction.config.pointer_gain_x == 12.0f && s_interaction.config.pointer_gain_y == 4.0f);
+    assert(test_storage_requests == writes + 1 && s_settings_revision == 2);
+    intent = make_intent(APP_MOTION_CONFIG, 0, 0, NULL);
+    intent.motion_patch = (app_motion_patch_t){.field = APP_MOTION_FIELD_GAIN_Y,
+        .expected_settings_revision = 1, .value.gain_centi = 800};
+    deliver(intent); /* Fresh UI action carrying a stale settings version. */
+    assert(test_storage_requests == writes + 1 && s_settings.motion_gain_y_centi == 400);
+    intent.motion_patch.expected_settings_revision = s_settings_revision;
+    intent.motion_patch.value.gain_centi = 24;
+    deliver(intent);
+    assert(test_storage_requests == writes + 1 && s_settings_revision == 2);
+    intent.motion_patch.field = APP_MOTION_FIELD_FREEZE;
+    intent.motion_patch.value.milliseconds = 600;
+    deliver(intent);
+    assert(s_interaction.config.freeze_ms == 600 && s_settings.motion_freeze_ms == 600);
+    assert(test_storage_requests == writes + 2 && s_settings_revision == 3);
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_settings.freeze_ms == 600 && test_view.motion_settings.revision == 3);
+    expect_idle();
+}
+
+static void new_settings_pages_reach_shared_preferences(void)
+{
+    setup(INPUT_MOUSE);
+    settings_page(APP_SETTINGS_MOTION);
+    assert(s_settings_page == APP_SETTINGS_MOTION);
+    app_intent_t change = make_intent(APP_MOTION_CONFIG, 0, 0, NULL);
+    change.motion_patch = (app_motion_patch_t){.field = APP_MOTION_FIELD_GAIN_Y,
+        .expected_settings_revision = s_settings_revision, .value.gain_centi = 800};
+    deliver(change);
+    assert(s_settings.motion_gain_y_centi == 800 && s_interaction.config.pointer_gain_y == 8.0f);
+    settings_page(APP_SETTINGS_MOTION_ADVANCED);
+    change = make_intent(APP_MOTION_CONFIG, 0, 0, NULL);
+    change.motion_patch = (app_motion_patch_t){.field = APP_MOTION_FIELD_INVERT_X,
+        .expected_settings_revision = s_settings_revision, .value.inverted = true};
+    deliver(change); assert(s_settings.motion_invert_x);
+    settings_page(APP_SETTINGS_GESTURES);
+    action(APP_TAP_TO_CLICK, 0); assert(!s_settings.tap_to_click);
+    settings_page(APP_SETTINGS_WIFI);
+    action(APP_MENU, APP_OVERLAY_API_CONNECTION);
+    assert(s_overlay == APP_OVERLAY_API_CONNECTION);
+    action(APP_CLOSE, 0);
+    settings_page(APP_SETTINGS_WIFI);
+    action(APP_MENU, APP_OVERLAY_WIFI_PROFILES);
+    assert(s_overlay == APP_OVERLAY_WIFI_PROFILES);
+}
+
+static void temporary_preferences_do_not_leak_into_unrelated_native_saves(void)
+{
+    setup(INPUT_MOUSE);
+    device_settings_t temporary = s_settings;
+    temporary.brightness_percent = 80;
+    temporary.motion_gain_x_centi = 900;
+    assert(update_settings_internal(&temporary, false));
+    assert(test_storage_requests == 0 && s_settings.brightness_percent == 80);
+    assert(s_durable_settings.brightness_percent == 50 && s_durable_settings.motion_gain_x_centi == 400);
+    render_view(&test_link, ESP_OK);
+    assert(test_view.settings_save_state == APP_SAVE_VOLATILE);
+    assert(test_view.bluetooth_name.save_state == APP_SAVE_DEFAULTS);
+    device_settings_t native = s_settings;
+    native.theme = DEVICE_THEME_LIGHT;
+    assert(update_settings(&native));
+    assert(test_storage_requests == 1 && test_saved_request.theme == DEVICE_THEME_LIGHT);
+    assert(test_saved_request.brightness_percent == 50 && test_saved_request.motion_gain_x_centi == 400);
+    assert(s_settings.brightness_percent == 80 && s_settings.motion_gain_x_centi == 900);
+    assert(update_settings_internal(&s_settings, true));
+    assert(test_storage_requests == 2 && test_saved_request.brightness_percent == 80);
+    assert(device_settings_equal(&s_durable_settings, &s_settings));
+}
+
+static void temporary_transport_switch_waits_without_persisting(void)
+{
+    transport_setup(INPUT_MOUSE, APP_INPUT_BLUETOOTH);
+    assert(request_input_transport_internal(APP_INPUT_USB, &test_link, false));
+    service_transport_switch(); assert(s_transport_switch_pending && test_storage_requests == 0);
+    release_barrier(); service_transport_switch();
+    assert(!s_transport_switch_pending && s_input_transport == APP_INPUT_USB);
+    assert(s_settings.preferred_transport == DEVICE_TRANSPORT_USB && test_storage_requests == 0);
+    assert(s_durable_settings.preferred_transport == DEVICE_TRANSPORT_BLUETOOTH);
+}
+
+static void contacts_at(uint64_t sequence, uint64_t time, unsigned contacts, unsigned y)
+{
+    s_now_ms = time;
+    board_touch_snapshot_t sample = {.sequence = sequence, .timestamp_ms = time,
+        .valid = true, .count = (uint8_t)contacts,
+        .contacts = {{.id = 3, .x = 100, .y = (uint16_t)y},
+                     {.id = 7, .x = 200, .y = (uint16_t)y}}};
+    assert(submit_contacts(&sample)); consume_one();
+}
+
+static void full_contact_fifo_precedes_primary_and_drains_pair(void)
+{
+    setup(INPUT_MOUSE); s_multitouch_available = true;
+    contacts_at(1, 1000, 1, 100);
+    pad_at(APP_TOUCH_BEGIN, 5001, 1000, 100, 100);
+    contacts_at(2, 1020, 2, 100);
+    assert(s_multitouch_consuming);
+    pad_at(APP_TOUCH_MOVE, 5001, 1020, 20, 0); expect_idle();
+    contacts_at(3, 1040, 2, 148);
+    const uint8_t wheel[4] = {0, 0, 0, 2}; expect_report(2, wheel, sizeof wheel);
+    pad_at(APP_TOUCH_MOVE, 5001, 1040, 10, 20); expect_idle();
+    contacts_at(4, 1050, 1, 148);
+    pad_at(APP_TOUCH_MOVE, 5001, 1050, 10, 20); expect_idle();
+    contacts_at(5, 1060, 0, 0);
+    pad_at(APP_TOUCH_END, 5001, 1060, 110, 148); expect_idle();
+    service_multitouch();
+    contacts_at(6, 1100, 1, 100);
+    pad_at(APP_TOUCH_BEGIN, 5002, 1100, 100, 100);
+    contacts_at(7, 1120, 0, 0);
+    pad_at(APP_TOUCH_END, 5002, 1120, 100, 100); pad_click_pair();
+    expect_idle();
+}
+
+static void full_contact_right_click_and_cancelled_drag(void)
+{
+    setup(INPUT_MOUSE); s_multitouch_available = true;
+    contacts_at(1, 1000, 2, 100);
+    pad_at(APP_TOUCH_BEGIN, 5011, 1000, 100, 100);
+    contacts_at(2, 1040, 0, 0);
+    pad_at(APP_TOUCH_END, 5011, 1040, 100, 100);
+    const uint8_t down[4] = {2,0,0,0}, up[4] = {0};
+    expect_report(2, down, sizeof down); expect_report(2, up, sizeof up); expect_idle();
+    coordinator_touch_hold(); s_multitouch_available = true;
+    contacts_at(1, 1110, 1, 100);
+    contacts_at(2, 1120, 2, 100);
+    assert(s_engine.state.release_pending && !interaction_touch_holding(&s_interaction));
+    release_barrier(); expect_idle();
+    contacts_at(3, 1130, 1, 150);
+    pad_at(APP_TOUCH_MOVE, 2002, 1130, 10, 0); expect_idle();
+    contacts_at(4, 1140, 0, 0); expect_idle();
+}
+
+static void contact_overflow_stale_context_and_motion_keep_safe_defaults(void)
+{
+    setup(INPUT_MOUSE); s_multitouch_available = true;
+    assert(s_settings.tap_to_click);
+    contacts_at(1, 1000, 2, 100);
+    s_now_ms = 1020;
+    const board_touch_snapshot_t sample = {.sequence=2, .timestamp_ms=1020, .valid=true};
+    assert(submit_contacts(&sample));
+    action(APP_MENU, APP_OVERLAY_MODES); /* Older queued all-up cannot click in new focus. */
+    while (uxQueueMessagesWaiting(s_intents)) consume_one();
+    release_barrier(); expect_idle();
+    setup(INPUT_MOUSE); s_multitouch_available = true;
+    fill_intents(); assert(!submit_contacts(&sample));
+    assert(process_priority()); release_barrier(); expect_empty_intents();
+    setup(INPUT_MOUSE); s_multitouch_available = true;
+    s_settings.tap_to_click = false;
+    contacts_at(1, 1000, 2, 100);
+    contacts_at(2, 1020, 0, 0); expect_idle();
+    assert(!s_multitouch_consuming);
+}
+
+static void capture_display_permission_requires_actual_receipt_and_brightness(void)
+{
+    setup(INPUT_KEYBOARD);
+    s_keyboard_submode = APP_KEYBOARD_SPOKEN;
+    test_brightness = (board_brightness_status_t){.applied_known = true, .applied_percent = 50, .error = ESP_OK};
+    test_indicator = (app_presenter_indicator_status_t){.indicator_armed = true,
+        .capture_generation = 9, .owner_heartbeat_ms = 1000};
+    refresh_media_context();
+    assert(test_media_environment.screen_visible && !test_media_environment.indicator_visible);
+    assert(test_media_speech_context && test_media_context.preview_characters == 0);
+    test_indicator.usable = true;
+    test_indicator.completed_us = 100; /* Old transfer remains evidence only with fresh owner heartbeat. */
+    refresh_media_context();
+    assert(test_media_environment.indicator_visible && test_media_environment.indicator_generation == 9);
+    assert(test_media_environment.indicator_seen_ms == 1000);
+    test_brightness.applied_known = false;
+    refresh_media_context();
+    assert(!test_media_environment.screen_visible && !test_media_environment.indicator_visible);
+    test_brightness.applied_known = true;
+    s_idle.wake_capture = true;
+    refresh_media_context();
+    assert(!test_media_environment.indicator_visible);
+    s_idle.wake_capture = false;
+    s_overlay = APP_OVERLAY_SETTINGS;
+    refresh_media_context();
+    assert(!test_media_speech_context); /* Native preview cannot be accepted behind a modal. */
+}
+
+static void capture_keeps_display_awake_until_confirmed_off_without_activity(void)
+{
+    setup(INPUT_AUDIO);
+    test_capabilities.brightness = true;
+    s_settings.idle_timeout = DEVICE_IDLE_1_MIN;
+    assert(device_idle_configure(&s_idle, s_settings.idle_timeout, s_now_ms));
+    uint64_t last_activity = s_idle.last_activity_ms;
+    test_media_snapshot = (app_media_snapshot_t){.initialized = true, .audio_known = true};
+    test_media_snapshot.audio.capture_indicator_required = true;
+    s_now_ms += 60001;
+    service_display();
+    assert(!s_idle.asleep && s_idle.last_activity_ms == last_activity);
+    test_media_snapshot.audio.capture_indicator_required = false;
+    service_display();
+    assert(s_idle.asleep); /* Normal saved timeout resumes without synthetic activity. */
+}
+
+static void physical_lock_stops_capture_but_release_only_does_not(void)
+{
+    setup(INPUT_MOUSE);
+    s_priority_requests = RELEASE_REQUEST;
+    assert(process_priority());
+    assert(test_media_stops == 0);
+    s_priority_requests = LOCK_REQUEST;
+    assert(process_priority());
+    assert(test_media_stops == 1 && s_engine.state.locked);
+    refresh_media_context();
+    assert(!test_media_environment.unlocked && test_media_environment.privacy_latched);
+}
+
+static void media_preview_confirmation_uses_normal_input_context(void)
+{
+    setup(INPUT_KEYBOARD);
+    s_keyboard_submode = APP_KEYBOARD_SPOKEN;
+    test_media_handle = true;
+    test_media_effect = (app_media_controls_effect_t){.handled = true, .preview_character = 'Q'};
+    action(APP_VOICE_CONFIRM, 0);
+    assert(strcmp(s_interaction.view.preview, "Q") == 0 && trace_count == 0);
+    assert(!s_send_token && !s_interaction.view.sending);
+    unsigned handled = test_media_handles;
+    s_overlay = APP_OVERLAY_SETTINGS;
+    action(APP_VOICE_CONFIRM, 0);
+    assert(test_media_handles == handled && strcmp(s_interaction.view.preview, "Q") == 0);
+    s_overlay = APP_OVERLAY_NONE;
+    hid_engine_set_locked(&s_engine, true);
+    action(APP_VOICE_CONFIRM, 0);
+    assert(test_media_handles == handled);
+}
+
+static cp_command_t remote_test_command(cp_operation_id_t operation, uint64_t key, const char *arguments)
+{
+    app_remote_input_state_t observed; assert(remote_observe(NULL, &observed));
+    cp_command_t command = {.version = CP_API_VERSION, .operation = operation, .command_key = key,
+        .deadline_ms = s_now_ms + 1000, .input_epoch = s_engine.state.epoch,
+        .transport_generation = observed.transport_generation, .ui_revision = s_ui_revision,
+        .management_generation = s_management_generation, .lease_expires_ms = s_now_ms + 3000};
+    command.identity.principal_id[0] = 11; command.identity.session_id[0] = 12;
+    command.identity.scopes = CP_SCOPE_ALL; command.lease_id[0] = 13;
+    memcpy(command.target_id, observed.target_id, sizeof(command.target_id));
+    (void)snprintf(command.args_json, sizeof(command.args_json), "%s", arguments);
+    return command;
+}
+static void remote_acquire_producer(const char *producer)
+{
+    remote_control_init(false); test_control_session_alive = true;
+    assert(set_remote_allowance(true));
+    remote_control_service();
+    char args[128];
+    if (producer) (void)snprintf(args, sizeof(args), "{\"state_sequence\":\"%llu\",\"producer\":\"%s\"}",
+        (unsigned long long)s_state_sequence, producer);
+    else (void)snprintf(args, sizeof(args), "{\"state_sequence\":\"%llu\"}",
+        (unsigned long long)s_state_sequence);
+    cp_command_t command = remote_test_command(CP_OP_CONTROL_ACQUIRE, 1, args);
+    cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service();
+    if (s_engine.state.owner != INPUT_REMOTE || !s_engine.state.release_pending)
+        fprintf(stderr, "acquire owner=%d release=%d error=%d reason=%s sequence=%llu\n",
+            s_engine.state.owner, s_engine.state.release_pending, test_control_result.error,
+            test_control_result.reason, (unsigned long long)s_state_sequence);
+    assert(s_engine.state.owner == INPUT_REMOTE && s_engine.state.release_pending);
+    release_barrier();
+    remote_control_service();
+    app_remote_input_view_t remote; app_remote_input_snapshot(s_remote_input, &remote);
+    assert(remote.active && !remote.pending && test_control_state.remote_owner);
+    assert(test_control_result.command_key == 1 && test_control_result.state == CP_RESULT_APPLIED);
+}
+static void remote_acquire_current_host(void) { remote_acquire_producer(NULL); }
+
+static void remote_imu_uses_the_single_board_sample_and_hid_queue(void)
+{
+    setup(INPUT_MOUSE); calibrate(); remote_acquire_producer("device_imu");
+    cp_command_t motion = remote_test_command(CP_OP_INPUT_MOTION_SET, 2, "{\"enabled\":true}");
+    cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &motion, &result) == CP_OK);
+    remote_control_service(); sync_interaction();
+    assert(!s_engine.state.release_pending);
+    assert(s_engine.state.gyro_enabled && s_engine.state.owner == INPUT_REMOTE);
+    for (unsigned i = 0; i < 15; ++i) { sample_after(10, 0, 0); expect_idle(); }
+    sample_after(10, 25, 0);
+    const uint8_t moved[] = {0, 2, 0, 0};
+    expect_report(2, moved, sizeof moved);
+    process_motion(); expect_idle(); /* The cached board sample is consumed once. */
+    remote_local_override(false); release_barrier(); sync_interaction();
+    sample_after(10, 25, 0); expect_idle();
+    assert(!s_engine.state.gyro_enabled && !s_remote_allowed);
+}
+static void remote_commands_share_actual_hid_queue_and_physical_takeover(void)
+{
+    setup(INPUT_MOUSE); remote_acquire_current_host();
+    cp_command_t click = remote_test_command(CP_OP_MOUSE_CLICK, 2, "{\"button\":\"left\"}");
+    cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &click, &result) == CP_OK);
+    remote_control_service();
+    const uint8_t down[] = {1, 0, 0, 0}, up[] = {0, 0, 0, 0};
+    expect_report(2, down, sizeof(down));
+    expect_report(2, up, sizeof(up));
+    remote_control_service();
+    assert(test_control_result.command_key == 2 && test_control_result.state == CP_RESULT_SENT);
+    cp_command_t queued = remote_test_command(CP_OP_MOUSE_CLICK, 3, "{\"button\":\"left\"}");
+    assert(app_command_bridge_submit(s_command_bridge, &queued, &result) == CP_OK);
+    remote_local_override(false);
+    remote_control_service();
+    assert(s_engine.state.owner == INPUT_LOCAL && test_media_stops == 0);
+    release_barrier(); expect_idle();
+    assert(test_control_result.command_key == 3 && test_control_result.error == CP_STALE);
+}
+
+static void remote_allowance_requires_local_restore_after_takeover(void)
+{
+    setup(INPUT_MOUSE);
+    remote_control_init(false); test_control_session_alive = true;
+    remote_control_service();
+    assert(!test_control_state.remote_allowed);
+    const uint64_t initial = test_control_state.allowance_generation;
+    assert(set_remote_allowance(true));
+    remote_control_service();
+    assert(test_control_state.remote_allowed && test_control_state.allowance_generation > initial);
+    const uint64_t granted = test_control_state.allowance_generation;
+    remote_local_override(false);
+    remote_control_service();
+    assert(!test_control_state.remote_allowed && test_control_state.allowance_generation > granted);
+    const uint64_t revoked = test_control_state.allowance_generation;
+    remote_control_service();
+    assert(!test_control_state.remote_allowed && test_control_state.allowance_generation == revoked);
+    assert(set_remote_allowance(true));
+    remote_control_service();
+    assert(test_control_state.remote_allowed && test_control_state.allowance_generation > revoked);
+    remote_local_override(true);
+    hid_engine_set_locked(&s_engine, true);
+    assert(!set_remote_allowance(true));
+    hid_engine_set_locked(&s_engine, false);
+    s_idle.asleep = true; assert(!set_remote_allowance(true));
+    s_idle.asleep = false; s_remote_allowance_generation = UINT64_MAX - 1;
+    assert(!set_remote_allowance(true) && !s_remote_allowed);
+    remote_control_service();
+    assert(!test_control_state.remote_allowed && test_control_state.allowance_generation == UINT64_MAX);
+}
+
+static void remote_allowance_ui_checks_identity_and_returns_core(void)
+{
+    setup(INPUT_MOUSE); remote_control_init(false);
+    s_overlay = APP_OVERLAY_API_CONNECTION;
+    app_intent_t toggle = make_intent(APP_API_INPUT_ALLOW_SET, 1, 0, NULL);
+    toggle.api.revision = s_remote_allowance_generation + 1;
+    handle_intent(&toggle, &test_link);
+    assert(!s_remote_allowed && s_overlay == APP_OVERLAY_API_CONNECTION);
+    toggle.api.revision = s_remote_allowance_generation;
+    handle_intent(&toggle, &test_link);
+    assert(s_remote_allowed && s_overlay == APP_OVERLAY_NONE);
+    assert(s_engine.state.release_pending);
+    remote_local_override(false); release_barrier(); sync_interaction();
+    toggle = make_intent(APP_API_INPUT_ALLOW_SET, 1, 0, NULL);
+    toggle.api.revision = s_remote_allowance_generation;
+    handle_intent(&toggle, &test_link);
+    assert(!s_remote_allowed); /* Core cannot impersonate the local settings action. */
+}
+
+static void remote_transport_rechecks_authority_at_effect_boundary(void)
+{
+    for (unsigned fault = 0; fault < 4; ++fault) {
+        setup(INPUT_MOUSE); remote_acquire_current_host();
+        test_usb.initialized = true; test_usb.failed = false;
+        cp_command_t command = remote_test_command(CP_OP_INPUT_TRANSPORT_SELECT, 2, "{\"transport\":\"usb\"}");
+        cp_result_t result;
+        assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+        remote_control_service();
+        assert(s_remote_transport_pending && s_transport_switch_pending);
+        if (fault == 1) remote_local_override(false);
+        if (fault == 2) test_control_session_alive = false;
+        if (fault == 3) s_now_ms = command.deadline_ms;
+        release_barrier(); service_transport_switch(); remote_control_service();
+        assert(!s_transport_switch_pending && !s_remote_transport_pending);
+        assert(test_control_result.command_key == 2);
+        if (!fault) {
+            assert(s_input_transport == APP_INPUT_USB && test_control_result.state == CP_RESULT_APPLIED);
+        } else {
+            assert(s_input_transport == APP_INPUT_BLUETOOTH && test_control_result.state == CP_RESULT_CANCELLED);
+            assert(test_control_result.error == (fault == 3 ? CP_EXPIRED : CP_STALE));
+        }
+    }
+}
+static void remote_device_routes_and_state_survive_missing_media(void)
+{
+    setup(INPUT_MOUSE); remote_control_init(false); test_control_session_alive = true; remote_control_service();
+    app_remote_device_state_t state;
+    assert(remote_device_observe(NULL, CP_OP_BLUETOOTH_PAIRING_OPEN, &state));
+    cp_command_t command = remote_test_command(CP_OP_BLUETOOTH_PAIRING_OPEN, 10, "{\"window_seconds\":120}");
+    command.resource_revision = state.resource_revision;
+    cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service();
+    assert(test_control_result.command_key == 10 && test_control_result.error == CP_OK);
+    assert(s_overlay == APP_OVERLAY_CONFIRM && s_remote_device_local_review[0] && !test_pair_opens);
+    char json[4096]; size_t length;
+    assert(command_read(NULL, &command.identity, "/api/v1/state", json, sizeof(json), &length) == CP_OK);
+    assert(length == strlen(json) && strstr(json, "\"device_controls\":{") &&
+        strstr(json, "\"media_status\":\"unavailable\"") && strstr(json, "retained_manifest_digest"));
+    command.identity.scopes = 0;
+    assert(command_read(NULL, &command.identity, "/api/v1/state", json, sizeof(json), &length) == CP_FORBIDDEN);
+}
+
+static void native_connection_review_and_back_navigation_reach_owner(void)
+{
+    setup(INPUT_MOUSE); settings_page(APP_SETTINGS_WIFI);
+    action(APP_MENU, APP_OVERLAY_API_CONNECTION);
+    action(APP_MENU, APP_OVERLAY_API_REVIEW);
+    assert(s_overlay == APP_OVERLAY_API_REVIEW);
+    action(APP_CLOSE, 0); settings_page(APP_SETTINGS_WIFI);
+    action(APP_MENU, APP_OVERLAY_API_CONNECTION);
+    action(APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
+    assert(s_overlay == APP_OVERLAY_API_CONNECTION);
+    action(APP_SETTINGS_PAGE, APP_SETTINGS_WIFI);
+    assert(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_WIFI);
+    open_overlay(APP_OVERLAY_BLUETOOTH_TARGET);
+    action(APP_SETTINGS_PAGE, APP_SETTINGS_WIFI);
+    assert(s_overlay == APP_OVERLAY_BLUETOOTH_TARGET);
+    action(APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
+    assert(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH);
+}
+
+static void cancelled_remote_receipt_cannot_hold_a_new_local_switch(void)
+{
+    setup(INPUT_MOUSE); remote_acquire_current_host(); test_usb.initialized = true; test_usb.failed = false;
+    cp_command_t command = remote_test_command(CP_OP_INPUT_TRANSPORT_SELECT, 2, "{\"transport\":\"usb\"}");
+    cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service();
+    test_control_completion_reject = true;
+    remote_local_override(false); remote_control_service();
+    assert(s_remote_transport_pending && s_remote_transport_cancelled && !s_transport_switch_pending);
+    assert(request_input_transport(APP_INPUT_USB, &test_link));
+    release_barrier(); service_transport_switch();
+    assert(s_input_transport == APP_INPUT_USB && !s_transport_switch_pending);
+    test_control_completion_reject = false; remote_control_service();
+    assert(!s_remote_transport_pending && test_control_result.command_key == 2 &&
+        test_control_result.state == CP_RESULT_CANCELLED && test_control_result.error == CP_STALE);
+}
+
+static void applied_remote_receipt_survives_later_local_selection(void)
+{
+    setup(INPUT_MOUSE); remote_acquire_current_host(); test_usb.initialized = true; test_usb.failed = false;
+    cp_command_t command = remote_test_command(CP_OP_INPUT_TRANSPORT_SELECT, 2, "{\"transport\":\"usb\"}");
+    cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service(); test_control_completion_reject = true;
+    release_barrier(); service_transport_switch(); remote_control_service();
+    assert(s_remote_transport_pending && s_remote_transport_effect && s_input_transport == APP_INPUT_USB);
+    remote_local_override(false);
+    assert(request_input_transport(APP_INPUT_BLUETOOTH, &test_link));
+    /* The selected USB target is disconnected; it cannot acknowledge release. */
+    service_transport_switch();
+    assert(s_input_transport == APP_INPUT_BLUETOOTH);
+    test_control_completion_reject = false; remote_control_service();
+    assert(!s_remote_transport_pending && test_control_result.command_key == 2 &&
+        test_control_result.state == CP_RESULT_APPLIED && test_control_result.error == CP_OK);
+}
+
+#include "update_cases.inc"
+#include "remote_device_cases.inc"
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
     unsigned passed = 0;
 #define RUN(test) do { if (argc == 1 || strcmp(argv[1], #test) == 0) { \
     test_case = #test; test(); ++passed; } } while (0)
+    REMOTE_UPDATE_CASES(RUN);
+    RUN(applied_remote_receipt_survives_later_local_selection);
+    RUN(cancelled_remote_receipt_cannot_hold_a_new_local_switch);
+    REMOTE_DEVICE_CASES(RUN);
+    RUN(native_connection_review_and_back_navigation_reach_owner);
+    RUN(remote_transport_rechecks_authority_at_effect_boundary);
+    RUN(remote_device_routes_and_state_survive_missing_media);
+    RUN(remote_commands_share_actual_hid_queue_and_physical_takeover);
+    RUN(remote_imu_uses_the_single_board_sample_and_hid_queue);
+    RUN(remote_allowance_requires_local_restore_after_takeover);
+    RUN(remote_allowance_ui_checks_identity_and_returns_core);
+    RUN(capture_display_permission_requires_actual_receipt_and_brightness);
+    RUN(capture_keeps_display_awake_until_confirmed_off_without_activity);
+    RUN(physical_lock_stops_capture_but_release_only_does_not);
+    RUN(media_preview_confirmation_uses_normal_input_context);
     RUN(saturated_emergency_admission);
     RUN(stale_ui_epoch);
     RUN(touch_cannot_unlock);
@@ -3798,6 +5290,31 @@ int main(int argc, char **argv)
     RUN(physical_double_click_returns_status_settings_and_choices_to_quick);
     RUN(confirmation_owns_navigation_choices_and_physical_double_click);
     RUN(wifi_setup_safe_menu_exits_clear_credentials_and_reject_stale_restart);
+    RUN(pad_single_double_and_drag_use_actual_hid_reports);
+    RUN(queued_pad_events_use_native_time_and_raw_out_and_back_slop);
+    RUN(queued_drag_with_lost_live_contact_is_neutralized);
+    RUN(tap_preference_preserves_movement_and_explicit_drag);
+    RUN(touch_drag_boundaries_and_contact_deadman_release);
+    RUN(touch_release_survives_congestion_and_refused_down_never_drags);
+    RUN(common_keys_are_explicit_and_preserve_preview);
+    RUN(local_name_persists_only_matching_verified_acknowledgement);
+    RUN(failed_or_stale_local_names_cannot_change_preferences);
+    RUN(private_wifi_submission_waits_for_touch_fifo_and_cancel);
+    RUN(wifi_editor_uses_reserved_identity_after_scan_expiry);
+    RUN(private_editor_deadline_and_lock_clear_secret_and_ticket);
+    RUN(mouse_pad_wake_is_consumed_before_fresh_takeover_and_click);
+    RUN(queued_expired_pad_and_real_clock_refresh_never_replay);
+    RUN(short_selection_ticket_expires_even_while_scan_is_fresh);
+    RUN(common_keys_route_from_keyboard_chooser_rejects_other_origins);
+    RUN(network_detail_back_returns_to_list_only_from_valid_origin);
+    RUN(boot_fault_uses_actual_display_after_partial_board_start);
+    RUN(motion_settings_are_independent_versioned_and_validated);
+    RUN(new_settings_pages_reach_shared_preferences);
+    RUN(temporary_preferences_do_not_leak_into_unrelated_native_saves);
+    RUN(temporary_transport_switch_waits_without_persisting);
+    RUN(full_contact_fifo_precedes_primary_and_drains_pair);
+    RUN(full_contact_right_click_and_cancelled_drag);
+    RUN(contact_overflow_stale_context_and_motion_keep_safe_defaults);
 #undef RUN
     assert(passed);
     if (argc == 2) printf("PASS: coordinator case %s\n", argv[1]);
@@ -3805,3 +5322,11 @@ int main(int argc, char **argv)
                 "physical timing, motion, settings, display/wake, connectivity, views and diagnostics\n", passed);
     return 0;
 }
+
+/* The coordinator suite substitutes only the board-reader boundary. Native UI
+ * tests exercise visible geometry; board-touch tests exercise driver reads. */
+app_ui_touch_context_t app_ui_touch_context(void)
+{ return (app_ui_touch_context_t){.epoch = s_engine.state.epoch, .ui_revision = s_ui_revision,
+    .eligible_pad = s_overlay == APP_OVERLAY_NONE, .x1 = 0, .y1 = 0, .x2 = 480, .y2 = 480}; }
+esp_err_t board_touch_observe(board_touch_snapshot_fn observer)
+{ (void)observer; return ESP_ERR_INVALID_STATE; }

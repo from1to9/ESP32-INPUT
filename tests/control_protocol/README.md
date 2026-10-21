@@ -1,0 +1,9 @@
+# Control protocol tests
+
+Run `python3 tests/control_protocol/run.py`. The generated catalog check and strict C11 AddressSanitizer/UndefinedBehaviorSanitizer executable exercise the actual portable JSON, SHA-256, registry and protocol implementation. Named callbacks replace only randomness and owner admission/completion/read/safety ports. No listeners, credentials, device or Keychain access are required.
+
+Coverage includes exact decimal and integer boundaries, canonical argument hashing, typed scopes/configuration, browser login/CSRF, single-use session-bound WSS tickets, strict Host/Origin/TLS checks, retained duplicate/conflict outcomes, sequence/deadline limits, competing input owners, lease expiry and ownership, deliberate mode transitions, independent management/media authority and malformed owner-result uncertainty. ACM1 tests cover bounded binary frame format and generation/size validation. Admission is never treated as observed hardware completion.
+
+The companion checks use the pinned dependencies in [the companion instructions](../../bridge/README.md): run `<companion-python> tests/control_protocol/test_bridge.py`. They exercise real offline certificate/key and publisher signatures, private file permissions, typed format/decimal validation, MCP stdio initialization/tools, and identical-envelope recovery after unknown outcomes. Keychain, HTTP and serial are named substitutes; no real secret store or device is changed.
+
+After preparing the normal pinned S31 SDK build, `python3 tests/control_protocol/compile_target.py` compiles the four portable sources and five production control adapters against its actual headers/configuration. It writes temporary objects and performs no link or device operation. The parent's integrated firmware build remains a separate gate. Actual TLS/WSS interoperability, radio contention, device timing, flash recovery and release qualification require separately authorized evidence.

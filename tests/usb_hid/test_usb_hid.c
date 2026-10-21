@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+
+static int test_console_setvbuf(FILE *stream, char *buffer, int mode, size_t size);
 
 /* Production sources; public TinyUSB types/descriptor macros are the real
  * pinned headers. Only hardware/RTOS/SDK actions below that boundary are mocked. */
 #include "../../firmware/main/usb_hid.c"
+#define setvbuf test_console_setvbuf
 #include "../../firmware/main/usb_console.c"
+#undef setvbuf
 
 static struct {
     uint64_t now_us;
@@ -16,6 +22,7 @@ static struct {
     esp_err_t timer_create_error, timer_start_error, install_error, cdc_error, console_error;
     bool fail_worker;
     unsigned timers, workers, installs, cdc_inits, console_inits, notifications, submits;
+    unsigned buffering_calls, buffering_fail_call;
     esp_timer_create_args_t timer;
     tinyusb_config_t driver;
     void (*deferred)(void *argument);
@@ -26,6 +33,26 @@ static struct {
     void (*during_install)(void);
 } hw;
 static int worker_handle, timer_handle;
+
+/* Audio is deliberately unavailable in this HID-focused boundary harness.
+ * Its separate suite exercises the production UAC transport. HID startup must
+ * still succeed when optional audio cannot reserve memory. */
+esp_err_t usb_audio_init(void) { return ESP_ERR_NO_MEM; }
+void usb_audio_stack_started(esp_err_t result) { (void)result; }
+void usb_audio_stack_event(bool mounted, bool suspended)
+{
+    assert(mounted == hw.mounted && suspended == hw.suspended);
+}
+
+static int test_console_setvbuf(FILE *stream, char *buffer, int mode, size_t size)
+{
+    assert(hw.lock_depth == 0 && hw.console_inits == 1 && hw.console_error == ESP_OK);
+    ++hw.buffering_calls;
+    assert(stream == (hw.buffering_calls == 1 ? stdout : stderr));
+    assert(buffer == NULL && mode == _IOLBF && size == BUFSIZ);
+    if (hw.buffering_calls == hw.buffering_fail_call) return -1;
+    return setvbuf(stream, buffer, mode, size); /* Real host stdio, not a successful buffering stub. */
+}
 
 void usb_test_enter(portMUX_TYPE *lock)
 {
@@ -554,7 +581,7 @@ static void mount_before_manager_callback_registration(void)
 
 static void test_manager_failures_and_counter_boundaries(void)
 {
-    for (unsigned failure = 0; failure < 6; ++failure) {
+    for (unsigned failure = 0; failure < 8; ++failure) {
         reset_fixture();
         switch (failure) {
         case 0: hw.timer_create_error = ESP_ERR_NO_MEM; break;
@@ -563,11 +590,15 @@ static void test_manager_failures_and_counter_boundaries(void)
         case 3: hw.install_error = ESP_FAIL; break;
         case 4: hw.cdc_error = ESP_FAIL; break;
         case 5: hw.console_error = ESP_FAIL; break;
+        case 6: hw.buffering_fail_call = 1; break;
+        case 7: hw.buffering_fail_call = 2; break;
         }
         const esp_err_t error = usb_console_start();
         assert(error != ESP_OK && usb_hid_snapshot().failed && !usb_hid_snapshot().ready);
         const unsigned installs = hw.installs;
         assert(usb_hid_init() == error && hw.installs == installs);
+        if (failure < 6) assert(hw.buffering_calls == 0);
+        else assert(hw.buffering_calls == failure - 5 && hw.console_inits == 1);
     }
     reset_fixture();
     hw.during_install = concurrent_start_attempt;
@@ -602,6 +633,43 @@ static void test_manager_failures_and_counter_boundaries(void)
     assert(usb_hid_snapshot().failed && usb_hid_snapshot().error == ESP_ERR_TIMEOUT);
 }
 
+static void test_console_completed_lines_flush_without_waiting_for_another_burst(void)
+{
+    FILE *original_out = stdout, *original_err = stderr;
+    FILE *out = tmpfile(), *err = tmpfile(), *control = tmpfile();
+    assert(out && err && control);
+    char out_buffer[512], err_buffer[512], control_buffer[512], observed[512];
+    assert(setvbuf(control, control_buffer, _IOFBF, sizeof(control_buffer)) == 0);
+    assert(fputs("control\n", control) >= 0);
+    assert(pread(fileno(control), observed, sizeof(observed), 0) == 0); /* Observer sees no buffered bytes. */
+    assert(fclose(control) == 0);
+    assert(setvbuf(out, out_buffer, _IOFBF, sizeof(out_buffer)) == 0);
+    assert(setvbuf(err, err_buffer, _IOFBF, sizeof(err_buffer)) == 0);
+    stdout = out;
+    stderr = err;
+    reset_fixture();
+    assert(usb_console_start() == ESP_OK && hw.buffering_calls == 2);
+    assert(!hw.mounted && !hw.submits);
+    const unsigned notifications = hw.notifications;
+    const char health[] = "Health uptime_s=42 heap=13977339 min_heap=13936888 queue=0 locked=0\n";
+    assert(fputs(health, stdout) >= 0);
+    ssize_t count = pread(fileno(out), observed, sizeof(observed), 0);
+    assert(count == (ssize_t)(sizeof(health) - 1) && memcmp(observed, health, (size_t)count) == 0);
+    const char fault[] = "diagnostic fault\n";
+    assert(fputs(fault, stderr) >= 0);
+    count = pread(fileno(err), observed, sizeof(observed), 0);
+    assert(count == (ssize_t)(sizeof(fault) - 1) && memcmp(observed, fault, (size_t)count) == 0);
+    assert(fputs("pending", stdout) >= 0);
+    assert(pread(fileno(out), observed, sizeof(observed), 0) == (ssize_t)(sizeof(health) - 1));
+    assert(fputc('\n', stdout) == '\n');
+    assert(pread(fileno(out), observed, sizeof(observed), 0) == (ssize_t)(sizeof(health) - 1 + 8));
+    assert(usb_console_start() == ESP_OK && hw.buffering_calls == 2); /* No runtime policy reset. */
+    assert(hw.notifications == notifications && !hw.submits);
+    stdout = original_out;
+    stderr = original_err;
+    assert(fclose(out) == 0 && fclose(err) == 0);
+}
+
 static uint16_t little_word(const uint8_t *data)
 {
     return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
@@ -610,17 +678,21 @@ static uint16_t little_word(const uint8_t *data)
 static void verify_configuration(const uint8_t *descriptor, bool high_speed)
 {
     assert(descriptor && descriptor[0] == 9 && descriptor[1] == TUSB_DESC_CONFIGURATION);
-    assert(little_word(descriptor + 2) == 100 && descriptor[4] == 3);
+    assert(little_word(descriptor + 2) == 309 && descriptor[4] == 6);
     assert(descriptor[7] == 0x80); /* No remote wakeup or fabricated self-power capability. */
-    unsigned interfaces = 0, endpoints = 0, cdc = 0, hid = 0;
+    unsigned interfaces = 0, endpoints = 0, cdc = 0, hid = 0, audio = 0;
     bool addresses[256] = {0};
-    for (size_t offset = 9; offset < 100;) {
+    for (size_t offset = 9; offset < 309;) {
         const uint8_t *item = descriptor + offset;
-        assert(item[0] >= 2 && offset + item[0] <= 100);
+        assert(item[0] >= 2 && offset + item[0] <= 309);
         if (item[1] == TUSB_DESC_INTERFACE) {
             ++interfaces;
             if (item[5] == TUSB_CLASS_CDC || item[5] == TUSB_CLASS_CDC_DATA) {
                 ++cdc;
+            } else if (item[5] == TUSB_CLASS_AUDIO) {
+                assert(item[2] >= 3 && item[2] <= 5 && item[7] == AUDIO_INT_PROTOCOL_CODE_V2);
+                assert(item[3] <= 1);
+                ++audio;
             } else {
                 assert(item[2] == 2 && item[5] == TUSB_CLASS_HID && item[6] == 0 && item[7] == 0);
                 ++hid;
@@ -637,14 +709,21 @@ static void verify_configuration(const uint8_t *descriptor, bool high_speed)
             } else if (item[2] == 0x83) {
                 assert(item[3] == TUSB_XFER_INTERRUPT && little_word(item + 4) == 16);
                 assert(item[6] == (high_speed ? 4 : 1));
+            } else if (item[2] == 0x04 || item[2] == 0x84) {
+                assert(item[3] == (TUSB_XFER_ISOCHRONOUS | TUSB_ISO_EP_ATT_ASYNCHRONOUS));
+                assert(little_word(item + 4) == 98 && item[6] == (high_speed ? 4 : 1));
+            } else if (item[2] == 0x85) {
+                assert(item[3] == (TUSB_XFER_ISOCHRONOUS | TUSB_ISO_EP_ATT_EXPLICIT_FB));
+                assert(little_word(item + 4) == 4 && item[6] == (high_speed ? 4 : 1));
             } else {
                 assert(item[2] == 0x81 && item[3] == TUSB_XFER_INTERRUPT);
             }
         }
         offset += item[0];
     }
-    assert(interfaces == 3 && cdc == 2 && hid == 1 && endpoints == 4);
+    assert(interfaces == 8 && cdc == 2 && hid == 1 && audio == 5 && endpoints == 7);
     assert(addresses[0x02] && addresses[0x81] && addresses[0x82] && addresses[0x83]);
+    assert(addresses[0x04] && addresses[0x84] && addresses[0x85]);
 }
 
 static void test_real_tinyusb_descriptor_macros_and_long_lifecycle(void)
@@ -668,6 +747,7 @@ static void test_real_tinyusb_descriptor_macros_and_long_lifecycle(void)
 
 int main(void)
 {
+    test_console_completed_lines_flush_without_waiting_for_another_burst();
     test_admission_submission_and_completion();
     test_invalid_reports_and_control_bounds();
     test_keyboard_led_output_and_report_protocol();

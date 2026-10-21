@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "board_port.h"
+#include "board_display_transfer.h"
 
 #include <limits.h>
 #include <math.h>
@@ -70,6 +71,8 @@ static void (*s_lock_callback)(void);
 static board_button_event_callback_t s_button_event_callback;
 static TaskHandle_t s_haptic_task;
 static haptics_t s_haptics;
+static board_haptic_status_t s_haptic_status = {.error = ESP_ERR_INVALID_STATE};
+static bool s_haptic_diagnostic_pending, s_haptic_cancel_requested;
 static TaskHandle_t s_imu_task;
 static board_imu_sample_t s_imu_sample;
 static bool s_imu_sample_valid;
@@ -180,6 +183,89 @@ static void publish_haptics(void)
     portEXIT_CRITICAL(&s_status_mux);
 }
 
+static haptics_event_t haptic_event(board_feedback_t pattern)
+{
+    switch (pattern) {
+    case BOARD_FEEDBACK_MODE: return HAPTICS_MODE;
+    case BOARD_FEEDBACK_LOCK: return HAPTICS_LOCK;
+    case BOARD_FEEDBACK_ERROR: return HAPTICS_ERROR;
+    default: return HAPTICS_CONFIRM;
+    }
+}
+
+static void haptics_service(uint64_t *applied_generation)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    bool enabled = s_dispatch.enabled;
+    uint64_t generation = s_dispatch.generation;
+    bool pending = s_pending;
+    haptics_event_t event = s_pending_event;
+    uint64_t pending_ms = s_pending_ms;
+    bool diagnostic = s_haptic_diagnostic_pending;
+    bool cancelled = s_haptic_cancel_requested;
+    board_haptic_status_t request = s_haptic_status;
+    s_pending = false;
+    s_haptic_diagnostic_pending = false;
+    s_haptic_cancel_requested = false;
+    portEXIT_CRITICAL(&s_status_mux);
+    uint64_t time_ms = now_ms();
+    s_dispatch_generation = generation;
+    if (generation != *applied_generation || enabled != haptics_enabled(&s_haptics)) {
+        (void)haptics_set_enabled(&s_haptics, false, time_ms);
+        (void)haptics_set_enabled(&s_haptics, enabled, time_ms);
+        *applied_generation = generation;
+    }
+    if (diagnostic) {
+        haptics_result_t result;
+        if (cancelled) result = HAPTICS_CANCELLED;
+        else if (request.operation == BOARD_HAPTIC_RECOVER) result = haptics_recover(&s_haptics, time_ms);
+        else if (!enabled || generation != request.generation || time_ms < request.requested_ms ||
+            time_ms - request.requested_ms > HAPTICS_MAX_AGE_MS) result = HAPTICS_SUPPRESSED;
+        else result = haptics_request(&s_haptics, haptic_event(request.pattern), time_ms);
+        portENTER_CRITICAL(&s_status_mux);
+        if (s_haptic_status.request_id == request.request_id) {
+            cancelled = cancelled || s_haptic_cancel_requested;
+            s_haptic_status.error = result == HAPTICS_OK || result == HAPTICS_SUPPRESSED ||
+                result == HAPTICS_DISABLED || result == HAPTICS_CANCELLED ? ESP_OK : ESP_FAIL;
+            s_haptic_status.off_confirmed = !s_motor_active && s_motor_error == ESP_OK;
+            if (result == HAPTICS_OK && request.operation == BOARD_HAPTIC_RECOVER) {
+                s_haptic_status.state = s_haptic_status.off_confirmed ? BOARD_HAPTIC_COMPLETED : BOARD_HAPTIC_UNCERTAIN;
+                s_haptic_status.finished_ms = time_ms;
+            } else if (result == HAPTICS_OK) {
+                s_haptic_status.state = BOARD_HAPTIC_ACTIVE;
+                s_haptic_status.on_confirmed = true;
+                s_haptic_status.started_ms = time_ms;
+            } else {
+                s_haptic_status.state = cancelled && s_haptic_status.off_confirmed ? BOARD_HAPTIC_CANCELLED :
+                    result == HAPTICS_SUPPRESSED || result == HAPTICS_DISABLED || result == HAPTICS_CANCELLED ?
+                    BOARD_HAPTIC_NO_EFFECT : s_motor_active ? BOARD_HAPTIC_UNCERTAIN : BOARD_HAPTIC_FAILED;
+                s_haptic_status.finished_ms = time_ms;
+            }
+        }
+        portEXIT_CRITICAL(&s_status_mux);
+    } else if (pending && enabled && time_ms >= pending_ms && time_ms - pending_ms <= HAPTICS_MAX_AGE_MS) {
+        (void)haptics_request(&s_haptics, event, time_ms);
+    }
+    (void)haptics_poll(&s_haptics, time_ms);
+    portENTER_CRITICAL(&s_status_mux);
+    if (s_haptic_status.state == BOARD_HAPTIC_ACTIVE) {
+        s_haptic_status.off_confirmed = !s_motor_active && s_motor_error == ESP_OK;
+        if (!haptics_available(&s_haptics)) {
+            s_haptic_status.state = s_motor_active ? BOARD_HAPTIC_UNCERTAIN : BOARD_HAPTIC_FAILED;
+            s_haptic_status.error = s_motor_error == ESP_OK ? ESP_FAIL : s_motor_error;
+            s_haptic_status.finished_ms = time_ms;
+        } else if (s_haptic_status.generation != s_dispatch.generation || !haptics_enabled(&s_haptics)) {
+            s_haptic_status.state = s_haptic_status.off_confirmed ? BOARD_HAPTIC_CANCELLED : BOARD_HAPTIC_UNCERTAIN;
+            s_haptic_status.finished_ms = time_ms;
+        } else if (!s_haptics.playing && s_haptic_status.off_confirmed) {
+            s_haptic_status.state = BOARD_HAPTIC_COMPLETED;
+            s_haptic_status.finished_ms = time_ms;
+        }
+    }
+    portEXIT_CRITICAL(&s_status_mux);
+    publish_haptics();
+}
+
 static void haptics_worker(void *argument)
 {
     (void)argument;
@@ -189,38 +275,7 @@ static void haptics_worker(void *argument)
         poll_ticks = 1;
     }
     for (;;) {
-        bool enabled;
-        bool pending;
-        haptics_event_t event;
-        uint64_t generation;
-        uint64_t pending_ms;
-        portENTER_CRITICAL(&s_status_mux);
-        enabled = s_dispatch.enabled;
-        generation = s_dispatch.generation;
-        pending = s_pending;
-        event = s_pending_event;
-        pending_ms = s_pending_ms;
-        s_pending = false;
-        portEXIT_CRITICAL(&s_status_mux);
-
-        const uint64_t time_ms = now_ms();
-        s_dispatch_generation = generation;
-        if (generation != applied_generation || enabled != haptics_enabled(&s_haptics)) {
-            /* Even a disable/enable pair between worker iterations cancels the
-             * old pattern. The mailbox was cleared by each control change. */
-            (void)haptics_set_enabled(&s_haptics, false, time_ms);
-            (void)haptics_set_enabled(&s_haptics, enabled, time_ms);
-            applied_generation = generation;
-        }
-        if (pending && enabled) {
-            /* Every nonzero phase is checked atomically with its driver write,
-             * including a second error pulse generated by haptics_poll(). */
-            if (time_ms >= pending_ms && time_ms - pending_ms <= HAPTICS_MAX_AGE_MS) {
-                (void)haptics_request(&s_haptics, event, time_ms);
-            }
-        }
-        (void)haptics_poll(&s_haptics, time_ms);
-        publish_haptics();
+        haptics_service(&applied_generation);
         /* A control notification wakes immediately; the 10 ms deadline also
          * advances pulse phases without occupying the HID/coordinator task. */
         (void)ulTaskNotifyTake(pdTRUE, poll_ticks);
@@ -792,6 +847,15 @@ esp_err_t board_init(void (*lock_callback)(void))
     }
     bsp_display_config_t display_config = BSP_DISPLAY_DEFAULT_CONFIG();
     display_config.enable_touch = true;
+    esp_lcd_panel_handle_t panel = NULL;
+    result = bsp_display_new(&display_config, &panel);
+    if (result != ESP_OK) return result;
+    /* Capture the adapter's exact callback at registration time. Installing
+     * after bsp_display_start would already have lost its private context. */
+    esp_err_t observer_result = board_display_transfer_install(panel, bsp_display_get_panel_io());
+    if (observer_result != ESP_OK) {
+        ESP_LOGW(TAG, "Display transfer observer unavailable: %s", esp_err_to_name(observer_result));
+    }
     s_display = bsp_display_start_with_config(&display_config);
     s_caps.display = s_display != NULL;
     s_caps.touch = bsp_display_get_input_dev() != NULL;
@@ -876,6 +940,14 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
             s_caps.imu = false;
         } else {
             *sample = s_imu_sample;
+            /* The factory firmware documents a 90-degree clockwise sensor
+             * mounting relative to the display. Rotate both vectors with the
+             * same proper rotation; keep acquisition and diagnostics raw.
+             * Provenance and deferred physical checks: tests/board_port/README.md. */
+            sample->x_dps = -s_imu_sample.y_dps;
+            sample->y_dps = s_imu_sample.x_dps;
+            sample->x_g = -s_imu_sample.y_g;
+            sample->y_g = s_imu_sample.x_g;
         }
     }
     s_imu_status.read_seen = true;
@@ -1017,7 +1089,8 @@ void board_haptic_feedback(board_feedback_t event)
     bool accepted = false;
     const uint64_t time_ms = now_ms();
     portENTER_CRITICAL(&s_status_mux);
-    if (s_caps.haptics && s_dispatch.enabled && !s_pending) {
+    if (s_caps.haptics && s_dispatch.enabled && !s_pending && !s_haptic_diagnostic_pending &&
+        s_haptic_status.state != BOARD_HAPTIC_PENDING && s_haptic_status.state != BOARD_HAPTIC_ACTIVE) {
         s_pending_event = haptic;
         s_pending_ms = time_ms;
         s_pending = true;
@@ -1035,4 +1108,51 @@ bool board_haptics_active(void)
     const bool active = s_motor_active || s_pending;
     portEXIT_CRITICAL(&s_status_mux);
     return active;
+}
+
+esp_err_t board_haptics_request(board_haptic_operation_t operation, board_feedback_t pattern, uint64_t *request_id)
+{
+    if (!request_id || (operation != BOARD_HAPTIC_TEST && operation != BOARD_HAPTIC_RECOVER) ||
+        pattern < BOARD_FEEDBACK_CONFIRM || pattern > BOARD_FEEDBACK_ERROR) return ESP_ERR_INVALID_ARG;
+    uint64_t time_ms = now_ms();
+    portENTER_CRITICAL(&s_status_mux);
+    if (!s_haptic_task || s_dispatch.exhausted || s_haptic_status.request_id == UINT64_MAX ||
+        s_haptic_diagnostic_pending || s_haptic_status.state == BOARD_HAPTIC_PENDING ||
+        s_haptic_status.state == BOARD_HAPTIC_ACTIVE || s_pending ||
+        (operation == BOARD_HAPTIC_TEST && (!s_caps.haptics || !s_dispatch.enabled))) {
+        portEXIT_CRITICAL(&s_status_mux); return ESP_ERR_INVALID_STATE;
+    }
+    if (operation == BOARD_HAPTIC_RECOVER) (void)haptics_dispatch_enable_locked(&s_dispatch, false);
+    s_haptic_status = (board_haptic_status_t){.request_id = s_haptic_status.request_id + 1,
+        .operation = operation, .pattern = pattern, .state = BOARD_HAPTIC_PENDING,
+        .generation = s_dispatch.generation, .requested_ms = time_ms};
+    *request_id = s_haptic_status.request_id;
+    s_haptic_diagnostic_pending = true;
+    portEXIT_CRITICAL(&s_status_mux);
+    xTaskNotifyGive(s_haptic_task);
+    return ESP_OK;
+}
+
+board_haptic_status_t board_haptics_status(void)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    board_haptic_status_t status = s_haptic_status;
+    status.worker_available = s_haptic_task != NULL && !s_dispatch.exhausted;
+    portEXIT_CRITICAL(&s_status_mux);
+    return status;
+}
+
+esp_err_t board_haptics_cancel(uint64_t request_id)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    if (!s_haptic_task || s_haptic_status.request_id != request_id ||
+        (s_haptic_status.state != BOARD_HAPTIC_PENDING && s_haptic_status.state != BOARD_HAPTIC_ACTIVE)) {
+        portEXIT_CRITICAL(&s_status_mux); return ESP_ERR_INVALID_STATE;
+    }
+    bool enabled = s_dispatch.enabled;
+    (void)haptics_dispatch_enable_locked(&s_dispatch, false);
+    if (enabled) (void)haptics_dispatch_enable_locked(&s_dispatch, true);
+    s_haptic_cancel_requested = true;
+    portEXIT_CRITICAL(&s_status_mux);
+    xTaskNotifyGive(s_haptic_task); return ESP_OK;
 }

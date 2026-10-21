@@ -2,11 +2,27 @@
 
 Run `python3 tests/ble_hid/run.py` from the repository root. A native C11 compiler and AddressSanitizer/UndefinedBehaviorSanitizer are required; ESP-IDF and a device are not required.
 
-The suite compiles production `ble_hid.c`, its internal `ble_hid_store.h` helper and the production portable HID engine. The only substitutes are Bluetooth/controller, NVS, PSA hashing, clock, task and queue boundaries in `stubs/`. The PSA substitute is a deterministic identity test double, not a SHA implementation. The target uses the SDK's actual PSA SHA-256 implementation. Native checks establish state behavior; the firmware build independently checks actual pinned SDK headers and libraries.
+The suite compiles production `ble_hid.c`, its internal `ble_hid_store.h` helper, the production portable HID engine and the shared device-settings validator. The only substitutes are Bluetooth/controller, NVS, PSA hashing, clock, task and queue boundaries in `stubs/`. The PSA substitute is a deterministic identity test double, not a SHA implementation. The target uses the SDK's actual PSA SHA-256 implementation. Native checks establish state behavior; the firmware build independently checks actual pinned SDK headers and libraries.
+
+The production `ble_hid_store.c` preference serializer is also linked. Its
+independent NVS namespace is tested for acknowledged commit/readback, reboot
+replay and order, same-address key replacement, removed selected bonds, stale
+revisions, copied inputs, admission during commit, all storage failure stages,
+commit errors with/without persistence, malformed CRC and future versions.
+No case treats missing/failed storage as an empty successful preference record.
+Single-bond removal tests use the real worker/API and require exact fingerprint
+and revision, one SDK address removal, preservation of unrelated bonds/CCCDs,
+verified absence, pending cancellation, late/foreign completion isolation and
+uncertainty after timeout/partial cleanup. The quiet forget-all variant never
+opens pairing; an acknowledged empty preference record also prevents automatic
+first-boot pairing behavior on the reset device's next boot.
 
 ## Advertising initialization
 
 The structured Bluedroid advertising API in pinned `esp_gap_ble_api.c` accepts service UUID input in 128-bit entries, even for assigned 16-bit services. The adapter supplies the Bluetooth base UUID for HID 0x1812 in little-endian order; the SDK compresses it to a 16-bit service UUID on air. The advertising payload is 24 bytes including name, flags and appearance.
+
+BTDM builds omit the BR/EDR-not-supported flag; BLE-only builds retain it.
+The test asserts both configurations independently without changing name size.
 
 The boundary substitute enforces the pinned API's `service_uuid_len % 16 == 0` contract. A production-initialization regression passes the old invalid two-byte length and requires `ESP_ERR_INVALID_ARG`, failed status and no app registration. A separate positive case checks all UUID bytes against an independent expected HID identity and drives registration, table creation, service start, advertisement configuration, scan-response configuration and advertising-start completion. Advertising cannot start before all prerequisites complete.
 
@@ -67,6 +83,22 @@ Synchronous initialization records the failing step, such as controller initiali
 Normal admission/API rejection, explicit disconnect, optional RSSI failures and ignored stale link jobs do not consume the record. A current SDK notification submission error is recorded even when existing recovery permits later successful reports. Deadline, storage, queue and actual setup faults retain their existing control behavior; diagnostics do not open/close gates, cancel actions, clear failures or retry work. This permits the parent health loop to print the original cause after USB CDC attaches without requiring an early serial capture.
 
 Regressions cover NVS/controller/worker initialization failures, an asynchronous registration failure before initialization returns, deferred attribute-table failure after initialization, all advertising failure completions, raw authentication status, notification failure/recovery and later failure, retained deadline evidence beyond the 32-bit tick range, repeated initialization, simulated reboot clearing, ignored obsolete jobs and normal nonfault operations. Repeated accessor calls preserve the complete control state, and 100000 healthy lifecycles perform zero diagnostic clock reads. The clock substitute models the SDK monotonic boundary; target timing and actual memory exhaustion still require device evidence. No external-stack or Bluetooth memory-debug configuration is enabled by this change.
+
+## Configurable local Bluetooth name
+
+The adapter uses `device_settings_bluetooth_name_valid()` and the shared default/bound. A name is 1 through 18 UTF-8 bytes, excludes NUL/C0/C1 controls, malformed/overlong UTF-8 and surrogates, and has no outer ASCII space. Inputs have an explicit byte length and need not be terminated. The maximum complete primary advertisement is 31 bytes: flags 3, appearance 4, compressed HID UUID 4, name header 2 and name 18. No truncation or split UTF-8 sequence is used.
+
+`ble_hid_name_request(utf8, length, &request_id)` copies one bounded request without calling Bluetooth or NVS. It accepts a pre-init request so initialization uses the stored name directly. The parent should submit its validated stored setting before `ble_hid_init()`. An accepted name cannot be replaced while pending; rejected input, partial initialization, forgetting, adapter fault and uncertain previous work leave the request and caller's output ID unchanged. A verified identical name completes without SDK or advertising churn.
+
+`ble_hid_name_snapshot()` is a cached value copy exposing the request ID, requested name, verified active name/availability, state, primary error/raw SDK status and rollback result. The parent owns settings persistence and must save only the matching `APPLIED` request with `active_known=true`. `active_known` can describe the verified old value while an update is still pending; neither that flag nor a successful submission alone confirms the requested apply. No name is automatically logged or written to NVS by this adapter.
+
+The worker serializes stop/read/set/read/advertising/scan-response/restart. Existing startup completions retain their owners. The pinned setter has no completion event, so the worker uses `esp_ble_gap_get_device_name()` and `ESP_GAP_BLE_GET_DEV_NAME_COMPLETE_EVT` to verify its actual result; `ESP_OK` from the setter is not treated as apply success. SDK callback data is copied/checked during its valid lifetime. Each advertising payload is configured and acknowledged before the next step. A disconnected update completes after advertising restart; a current HID host stays connected, with updated payloads prepared for its eventual normal reconnect. Connection events prove when legacy advertising already stopped, even if the explicit stop/start completion arrives later.
+
+Reported failures restore the actual previously read bounded name, verify it, reconfigure both payloads and restore advertising when disconnected. `FAILED` with `rollback_confirmed=true` proves that restoration; it preserves the primary error. A failure before changing the name needs no rollback. Apply and rollback each have an independent five-second deadline. A missing callback or failed rollback becomes `UNCERTAIN`, retains truthful availability/error state, and blocks further name requests and advertising restarts until reboot. Its callback owner remains quarantined; a late callback can drain it but cannot complete another request. An existing HID connection remains usable through name failure/timeout. Normal module faults retain their existing teardown behavior.
+
+Renaming never changes local address/identity, bonds, security policy, HID generations or subscription records, and it never sends a HID release or report. Host display caches are outside this adapter's control and may retain an old name until refreshed. Device tests are still required to observe the actual on-air payload and host cache behavior.
+
+Regressions cover bounded/shared UTF-8 validation, caller-buffer ownership, pre-init stored names, startup callback isolation, request correlation/no-op, full-length UTF-8 advertisements, live HID input during apply, unchanged bond fingerprints/subscriptions/NVS counts, restoration of a previous non-default name, readback mismatch, stop/read/payload/restart submission and callback failures, rollback failure, timeout/late callbacks and connect/disconnect races during stop/restart. The native suite exercises both configured bond capacities with the real shared validator.
 
 ## Evidence and qualification
 

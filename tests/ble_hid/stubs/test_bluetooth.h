@@ -40,6 +40,7 @@
 #define ESP_BLE_ADV_FLAG_BREDR_NOT_SPT 4
 #define ADV_TYPE_IND 0
 #define BLE_ADDR_TYPE_PUBLIC 0
+#define BLE_ADDR_TYPE_RANDOM 1
 #define ADV_CHNL_ALL 7
 #define ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY 0
 #define ESP_BT_STATUS_SUCCESS 0
@@ -140,9 +141,11 @@ typedef enum {
     ESP_GAP_BLE_SEC_REQ_EVT = 10,
     ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT = 17,
     ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT = 23,
-    ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT = 27
+    ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT = 27,
+    ESP_GAP_BLE_GET_DEV_NAME_COMPLETE_EVT = 60
 } esp_gap_ble_cb_event_t;
 typedef union {
+    struct { int status; char *name; } get_dev_name_cmpl;
     struct { int status; } adv_data_cmpl, scan_rsp_data_cmpl, adv_start_cmpl, adv_stop_cmpl;
     struct { int status; int8_t rssi; esp_bd_addr_t remote_addr; } read_rssi_cmpl;
     struct { int status; esp_bd_addr_t bd_addr; } remove_bond_dev_cmpl;
@@ -173,6 +176,7 @@ typedef struct {
 } esp_ble_adv_params_t;
 
 esp_err_t esp_ble_gatts_register_callback(esp_gatts_cb_t callback);
+esp_err_t esp_ble_gap_get_device_name(void);
 esp_err_t esp_ble_gatts_app_register(uint16_t app_id);
 esp_err_t esp_ble_gatts_create_attr_tab(const esp_gatts_attr_db_t *, esp_gatt_if_t, uint16_t, uint8_t);
 esp_err_t esp_ble_gatts_start_service(uint16_t handle);

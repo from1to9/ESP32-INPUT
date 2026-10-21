@@ -2,6 +2,24 @@
 
 Scope: Mouse/Keyboard/Audio, Bluetooth/USB input, settings and their safety boundaries, reviewed 2026-10-21. The browser prototype defines the original interaction intent; the later [focused mode workspace revision](requirements.md#focused-mode-workspace-revision) explicitly replaces persistent navigation with core controls and an on-demand menu. A diagnostic transport screen alone does not satisfy P0. Product acceptance remains defined in [requirements](requirements.md), [interaction](interaction.md) and [validation](validation.md), with the explicit later revision governing changed navigation. This matrix separates executable evidence from planned checks; it does not assign a coverage percentage.
 
+## Combined source delivery coverage
+
+The current aggregate runner includes portable input, multitouch, the single board
+touch reader, BLE/USB HID, BT/UAC audio, codec/display/recording HALs, settings,
+Wi-Fi profiles, presentation, boot UI, audio engine/store, spoken letters, media
+runtime/controls, typed control protocol, command bridge, remote input/device/media,
+restart worker, trust/clock/update runtime and native connection controls. Tests
+exercise production code with explicit SDK boundaries; accepted requests and
+asynchronous acknowledgements remain distinct. The separate native LVGL suite
+checks actual rendering, coordinate hits, immutable review identity and bounded
+navigation/idle memory. Current delivery results belong in [validation](validation.md);
+the numbered checkpoints below retain historical evidence.
+
+The deferred device matrix covers physical IMU/touch accuracy, RF coexistence,
+real host enumeration and audio, storage power interruption, partition migration,
+OTA rollback and sustained powered operation. No host test substitutes for those
+results, and no physical device is accessed during the source-only delivery.
+
 ## Evidence levels and commands
 
 - **Host-tested:** portable production code, production adapter code with substituted SDK boundaries, descriptor bytes or offline capture tooling passed an executable check. This does not prove real SDK callbacks, radio delivery or target UI effects.

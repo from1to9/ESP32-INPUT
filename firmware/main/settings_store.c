@@ -88,7 +88,10 @@ esp_err_t settings_store_init(device_settings_t *settings)
         if (device_settings_decode(record, length, settings) == DEVICE_SETTINGS_OK) {
             s_status.loaded = true;
             s_saved_known = true;
-            memcpy(s_saved, record, sizeof(s_saved));
+            /* Cache the known logical value canonically, not legacy padding.
+             * This does not rewrite NVS: equal requests/return-to-old-value
+             * remain no-ops even when the loaded record was schema 1, 2 or 3. */
+            (void)device_settings_encode(settings, s_saved, sizeof(s_saved));
         } else {
             error = ESP_ERR_INVALID_ARG;
         }

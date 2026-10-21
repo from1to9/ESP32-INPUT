@@ -1,9 +1,33 @@
 # Delivery progress
 
-Updated: 2026-10-21. Each completed stage is published promptly after its
-applicable checks and independent code review. Work in progress is not a tested
-firmware release. Source review, host tests, target builds, device checks and
-host compatibility are separate evidence levels.
+Updated: 2026-10-21. The current delivery combines the accepted modules into
+one reviewed source commit after local validation. Installation and device
+testing are explicitly deferred. Earlier checkpoints used separate publications;
+they do not change this combined delivery boundary. Source review, host tests,
+target builds, device checks and host compatibility are separate evidence levels.
+
+## Current combined source
+
+- Mouse and keyboard share BLE/USB ownership, including motion, touch gestures,
+  the nine-cell keyboard, common keys and explicit spoken-letter confirmation.
+- HFP/A2DP, USB audio, local recording and speech share one audio manager and
+  codec owner. Capability, consent, format and transport readiness remain
+  separate conditions. Recording uses explicitly prepared encrypted NOR space;
+  unknown external NAND is preserved.
+- Existing-LAN Wi-Fi, saved network priorities, authenticated HTTPS/WebSocket
+  control, the MCP companion and signed inactive-slot update staging are
+  integrated. Native settings and remote commands use the same owning services.
+- Compact Light/Dark workspaces, the startup logo, connection management,
+  immutable local approvals, recording indicators and configurable haptics are
+  implemented in the production UI.
+- The complete typed API catalog includes conditional and reserved operations.
+  A listed operation is not a promise of current hardware support; runtime
+  capability and per-operation rejection remain authoritative.
+
+The [combined checklist](delivery-checklist.md) defines the source gate.
+[Validation](validation.md) records local evidence and distinguishes it from
+the deferred physical compatibility and continuous-operation checks. Historical
+checkpoint statements below describe their original snapshots.
 
 ## Checkpoint 1: revised product contract
 
@@ -260,6 +284,28 @@ two-buffer/two-window profile and bound TCP out-of-order retention. The failed
 capture remains failed; corrected-image device evidence is still pending.
 See [validation](validation.md#imu-startup-diagnosis-and-configuration-reproducibility)
 for the exact image and evidence boundaries.
+
+The correction was published at `892805a4c37777ee22518de4517bf6974ed22222`
+and flashed with verification. Live IMU sampling and calibration recovered;
+the user can enable Motion and move the pointer. Pointer speed/directions
+remain unacceptable, while the touchpad works. Automatic grip adaptation and
+configurable speed/directions are the next motion refinement. The capture
+still fails on an incomplete final health line; see the detailed evidence.
+
+## Checkpoint 14: native station setup and input controls
+
+The implementation provides normal on-device Wi-Fi scan/select/password/join
+to an existing LAN. It does not require the computer to join a device hotspot.
+The recovery hotspot remains a secondary, explicit action. Web/API, MCP and OTA
+services are still planned and are shown as unavailable.
+
+Common host keys, touchpad tap/double-tap/drag, a persistent tap-to-click switch,
+local Bluetooth-name editing and an LVGL-owned presenter are integrated. The
+UI preserves its compact three-mode layout and one-panel resource boundary.
+Native validation passed 276 scenes, 60 idle/resource cases and 2,000 total
+panel cycles; the coordinator passed 108 cases. Independent review and exact
+device deployment remain delivery gates. The physical acceptance of these new
+controls must not be inferred from the earlier compact-UI navigation test.
 
 ## Next checkpoints
 

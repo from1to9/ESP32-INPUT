@@ -67,8 +67,14 @@ bool input_can_emit(const input_state_t *s, uint64_t epoch,
 
 bool input_set_gyro(input_state_t *s, bool enabled)
 {
+    return input_set_gyro_owned(s, INPUT_LOCAL, enabled);
+}
+
+bool input_set_gyro_owned(input_state_t *s, input_owner_t source, bool enabled)
+{
+    if (source != INPUT_LOCAL && source != INPUT_REMOTE) return false;
     if (!enabled) { s->gyro_enabled = false; return true; }
-    if (!input_can_emit(s, s->epoch, INPUT_LOCAL, INPUT_MOUSE)) return false;
+    if (!input_can_emit(s, s->epoch, source, INPUT_MOUSE)) return false;
     s->gyro_enabled = true;
     return true;
 }

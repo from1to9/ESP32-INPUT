@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Exercise real companion code with substituted Keychain/HTTP/serial boundaries."""
+import asyncio
+import hashlib
+import json
+from pathlib import Path
+import stat
+import struct
+import sys
+import tempfile
+import time
+import unittest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "bridge"))
+from commission import create_package, send_package
+from control_bridge import CATALOG_DIGEST, DeviceSession, TypedValidator, TOOLS, FORMAT
+from secure_transport import BridgeError, PinnedHTTPS
+from sign_release import sign_release
+
+class FakeKeychain:
+    def __init__(self): self.values = {}
+    def put(self, service, account, secret): self.values[service, account] = secret
+    def get(self, service, account): return self.values[service, account]
+
+class FakeHTTP:
+    def __init__(self): self.commands = []; self.fail_once = False
+    def request(self, method, path, body=None, token=None):
+        if path == "/api/v1/sessions":
+            return dict(http_status=200, session_token="3"*64, session_id="4"*32,
+                        request_prefix="5"*16, boot_id="6"*32, next_seq=1)
+        if path == "/api/v1/capabilities": return dict(http_status=200, catalog_sha256=CATALOG_DIGEST)
+        if path == "/api/v1/sessions/current": return dict(http_status=200, authenticated=True, state="completed")
+        if path == "/api/v1/state":
+            return dict(http_status=200, protocol={"boot_id": "6"*32, "now_ms": "1000", "lease_active": True, "lease_id": "7"*32})
+        if path == "/api/v1/commands":
+            self.commands.append(json.loads(json.dumps(body)))
+            if self.fail_once:
+                self.fail_once = False
+                raise BridgeError("Synthetic unknown connection outcome")
+            return dict(http_status=202, state="accepted", command_key="100", next_seq=body["seq"]+1)
+        raise AssertionError(path)
+
+class FakeSerial:
+    def __init__(self): self.responses = []; self.received = bytearray(); self.expected = 0; self.digest = ""; self.ended = False
+    def write(self, line):
+        parts = line.strip().split()
+        assert parts[0] == b"CP1"
+        if parts[1] == b"CHALLENGE": self.responses.append(b"CP1 TOKEN " + b"1"*64 + b"\n")
+        elif parts[1] == b"BEGIN":
+            assert parts[2] == b"1"*64
+            self.expected, self.digest = int(parts[3]), parts[4].decode()
+            self.responses.append(b"CP1 READY\n")
+        elif parts[1] == b"DATA":
+            assert int(parts[2]) == len(self.received)
+            self.received.extend(bytes.fromhex(parts[3].decode()))
+            self.responses.append(b"CP1 ACK\n")
+        elif parts[1] == b"END":
+            assert len(self.received) == self.expected and hashlib.sha256(self.received).hexdigest() == self.digest
+            self.ended = True
+            self.responses.append(b"CP1 PENDING_REVIEW\n")
+        else: raise AssertionError("USB cannot approve Review")
+    def readline(self, limit): return self.responses.pop(0)
+
+class CompanionTests(unittest.TestCase):
+    def test_private_enrollment_and_protocol(self):
+        with tempfile.TemporaryDirectory(prefix="control-private-") as directory:
+            keychain = FakeKeychain(); destination = Path(directory) / "owner"
+            summary = create_package(destination, "device.test", 443, ["view", "audio.capture"],
+                ["clock.example"], [{"expires_unix_seconds": str(int(time.time())+3600), "source": "local_microphone", "purpose": "live_capture", "maximum_bytes": "8589934592", "maximum_duration_seconds": 28800, "maximum_retention_seconds": 0, "live_destination": True, "file_destination": False, "owner_download": False}], keychain)
+            package = (destination / "device-package.json").read_bytes(); decoded = json.loads(package)
+            profile = json.loads((destination / "client-profile.json").read_bytes())
+            secret = next(iter(keychain.values.values()))
+            self.assertNotIn(secret.encode(), package)
+            self.assertEqual(hashlib.sha256(bytes.fromhex(secret)).hexdigest(), decoded["principals"][0]["credential_sha256"])
+            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE((destination / "device-package.json").stat().st_mode), 0o600)
+            self.assertFalse((destination / "client-secret-backup.json").exists())
+            certificate = x509.load_pem_x509_certificate(profile["certificate_pem"].encode())
+            self.assertEqual(certificate.fingerprint(hashes.SHA256()).hex(), profile["certificate_der_sha256"])
+            PinnedHTTPS(profile)  # Constructs real SSL verification with explicit CA/hostname/pin.
+            changed = dict(profile, certificate_der_sha256="0"*64)
+            with self.assertRaises(BridgeError): PinnedHTTPS(changed)
+            serial = FakeSerial(); self.assertEqual(send_package(serial, package), "pending_local_review")
+            self.assertEqual(bytes(serial.received), package); self.assertTrue(serial.ended)
+            self.assertEqual(summary["capture_grants"], [decoded["capture_grants"][0]["id"]])
+            http = FakeHTTP(); session = DeviceSession(profile, http, keychain)
+            http.fail_once = True
+            arguments = {"context": {"management_generation": "1", "resource_revision": "1"}, "args": {}}
+            with self.assertRaises(BridgeError): session.invoke("wifi_scan_start", arguments)
+            with self.assertRaises(BridgeError): session.invoke("wifi_scan_start", arguments)
+            result = session.invoke("bridge_retry_pending", {})
+            self.assertEqual(http.commands[0], http.commands[1]); self.assertEqual(result["state"], "accepted")
+            self.assertNotIn("lease_id", http.commands[0])  # Management never borrows HID lease fields.
+            self.assertEqual(session.sequence, 2)
+            with self.assertRaises(BridgeError): session.invoke("wifi_join", {"context": {}, "args": {"password": "do-not-echo"}})
+            self.assertEqual(len(http.commands), 2)
+            session.close()
+
+    def test_exact_decimal_schema(self):
+        schema = next(tool["inputSchema"] for tool in TOOLS if tool["name"] == "config_stage")
+        for value in (.25, 4.01, 4.02, 100):
+            TypedValidator(schema).validate({"context": {}, "args": {"patch": {"pointer.gain_x_hid_per_degree": value}}})
+        from jsonschema import ValidationError
+        for value in (.24, 4.001, 100.01):
+            with self.assertRaises(ValidationError):
+                TypedValidator(schema).validate({"context": {}, "args": {"patch": {"pointer.gain_x_hid_per_degree": value}}})
+
+    def test_wire_formats_before_authentication(self):
+        from jsonschema import ValidationError
+        schema = next(tool["inputSchema"] for tool in TOOLS if tool["name"] == "wifi_join")
+        validator = TypedValidator(schema, format_checker=FORMAT)
+        good = {"context": {}, "args": {"ssid": "Example", "password": "valid passphrase", "remember": False}}
+        for value in ("0", "1", "18446744073709551615"):
+            validator.validate({**good, "context": {"management_generation": value}})
+        invalid = []
+        for value in ("00", "01", "+1", " 1", "1 ", "18446744073709551616", "\u0661"):
+            invalid.append({**good, "context": {"management_generation": value}})
+        for value in ("x", "1234567", "long\nsecret", "long\x7fsecret", "secret\u00e9x", "a" * 64):
+            invalid.append({**good, "args": {**good["args"], "password": value}})
+        for value in ("", "bad\tname", "bad\x7fname", "\u00e9" * 17, "bad\ud800"):
+            invalid.append({**good, "args": {**good["args"], "ssid": value}})
+        validator.validate({**good, "args": {**good["args"], "ssid": "\u00e9" * 16}})
+        # No profile/Keychain/HTTP is supplied: rejection must precede any login
+        # or transport work and must not echo invalid secrets in the public error.
+        session = DeviceSession({}, None, None)
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValidationError):
+                    validator.validate(arguments)
+                with self.assertRaisesRegex(BridgeError, "^Tool arguments violate the typed device schema$"):
+                    session.invoke("wifi_join", arguments)
+                self.assertIsNone(session.login)
+                self.assertIsNone(session.pending)
+        for kind, good_value, bad_values in (
+            ("ansi_text", "Hello!", ("\u00e9", "line\nfeed", "\x7f")),
+            ("device_name", "Desk \u00e9", (" leading", "trailing ", "bad\u0085", "")),
+        ):
+            text_validator = TypedValidator({"type": "string", "format": kind,
+                "minLength": 1, "maxLength": 18}, format_checker=FORMAT)
+            text_validator.validate(good_value)
+            for value in (*bad_values, "\u00e9" * 10):
+                with self.subTest(format=kind, value=value), self.assertRaises(ValidationError):
+                    text_validator.validate(value)
+
+    def test_real_signing(self):
+        image = bytearray(512); image[0] = 0xE9
+        struct.pack_into("<H", image, 12, 0x20); struct.pack_into("<I", image, 28, 480)
+        struct.pack_into("<I", image, 32, 0xABCD5432); image[48:53] = b"2.0.0"; image[80:91] = b"esp32_input"
+        key = ec.generate_private_key(ec.SECP256R1())
+        pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+        catalog = sign_release(bytes(image), pem, key_id="publisher", product="input", board="mosaico",
+                               release_id="release-2", release_index=2, url="https://publisher.example/image.bin", expires=int(time.time())+3600)
+        signature = bytes.fromhex(catalog["signature"])
+        der = utils.encode_dss_signature(int.from_bytes(signature[:32], "big"), int.from_bytes(signature[32:], "big"))
+        key.public_key().verify(der, catalog["payload"].encode(), ec.ECDSA(hashes.SHA256()))
+        payload = json.loads(catalog["payload"])
+        self.assertEqual(payload["project"], "esp32_input"); self.assertEqual(payload["version"], "2.0.0")
+        self.assertEqual(payload["layout"], "esp32s31-16m-ota6-v3")
+        self.assertEqual(payload["sha256"], hashlib.sha256(image).hexdigest())
+        with self.assertRaises(BridgeError): sign_release(b"wrong", pem, key_id="publisher", product="input", board="mosaico", release_id="release-2", release_index=2, url="https://publisher.example/image.bin", expires=int(time.time())+3600)
+
+    def test_actual_mcp_stdio(self):
+        async def exercise(profile):
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+            parameters = StdioServerParameters(command=sys.executable, args=[str(ROOT / "bridge/control_bridge.py"), "--profile", str(profile)])
+            async with stdio_client(parameters) as (reader, writer):
+                async with ClientSession(reader, writer) as client:
+                    await client.initialize(); listing = await client.list_tools()
+                    self.assertIn("wifi_join", {tool.name for tool in listing.tools})
+                    self.assertIn("bridge_retry_pending", {tool.name for tool in listing.tools})
+        with tempfile.TemporaryDirectory(prefix="control-mcp-") as directory:
+            destination = Path(directory) / "owner"
+            create_package(destination, "device.test", 443, ["view"], [], [], FakeKeychain())
+            asyncio.run(exercise(destination / "client-profile.json"))
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -7,3 +7,4 @@ BaseType_t xTaskCreate(TaskFunction_t function, const char *name, uint32_t stack
     void *argument, unsigned priority, TaskHandle_t *handle);
 void xTaskNotifyGive(TaskHandle_t handle);
 unsigned ulTaskNotifyTake(BaseType_t clear, TickType_t timeout);
+void vTaskDelay(TickType_t timeout);

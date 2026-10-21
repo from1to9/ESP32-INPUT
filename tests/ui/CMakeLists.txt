@@ -18,8 +18,12 @@ add_subdirectory("${LVGL_SOURCE}" "lvgl")
 set_source_files_properties("${LVGL_SOURCE}/src/stdlib/clib/lv_mem_core_clib.c"
     TARGET_DIRECTORY lvgl PROPERTIES COMPILE_DEFINITIONS
     "lv_malloc_core=ui_clib_malloc_core;lv_realloc_core=ui_clib_realloc_core;lv_free_core=ui_clib_free_core")
-add_executable(ui_visual ui_visual.c ui_memory.c "${REPOSITORY_ROOT}/firmware/main/app_ui.c")
-add_executable(ui_resources ui_resources.c ui_memory.c "${REPOSITORY_ROOT}/firmware/main/app_ui.c")
+add_executable(ui_visual ui_visual.c ui_memory.c ui_private_probe.c ui_trust_review_fixture.c
+    "${REPOSITORY_ROOT}/components/control_protocol/control_registry.c")
+target_include_directories(ui_visual PRIVATE "${LVGL_SOURCE}" "${REPOSITORY_ROOT}/tests/bt_audio/stubs"
+    "${REPOSITORY_ROOT}/components/control_protocol/include"
+    "${REPOSITORY_ROOT}/components/device_settings/include" "${REPOSITORY_ROOT}/components/audio_engine/include")
+add_executable(ui_resources ui_resources.c ui_memory.c ui_private_probe.c)
 foreach(target ui_visual ui_resources)
     target_include_directories(${target} PRIVATE "${REPOSITORY_ROOT}/firmware/main"
         "${REPOSITORY_ROOT}/components/input_core/include")
@@ -33,4 +37,18 @@ if(UI_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     endforeach()
     target_link_options(ui_visual PRIVATE -fsanitize=address,undefined)
     target_link_options(ui_resources PRIVATE -fsanitize=address,undefined)
+endif()
+
+add_executable(ui_presenter_integration ui_presenter_integration.c ui_memory.c
+    "${REPOSITORY_ROOT}/firmware/main/app_ui.c"
+    "${REPOSITORY_ROOT}/firmware/main/app_presenter.c"
+    "${REPOSITORY_ROOT}/firmware/main/board_display_transfer.c")
+target_include_directories(ui_presenter_integration PRIVATE "${LVGL_SOURCE}"
+    "${REPOSITORY_ROOT}/firmware/main" "${REPOSITORY_ROOT}/components/input_core/include"
+    "${REPOSITORY_ROOT}/tests/display_transfer/stubs" "${CMAKE_CURRENT_LIST_DIR}/presenter_stubs")
+target_compile_options(ui_presenter_integration PRIVATE -Wall -Wextra -Werror -Wpedantic)
+target_link_libraries(ui_presenter_integration PRIVATE lvgl m)
+if(UI_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(ui_presenter_integration PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    target_link_options(ui_presenter_integration PRIVATE -fsanitize=address,undefined)
 endif()

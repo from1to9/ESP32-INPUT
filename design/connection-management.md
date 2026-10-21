@@ -3,6 +3,8 @@
 Status: proposed next phase, 2026-10-21. The production UI at `d9e39ea9406e75cfdb318877d98801d3442fd07b` remains frozen until the baseline target/device gate. Complete the full device API function plan before implementing any new interface. This document changes no production code and does not claim that the proposed services are implemented or qualified.
 
 The governing behavior is in [requirements](../docs/requirements.md), especially "Connection management and firmware updates", and the [remote-control contract](../docs/remote-control.md). Use the [focused-workspace layout and shared quick panel](ui-plan.md), which the latest user instruction explicitly authorizes in place of persistent tabs/header. Network, Bluetooth, settings and update managers own capabilities, admission, progress and durable state; this document specifies their local presentation. The [Wi-Fi management/OTA service draft](../docs/wifi-management-ota.md) supplies the scan/profile, staging and recovery contract. Latest owner decisions on unattended authorization and the three work policies take precedence over older draft wording; remaining cross-document reconciliation is listed below.
+The latest native setup extension is specified in [Native Wi-Fi UI](native-wifi-ui.md): the device scans and joins the existing LAN locally; the computer stays on its own Wi-Fi. SoftAP is explicit recovery only. That scoped extension retains the actual single saved-network capability and a shared local editor for Wi-Fi credentials and the local Bluetooth device name. The broader profile/remote-service/OTA pages below remain capability-dependent plans.
+
 
 ## 1. Three independent choices
 
@@ -101,7 +103,7 @@ Display a management address only when the service and its trust path exist. A p
 
 ### Local and remote function parity
 
-The Wi-Fi API plan must cover every device function, including settings, mouse/keyboard, volume, microphone, speaker and future recording. The network designer owns the exhaustive operation/schema matrix at `docs/api-function-matrix.md`; that companion was not yet present at this review. Complete and reconcile it before implementing new API, UI or service interfaces. The following map accounts for every current [UI action](../firmware/main/app_ui.h); it defines shared semantic ownership rather than prescribing a raw enum-over-network protocol.
+The Wi-Fi API plan must cover every device function, including settings, mouse/keyboard, volume, microphone, speaker and future recording. The network designer owns the exhaustive operation/schema matrix at `docs/api-function-matrix.md`; that companion now records the complete planned operation/authority coverage. Complete and reconcile it before implementing new API, UI or service interfaces. The following map accounts for every current [UI action](../firmware/main/app_ui.h); it defines shared semantic ownership rather than prescribing a raw enum-over-network protocol.
 
 | Current local intent family | Shared capability action and remote presentation |
 | --- | --- |

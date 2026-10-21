@@ -132,8 +132,13 @@ bool hid_engine_set_owner(hid_engine_t *engine, input_owner_t owner)
 
 bool hid_engine_set_gyro(hid_engine_t *engine, bool enabled)
 {
+    return hid_engine_set_gyro_owned(engine, INPUT_LOCAL, enabled);
+}
+
+bool hid_engine_set_gyro_owned(hid_engine_t *engine, input_owner_t source, bool enabled)
+{
     if (enabled && (!engine->ready || engine->congested)) return false;
-    return input_set_gyro(&engine->state, enabled);
+    return input_set_gyro_owned(&engine->state, source, enabled);
 }
 
 static hid_engine_enqueue_result_t check_enqueue(const hid_engine_t *engine,

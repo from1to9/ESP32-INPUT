@@ -26,12 +26,15 @@ by a thousand unchanged requests with no additional writes. Corruption tests
 use the production codec, retain the original bytes and require an explicit
 request before replacing the damaged record.
 
-The 16 cases include schema-2 Bluetooth/USB preference round trips and invalid
-transport rejection. A frozen schema-1 record loads with Bluetooth selected and
-its original 70% brightness, retaining those bytes through worker polls despite
-the new 50% fallback; an explicit USB change
-writes schema 2 after the quiet interval and survives simulated restart. This
-proves store migration/durability decisions, not the coordinator startup path.
+The 17 cases include schema-3 Bluetooth/USB, tap-to-click and Bluetooth-name
+round trips and invalid preference rejection. Frozen 16-byte schema-1/2 records
+retain every old field (including 70% or custom brightness), default only new
+tap/name values, and remain byte-for-byte unchanged through worker polls and
+unchanged requests. An explicit changed preference writes the 56-byte schema 4
+after the quiet interval and survives simulated restart. The store caches the
+validated logical value canonically for deduplication; this memory-only cache
+is not evidence that the on-flash record was upgraded. These cases prove store
+migration/durability decisions, not coordinator startup or BLE name application.
 
 The storage double supports both an unchanged durable record on failure and an
 uncertain commit result where the new value is already durable. A failure must
@@ -46,3 +49,5 @@ accepted/pending from saved; `loaded` describes startup load evidence. General
 setting coalescing does not weaken BLE subscription commit-before-success rules.
 The integration owner maintains `tools/check.py` and fixes production defects;
 this suite retains failures until the owning implementation is corrected.
+
+Schema-3 tap-off migration is additionally checked with a frozen independent CRC fixture: equal requests and changed-then-restored values preserve the original 40-byte record without a boot or format-only write. Explicit motion changes persist schema 4 and round-trip across restart.

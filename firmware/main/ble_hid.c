@@ -16,6 +16,10 @@
 #include "hid_engine.h"
 #include "nvs_flash.h"
 #include "ble_hid_store.h"
+#include "ble_hid_targets_store.h"
+#if CONFIG_BT_CLASSIC_ENABLED
+#include "bt_bond_guard.h"
+#endif
 
 #define HID_APP_ID 0x1812
 #define CONTROL_QUEUE_LENGTH 16
@@ -33,6 +37,8 @@
 #define PAIRING_BOND_CAPACITY CONFIG_BT_SMP_MAX_BONDS
 _Static_assert(PAIRING_BOND_CAPACITY > 0 && PAIRING_BOND_CAPACITY <= BLE_HID_MAX_BONDS,
                "Configured bond capacity must fit the bounded cache");
+_Static_assert(BLE_HID_NAME_MAX_BYTES + 13U <= 31U,
+               "Complete name plus HID advertising fields must fit legacy advertising");
 
 enum {
     ATTR_SERVICE,
@@ -141,6 +147,26 @@ typedef struct {
 
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static ble_hid_failure_t first_failure = {.stage = "none", .error = ESP_OK};
+typedef enum {
+    NAME_IDLE, NAME_QUIET, NAME_WAIT_STOP, NAME_GET_PREVIOUS, NAME_WAIT_PREVIOUS,
+    NAME_SET, NAME_WAIT_VALUE, NAME_ADV, NAME_WAIT_ADV, NAME_SCAN, NAME_WAIT_SCAN,
+    NAME_RESTART, NAME_HALTED
+} name_phase_t;
+typedef enum { NAME_ACK_NONE, NAME_ACK_STOP, NAME_ACK_GET, NAME_ACK_ADV,
+               NAME_ACK_SCAN, NAME_ACK_START } name_ack_t;
+static struct {
+    ble_hid_name_snapshot_t public;
+    name_phase_t phase;
+    name_ack_t ack;
+    bool changed;
+    bool rollback;
+    bool previous_known;
+    bool blocked;
+    bool deadline_active;
+    bool start_stopped_by_connect;
+    TickType_t started;
+    char previous[BLE_HID_NAME_MAX_BYTES + 1U];
+} device_name;
 static QueueHandle_t control_queue;
 static struct {
     ble_hid_snapshot_t public;
@@ -156,6 +182,21 @@ static struct {
     bool bond_refresh_pending;
     uint64_t bond_mutation_revision;
     ble_hid_bond_list_t bond_list;
+    ble_hid_target_snapshot_t target;
+    ble_hid_target_t target_order[BLE_HID_MAX_BONDS];
+    uint8_t target_order_count;
+    bool target_order_configured;
+    ble_hid_preferences_t target_candidate;
+    uint64_t target_expected_bond_mutation;
+    bool classic_pairing_reserved;
+    ble_hid_bond_forget_snapshot_t single_forget;
+    ble_hid_target_t single_before[BLE_HID_MAX_BONDS];
+    uint8_t single_before_count;
+    uint64_t single_mutation;
+    TickType_t single_started;
+    bool single_completed;
+    bool single_list_verified;
+    esp_err_t single_result;
     uint8_t peer_address_type;
     bool peer_address_type_known;
     bool pairing_user_controlled;
@@ -179,6 +220,7 @@ static struct {
     esp_bd_addr_t rssi_address;
     TickType_t forget_started;
     uint64_t forget_generation;
+    bool forget_reopen_pairing;
     unsigned int forget_previous_count;
     bool remove_inflight;
     bool remove_completed;
@@ -234,12 +276,24 @@ static void refresh_locked(void)
         (state.link_congested || state.notification_pending || state.submitting);
 }
 
+static bool single_forget_busy_locked(void)
+{
+    return state.single_forget.status == BLE_HID_BOND_FORGET_PENDING ||
+        state.single_forget.status == BLE_HID_BOND_FORGET_REMOVING ||
+        state.single_forget.status == BLE_HID_BOND_FORGET_VERIFYING ||
+        state.single_forget.status == BLE_HID_BOND_FORGET_UNCERTAIN || state.single_forget.sdk_inflight;
+}
+
 static bool pairing_allowed_locked(TickType_t now)
 {
     return state.public.pairing_open &&
+        !device_name.blocked &&
         state.bond_list.known && state.bond_list.count < PAIRING_BOND_CAPACITY &&
         (TickType_t)(now - state.pairing_started) < state.pairing_duration &&
-        state.public.bond_forget_state != BLE_HID_FORGET_RUNNING && !state.public.failed;
+        state.public.bond_forget_state != BLE_HID_FORGET_RUNNING && !state.public.failed && !state.target.selected &&
+        !state.classic_pairing_reserved && !single_forget_busy_locked() && state.target.loaded &&
+        state.target.request_status != BLE_HID_TARGET_PENDING &&
+        state.target.request_status != BLE_HID_TARGET_APPLYING && state.target.request_status != BLE_HID_TARGET_UNCERTAIN;
 }
 
 static void open_pairing_locked(TickType_t now, uint32_t duration_ms)
@@ -257,6 +311,67 @@ static bool saved_peer_locked(const esp_bd_addr_t address)
     return false;
 }
 
+static bool target_key_matches(const ble_hid_target_t *key, const ble_hid_bond_t *bond)
+{
+    return bond->address_type_known && key->address_type == bond->address_type &&
+        memcmp(key->address, bond->address, ESP_BD_ADDR_LEN) == 0 &&
+        (!key->bond_id_known || (bond->bond_id_known && memcmp(key->bond_id, bond->bond_id, BLE_HID_BOND_ID_BYTES) == 0));
+}
+
+static ble_hid_target_t key_for_bond(const ble_hid_bond_t *bond)
+{
+    ble_hid_target_t key = {.address_type = bond->address_type, .bond_id_known = bond->bond_id_known};
+    memcpy(key.address, bond->address, 6); memcpy(key.bond_id, bond->bond_id, BLE_HID_BOND_ID_BYTES);
+    return key;
+}
+
+static bool target_blocked_locked(void)
+{
+    return !state.target.loaded || state.target.request_status == BLE_HID_TARGET_PENDING ||
+        state.target.request_status == BLE_HID_TARGET_APPLYING || state.target.request_status == BLE_HID_TARGET_UNCERTAIN;
+}
+
+static bool selected_peer_locked(const esp_bd_addr_t address, unsigned int address_type)
+{
+    if (!state.target.selected) return true;
+    if (!state.bond_list.known || address_type != state.target.target.address_type ||
+        memcmp(address, state.target.target.address, ESP_BD_ADDR_LEN) != 0) return false;
+    for (unsigned int i = 0; i < state.bond_list.count; ++i)
+        if (state.bond_list.bonds[i].selection_supported &&
+            target_key_matches(&state.target.target, &state.bond_list.bonds[i])) return true;
+    return false;
+}
+
+static void order_bonds_locked(void)
+{
+    if (!state.target_order_configured) return;
+    ble_hid_bond_t ordered[BLE_HID_MAX_BONDS];
+    bool used[BLE_HID_MAX_BONDS] = {0};
+    unsigned int count = 0;
+    for (unsigned int i = 0; i < state.target_order_count; ++i) {
+        for (unsigned int j = 0; j < state.bond_list.count; ++j) {
+            if (!used[j] && target_key_matches(&state.target_order[i], &state.bond_list.bonds[j])) {
+                ordered[count++] = state.bond_list.bonds[j]; used[j] = true; break;
+            }
+        }
+    }
+    for (unsigned int j = 0; j < state.bond_list.count; ++j)
+        if (!used[j]) ordered[count++] = state.bond_list.bonds[j];
+    memcpy(state.bond_list.bonds, ordered, count * sizeof(*ordered));
+    state.target_order_count = (uint8_t)count;
+    bool selected_found = false;
+    for (unsigned int i = 0; i < count; ++i) {
+        const ble_hid_bond_t *bond = &ordered[i];
+        state.target_order[i] = key_for_bond(bond);
+        selected_found |= state.target.selected && bond->selection_supported &&
+            target_key_matches(&state.target.target, bond);
+    }
+    /* A removed/changed selected key must fail closed, not silently admit all
+     * remaining saved hosts. Keep the selection as a blocked preference until
+     * the coordinator explicitly clears/replaces it against a fresh list. */
+    if (state.target.selected && !selected_found) state.public.pairing_open = false;
+}
+
 static void bond_list_status_locked(bool known, bool updating, esp_err_t error)
 {
     state.bond_list.known = known;
@@ -270,11 +385,12 @@ static void bond_list_status_locked(bool known, bool updating, esp_err_t error)
 
 static void invalidate_bonds_locked(void)
 {
+    state.single_list_verified = false;
     ++state.bond_mutation_revision;
     if (state.bond_mutation_revision == 0) ++state.bond_mutation_revision;
     state.bond_refresh_pending = true;
     bond_list_status_locked(false,
-        state.public.bond_forget_state == BLE_HID_FORGET_RUNNING, ESP_ERR_INVALID_STATE);
+        state.public.bond_forget_state == BLE_HID_FORGET_RUNNING || single_forget_busy_locked(), ESP_ERR_INVALID_STATE);
 }
 
 /* Worker only. Publish addresses/count after a complete successful bounded
@@ -295,6 +411,13 @@ static esp_err_t refresh_known_bonds(void)
             error = ESP_ERR_INVALID_STATE;
         }
     }
+    /* Hash only in the worker, outside state_lock. No key material escapes
+     * this SDK export; the complete durable bond (including LTK) is bound. */
+    if (error == ESP_OK && count >= 0 && count <= (int)SUBSCRIPTION_CAPACITY) {
+        for (int i = 0; i < count; ++i)
+            subscriptions.live_valid[i] = subscription_fingerprint(&subscriptions.bonds[i],
+                subscriptions.live_fingerprints[i]) == ESP_OK;
+    }
     portENTER_CRITICAL(&state_lock);
     if (mutation != state.bond_mutation_revision) {
         /* A completion during this read may have persisted another bond.
@@ -307,7 +430,7 @@ static esp_err_t refresh_known_bonds(void)
     if (error != ESP_OK || count < 0 || count > (int)SUBSCRIPTION_CAPACITY) {
         if (error == ESP_OK) error = ESP_ERR_INVALID_STATE;
         bond_list_status_locked(false,
-            state.public.bond_forget_state == BLE_HID_FORGET_RUNNING, error);
+            state.public.bond_forget_state == BLE_HID_FORGET_RUNNING || single_forget_busy_locked(), error);
         portEXIT_CRITICAL(&state_lock);
         subscription_clear_bonds();
         return error;
@@ -315,15 +438,27 @@ static esp_err_t refresh_known_bonds(void)
     memset(state.bond_list.bonds, 0, sizeof(state.bond_list.bonds));
     for (int i = 0; i < count; ++i) {
         ble_hid_bond_t *bond = &state.bond_list.bonds[i];
+        bond->bond_id_known = subscriptions.live_valid[i];
+        if (bond->bond_id_known) memcpy(bond->bond_id, subscriptions.live_fingerprints[i], BLE_HID_BOND_ID_BYTES);
         memcpy(bond->address, subscriptions.bonds[i].bd_addr, ESP_BD_ADDR_LEN);
         bond->address_type_known = (unsigned int)subscriptions.bonds[i].bd_addr_type <= 3U;
         if (bond->address_type_known) {
             bond->address_type = (uint8_t)subscriptions.bonds[i].bd_addr_type;
+#if !CONFIG_BT_BLE_PERIPH_PSEUDO_ADDR_BOND
+            bool stable = bond->address_type == BLE_ADDR_TYPE_PUBLIC ||
+                (bond->address_type == BLE_ADDR_TYPE_RANDOM && (bond->address[0] & 0xc0U) == 0xc0U);
+            bool identity = (subscriptions.bonds[i].bond_key.key_mask & ESP_BLE_ID_KEY_MASK) != 0;
+            bool same_identity = !identity ||
+                (subscriptions.bonds[i].bond_key.pid_key.addr_type == bond->address_type &&
+                 memcmp(subscriptions.bonds[i].bond_key.pid_key.static_addr, bond->address, ESP_BD_ADDR_LEN) == 0);
+            bond->selection_supported = stable && same_identity && bond->bond_id_known;
+#endif
         }
     }
     state.bond_list.count = (uint8_t)count;
+    order_bonds_locked();
     state.bonds_loaded = true;
-    bool updating = state.public.bond_forget_state == BLE_HID_FORGET_RUNNING;
+    bool updating = state.public.bond_forget_state == BLE_HID_FORGET_RUNNING || single_forget_busy_locked();
     bool failed = state.public.bond_forget_state == BLE_HID_FORGET_FAILED;
     bond_list_status_locked(!updating && !failed, updating,
         failed ? state.public.bond_forget_error : ESP_OK);
@@ -352,6 +487,71 @@ static void record_failure_locked(const char *stage, esp_err_t error,
         .uptime_ms = (uint64_t)esp_timer_get_time() / 1000U};
 }
 
+static bool name_busy_locked(void)
+{
+    return device_name.public.status == BLE_HID_NAME_PENDING ||
+        device_name.public.status == BLE_HID_NAME_APPLYING;
+}
+
+static bool name_advertising_allowed_locked(void)
+{
+    return !device_name.blocked &&
+        (!name_busy_locked() || device_name.phase == NAME_RESTART);
+}
+
+static void name_uncertain_locked(esp_err_t error)
+{
+    if (device_name.public.error == ESP_OK) device_name.public.error = error;
+    if (device_name.rollback) device_name.public.rollback_error = error;
+    device_name.public.status = BLE_HID_NAME_UNCERTAIN;
+    if (device_name.changed) device_name.public.active_known = false;
+    device_name.phase = NAME_HALTED;
+    device_name.blocked = true;
+    device_name.deadline_active = false;
+    /* Keep the outstanding callback owner quarantined. A late callback can
+     * drain it, but can never complete/retry a different name request. */
+}
+
+static void name_finish_locked(void)
+{
+    if (device_name.rollback) {
+        memcpy(device_name.public.active, device_name.previous, sizeof(device_name.previous));
+        device_name.public.active_known = true;
+        device_name.public.rollback_confirmed = true;
+    } else if (device_name.public.error == ESP_OK) {
+        memcpy(device_name.public.active, device_name.public.requested, sizeof(device_name.public.active));
+        device_name.public.active_known = true;
+    }
+    device_name.public.status = device_name.public.error == ESP_OK ?
+        BLE_HID_NAME_APPLIED : BLE_HID_NAME_FAILED;
+    device_name.phase = NAME_IDLE;
+    device_name.ack = NAME_ACK_NONE;
+    device_name.deadline_active = false;
+}
+
+static void name_fail_locked(const char *stage, esp_err_t error, bool raw_known, uint32_t raw)
+{
+    record_failure_locked(stage, error, raw_known, raw);
+    if (device_name.public.error == ESP_OK) {
+        device_name.public.error = error;
+        device_name.public.sdk_status_known = raw_known;
+        device_name.public.sdk_status = raw;
+    }
+    if (device_name.rollback || (device_name.phase == NAME_RESTART && !device_name.changed)) {
+        name_uncertain_locked(error);
+    } else if (device_name.changed && device_name.previous_known) {
+        device_name.rollback = true;
+        device_name.public.rollback_attempted = true;
+        device_name.public.active_known = false;
+        device_name.started = xTaskGetTickCount();
+        device_name.phase = NAME_SET;
+    } else if (device_name.changed) {
+        name_uncertain_locked(error);
+    } else {
+        device_name.phase = NAME_RESTART;
+    }
+}
+
 static void fail_transport(const char *operation, esp_err_t error)
 {
     portENTER_CRITICAL(&state_lock);
@@ -360,6 +560,16 @@ static void fail_transport(const char *operation, esp_err_t error)
         advance_generation_locked();
     }
     state.public.failed = true;
+    if (name_busy_locked()) {
+        if (device_name.changed || device_name.ack != NAME_ACK_NONE) name_uncertain_locked(error);
+        else {
+            device_name.public.error = error;
+            device_name.public.status = BLE_HID_NAME_FAILED;
+            device_name.phase = NAME_HALTED;
+            device_name.blocked = true;
+            device_name.deadline_active = false;
+        }
+    }
     refresh_locked();
     portEXIT_CRITICAL(&state_lock);
     ESP_LOGE(TAG, "%s failed: %s", operation, esp_err_to_name(error));
@@ -457,7 +667,11 @@ static esp_ble_adv_data_t advertising_data = {
     .appearance = 0x03c0, /* Generic Human Interface Device. */
     .service_uuid_len = sizeof(advertised_services),
     .p_service_uuid = advertised_services,
+#if CONFIG_BT_CLASSIC_ENABLED
+    .flag = ESP_BLE_ADV_FLAG_GEN_DISC,
+#else
     .flag = ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT,
+#endif
 };
 static esp_ble_adv_data_t scan_data = {.set_scan_rsp = true, .include_name = true};
 static esp_ble_adv_params_t advertising_parameters = {
@@ -474,6 +688,11 @@ static void notification_watchdog(TimerHandle_t timer)
     (void)timer;
     TickType_t now = xTaskGetTickCount();
     portENTER_CRITICAL(&state_lock);
+    if (name_busy_locked() && device_name.deadline_active &&
+        (TickType_t)(now - device_name.started) >= pdMS_TO_TICKS(BLE_HID_NAME_TIMEOUT_MS)) {
+        record_failure_locked("Device name completion timeout", ESP_ERR_TIMEOUT, false, 0);
+        name_uncertain_locked(ESP_ERR_TIMEOUT);
+    }
     bool timed_out = state.notification_pending && !state.notification_timed_out &&
         (TickType_t)(now - state.notification_started) >=
             pdMS_TO_TICKS(NOTIFICATION_TIMEOUT_MS);
@@ -521,6 +740,15 @@ static void notification_watchdog(TimerHandle_t timer)
         state.public.pairing_open = false;
         if (!state.public.failed) advance_generation_locked();
         state.public.failed = true;
+    }
+    if (single_forget_busy_locked() && state.single_forget.status != BLE_HID_BOND_FORGET_UNCERTAIN &&
+        (TickType_t)(now - state.single_started) >= pdMS_TO_TICKS(FORGET_TIMEOUT_MS)) {
+        bool uncertain = state.single_forget.status != BLE_HID_BOND_FORGET_PENDING;
+        state.single_forget.status = uncertain ? BLE_HID_BOND_FORGET_UNCERTAIN : BLE_HID_BOND_FORGET_FAILED;
+        state.single_forget.error = ESP_ERR_TIMEOUT; state.single_forget.cancellable = false;
+        bond_list_status_locked(false, false, ESP_ERR_TIMEOUT); state.bond_refresh_pending = !uncertain;
+        if (uncertain) state.public.failed = true;
+        record_failure_locked("Single bond removal timeout", ESP_ERR_TIMEOUT, false, 0);
     }
     if (timed_out) {
         record_failure_locked("Notification completion timeout", ESP_ERR_TIMEOUT, false, 0);
@@ -622,7 +850,7 @@ static void service_bond_forget(void)
             state.public.bond_forget_state = BLE_HID_FORGET_DONE;
             state.public.bond_forget_error = ESP_OK;
             bond_list_status_locked(true, false, ESP_OK);
-            open_pairing_locked(xTaskGetTickCount(), BLE_HID_PAIRING_DEFAULT_MS);
+            if (state.forget_reopen_pairing) open_pairing_locked(xTaskGetTickCount(), BLE_HID_PAIRING_DEFAULT_MS);
             refresh_locked();
         }
         portEXIT_CRITICAL(&state_lock);
@@ -643,6 +871,99 @@ static void service_bond_forget(void)
         portEXIT_CRITICAL(&state_lock);
         fail_forget(operation, error);
     }
+}
+
+static void finish_single_forget_locked(ble_hid_bond_forget_status_t status, esp_err_t error)
+{
+    state.single_forget.status = status; state.single_forget.error = error; state.single_forget.cancellable = false;
+    bool uncertain = status == BLE_HID_BOND_FORGET_UNCERTAIN;
+    if (uncertain) {
+        state.public.failed = true; record_failure_locked("Single bond removal uncertain", error, false, 0);
+    }
+    bool known = !uncertain && state.single_list_verified && !state.bond_refresh_pending;
+    bond_list_status_locked(known, false, uncertain ? error : (known ? ESP_OK : error));
+    if (!known && !uncertain) state.bond_refresh_pending = true;
+    refresh_locked();
+}
+
+static void service_single_bond_forget(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    bool pending = state.single_forget.status == BLE_HID_BOND_FORGET_PENDING;
+    bool completed = state.single_forget.status == BLE_HID_BOND_FORGET_VERIFYING && state.single_completed;
+    uint64_t id = state.single_forget.request_id;
+    bool blocked = state.public.connected || state.rejected_pending || state.advertising || state.adv_pending ||
+        state.adv_stop_pending || state.notification_pending || state.submitting;
+    if (pending && (state.public.failed || state.single_mutation != state.bond_mutation_revision ||
+        state.single_forget.generation != state.public.generation)) {
+        finish_single_forget_locked(BLE_HID_BOND_FORGET_FAILED, ESP_ERR_INVALID_STATE); pending = false;
+    }
+    portEXIT_CRITICAL(&state_lock);
+    if ((!pending && !completed) || blocked) return;
+
+    esp_err_t error = refresh_known_bonds();
+    portENTER_CRITICAL(&state_lock);
+    bool current = id == state.single_forget.request_id &&
+        (state.single_forget.status == BLE_HID_BOND_FORGET_PENDING || state.single_forget.status == BLE_HID_BOND_FORGET_VERIFYING);
+    if (!current) { portEXIT_CRITICAL(&state_lock); return; }
+    state.single_list_verified = error == ESP_OK;
+    if (error != ESP_OK) {
+        finish_single_forget_locked(completed ? BLE_HID_BOND_FORGET_UNCERTAIN : BLE_HID_BOND_FORGET_FAILED, error);
+        portEXIT_CRITICAL(&state_lock); return;
+    }
+    if (pending) {
+        int matched = -1;
+        for (unsigned int i = 0; i < state.bond_list.count; ++i)
+            if (target_key_matches(&state.single_forget.target, &state.bond_list.bonds[i])) matched = (int)i;
+        if (matched < 0 || state.single_mutation != state.bond_mutation_revision || state.public.failed) {
+            finish_single_forget_locked(BLE_HID_BOND_FORGET_FAILED, ESP_ERR_INVALID_STATE);
+            portEXIT_CRITICAL(&state_lock); return;
+        }
+        state.single_before_count = state.bond_list.count;
+        for (unsigned int i = 0; i < state.bond_list.count; ++i) state.single_before[i] = key_for_bond(&state.bond_list.bonds[i]);
+        state.single_forget.status = BLE_HID_BOND_FORGET_REMOVING; state.single_forget.sdk_inflight = true;
+        state.single_forget.cancellable = false; state.single_completed = false; state.single_result = ESP_OK;
+        esp_bd_addr_t address; memcpy(address, state.single_forget.target.address, sizeof(address));
+        portEXIT_CRITICAL(&state_lock);
+        error = esp_ble_remove_bond_device(address);
+        if (error != ESP_OK) {
+            portENTER_CRITICAL(&state_lock);
+            if (state.single_forget.request_id == id && state.single_forget.status == BLE_HID_BOND_FORGET_REMOVING) {
+                state.single_forget.sdk_inflight = false;
+                finish_single_forget_locked(BLE_HID_BOND_FORGET_FAILED, error);
+            }
+            portEXIT_CRITICAL(&state_lock);
+        }
+        return;
+    }
+    bool preserved = state.single_before_count > 0 && state.bond_list.count + 1U == state.single_before_count;
+    for (unsigned int i = 0; preserved && i < state.bond_list.count; ++i) {
+        const ble_hid_bond_t *row = &state.bond_list.bonds[i]; bool found = false;
+        if (!memcmp(row->address, state.single_forget.target.address, 6)) { preserved = false; break; }
+        for (unsigned int j = 0; j < state.single_before_count; ++j)
+            if (target_key_matches(&state.single_before[j], row)) found = true;
+        if (!found) preserved = false;
+    }
+    esp_err_t result = state.single_result;
+    state.single_completed = false;
+    if (result != ESP_OK) {
+        finish_single_forget_locked(BLE_HID_BOND_FORGET_FAILED, result);
+        portEXIT_CRITICAL(&state_lock); return;
+    }
+    if (!preserved) {
+        finish_single_forget_locked(BLE_HID_BOND_FORGET_UNCERTAIN, ESP_ERR_INVALID_STATE);
+        portEXIT_CRITICAL(&state_lock); return;
+    }
+    uint8_t fingerprint[BLE_HID_BOND_ID_BYTES]; memcpy(fingerprint, state.single_forget.target.bond_id, sizeof(fingerprint));
+    uint64_t verified_mutation = state.bond_mutation_revision;
+    portEXIT_CRITICAL(&state_lock);
+    error = subscription_forget_one(fingerprint);
+    portENTER_CRITICAL(&state_lock);
+    if (state.single_forget.request_id == id && state.single_forget.status == BLE_HID_BOND_FORGET_VERIFYING) {
+        if (verified_mutation != state.bond_mutation_revision && error == ESP_OK) error = ESP_ERR_INVALID_STATE;
+        finish_single_forget_locked(error == ESP_OK ? BLE_HID_BOND_FORGET_SUCCEEDED : BLE_HID_BOND_FORGET_UNCERTAIN, error);
+    }
+    portEXIT_CRITICAL(&state_lock);
 }
 
 static void service_rssi(void)
@@ -717,7 +1038,7 @@ static void service_link_control(void)
         state.closing = true;
         close_link = true;
     }
-    if ((state.public.failed || state.public.connected ||
+    if ((state.public.failed || state.public.connected || device_name.blocked || target_blocked_locked() || single_forget_busy_locked() ||
          state.public.bond_forget_state == BLE_HID_FORGET_RUNNING) &&
         state.advertising && !state.adv_stop_pending) {
         state.adv_stop_pending = true;
@@ -727,9 +1048,15 @@ static void service_link_control(void)
     if (!state.public.failed && !state.public.connected && state.service_started &&
         state.adv_configured && state.scan_configured && !state.adv_pending &&
         !state.advertising && !state.adv_stop_pending && !state.rejected_pending &&
-        state.bonds_loaded && state.public.bond_forget_state != BLE_HID_FORGET_RUNNING &&
+        state.bonds_loaded && name_advertising_allowed_locked() &&
+        !target_blocked_locked() && !single_forget_busy_locked() &&
+        state.public.bond_forget_state != BLE_HID_FORGET_RUNNING &&
         !state.submitting && !state.notification_pending) {
         state.adv_pending = true;
+        if (name_busy_locked() && device_name.phase == NAME_RESTART) {
+            device_name.ack = NAME_ACK_START;
+            device_name.start_stopped_by_connect = false;
+        }
         start_adv = true;
     }
     refresh_locked();
@@ -755,7 +1082,15 @@ static void service_link_control(void)
     if (start_adv) {
         esp_err_t error = esp_ble_gap_start_advertising(&advertising_parameters);
         if (error != ESP_OK) {
-            fail_transport("Start advertising", error);
+            portENTER_CRITICAL(&state_lock);
+            bool owned_name = device_name.ack == NAME_ACK_START;
+            if (owned_name) {
+                state.adv_pending = false;
+                device_name.ack = NAME_ACK_NONE;
+                if (name_busy_locked()) name_fail_locked("Device name advertising restart", error, false, 0);
+            }
+            portEXIT_CRITICAL(&state_lock);
+            if (!owned_name) fail_transport("Start advertising", error);
         }
     }
 }
@@ -801,6 +1136,11 @@ static void service_pairing_admission(void)
     /* A cached free slot only admits the physical link. Confirm actual SDK
      * capacity before starting SMP, whose persistence can evict an old bond. */
     esp_err_t error = refresh_known_bonds();
+#if CONFIG_BT_CLASSIC_ENABLED
+    int shared_count = btc_storage_get_num_all_bond_devices();
+#else
+    int shared_count = -1; /* BLE-only admission uses the verified public list. */
+#endif
     portENTER_CRITICAL(&state_lock);
     bool current = command_current_locked(&identity) && state.auth_revision == revision &&
         state.pairing_admission_pending && !state.auth_complete &&
@@ -808,6 +1148,12 @@ static void service_pairing_admission(void)
     bool retry = error != ESP_OK && state.bond_refresh_pending;
     bool grant = current && error == ESP_OK && state.bond_list.known &&
         state.bond_list.count < PAIRING_BOND_CAPACITY &&
+        !state.classic_pairing_reserved &&
+#if CONFIG_BT_CLASSIC_ENABLED
+        shared_count >= 0 && shared_count < PAIRING_BOND_CAPACITY &&
+#else
+        shared_count == -1 &&
+#endif
         (TickType_t)(xTaskGetTickCount() - state.handshake_started) <
             pdMS_TO_TICKS(PAIRING_HANDSHAKE_TIMEOUT_MS);
     if (current && !retry) {
@@ -825,6 +1171,201 @@ static void service_pairing_admission(void)
     if (error != ESP_OK) {
         fail_link_current(&identity, revision, true, "Pairing capacity/encryption", error);
     }
+}
+
+/* One worker owns SDK name/advertisement calls. Callback ownership remains
+ * reserved until that exact outstanding completion drains, including timeout. */
+static void service_device_name(void)
+{
+    name_phase_t action = NAME_IDLE;
+    uint64_t request = 0;
+    char target[BLE_HID_NAME_MAX_BYTES + 1U];
+    portENTER_CRITICAL(&state_lock);
+    if (!name_busy_locked() || !state.public.initialized) {
+        portEXIT_CRITICAL(&state_lock);
+        return;
+    }
+    if (state.public.failed) {
+        name_uncertain_locked(ESP_ERR_INVALID_STATE);
+        portEXIT_CRITICAL(&state_lock);
+        return;
+    }
+    if (!device_name.deadline_active) {
+        device_name.started = xTaskGetTickCount();
+        device_name.deadline_active = true;
+    }
+    if ((TickType_t)(xTaskGetTickCount() - device_name.started) >=
+        pdMS_TO_TICKS(BLE_HID_NAME_TIMEOUT_MS)) {
+        record_failure_locked("Device name completion timeout", ESP_ERR_TIMEOUT, false, 0);
+        name_uncertain_locked(ESP_ERR_TIMEOUT);
+        portEXIT_CRITICAL(&state_lock);
+        return;
+    }
+    if (device_name.ack != NAME_ACK_NONE) {
+        portEXIT_CRITICAL(&state_lock);
+        return;
+    }
+    if (device_name.phase == NAME_QUIET) {
+        /* Startup payload completions and prior radio commands retain their
+         * original owners; never relabel them as a rename's completion. */
+        if (!state.service_started || !state.adv_configured || !state.scan_configured ||
+            state.adv_pending || state.adv_stop_pending) {
+            portEXIT_CRITICAL(&state_lock);
+            return;
+        }
+        device_name.public.status = BLE_HID_NAME_APPLYING;
+        if (state.advertising) {
+            state.adv_stop_pending = true;
+            state.adv_stopped_by_connect = false;
+            device_name.phase = NAME_WAIT_STOP;
+            device_name.ack = NAME_ACK_STOP;
+            action = NAME_WAIT_STOP;
+        } else {
+            device_name.phase = NAME_GET_PREVIOUS;
+        }
+    }
+    if (device_name.phase == NAME_GET_PREVIOUS) {
+        device_name.phase = NAME_WAIT_PREVIOUS;
+        device_name.ack = NAME_ACK_GET;
+        action = NAME_GET_PREVIOUS;
+    } else if (device_name.phase == NAME_SET) {
+        memcpy(target, device_name.rollback ? device_name.previous : device_name.public.requested,
+            sizeof(target));
+        device_name.changed = true;
+        device_name.public.active_known = false;
+        device_name.phase = NAME_WAIT_VALUE;
+        device_name.ack = NAME_ACK_GET;
+        action = NAME_SET;
+    } else if (device_name.phase == NAME_ADV) {
+        state.adv_configured = false;
+        device_name.phase = NAME_WAIT_ADV;
+        device_name.ack = NAME_ACK_ADV;
+        action = NAME_ADV;
+    } else if (device_name.phase == NAME_SCAN) {
+        state.scan_configured = false;
+        device_name.phase = NAME_WAIT_SCAN;
+        device_name.ack = NAME_ACK_SCAN;
+        action = NAME_SCAN;
+    } else if (device_name.phase == NAME_RESTART &&
+        (state.public.connected || (state.advertising && !state.adv_pending))) {
+        /* A live HID link needs no advertising restart or disconnect. Both
+         * updated payloads are ready for its eventual normal reconnect. */
+        name_finish_locked();
+    }
+    request = device_name.public.request_id;
+    portEXIT_CRITICAL(&state_lock);
+
+    esp_err_t error = ESP_OK;
+    const char *stage = "Device name operation";
+    switch (action) {
+    case NAME_WAIT_STOP:
+        stage = "Device name advertising stop";
+        error = esp_ble_gap_stop_advertising();
+        break;
+    case NAME_GET_PREVIOUS:
+        stage = "Device name previous read";
+        error = esp_ble_gap_get_device_name();
+        break;
+    case NAME_SET:
+        stage = "Device name submission/readback";
+        error = esp_ble_gap_set_device_name(target);
+        if (error == ESP_OK) {
+            portENTER_CRITICAL(&state_lock);
+            bool current = name_busy_locked() && device_name.public.request_id == request &&
+                device_name.phase == NAME_WAIT_VALUE && device_name.ack == NAME_ACK_GET;
+            portEXIT_CRITICAL(&state_lock);
+            if (current) error = esp_ble_gap_get_device_name();
+        }
+        break;
+    case NAME_ADV:
+        stage = "Device name advertising data submission";
+        error = esp_ble_gap_config_adv_data(&advertising_data);
+        break;
+    case NAME_SCAN:
+        stage = "Device name scan response submission";
+        error = esp_ble_gap_config_adv_data(&scan_data);
+        break;
+    default:
+        break;
+    }
+    if (error != ESP_OK) {
+        portENTER_CRITICAL(&state_lock);
+        if (device_name.public.request_id == request) {
+            device_name.ack = NAME_ACK_NONE; /* Rejected submission has no callback. */
+            if (action == NAME_WAIT_STOP) state.adv_stop_pending = false;
+            if (name_busy_locked()) name_fail_locked(stage, error, false, 0);
+        }
+        portEXIT_CRITICAL(&state_lock);
+    }
+}
+
+static bool name_gap_completion_locked(esp_gap_ble_cb_event_t event,
+                                       const esp_ble_gap_cb_param_t *parameter)
+{
+    name_ack_t ack = device_name.ack;
+    bool matched = (ack == NAME_ACK_STOP && event == ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT) ||
+        (ack == NAME_ACK_GET && event == ESP_GAP_BLE_GET_DEV_NAME_COMPLETE_EVT) ||
+        (ack == NAME_ACK_ADV && event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) ||
+        (ack == NAME_ACK_SCAN && event == ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT) ||
+        (ack == NAME_ACK_START && event == ESP_GAP_BLE_ADV_START_COMPLETE_EVT);
+    if (!matched) return false;
+    device_name.ack = NAME_ACK_NONE;
+    if (ack == NAME_ACK_START && device_name.start_stopped_by_connect) {
+        state.advertising = false; /* Connection proves legacy advertising stopped. */
+        device_name.start_stopped_by_connect = false;
+    }
+    if (!name_busy_locked()) return true; /* Drain an uncertain operation only. */
+    uint32_t raw = 0;
+    const char *stage = "Device name completion";
+    if (ack == NAME_ACK_GET) {
+        raw = (uint32_t)parameter->get_dev_name_cmpl.status;
+        stage = "Device name readback";
+        if (raw != ESP_BT_STATUS_SUCCESS || !parameter->get_dev_name_cmpl.name) {
+            name_fail_locked(stage, ESP_FAIL, true, raw);
+            return true;
+        }
+        const char *value = parameter->get_dev_name_cmpl.name;
+        size_t length = 0;
+        while (length <= BLE_HID_NAME_MAX_BYTES && value[length]) ++length;
+        if (length > BLE_HID_NAME_MAX_BYTES || (length != 0 && !ble_hid_name_valid(value, length))) {
+            name_fail_locked(stage, ESP_ERR_NOT_SUPPORTED, true, raw);
+        } else if (device_name.phase == NAME_WAIT_PREVIOUS) {
+            memset(device_name.previous, 0, sizeof(device_name.previous));
+            memcpy(device_name.previous, value, length);
+            device_name.previous_known = true;
+            device_name.changed = false;
+            memcpy(device_name.public.active, device_name.previous, sizeof(device_name.previous));
+            device_name.public.active_known = true;
+            device_name.phase = strcmp(device_name.previous, device_name.public.requested) == 0 ?
+                NAME_RESTART : NAME_SET;
+        } else {
+            const char *expected = device_name.rollback ? device_name.previous : device_name.public.requested;
+            if (strcmp(value, expected) == 0) device_name.phase = NAME_ADV;
+            else name_fail_locked(stage, ESP_ERR_INVALID_STATE, true, raw);
+        }
+        return true;
+    }
+    if (ack == NAME_ACK_STOP) {
+        raw = (uint32_t)parameter->adv_stop_cmpl.status;
+        stage = "Device name advertising stop completion";
+        if (!state.adv_stop_pending && !state.advertising) raw = ESP_BT_STATUS_SUCCESS;
+        if (raw != ESP_BT_STATUS_SUCCESS) state.adv_stop_pending = false;
+    } else if (ack == NAME_ACK_ADV) {
+        raw = (uint32_t)parameter->adv_data_cmpl.status;
+        stage = "Device name advertising data completion";
+    } else if (ack == NAME_ACK_SCAN) {
+        raw = (uint32_t)parameter->scan_rsp_data_cmpl.status;
+        stage = "Device name scan response completion";
+    } else {
+        raw = (uint32_t)parameter->adv_start_cmpl.status;
+        stage = "Device name advertising restart completion";
+    }
+    if (raw != ESP_BT_STATUS_SUCCESS) name_fail_locked(stage, ESP_FAIL, true, raw);
+    else if (ack == NAME_ACK_STOP) device_name.phase = NAME_GET_PREVIOUS;
+    else if (ack == NAME_ACK_ADV) device_name.phase = NAME_SCAN;
+    else if (ack == NAME_ACK_SCAN) device_name.phase = NAME_RESTART;
+    else name_finish_locked();
+    return true;
 }
 
 static void respond_control(const control_command_t *command)
@@ -887,6 +1428,16 @@ static void resolve_subscriptions(void)
         control_command_t identity = {.generation = generation, .conn_id = conn_id};
         memcpy(identity.address, address, sizeof(address));
         fail_link_current(&identity, revision, true, "Trusted bond identity unavailable", error);
+        return;
+    }
+    portENTER_CRITICAL(&state_lock);
+    bool selected_mismatch = state.target.selected && (!state.target.target.bond_id_known ||
+        memcmp(state.target.target.bond_id, fingerprint, BLE_HID_BOND_ID_BYTES) != 0);
+    portEXIT_CRITICAL(&state_lock);
+    if (selected_mismatch) {
+        control_command_t identity = {.generation = generation, .conn_id = conn_id};
+        memcpy(identity.address, address, sizeof(address));
+        fail_link_current(&identity, revision, true, "Selected bond identity changed", ESP_ERR_INVALID_STATE);
         return;
     }
     uint8_t mask = bonded ? subscription_mask(fingerprint) : 0;
@@ -992,6 +1543,72 @@ static void process_subscription_jobs(void)
     }
 }
 
+static void apply_preferences_locked(const ble_hid_preferences_t *value, bool durable)
+{
+    state.target.loaded = true; state.target.durable = durable;
+    state.target.selected = value->selected; state.target.target = value->target;
+    state.target.revision = value->revision;
+    /* A verified user preference record distinguishes managed/reset devices
+     * from a virgin boot; do not create a new trust window after reboot. */
+    if (durable) state.pairing_user_controlled = true;
+    state.target_order_count = value->count; state.target_order_configured = value->count != 0;
+    memcpy(state.target_order, value->order, (size_t)value->count * sizeof(*value->order));
+    if (value->selected) { state.public.pairing_open = false; state.pairing_user_controlled = true; }
+    if (state.bonds_loaded && state.bond_list.known) order_bonds_locked();
+}
+
+static void service_target_preferences(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    bool load = !state.target.loaded && !state.public.failed;
+    portEXIT_CRITICAL(&state_lock);
+    if (load) {
+        bool exists;
+        /* Admission rejects until loaded, so this single worker can reuse its
+         * bounded candidate without placing a second policy on the task stack. */
+        esp_err_t error = ble_hid_preferences_load(&state.target_candidate, &exists);
+        portENTER_CRITICAL(&state_lock);
+        if (error == ESP_OK) apply_preferences_locked(&state.target_candidate, exists);
+        else { state.target.request_status = BLE_HID_TARGET_FAILED; state.target.request_error = error; }
+        portEXIT_CRITICAL(&state_lock);
+        if (error != ESP_OK) fail_transport("HID target preferences load (data preserved)", error);
+    }
+    portENTER_CRITICAL(&state_lock);
+    bool pending = state.target.request_status == BLE_HID_TARGET_PENDING;
+    bool same_bonds = state.target_candidate.count == state.bond_list.count;
+    bool matched[BLE_HID_MAX_BONDS] = {0};
+    for (unsigned int i = 0; pending && same_bonds && i < state.target_candidate.count; ++i) {
+        bool found = false;
+        for (unsigned int j = 0; j < state.bond_list.count; ++j) {
+            if (!matched[j] && target_key_matches(&state.target_candidate.order[i], &state.bond_list.bonds[j])) {
+                matched[j] = true; found = true; break;
+            }
+        }
+        if (!found) same_bonds = false;
+    }
+    bool current = !state.public.failed && state.bond_list.known && !state.bond_list.updating &&
+        same_bonds && state.target_expected_bond_mutation == state.bond_mutation_revision &&
+        !state.public.connected && !state.notification_pending && !state.submitting &&
+        state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
+    if (pending) state.target.request_status = current ? BLE_HID_TARGET_APPLYING : BLE_HID_TARGET_FAILED;
+    if (pending && !current) state.target.request_error = ESP_ERR_INVALID_STATE;
+    portEXIT_CRITICAL(&state_lock);
+    if (!pending || !current) return;
+    bool uncertain;
+    esp_err_t error = ble_hid_preferences_save(&state.target_candidate, &uncertain);
+    portENTER_CRITICAL(&state_lock);
+    state.target.request_error = error;
+    if (error == ESP_OK) {
+        apply_preferences_locked(&state.target_candidate, true);
+        state.target.request_status = BLE_HID_TARGET_APPLIED;
+        bond_list_status_locked(state.bond_list.known, state.bond_list.updating, state.bond_list.error);
+    } else {
+        state.target.request_status = uncertain ? BLE_HID_TARGET_UNCERTAIN : BLE_HID_TARGET_FAILED;
+        record_failure_locked("HID target preference persistence", error, false, 0);
+    }
+    refresh_locked(); portEXIT_CRITICAL(&state_lock);
+}
+
 static void control_worker(void *argument)
 {
     (void)argument;
@@ -1001,6 +1618,7 @@ static void control_worker(void *argument)
             fail_transport("Subscription store initialization", error);
         }
     }
+    service_target_preferences();
     portENTER_CRITICAL(&state_lock);
     bool load_bonds = !state.bonds_loaded && !state.public.failed;
     portEXIT_CRITICAL(&state_lock);
@@ -1017,7 +1635,9 @@ static void control_worker(void *argument)
         }
     }
     for (;;) {
+        service_device_name();
         service_bond_cache();
+        service_target_preferences();
         service_pairing_admission();
         control_command_t command;
         if (xQueueReceive(control_queue, &command,
@@ -1090,6 +1710,7 @@ static void control_worker(void *argument)
         process_subscription_jobs();
         service_link_control();
         service_bond_forget();
+        service_single_bond_forget();
         service_rssi();
     }
 }
@@ -1300,6 +1921,16 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
                     (uint32_t)parameter->remove_bond_dev_cmpl.status);
             }
             state.remove_completed = true;
+        } else if (state.single_forget.sdk_inflight && !state.single_completed &&
+            !memcmp(state.single_forget.target.address, parameter->remove_bond_dev_cmpl.bd_addr, ESP_BD_ADDR_LEN)) {
+            state.single_forget.sdk_inflight = false; state.single_completed = true;
+            state.single_result = parameter->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS ? ESP_OK : ESP_FAIL;
+            if (state.single_forget.status == BLE_HID_BOND_FORGET_REMOVING)
+                state.single_forget.status = BLE_HID_BOND_FORGET_VERIFYING;
+        } else if (single_forget_busy_locked()) {
+            /* Other/stale SDK removals still invalidate durable observations;
+             * they never complete or retarget this operation. */
+            invalidate_bonds_locked();
         }
         break;
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
@@ -1364,6 +1995,8 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
     default:
         break;
     }
+    bool name_owned = name_gap_completion_locked(event, parameter);
+    if (name_owned) failure = false;
     if (failure) record_failure_locked(failure_stage, ESP_FAIL, true, failure_status);
     refresh_locked();
     portEXIT_CRITICAL(&state_lock);
@@ -1446,11 +2079,14 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
         portENTER_CRITICAL(&state_lock);
         bool saved = state.bonds_loaded && saved_peer_locked(command.address);
         bool pairing = pairing_allowed_locked(now);
+        if (device_name.ack == NAME_ACK_START) device_name.start_stopped_by_connect = true;
         if (state.adv_stop_pending) state.adv_stopped_by_connect = true;
         state.advertising = false; /* Legacy connectable advertising stops on connect. */
         if (state.public.connected || state.rejected_pending || state.public.failed ||
+            target_blocked_locked() || single_forget_busy_locked() ||
             state.public.bond_forget_state == BLE_HID_FORGET_RUNNING ||
             state.notification_pending || state.submitting || !state.bonds_loaded ||
+            !selected_peer_locked(command.address, (unsigned int)parameter->connect.ble_addr_type) ||
             (!saved && !pairing)) {
             command.kind = COMMAND_REJECT_CONNECTION;
             state.rejected_pending = true;
@@ -1570,6 +2206,57 @@ ble_hid_snapshot_t ble_hid_snapshot(void)
     return snapshot;
 }
 
+bool ble_hid_name_valid(const char *utf8, size_t length)
+{
+    return device_settings_bluetooth_name_valid(utf8, length);
+}
+
+esp_err_t ble_hid_name_request(const char *utf8, size_t length, uint64_t *request_id)
+{
+    if (!ble_hid_name_valid(utf8, length)) return ESP_ERR_INVALID_ARG;
+    TickType_t now = xTaskGetTickCount();
+    portENTER_CRITICAL(&state_lock);
+    bool accepted = !state.public.failed && !device_name.blocked && !name_busy_locked() &&
+        (!state.public.initialized || (!target_blocked_locked() && !single_forget_busy_locked())) &&
+        (!state.init_attempted || state.public.initialized) &&
+        state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
+    if (accepted) {
+        uint64_t next = device_name.public.request_id + 1U;
+        if (next == 0) ++next;
+        device_name.public.request_id = next;
+        device_name.public.error = ESP_OK;
+        device_name.public.sdk_status_known = false;
+        device_name.public.sdk_status = 0;
+        device_name.public.rollback_attempted = false;
+        device_name.public.rollback_confirmed = false;
+        device_name.public.rollback_error = ESP_OK;
+        memset(device_name.public.requested, 0, sizeof(device_name.public.requested));
+        memcpy(device_name.public.requested, utf8, length);
+        device_name.changed = false;
+        device_name.rollback = false;
+        device_name.previous_known = false;
+        device_name.phase = NAME_QUIET;
+        device_name.public.status = BLE_HID_NAME_PENDING;
+        device_name.deadline_active = state.public.initialized;
+        device_name.started = now;
+        if (device_name.public.active_known &&
+            strcmp(device_name.public.active, device_name.public.requested) == 0) {
+            name_finish_locked(); /* Verified no-op: no advertising/SDK churn. */
+        }
+        if (request_id) *request_id = next;
+    }
+    portEXIT_CRITICAL(&state_lock);
+    return accepted ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+ble_hid_name_snapshot_t ble_hid_name_snapshot(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    ble_hid_name_snapshot_t snapshot = device_name.public;
+    portEXIT_CRITICAL(&state_lock);
+    return snapshot;
+}
+
 ble_hid_failure_t ble_hid_failure(void)
 {
     portENTER_CRITICAL(&state_lock);
@@ -1587,6 +2274,7 @@ ble_hid_bond_list_t ble_hid_bond_list(void)
 {
     portENTER_CRITICAL(&state_lock);
     ble_hid_bond_list_t list = state.bond_list;
+    list.preferences_revision = state.target.revision;
     list.capacity = PAIRING_BOND_CAPACITY;
     /* Matching requires successful authentication and resolution of this
      * connection's actual bond, not just an address seen during admission.
@@ -1601,6 +2289,7 @@ ble_hid_bond_list_t ble_hid_bond_list(void)
     for (unsigned int i = 0; i < list.count; ++i) {
         ble_hid_bond_t *bond = &list.bonds[i];
         bond->is_current = false;
+        bond->is_selected = state.target.selected && target_key_matches(&state.target.target, bond);
         if (verified && bond->address_type_known &&
             bond->address_type == state.peer_address_type &&
             memcmp(bond->address, state.address, ESP_BD_ADDR_LEN) == 0) {
@@ -1616,13 +2305,129 @@ ble_hid_bond_list_t ble_hid_bond_list(void)
     return list;
 }
 
+static bool target_editable_locked(uint64_t revision)
+{
+    return state.public.initialized && !state.public.failed && !device_name.blocked && !name_busy_locked() &&
+        !state.public.connected && !state.rejected_pending && !state.notification_pending && !state.submitting && !single_forget_busy_locked() &&
+        state.bond_list.known && !state.bond_list.updating && revision == state.bond_list.revision &&
+        state.public.bond_forget_state != BLE_HID_FORGET_RUNNING &&
+        state.public.bond_forget_state != BLE_HID_FORGET_FAILED;
+}
+
+static esp_err_t submit_preferences_locked(const ble_hid_target_preferences_request_t *request, uint64_t *request_id)
+{
+    if (!target_editable_locked(request->expected_bond_revision) || target_blocked_locked() ||
+        request->expected_revision != state.target.revision || state.target.revision == UINT64_MAX ||
+        state.target.request_id == UINT64_MAX) return ESP_ERR_INVALID_STATE;
+    if (request->count != state.bond_list.count) return ESP_ERR_INVALID_ARG;
+    ble_hid_preferences_t candidate = {.revision = state.target.revision + 1U,
+        .selected = request->selected, .count = request->count};
+    bool used[BLE_HID_MAX_BONDS] = {0};
+    for (unsigned int i = 0; i < request->count; ++i) {
+        bool found = false;
+        for (unsigned int j = 0; j < state.bond_list.count; ++j) {
+            const ble_hid_bond_t *bond = &state.bond_list.bonds[j];
+            if (!used[j] && target_key_matches(&request->order[i], bond)) {
+                if (!bond->address_type_known) return ESP_ERR_NOT_SUPPORTED;
+                candidate.order[i] = key_for_bond(bond); used[j] = true; found = true; break;
+            }
+        }
+        if (!found) return ESP_ERR_INVALID_ARG;
+    }
+    if (request->selected) {
+        bool found = false;
+        for (unsigned int j = 0; j < state.bond_list.count; ++j) {
+            const ble_hid_bond_t *bond = &state.bond_list.bonds[j];
+            if (target_key_matches(&request->target, bond)) {
+                if (!bond->selection_supported) return ESP_ERR_NOT_SUPPORTED;
+                candidate.target = key_for_bond(bond); found = true; break;
+            }
+        }
+        /* Reordering may preserve a previously selected but now missing bond.
+         * Its complete identity stays blocked instead of retargeting by address. */
+        if (!found && state.target.selected && request->target.bond_id_known &&
+            state.target.target.bond_id_known && request->target.address_type == state.target.target.address_type &&
+            memcmp(request->target.address, state.target.target.address, 6) == 0 &&
+            memcmp(request->target.bond_id, state.target.target.bond_id, BLE_HID_BOND_ID_BYTES) == 0) {
+            candidate.target = state.target.target; found = true;
+        }
+        if (!found) return ESP_ERR_NOT_FOUND;
+    }
+    state.target_candidate = candidate;
+    state.target_expected_bond_mutation = state.bond_mutation_revision;
+    ++state.target.request_id;
+    state.target.request_status = BLE_HID_TARGET_PENDING; state.target.request_error = ESP_OK;
+    state.public.pairing_open = false;
+    if (request_id) *request_id = state.target.request_id;
+    return ESP_OK;
+}
+
+esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_request_t *request, uint64_t *request_id)
+{
+    if (!request || request->count > BLE_HID_MAX_BONDS) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&state_lock);
+    esp_err_t error = submit_preferences_locked(request, request_id);
+    portEXIT_CRITICAL(&state_lock);
+    return error;
+}
+
+esp_err_t ble_hid_target_select(uint64_t bond_revision, const ble_hid_target_t *target)
+{
+    portENTER_CRITICAL(&state_lock);
+    ble_hid_target_preferences_request_t request = {.expected_bond_revision = bond_revision,
+        .expected_revision = state.target.revision, .selected = target != NULL,
+        .count = state.bond_list.count};
+    if (target) request.target = *target;
+    for (unsigned int i = 0; i < request.count; ++i) request.order[i] = key_for_bond(&state.bond_list.bonds[i]);
+    esp_err_t error = submit_preferences_locked(&request, NULL);
+    portEXIT_CRITICAL(&state_lock);
+    return error;
+}
+
+ble_hid_target_snapshot_t ble_hid_target_snapshot(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    ble_hid_target_snapshot_t result = state.target;
+    result.available = state.bond_list.known && !state.bond_list.updating && !state.public.failed && !target_blocked_locked();
+    result.error = result.available ? ESP_OK : (target_blocked_locked() || state.public.failed ? ESP_ERR_INVALID_STATE : state.bond_list.error);
+    if (result.available && result.selected) {
+        result.available = false; result.error = ESP_ERR_NOT_FOUND;
+        for (unsigned int i = 0; i < state.bond_list.count; ++i) {
+            if (target_key_matches(&result.target, &state.bond_list.bonds[i])) {
+                result.available = state.bond_list.bonds[i].selection_supported;
+                result.error = result.available ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+                break;
+            }
+        }
+    }
+    result.host_initiated_only = true;
+    result.nearby_detection_supported = false;
+    portEXIT_CRITICAL(&state_lock);
+    return result;
+}
+
+esp_err_t ble_hid_target_order(uint64_t bond_revision, const ble_hid_target_t *ordered, size_t count)
+{
+    if (count > BLE_HID_MAX_BONDS || (count && !ordered)) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&state_lock);
+    ble_hid_target_preferences_request_t request = {.expected_bond_revision = bond_revision,
+        .expected_revision = state.target.revision, .selected = state.target.selected,
+        .target = state.target.target, .count = (uint8_t)count};
+    if (count) memcpy(request.order, ordered, count * sizeof(*ordered));
+    esp_err_t error = submit_preferences_locked(&request, NULL);
+    portEXIT_CRITICAL(&state_lock);
+    return error;
+}
+
 bool ble_hid_pairing_open(uint32_t duration_ms)
 {
     if (duration_ms == 0 || duration_ms > BLE_HID_PAIRING_MAX_MS) return false;
     TickType_t now = xTaskGetTickCount();
     portENTER_CRITICAL(&state_lock);
     bool accepted = state.public.initialized && !state.public.failed &&
+        !device_name.blocked &&
         !state.public.connected && !state.rejected_pending &&
+        !state.target.selected && !state.classic_pairing_reserved && !target_blocked_locked() && !single_forget_busy_locked() &&
         state.bond_list.known && state.bond_list.count < PAIRING_BOND_CAPACITY &&
         state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
     if (accepted) {
@@ -1641,16 +2446,38 @@ void ble_hid_pairing_close(void)
     portEXIT_CRITICAL(&state_lock);
 }
 
-bool ble_hid_forget_bonds(uint64_t generation)
+bool ble_hid_pairing_claim_classic(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    bool accepted = state.public.initialized && !state.public.failed && !state.classic_pairing_reserved && !target_blocked_locked() && !single_forget_busy_locked() &&
+        !state.public.pairing_open && !state.pairing_admitted && !state.pairing_admission_pending &&
+        (!state.public.connected || (state.auth_complete && state.bond_resolved)) &&
+        state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
+    if (accepted) state.classic_pairing_reserved = true;
+    portEXIT_CRITICAL(&state_lock);
+    return accepted;
+}
+
+void ble_hid_pairing_release_classic(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    state.classic_pairing_reserved = false;
+    portEXIT_CRITICAL(&state_lock);
+}
+
+static bool request_forget_bonds(uint64_t generation, bool reopen_pairing)
 {
     TickType_t now = xTaskGetTickCount();
     portENTER_CRITICAL(&state_lock);
     bool accepted = state.public.initialized && !state.public.failed &&
+        !name_busy_locked() && !device_name.blocked &&
+        !target_blocked_locked() && !single_forget_busy_locked() && !state.classic_pairing_reserved &&
         state.public.generation == generation && !state.public.connected &&
         !state.rejected_pending && !state.notification_pending && !state.submitting &&
         !state.remove_inflight && state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
     if (accepted) {
         state.public.pairing_open = false;
+        state.forget_reopen_pairing = reopen_pairing;
         state.pairing_user_controlled = true;
         state.public.bond_forget_state = BLE_HID_FORGET_RUNNING;
         state.public.bond_forget_error = ESP_OK;
@@ -1745,6 +2572,63 @@ bool ble_hid_disconnect_generation(uint64_t generation)
     return true;
 }
 
+bool ble_hid_forget_bonds(uint64_t generation) { return request_forget_bonds(generation, true); }
+bool ble_hid_forget_bonds_without_pairing(uint64_t generation) { return request_forget_bonds(generation, false); }
+
+esp_err_t ble_hid_forget_bond_request(uint64_t generation, uint64_t bond_revision,
+                                     const ble_hid_target_t *target, uint64_t *request_id)
+{
+    if (!target) return ESP_ERR_INVALID_ARG;
+    if (!target->bond_id_known) return ESP_ERR_NOT_SUPPORTED;
+    portENTER_CRITICAL(&state_lock);
+    bool ready = target_editable_locked(bond_revision) && !target_blocked_locked() && !state.classic_pairing_reserved &&
+        generation == state.public.generation && !state.remove_inflight && !state.pairing_admitted && !state.pairing_admission_pending &&
+        state.single_forget.request_id != UINT64_MAX;
+    int found = -1;
+    for (unsigned int i = 0; i < state.bond_list.count; ++i)
+        if (target_key_matches(target, &state.bond_list.bonds[i])) found = (int)i;
+    esp_err_t error = !ready ? ESP_ERR_INVALID_STATE : (found < 0 ? ESP_ERR_NOT_FOUND : ESP_OK);
+    if (error == ESP_OK) {
+        uint64_t id = state.single_forget.request_id + 1U;
+        state.public.pairing_open = false; state.pairing_user_controlled = true;
+        advance_generation_locked();
+        state.single_forget = (ble_hid_bond_forget_snapshot_t){.request_id = id, .generation = state.public.generation,
+            .bond_revision = bond_revision, .target = *target, .status = BLE_HID_BOND_FORGET_PENDING, .cancellable = true};
+        state.single_mutation = state.bond_mutation_revision; state.single_started = xTaskGetTickCount();
+        state.single_list_verified = true;
+        state.single_completed = false; state.single_result = ESP_OK;
+        bond_list_status_locked(false, true, ESP_OK);
+        if (request_id) *request_id = id;
+        refresh_locked();
+    }
+    portEXIT_CRITICAL(&state_lock); return error;
+}
+
+esp_err_t ble_hid_forget_bond_cancel(uint64_t request_id)
+{
+    portENTER_CRITICAL(&state_lock);
+    esp_err_t error = ESP_ERR_INVALID_STATE;
+    if (request_id && request_id == state.single_forget.request_id) {
+        if (state.single_forget.status == BLE_HID_BOND_FORGET_PENDING && !state.single_forget.sdk_inflight) {
+            state.single_forget.status = BLE_HID_BOND_FORGET_CANCELLED; state.single_forget.cancellable = false;
+            state.single_forget.error = ESP_OK;
+            bool known = state.single_mutation == state.bond_mutation_revision && !state.bond_refresh_pending;
+            bond_list_status_locked(known, false, known ? ESP_OK : ESP_ERR_INVALID_STATE);
+            refresh_locked(); error = ESP_OK;
+        } else if (state.single_forget.status == BLE_HID_BOND_FORGET_CANCELLED) error = ESP_OK;
+        else error = ESP_ERR_NOT_SUPPORTED;
+    }
+    portEXIT_CRITICAL(&state_lock); return error;
+}
+
+ble_hid_bond_forget_snapshot_t ble_hid_bond_forget_snapshot(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    ble_hid_bond_forget_snapshot_t snapshot = state.single_forget;
+    snapshot.cancellable = snapshot.status == BLE_HID_BOND_FORGET_PENDING && !state.public.failed;
+    portEXIT_CRITICAL(&state_lock); return snapshot;
+}
+
 esp_err_t ble_hid_init(void)
 {
     portENTER_CRITICAL(&state_lock);
@@ -1782,7 +2666,11 @@ esp_err_t ble_hid_init(void)
     error = esp_bt_controller_init(&configuration);
     if (error == ESP_OK) {
         initialization_stage = "Controller enable";
+#if CONFIG_BT_CLASSIC_ENABLED
+        error = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+#else
         error = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+#endif
     }
     if (error == ESP_OK) {
         initialization_stage = "Bluedroid initialization";
@@ -1835,7 +2723,17 @@ esp_err_t ble_hid_init(void)
     }
     if (error == ESP_OK) {
         initialization_stage = "Device name configuration";
-        error = esp_ble_gap_set_device_name("ESP32-INPUT");
+        char initial_name[BLE_HID_NAME_MAX_BYTES + 1U] = BLE_HID_DEFAULT_NAME;
+        portENTER_CRITICAL(&state_lock);
+        bool pending_name = name_busy_locked();
+        if (pending_name) memcpy(initial_name, device_name.public.requested, sizeof(initial_name));
+        portEXIT_CRITICAL(&state_lock);
+        error = esp_ble_gap_set_device_name(initial_name);
+        if (error == ESP_OK && pending_name) {
+            portENTER_CRITICAL(&state_lock);
+            device_name.changed = true;
+            portEXIT_CRITICAL(&state_lock);
+        }
     }
     if (error == ESP_OK && xTaskCreate(control_worker, "ble_hid_control",
         CONTROL_TASK_STACK, NULL, CONTROL_TASK_PRIORITY, NULL) != pdPASS) {
@@ -1868,6 +2766,10 @@ esp_err_t ble_hid_init(void)
     }
     portENTER_CRITICAL(&state_lock);
     state.public.initialized = true;
+    if (name_busy_locked()) {
+        device_name.started = xTaskGetTickCount();
+        device_name.deadline_active = true;
+    }
     portEXIT_CRITICAL(&state_lock);
     return ESP_OK;
 }

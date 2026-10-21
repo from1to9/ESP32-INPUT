@@ -1,6 +1,58 @@
 # Compatibility and acceptance
 
-## Current evidence
+## Current combined delivery boundary
+
+The current combined source includes HID, motion/touch, spoken letters, audio,
+recording, authenticated LAN control/MCP, native connection management and signed
+OTA staging. This source-only checkpoint follows the
+[combined checklist](delivery-checklist.md). Hardware testing and installation are
+explicitly deferred. The historical observations below belong to their named
+images and must not be used as evidence for this combined image.
+
+### Combined source checkpoint: 2026-10-21
+
+| Check | Current evidence |
+| --- | --- |
+| Complete host regression | `python3 tools/check.py` passed, including 146 actual coordinator cases, protocol/generated-artifact checks, threaded media composition, server/authentication, connection ownership, settings/storage and updater failure paths |
+| Companion/MCP | Five tests passed using the actual companion, stdio MCP and signing code with named external boundaries; independent review also passed four offline real-TLS cases and 54 C/Python format comparisons |
+| Production UI | All native suites passed on stable source: 748 renders, all 174 legacy scenario names retained, 100 settled-resource cases and repeated navigation across both themes; teardown retained zero tracked allocations |
+| Independent review | Component and integration findings were repaired and independently retested. Publication requires the exact whole-tree review inventory to match the final files; detailed private reports remain local |
+| Hygiene | First-party text/local-link checks passed for 484 files; diff whitespace passed. Publication excludes private recovery images, credentials, recordings, generated binaries and local evidence |
+| Target build | Full ESP32-S31 firmware build and size analysis passed with the pinned SDK, BSP and resolved dependencies; this did not enumerate or access a device |
+
+The built application is **4,655,312 bytes** (`0x4708d0`), leaving 26 percent of
+its six-MiB slot free. Its SHA-256 is
+`601827c21e672e5dcba965ee4e8ea7d65a895564f73e4dfa83d8441f18344b24`.
+The generated configuration SHA-256 is
+`c55cc206f4a9e1e86f91934b4d120faca948d042e849c1f79ac161fa47c6c80c`.
+SDK commit `383dda6c182e3dabf6355160166fe007df775629`, BSP commit
+`5f10831ddf8697680121e72ba0fd3dce7f7f1799`, the exact reviewed pairing patch and
+`firmware/dependencies.lock` identify the dependencies. The generated SDK and
+actual X.509 compilation enable certificate date validation. Rollback uses
+application-controlled confirmation, with startup auto-confirm disabled.
+
+Static DIRAM use is 301,378 of 503,744 bytes, leaving 202,366 bytes before runtime
+allocations. This is linker evidence, not a measured free-heap or endurance
+result. The bounded native review pages and presentation buffers use external
+RAM; their successful host allocation checks do not qualify physical PSRAM.
+
+The operation catalog has 147 entries and 77 configuration metadata fields;
+16 native preference keys are currently writable through the shared path.
+Catalog presence does not imply runtime support. Initial-v1 event subscriptions,
+playback pause/resume/seek, recording pause/resume, destination export and target
+screen observation remain explicitly unsupported. Finalized recording download
+uses the authenticated binary HTTP resource. Spoken input is the confirmed
+letter-candidate workflow, not general dictation. Actual recording uses explicitly
+prepared encrypted NOR storage; unknown external NAND remains preserved.
+
+No flashing, USB/serial enumeration, pairing, recording on hardware, radio test
+or device test was performed for this checkpoint. Host interoperability, acoustic
+quality, physical motion/touch behavior, partition migration, power-loss recovery
+and long powered operation remain separate qualification gates. The v3 layout
+needs a separately authorized migration on an earlier-layout device; ordinary
+OTA cannot perform that migration.
+
+## Historical evidence
 
 Evidence date: 2026-10-21. The pinned S31 toolchain has built the minimal composite HID firmware. Portable behavior, report layout and production BLE callback logic have executable host coverage. The physical development board is identified as Mosaico v1.2 (eFuse `0x0102`) with 16 MB flash, and its original flash contents have been backed up locally. Runtime deployment and host compatibility evidence are recorded separately below; a build does not establish a working HID device or long-term reliability.
 
@@ -56,7 +108,7 @@ These durations are acceptance plans, not completed runs. IMU sample rate or rep
 - USB CDC provides read-only diagnostics; composite USB HID and transport switching are being integrated under the same USB owner. Health records include uptime, free/minimum heap, largest internal block, coordinator stack watermark, queue occupancy and lock state. Logs may drop when the host does not read; logging must not block HID.
 - Bluetooth Device Information/Battery services, cross-host compatibility and long-duration qualification remain release gaps. Local battery/About screens are separate from GATT services. The current profile is a development HID subset, not a Bluetooth qualification claim.
 
-### Current expanded integration
+### Historical expanded integration
 
 The original product implementation passed a frozen independent v3 review and
 target build before the user added device basics, multiple saved peers, a
@@ -246,6 +298,55 @@ four pbufs per connection. Fresh configuration generation and a new device
 capture are required; earlier memory observations do not qualify this image.
 The diagnostic image also includes the 50-percent fallback brightness change,
 but physical brightness and preserved settings have not been measured.
+
+### Corrected IMU deployment and remaining pointer qualification
+
+The startup/memory correction was published at
+`892805a4c37777ee22518de4517bf6974ed22222`. Its freshly configured, reviewed
+2,425,632-byte application SHA-256 is
+`4996587fad68e21ddc5075010d921c5e9ea8d896b45ef19035cee828c354b1f3`.
+Flash verification passed and NVS was preserved. The 46.005-second capture
+observed IMU samples increasing from 928 to 3,675, `ESP_OK`, and completed
+64-sample calibration by uptime 22 seconds. No retained IMU, allocation or
+Bluetooth fault was captured. Complete health samples reported 66,591 bytes
+free internal RAM and a largest DMA block of 25,600 bytes.
+
+That capture remains failed: its final health line is incomplete
+(`malformed_health`, `unterminated_line`). A subsequent attempted capture found
+no USB serial interface and collected no samples. Neither result is a passing
+health or endurance gate.
+
+The user confirmed that Motion can enable and produce pointer movement, but
+movement is too slow and directions are unintuitive; touchpad movement works
+normally on the same connection. Sensor startup recovery is established, while
+air-mouse behavior is not accepted. The requested next refinement is automatic
+adaptation between screen-up and tilted screen-facing grips, with configurable
+speed and directions. The fixed-axis mapping in this image has not passed that
+requirement.
+
+### Native station setup and input controls candidate
+
+The integrated candidate provides on-device Wi-Fi scan/select/password/join,
+saved-network reconnect, explicit common host keys, touchpad tap/double-tap/drag,
+a persistent tap-to-click preference and verified asynchronous Bluetooth-name
+updates. Normal Wi-Fi setup joins the existing LAN; a recovery hotspot is an
+explicit secondary action. A LAN address does not imply an implemented web/API,
+MCP or OTA service. Those services remain unavailable/planned.
+
+The native UI run passed 276 rendered scenes in both themes, preserving all
+174 earlier scenarios. Sixty unchanged/hidden-state cases produced no redraw
+or allocation; 1,000 panel cycles per theme retained no growth. Core/peak object
+counts were 102/144 under the unchanged 160-object limit. Final teardown retained
+zero live blocks. The run checked private draft wiping, consumed sessions,
+generation-bound network rows, common keys and touch contact heartbeats using
+the production LVGL UI. These are host observations, not device memory proof.
+
+The expanded coordinator suite passed 108 cases, including actual HID down/up
+sequences, queued swipe rejection, drag cancellation, local editor FIFO and
+secret cleanup, acknowledged name persistence and the two added navigation
+routes. The presenter module passed eight bounded-publication tests. Actual
+LAN join/IP acquisition, on-air name changes and physical tap/drag/common-key
+interoperability remain device gates for this candidate.
 
 ### Long-term power gate
 

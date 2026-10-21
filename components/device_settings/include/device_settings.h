@@ -4,8 +4,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define DEVICE_SETTINGS_RECORD_SIZE 16U
-#define DEVICE_SETTINGS_SCHEMA_VERSION 2U
+#define DEVICE_SETTINGS_RECORD_SIZE 56U
+#define DEVICE_SETTINGS_V3_RECORD_SIZE 40U
+#define DEVICE_SETTINGS_LEGACY_RECORD_SIZE 16U
+#define DEVICE_SETTINGS_SCHEMA_VERSION 4U
+#define DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES 18U
+#define DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME "ESP32-INPUT"
 #define DEVICE_SETTINGS_MIN_BRIGHTNESS 10U
 #define DEVICE_SETTINGS_MAX_BRIGHTNESS 100U
 #define DEVICE_SETTINGS_BRIGHTNESS_STEP 10U
@@ -27,6 +31,12 @@ typedef struct {
     uint8_t brightness_percent;
     device_idle_timeout_t idle_timeout;
     device_transport_t preferred_transport;
+    bool tap_to_click;
+    char bluetooth_name[DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES + 1U];
+    uint16_t motion_gain_x_centi, motion_gain_y_centi; /* 25..10000; HID units/degree * 100. */
+    uint16_t motion_deadzone_mdps; /* 0..10000; milli-degrees/second. */
+    uint16_t motion_filter_ms, motion_freeze_ms; /* Each 0..1000 milliseconds. */
+    bool motion_invert_x, motion_invert_y;
 } device_settings_t;
 
 typedef enum {
@@ -45,20 +55,31 @@ typedef enum {
 } device_settings_apply_t;
 
 /* Defaults: Dark, Ctrl, haptics enabled, brightness 50%, timeout five minutes,
- * preferred transport Bluetooth. Actual switching belongs to the coordinator.
+ * preferred transport Bluetooth, tap-to-click enabled, name ESP32-INPUT;
+ * motion X/Y gain 4, deadzone 0.5 dps, filter 30 ms, freeze 150 ms, no inversion.
+ * Actual switching/name application belongs to the coordinator/adapters.
  * Brightness is 10..100 inclusive, in steps of ten percentage points.
  * No hardware availability, persistence state or credentials are inferred. */
 void device_settings_defaults(device_settings_t *settings);
 bool device_settings_validate(const device_settings_t *settings);
+/* Shared BLE/settings validator: explicit 1..18 UTF-8 bytes, excluding NUL.
+ * Reject malformed/overlong UTF-8, surrogates, NUL/C0/C1 controls and outer
+ * ASCII space. Input need not be terminated; this never reads beyond length. */
+bool device_settings_bluetooth_name_valid(const char *utf8, size_t length);
 bool device_settings_equal(const device_settings_t *a, const device_settings_t *b);
 /* Only CHANGED should schedule a coalesced save in the external NVS adapter.
  * This component never writes, allocates, sleeps or accesses hardware. */
 device_settings_apply_t device_settings_apply(device_settings_t *current,
                                               const device_settings_t *candidate);
-/* Exact 16-byte little-endian wire record; no C struct/padding serialization.
- * Encode schema 2 (transport at byte 11). Decode schema 1 only with its reserved
- * byte 11 zero, migrating transport to Bluetooth. Unknown versions are rejected.
- * Decode failures leave output untouched, never silently install defaults. */
+/* Encode exact 56-byte schema 4, never C struct/padding serialization. Decode
+ * also accepts 16-byte schema 1/2 and 40-byte schema 3. Preserve every old
+ * value and default only absent fields. V1 byte 11 must be zero (Bluetooth).
+ * V3/v4: tap flag at 12, name length at 13, zero-padded name[19] at 14..32,
+ * reserved zero at 33..35. V4 LE uint16 gain X/Y at 36/38, deadzone at 40,
+ * filter/freeze at 42/44; inversion bits X=1/Y=2 at 46; 47..51 zero.
+ * CRC32 at the last four bytes covers all preceding bytes in each schema.
+ * Unknown versions are rejected. Failures leave output untouched;
+ * decoding/migration never writes storage or silently replaces bad data. */
 device_settings_status_t device_settings_encode(const device_settings_t *settings,
                                                 uint8_t *record, size_t length);
 device_settings_status_t device_settings_decode(const uint8_t *record, size_t length,
@@ -102,6 +123,14 @@ bool device_idle_configure(device_idle_t *policy, device_idle_timeout_t timeout,
  * never from gyro/RSSI/network/render polling. Wakes and renews the deadline.
  * Returns whether desired asleep changed. Does not release wake capture. */
 bool device_idle_activity(device_idle_t *policy, uint64_t now_ms);
+/* Explicit coordinator sleep request, independent of the saved idle timeout.
+ * Rejects held/wake-captured input and clock rollback. On admission, consume
+ * all old gesture tokens so delayed callbacks cannot activate after sleep.
+ * The next physical BEGIN must wake through the normal whole-gesture gate.
+ * This changes desired policy only; callers must first stop protected capture
+ * and verify its hardware-off acknowledgement, then observe brightness-off.
+ * True means admitted (including already asleep), not a hardware receipt. */
+bool device_idle_request_sleep(device_idle_t *policy, uint64_t now_ms);
 /* Record a real callback timestamp once it changes, even if its queued intent
  * is later discarded by priority handling. Never wakes by itself or changes
  * the observed clock/capture state. When awake, only newer activity extends

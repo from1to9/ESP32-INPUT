@@ -1,9 +1,6 @@
 # Shared configuration contract
 
-Status: planning, 2026-10-21. This extends the current six-field preference
-record; it does not claim new runtime settings or network endpoints exist.
-Complete the API/function inventory and this schema before implementing new
-interfaces. Current executable defaults remain authoritative until migration.
+Status: implemented schema-4 preference and typed configuration integration candidate, 2026-10-21. The production settings owner preserves valid legacy schemas and reports effective/requested/saved state separately. The [generated catalog](../api/control-v1.json) defines 77 typed metadata fields consumed by firmware/OpenAPI/MCP; individual manager availability, apply policy and persistence support remain explicit. Metadata does not make an unsupported field writable or qualify hardware. Existing durable data is never rewritten merely by loading it.
 
 ## One model, three clients
 
@@ -38,20 +35,41 @@ An explicit reset names its field/group and follows the same validation path.
 
 ## Configuration inventory
 
-The following values describe the current baseline where known. Additional
-choices remain proposals until their owning algorithm/driver and tests exist.
+The stored fields are theme, shortcut modifier, haptics enable, brightness,
+idle timeout, preferred transport, tap-to-click, Bluetooth name, independent
+pointer X/Y gains, deadzone, filter, freeze and X/Y inversion. Motion intent,
+calibration, gravity/reference state, draft contents and active leases remain
+volatile.
+
+The current configuration transaction owner implements sixteen keys:
+`display.theme`, `display.brightness_percent`, `display.idle_timeout_seconds`,
+`haptics.enabled`, `keyboard.shortcut_modifier`, `input.preferred_transport`,
+`touch.tap_to_click`, `bluetooth.device_name`, `pointer.gain_hid_per_degree`,
+`pointer.deadzone_dps`, `pointer.filter_seconds`,
+`pointer.gain_x_hid_per_degree`, `pointer.gain_y_hid_per_degree`,
+`pointer.invert_x`, `pointer.invert_y` and `pointer.freeze_ms`. The scalar API
+gain sets both axes. A candidate containing both scalar and per-axis gain is
+rejected regardless of ordering. Each per-axis, inversion and freeze field can
+be applied or reset independently through the same native preferences. When
+axis gains differ, the configuration read reports the scalar as null and
+includes the actual X/Y values. Registry entries alone do not make the
+remaining fields writable; unsupported owner operations reject explicitly.
+
+The following inventory includes implemented preferences and proposed profiles.
+Additional choices need an owning algorithm/driver and validation before use.
 
 | Group | Fields and current values | Apply and persistence plan |
 | --- | --- | --- |
 | Display | Theme Dark/Light, default Dark; brightness 10..100 percent in steps of 10, default 50; timeout Off/1/5/10/30 minutes, default 5 | Existing durable preferences; brightness requires driver acknowledgement; timeout starts a new interval |
 | Input routing | Preferred Bluetooth/USB, default Bluetooth; cold boot Mouse with motion off | Transport preference saves only after safe switch; current link/readiness and motion-on are volatile |
 | Keyboard | Ctrl/Command, default Ctrl; US ANSI layout; nine-cell groups; compiled preview capacity 64 | Modifier is durable today; a proposed effective preview limit may be 1..64 with default 64, distinct from the immutable compiled capacity. Layout/group profiles require capability/schema validation and release-before-apply; reducing the limit below the current draft rejects without truncation. Draft/send progress stays volatile |
-| Pointer | Gain currently 4 HID units/degree; deadzone 0.5 degrees/second; filter constant 0.03 seconds; board axis transform | Proposed validated profiles; clear fractional/filter state and release/cancel before apply; no remote raw axis-register writes |
+| Pointer | Durable X/Y gains 0.25..100 HID units/degree in 0.01 steps, default 4 each; deadzone 0..10 degrees/second in 0.001 steps, default 0.5; filter/freeze 0..1000 ms, defaults 30/150; X/Y inversion default false | Implemented schema-4 preferences; all these native fields use the configuration API keys above. Cancel/release before motion policy changes and clear fractional/filter state; calibration and motion-on stay volatile. Board axis transforms remain port definitions |
 | Selection | Cell angle currently 6 degrees; hysteresis 1 degree; valid-cell layout and center rule | Proposed profile; require valid group membership and hysteresis strictly smaller than half the cell spacing; cancel pending confirmation before changing |
-| Touch | Gain divisors currently 1, 4, 8; gesture/scroll behavior | Profile-supported choices; complete or cancel the active gesture before apply; never reinterpret an in-flight gesture |
+| Touch | Gain divisors 1, 4, 8; durable `tap_to_click`, default true; portable tap/drag profile | Current defaults: tap 250 ms/8 px, second contact within 280 ms/16 px, contact timeout 1000 ms, drag ceiling 30000 ms. Valid bounds live in the portable header. Cancel/release before changing policy; Off keeps pointer motion and explicit buttons. Timing/profile API exposure remains planned |
+| Bluetooth device name | Durable local UTF-8 name, default `ESP32-INPUT`, 1..18 bytes excluding NUL | Reject malformed UTF-8, C0/C1 controls and outer ASCII spaces. Persist a user change only after matching radio acknowledgement; keep effective, requested and saved status distinct. Preserve identity and bonds; host caches may retain an older name |
 | Buttons | Current AI single/double/hold semantics; 280 ms double-click window and 900 ms hold | Proposed allowlisted semantic mappings and timing profiles; shared wake/gesture timing; physical recovery/unlock must remain reachable |
 | Haptics | Global enabled preference, default true; current bounded confirmation/mode/lock/error patterns | Existing enable is durable; proposed strength/duration/pattern profiles stay within board-qualified motor limits; off stops pending output immediately |
-| Connections | Saved Wi-Fi profiles/order, BLE target preference/order, automatic reconnect policy, setup/pairing windows | New schema planned; stable object IDs/revisions, bounded counts/backoff; preserve current healthy link unless explicitly switching |
+| Connections | Saved Wi-Fi profiles/order, BLE target selection, setup/pairing windows | Separate typed connection operations and stores, rather than fields in the schema-4 preference record. Configuration transactions do not yet expose a general reconnect/order profile; preserve the current healthy link unless explicitly switching |
 | Work policy | Canonical `work.policy` values `input_first` (default), `balanced`, `management_first`; only qualified values become writable | Bounded scan/retry/status/download budgets; idle-only admission is a separate job condition. No arbitrary RF percentage control or ability to demote key release/local stop |
 | Audio | Route, volume, mic/speaker mute, sample profile, channel/mix/codec options | Driver-advertised choices only; separate saved volume from actual output/mute; no durable automatic capture/unmute |
 | Recording | Format, sample profile, duration/byte ceilings, storage target, retention policy, streaming budget | New capability; bounded jobs, explicit authorization and indicator; file retention and storage writes are separate from settings writes |
@@ -85,15 +103,32 @@ Configurable requested limits must not exceed those ceilings.
 
 ## Transaction and durability
 
-Expose schema and current effective/desired/saved state through read operations.
-Use one bounded `config.stage` / `config.apply` / `config.cancel` transaction
-family in the API operation registry, not a second path that bypasses ownership.
-Staging is inert; it validates the full candidate against expected revision and
-current capabilities. It does not save, stop input or change a connection.
+The implemented bounded `config.stage` / `config.apply` / `config.cancel` family
+uses the API operation registry and common coordinator. Staging is inert; it
+validates the full candidate against expected revision and current capabilities.
+It does not save, stop input or change a connection. Applying rechecks mutable
+gates and observes the owning driver and storage outcomes. Configuration reads
+report current settings/revision; `durability: owner_status_required` means the
+read itself is not a persistence receipt.
+
+The staged `durable` option defaults to true. With `durable: false`, applying
+changes effective runtime preferences without requesting a preference save.
+With `durable: true`, the validated candidate is explicitly submitted to the
+coalescing store; acceptance does not prove a commit. A same-effective-value
+durable apply can save a previously temporary candidate. Native preference
+edits merge only their changed fields into the separate durable baseline, so
+an unrelated local edit cannot silently persist a remote temporary override.
+
+The coordinator keeps effective preferences separate from its last admitted
+durable intent. That baseline is not proof of storage: pending/error status and
+the store's requested/saved revisions determine durable evidence. The UI can
+report temporary preferences when effective values differ from that baseline.
+After reboot, only a successfully stored record is restored; temporary changes
+have no automatic restoration or background save.
 
 Applying rechecks authorization, revision, capability and conflicts. Acquire
 any required release/reconnect/maintenance barrier, then apply through the
-manager. Report `accepted`, `applying`, `applied`, `saving`, `saved`, `failed`,
+manager. Keep `accepted`, `applying`, `applied`, `saving`, `saved`, `failed`,
 `storage_uncertain` and `requires_restart` as distinct observations. A response
 must identify which runtime values are effective and what durable evidence is
 known. Group changes with different managers cannot claim atomic hardware
@@ -113,10 +148,23 @@ secrets and unrelated namespaces survive. Cancellation cannot pretend to undo
 a commit that has already begun. Factory-reset/forget operations are separately
 scoped and cannot be hidden inside reset-to-default preferences.
 
+`preferences.reset` supports `all`, `display`, `input`, `haptics` and `bluetooth`
+groups through an immutable reviewed candidate. `device.factory_reset.request`
+means **Reset preferences and connections**: device preferences, LE HID bonds,
+Wi-Fi profiles and HID target preferences. Its required retention-manifest
+digest identifies the displayed reset/retain scope. Control trust, Classic
+bonds, firmware/OTA, models, recordings, unknown namespaces, external NAND and
+factory backups remain preserved. Wi-Fi deletion runs last. No raw erase,
+automatic restart, new pairing window or atomic rollback is implied. An absent
+approval ID stages a local review; a supplied ID must match the original
+identity, scope, action digest and revisions. Reset/restart confirmation requires
+fresh physical input on that exact review, and cancellation remains available
+when confirmation becomes stale or expired.
+
 ## Validation gate
 
-Before implementation, reconcile names and types with the complete API function
-matrix. Each configurable function needs a manager owner, default/bounds,
+Reconcile new fields and changes with the complete API function matrix and the
+[canonical registry](../api/control-v1.json). Each configurable function needs a manager owner, default/bounds,
 support status, apply/persistence semantics and test references. Validate schema
 examples against a machine-readable definition; verify UI/API/MCP derive the
 same choices and reasons. No permissive generic set-any-key endpoint.

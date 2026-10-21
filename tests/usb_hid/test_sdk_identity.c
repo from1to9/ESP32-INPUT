@@ -19,7 +19,7 @@ int main(void)
 {
     tinyusb_desc_serial_number_init();
     assert(strcmp(descriptor_str_default[3], "021324354657") == 0);
-    assert(descriptor_dev_default.idVendor == 0x303a && descriptor_dev_default.idProduct == 0x4005);
+    assert(descriptor_dev_default.idVendor == 0x303a && descriptor_dev_default.idProduct == 0x4015);
     assert(descriptor_dev_default.bDeviceClass == TUSB_CLASS_MISC);
     assert(descriptor_dev_default.bDeviceSubClass == MISC_SUBCLASS_COMMON);
     assert(descriptor_dev_default.bDeviceProtocol == MISC_PROTOCOL_IAD);

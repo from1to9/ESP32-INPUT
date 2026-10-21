@@ -1,0 +1,17 @@
+--- a/components/bt/host/bluedroid/btc/core/btc_dm.c
++++ b/components/bt/host/bluedroid/btc/core/btc_dm.c
+@@ -542,5 +542,3 @@
+-    if (p_cfm_req->just_works) {
+-        // just work, not show to users.
+-        BTA_DmConfirm(p_cfm_req->bd_addr, true);
+-        return;
+-    }
++    /* Application admission must also cover Just Works. The application owns
++     * its bounded pairing window and shared Classic/LE bond capacity policy.
++     * No keys may be persisted before that policy confirms the request. */
+--- a/components/bt/host/bluedroid/api/include/api/esp_gap_bt_api.h
++++ b/components/bt/host/bluedroid/api/include/api/esp_gap_bt_api.h
+@@ -8,0 +9,3 @@
++
++/* Repository admission patch: Just Works requires the existing CFM_REQ reply. */
++#define ESP_BT_GAP_JUST_WORKS_CONFIRM_REQUIRED 1

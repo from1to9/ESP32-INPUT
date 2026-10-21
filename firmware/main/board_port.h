@@ -125,7 +125,13 @@ esp_err_t board_button_events_register(board_button_event_callback_t callback);
 esp_err_t board_init(void (*lock_callback)(void));
 board_capabilities_t board_capabilities(void);
 
-/* Nonblocking latest sample from the 100 Hz BMI270 stream, in BSP sensor axes.
+/* Nonblocking latest sample from the 100 Hz BMI270 stream. Both acceleration
+ * and angular velocity use the right-handed display frame: X right, Y top,
+ * Z outward toward the viewer. The output rotation from BSP sensor coordinates
+ * is (-sensorY, sensorX, sensorZ), determinant +1. Positive angular velocity
+ * follows the right-hand rule. This is source-grounded; physical sign and
+ * installed display orientation qualification remain pending. The acquisition
+ * cache and hardware diagnostics retain raw BSP coordinates.
  * Gyro and acceleration use separate official BSP reads in one acquisition
  * batch; they are not an atomic six-axis sensor frame. Acceleration is in g.
  * Acquisition batches over 20 ms are rejected rather than timestamped fresh.
@@ -170,6 +176,33 @@ void board_haptics_enable(bool enabled);
 void board_haptic_feedback(board_feedback_t event);
 /* Gate motion while a pulse is pending/active or motor-off is unconfirmed. */
 bool board_haptics_active(void);
+
+typedef enum { BOARD_HAPTIC_TEST, BOARD_HAPTIC_RECOVER } board_haptic_operation_t;
+typedef enum {
+    BOARD_HAPTIC_NONE, BOARD_HAPTIC_PENDING, BOARD_HAPTIC_ACTIVE,
+    BOARD_HAPTIC_COMPLETED, BOARD_HAPTIC_NO_EFFECT, BOARD_HAPTIC_CANCELLED,
+    BOARD_HAPTIC_FAILED, BOARD_HAPTIC_UNCERTAIN,
+} board_haptic_state_t;
+typedef struct {
+    uint64_t request_id, generation, requested_ms, started_ms, finished_ms;
+    board_haptic_operation_t operation;
+    board_feedback_t pattern;
+    board_haptic_state_t state;
+    bool on_confirmed, off_confirmed, worker_available;
+    esp_err_t error;
+} board_haptic_status_t;
+/* Bounded copied request to the existing haptics worker. Four native profiles
+ * only: confirm 24ms/35%, mode 45ms/55%, lock 65ms/65%, error 165ms/65% with
+ * its existing off gap. Cooldown/disabled/stale requests report NO_EFFECT.
+ * COMPLETED requires actual on and final off driver acknowledgements; recovery
+ * proves off and leaves admission disabled. No SDK work in the submission or
+ * nonmutating status snapshot. New accepted IDs never wrap or alias old work. */
+esp_err_t board_haptics_request(board_haptic_operation_t operation, board_feedback_t pattern, uint64_t *request_id);
+/* Cancels only the matching diagnostic. Preserves the configured admission
+ * preference, invalidates pending nonzero writes immediately, and lets the
+ * same worker confirm motor off before publishing CANCELLED. */
+esp_err_t board_haptics_cancel(uint64_t request_id);
+board_haptic_status_t board_haptics_status(void);
 
 #ifdef __cplusplus
 }

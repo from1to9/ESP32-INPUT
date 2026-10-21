@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SUITE = Path(__file__).resolve().parent
 HEADERS = ["esp_err.h", "sdkconfig.h", "soc/soc_caps.h", "esp_event.h",
            "esp_http_server.h", "esp_netif.h", "esp_random.h", "esp_timer.h",
-           "esp_wifi.h", "freertos/FreeRTOS.h", "freertos/task.h", "nvs.h"]
+           "esp_wifi.h", "esp_heap_caps.h", "freertos/FreeRTOS.h", "freertos/task.h", "nvs.h"]
 
 
 def main():

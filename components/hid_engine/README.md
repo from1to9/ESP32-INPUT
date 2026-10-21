@@ -44,3 +44,5 @@ clang -std=c11 -Wall -Wextra -Werror -pedantic -Wconversion -Wshadow \
 ```
 
 The host regression also runs 100,000 deterministic lifecycle cycles using fixed engine and sender storage. They repeatedly exercise queued movement, accepted key/button presses, mode/lock/ownership cancellation, disconnect/reconnect, failed key-up recovery, short congestion and deadline cancellation. Every cycle checks bounded storage, completed releases, local ownership, cleared pending work and idle output; this is portable lifecycle evidence rather than an elapsed-time device soak.
+
+`hid_engine_set_gyro_owned` supports the coordinator's explicitly authorized local or remote producer through the same input-core readiness/epoch/owner gates. The original function remains the local-source wrapper. It does not create a lease or bypass release/congestion checks.

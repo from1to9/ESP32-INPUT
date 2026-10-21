@@ -42,7 +42,15 @@ static input_delta_t motion(interaction_t *m, uint64_t *time, uint64_t dt,
                             float gx, float gy)
 {
     *time += dt;
-    const interaction_imu_sample_t s = sample(*time, gx, gy);
+    interaction_imu_sample_t s = sample(*time, gx, gy);
+    /* Existing scalar pointer tests request horizontal/vertical angular rates.
+     * Mouse fixtures express them as screen-up yaw Z and pitch X; keyboard
+     * fixtures retain their explicit X/Y selector mapping. */
+    if (m->view.mode == INPUT_MOUSE) {
+        s.gx_dps = 1 + gy + 2;
+        s.gy_dps = -2;
+        s.gz_dps = .5f + gx - 1;
+    }
     return interaction_motion_sample(m, &s);
 }
 
@@ -432,6 +440,10 @@ static void motion_calibration_and_focus(void)
         assert(delta.x == 0 && delta.y == 0); /* Corrected stationary bias/deadzone. */
     }
     assert(motion(&m, &time, 50001, 26, -2).x == 0);
+    assert(motion(&m, &time, 10000, 26, -2).x == 0);
+    for (unsigned i = 0; i < 13; ++i)
+        assert(motion(&m, &time, 10000, 1, -2).x == 0);
+    assert(m.gravity_ready); /* A gap needs fresh still evidence, with no catch-up. */
     assert(motion(&m, &time, 10000, 26, -2).x == 1);
     interaction_imu_sample_t invalid = sample(time + 10000, NAN, -2);
     assert(interaction_motion_sample(&m, &invalid).x == 0);
@@ -674,7 +686,7 @@ static void asynchronous_freeze(void)
     setup(&m, INPUT_MOUSE);
     uint64_t time = calibrate(&m);
     interaction_config_t config = m.config;
-    config.pointer_gain = 1;
+    config.pointer_gain_x = 1;
     assert(interaction_configure(&m, &config));
     assert(interaction_set_motion(&m, true));
     for (size_t i = 0; i < 3; ++i) assert(motion(&m, &time, 10000, 26, -2).x == 0);
@@ -730,9 +742,9 @@ static void invalid_configuration_and_samples(void)
     setup(&m, INPUT_MOUSE);
     const interaction_config_t valid = m.config;
     interaction_config_t bad = valid;
-    bad.pointer_gain = NAN;
+    bad.pointer_gain_x = NAN;
     assert(!interaction_configure(&m, &bad));
-    bad = valid; bad.pointer_gain = -1;
+    bad = valid; bad.pointer_gain_x = -1;
     assert(!interaction_configure(&m, &bad));
     bad = valid; bad.deadzone_dps = INFINITY;
     assert(!interaction_configure(&m, &bad));
@@ -756,6 +768,429 @@ static void invalid_configuration_and_samples(void)
     assert(interaction_motion_sample(&m, &invalid).x == 0);
 }
 
+static interaction_touch_result_t pad(interaction_t *m, interaction_touch_phase_t phase,
+    uint64_t gesture, uint64_t event_ms, uint64_t now_ms, float x, float y, bool allowed)
+{
+    const interaction_touch_event_t event = {.phase = phase, .gesture = gesture,
+        .epoch = m->control.epoch, .ui_revision = 7, .timestamp_ms = event_ms, .x = x, .y = y};
+    return interaction_touch_input(m, &event, now_ms, 7, allowed);
+}
+
+static void admit_pad(interaction_t *m, interaction_touch_result_t result,
+    interaction_touch_effect_t expected)
+{
+    assert(result.effect == expected && result.token && !result.allow_motion);
+    assert(interaction_touch_admit(m, result.token, true).effect == INTERACTION_TOUCH_NONE);
+}
+
+static void first_pad_tap(interaction_t *m)
+{
+    assert(pad(m, INTERACTION_TOUCH_BEGIN, 1, 100, 100, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+    admit_pad(m, pad(m, INTERACTION_TOUCH_END, 1, 120, 120, 100, 100, true), INTERACTION_TOUCH_CLICK);
+}
+
+static void held_pad(interaction_t *m)
+{
+    setup(m, INPUT_MOUSE);
+    first_pad_tap(m);
+    admit_pad(m, pad(m, INTERACTION_TOUCH_BEGIN, 2, 200, 200, 100, 100, true), INTERACTION_TOUCH_LEFT_DOWN);
+    assert(interaction_touch_holding(m));
+}
+
+static void pad_single_double_and_drag_effects(void)
+{
+    for (unsigned drag = 0; drag < 2; ++drag) {
+        interaction_t m; held_pad(&m);
+        if (drag) {
+            interaction_touch_result_t result = pad(&m, INTERACTION_TOUCH_MOVE, 2, 210, 210, 20, 7, true);
+            assert(result.effect == INTERACTION_TOUCH_NONE && result.allow_motion);
+            interaction_set_suppressed(&m, true, false, false, 210);
+            input_delta_t delta = interaction_touch_move(&m, 20, 7);
+            assert(delta.x == 20 && delta.y == 7);
+            assert(pad(&m, INTERACTION_TOUCH_MOVE, 2, 220, 220, 0, 0, true).effect == INTERACTION_TOUCH_NONE);
+        }
+        admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 2, 230, 230,
+            drag ? 120.0f : 100.0f, drag ? 107.0f : 100.0f, true), INTERACTION_TOUCH_LEFT_UP);
+        assert(!interaction_touch_holding(&m));
+        assert(pad(&m, INTERACTION_TOUCH_END, 2, 240, 240, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+        assert(interaction_touch_tick(&m, 600, 7).effect == INTERACTION_TOUCH_NONE);
+        assert(pad(&m, INTERACTION_TOUCH_BEGIN, 3, 700, 700, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+        admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 3, 720, 720, 100, 100, true), INTERACTION_TOUCH_CLICK);
+    }
+}
+
+static void pad_timing_distance_and_raw_slop_boundaries(void)
+{
+    const unsigned divisors[] = {1,4,8};
+    for (size_t divisor = 0; divisor < sizeof divisors / sizeof divisors[0]; ++divisor)
+        for (unsigned outside = 0; outside < 2; ++outside) {
+            interaction_t m; setup(&m, INPUT_MOUSE);
+            assert(interaction_set_touch_divisor(&m, divisors[divisor]));
+            (void)pad(&m, INTERACTION_TOUCH_BEGIN, 1, 100, 100, 100, 100, true);
+            float distance = outside ? 8.01f : 8.0f;
+            assert(pad(&m, INTERACTION_TOUCH_MOVE, 1, 110, 110, distance, 0, true).allow_motion);
+            (void)pad(&m, INTERACTION_TOUCH_MOVE, 1, 120, 120, -distance, 0, true);
+            interaction_touch_result_t result = pad(&m, INTERACTION_TOUCH_END, 1, 130, 130, 100, 100, true);
+            if (outside) assert(result.effect == INTERACTION_TOUCH_NONE);
+            else admit_pad(&m, result, INTERACTION_TOUCH_CLICK);
+        }
+    for (unsigned late = 0; late < 2; ++late) {
+        interaction_t m; setup(&m, INPUT_MOUSE);
+        (void)pad(&m, INTERACTION_TOUCH_BEGIN, 1, 100, 100, 100, 100, true);
+        interaction_touch_result_t result = pad(&m, INTERACTION_TOUCH_END, 1,
+            350U + late, 350U + late, 100, 100, true);
+        if (late) assert(result.effect == INTERACTION_TOUCH_NONE);
+        else admit_pad(&m, result, INTERACTION_TOUCH_CLICK);
+    }
+    for (unsigned late = 0; late < 2; ++late) {
+        interaction_t m; setup(&m, INPUT_MOUSE); first_pad_tap(&m);
+        interaction_touch_result_t result = pad(&m, INTERACTION_TOUCH_BEGIN, 2,
+            400U + late, 400U + late, 116, 100, true);
+        if (late) assert(result.effect == INTERACTION_TOUCH_NONE);
+        else admit_pad(&m, result, INTERACTION_TOUCH_LEFT_DOWN);
+    }
+    interaction_t m; setup(&m, INPUT_MOUSE); first_pad_tap(&m);
+    assert(pad(&m, INTERACTION_TOUCH_BEGIN, 2, 200, 200, 116.01f, 100, true).effect == INTERACTION_TOUCH_NONE);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 2, 220, 220, 116.01f, 100, true), INTERACTION_TOUCH_CLICK);
+}
+
+static void pad_movement_only_and_external_drag_never_click(void)
+{
+    for (unsigned external = 0; external < 2; ++external) {
+        interaction_t m; setup(&m, INPUT_MOUSE);
+        interaction_touch_config_t config = m.touch_config;
+        config.tap_to_click = external != 0;
+        assert(interaction_touch_configure(&m, &config));
+        (void)pad(&m, INTERACTION_TOUCH_BEGIN, 1, 100, 100, 100, 100, external == 0);
+        interaction_touch_result_t result = pad(&m, INTERACTION_TOUCH_MOVE, 1, 110, 110, 20, 0, external == 0);
+        assert(result.allow_motion && result.effect == INTERACTION_TOUCH_NONE);
+        assert(pad(&m, INTERACTION_TOUCH_END, 1, 120, 120, 120, 100, external == 0).effect == INTERACTION_TOUCH_NONE);
+        (void)pad(&m, INTERACTION_TOUCH_BEGIN, 2, 200, 200, 120, 100, external == 0);
+        assert(pad(&m, INTERACTION_TOUCH_END, 2, 220, 220, 120, 100, external == 0).effect == INTERACTION_TOUCH_NONE);
+        assert(!interaction_touch_holding(&m));
+    }
+    interaction_t m; held_pad(&m);
+    interaction_touch_config_t config = m.touch_config; config.tap_to_click = false;
+    assert(interaction_touch_configure(&m, &config));
+    interaction_touch_result_t release = interaction_touch_tick(&m, 210, 7);
+    assert(release.effect == INTERACTION_TOUCH_RELEASE_REQUIRED && interaction_touch_holding(&m));
+    admit_pad(&m, release, INTERACTION_TOUCH_RELEASE_REQUIRED);
+    assert(pad(&m, INTERACTION_TOUCH_END, 2, 220, 220, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+    assert(!interaction_touch_holding(&m));
+}
+
+static void pad_admission_rejection_and_cleanup_latch(void)
+{
+    interaction_t m; setup(&m, INPUT_MOUSE);
+    (void)pad(&m, INTERACTION_TOUCH_BEGIN, 1, 100, 100, 100, 100, true);
+    interaction_touch_result_t click = pad(&m, INTERACTION_TOUCH_END, 1, 120, 120, 100, 100, true);
+    assert(click.effect == INTERACTION_TOUCH_CLICK);
+    assert(interaction_touch_admit(&m, click.token, false).effect == INTERACTION_TOUCH_NONE);
+    assert(pad(&m, INTERACTION_TOUCH_BEGIN, 2, 200, 200, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 2, 220, 220, 100, 100, true), INTERACTION_TOUCH_CLICK);
+    interaction_touch_result_t down = pad(&m, INTERACTION_TOUCH_BEGIN, 3, 300, 300, 100, 100, true);
+    assert(down.effect == INTERACTION_TOUCH_LEFT_DOWN);
+    assert(interaction_touch_admit(&m, down.token, false).effect == INTERACTION_TOUCH_NONE);
+    assert(!interaction_touch_holding(&m));
+    assert(!pad(&m, INTERACTION_TOUCH_MOVE, 3, 310, 310, 20, 0, true).allow_motion);
+    assert(pad(&m, INTERACTION_TOUCH_END, 3, 320, 320, 120, 100, true).effect == INTERACTION_TOUCH_NONE);
+    assert(interaction_touch_tick(&m, 500, 7).effect == INTERACTION_TOUCH_NONE);
+    held_pad(&m);
+    interaction_touch_result_t up = pad(&m, INTERACTION_TOUCH_END, 2, 220, 220, 100, 100, true);
+    interaction_touch_result_t release = interaction_touch_admit(&m, up.token, false);
+    assert(release.effect == INTERACTION_TOUCH_RELEASE_REQUIRED && release.token != up.token);
+    assert(interaction_touch_admit(&m, up.token, true).effect == INTERACTION_TOUCH_NONE);
+    assert(interaction_touch_holding(&m));
+    assert(interaction_touch_admit(&m, release.token, false).token == release.token);
+    assert(interaction_touch_tick(&m, 500, 7).token == release.token);
+    admit_pad(&m, release, INTERACTION_TOUCH_RELEASE_REQUIRED);
+    assert(!interaction_touch_holding(&m));
+}
+
+static void pad_context_changes_and_congestion_release(void)
+{
+    for (unsigned boundary = 0; boundary < 7; ++boundary) {
+        interaction_t m; held_pad(&m);
+        input_state_t state = m.control;
+        if (boundary == 0) input_set_locked(&state, true);
+        if (boundary == 1) assert(input_set_mode(&state, INPUT_KEYBOARD));
+        if (boundary == 2) input_set_owner(&state, INPUT_REMOTE);
+        if (boundary == 3) input_set_connected(&state, false);
+        if (boundary == 4) input_invalidate(&state);
+        if (boundary == 5) interaction_set_suppressed(&m, true, true, false, 210);
+        interaction_sync(&m, &state, true, 210);
+        interaction_touch_result_t result = interaction_touch_tick(&m, 210, boundary == 6 ? 8 : 7);
+        assert(result.effect == INTERACTION_TOUCH_RELEASE_REQUIRED);
+        admit_pad(&m, result, INTERACTION_TOUCH_RELEASE_REQUIRED);
+        assert(!interaction_touch_holding(&m));
+        assert(pad(&m, INTERACTION_TOUCH_END, 2, 220, 220, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+    }
+    interaction_t m; held_pad(&m);
+    interaction_sync(&m, &m.control, false, 210);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 2, 220, 220, 100, 100, true), INTERACTION_TOUCH_LEFT_UP);
+    assert(!interaction_touch_holding(&m));
+}
+
+static void pad_heartbeat_deadlines_and_old_gesture_isolation(void)
+{
+    interaction_t m; held_pad(&m);
+    assert(pad(&m, INTERACTION_TOUCH_CANCEL, 1, 1190, 1190, 0, 0, true).effect == INTERACTION_TOUCH_NONE);
+    assert(interaction_touch_tick(&m, 1199, 7).effect == INTERACTION_TOUCH_NONE);
+    admit_pad(&m, interaction_touch_tick(&m, 1200, 7), INTERACTION_TOUCH_RELEASE_REQUIRED);
+    assert(!interaction_touch_holding(&m));
+    held_pad(&m);
+    interaction_touch_config_t config = m.touch_config;
+    config.drag_max_ms = 1000;
+    assert(interaction_touch_configure(&m, &config));
+    admit_pad(&m, interaction_touch_tick(&m, 200, 7), INTERACTION_TOUCH_RELEASE_REQUIRED);
+    /* Configure before a new gesture; no restoration of the cancelled hold. */
+    assert(pad(&m, INTERACTION_TOUCH_BEGIN, 3, 300, 300, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 3, 320, 320, 100, 100, true), INTERACTION_TOUCH_CLICK);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_BEGIN, 4, 400, 400, 100, 100, true), INTERACTION_TOUCH_LEFT_DOWN);
+    for (uint64_t now = 450; now < 1400; now += 50)
+        assert(pad(&m, INTERACTION_TOUCH_MOVE, 4, now, now, 0, 0, true).effect == INTERACTION_TOUCH_NONE);
+    assert(interaction_touch_tick(&m, 1399, 7).effect == INTERACTION_TOUCH_NONE);
+    admit_pad(&m, interaction_touch_tick(&m, 1400, 7), INTERACTION_TOUCH_RELEASE_REQUIRED);
+}
+
+static void pad_event_time_staleness_clock_and_malformed_input(void)
+{
+    interaction_t m; setup(&m, INPUT_MOUSE);
+    (void)pad(&m, INTERACTION_TOUCH_BEGIN, 1, 100, 500, 100, 100, true);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 1, 120, 500, 100, 100, true), INTERACTION_TOUCH_CLICK);
+    /* Native timestamps, not processing delay, decide the double-tap window. */
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_BEGIN, 2, 200, 500, 100, 100, true), INTERACTION_TOUCH_LEFT_DOWN);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 2, 220, 500, 100, 100, true), INTERACTION_TOUCH_LEFT_UP);
+    setup(&m, INPUT_MOUSE);
+    assert(pad(&m, INTERACTION_TOUCH_BEGIN, 1, 100, 1100, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+    assert(pad(&m, INTERACTION_TOUCH_END, 1, 120, 1100, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+    for (unsigned fault = 0; fault < 6; ++fault) {
+        held_pad(&m);
+        interaction_touch_event_t event = {.phase = INTERACTION_TOUCH_MOVE, .gesture = 2,
+            .epoch = m.control.epoch, .ui_revision = 7, .timestamp_ms = 210};
+        if (fault == 0) --event.epoch;
+        if (fault == 1) --event.ui_revision;
+        if (fault == 2) event.timestamp_ms = 211;
+        if (fault == 3) event.timestamp_ms = 199;
+        if (fault == 4) event.x = NAN;
+        if (fault == 5) event.y = 4097;
+        admit_pad(&m, interaction_touch_input(&m, &event, 210, 7, true), INTERACTION_TOUCH_RELEASE_REQUIRED);
+    }
+    held_pad(&m);
+    admit_pad(&m, interaction_touch_tick(&m, 199, 7), INTERACTION_TOUCH_RELEASE_REQUIRED);
+    held_pad(&m);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_MOVE, 2, 210, 210, 0, 0, false), INTERACTION_TOUCH_RELEASE_REQUIRED);
+    setup(&m, INPUT_MOUSE);
+    (void)pad(&m, INTERACTION_TOUCH_BEGIN, 1, UINT64_MAX - 100, UINT64_MAX - 100, 100, 100, true);
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 1, UINT64_MAX, UINT64_MAX, 100, 100, true), INTERACTION_TOUCH_CLICK);
+}
+
+static void pad_configuration_and_token_exhaustion(void)
+{
+    interaction_t m; held_pad(&m);
+    const interaction_touch_config_t valid = m.touch_config;
+    for (unsigned fault = 0; fault < 12; ++fault) {
+        interaction_touch_config_t bad = valid;
+        if (fault == 0) bad.tap_max_ms = 49;
+        if (fault == 1) bad.tap_max_ms = 501;
+        if (fault == 2) bad.double_window_ms = 99;
+        if (fault == 3) bad.double_window_ms = 501;
+        if (fault == 4) bad.contact_timeout_ms = 99;
+        if (fault == 5) bad.contact_timeout_ms = 2001;
+        if (fault == 6) bad.drag_max_ms = 999;
+        if (fault == 7) bad.drag_max_ms = 60001;
+        if (fault == 8) bad.tap_slop_px = NAN;
+        if (fault == 9) bad.tap_slop_px = 1;
+        if (fault == 10) bad.double_slop_px = 49;
+        if (fault == 11) bad.double_slop_px = 7;
+        assert(!interaction_touch_configure(&m, &bad));
+        assert(m.touch_config.tap_to_click && m.touch_config.tap_slop_px == 8 && interaction_touch_holding(&m));
+    }
+    assert(interaction_touch_configure(&m, &valid));
+    assert(interaction_touch_tick(&m, 210, 7).effect == INTERACTION_TOUCH_NONE);
+    m.touch.serial = UINT64_MAX - 1;
+    admit_pad(&m, pad(&m, INTERACTION_TOUCH_END, 2, 220, 220, 100, 100, true), INTERACTION_TOUCH_RELEASE_REQUIRED);
+    assert(m.touch.exhausted && !interaction_touch_holding(&m));
+    assert(pad(&m, INTERACTION_TOUCH_BEGIN, 3, 300, 300, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+    assert(pad(&m, INTERACTION_TOUCH_END, 3, 320, 320, 100, 100, true).effect == INTERACTION_TOUCH_NONE);
+}
+
+static input_delta_t physical_sample(interaction_t *m, uint64_t *time, uint64_t interval,
+                                     float x, float y, float z, float ax, float ay, float az)
+{
+    *time += interval;
+    const interaction_imu_sample_t s = {.timestamp_us = *time,
+        .gx_dps = x, .gy_dps = y, .gz_dps = z, .ax_g = ax, .ay_g = ay, .az_g = az};
+    return interaction_motion_sample(m, &s);
+}
+
+static uint64_t physical_grip(interaction_t *m, float tilt)
+{
+    setup(m, INPUT_MOUSE);
+    uint64_t time = 0;
+    for (unsigned i = 0; i < 64; ++i) {
+        const input_delta_t d = physical_sample(m, &time, 10000, 0, 0, 0, 0, sinf(tilt), cosf(tilt));
+        assert(d.x == 0 && d.y == 0);
+    }
+    assert(m->view.calibrated && m->gravity_ready);
+    assert(interaction_set_motion(m, true));
+    return time;
+}
+
+static void auto_grip_projection_and_independent_gains(void)
+{
+    const uint64_t intervals[] = {5000, 10000, 20000};
+    for (unsigned grip = 0; grip <= 6; ++grip) {
+        const float tilt = (float)grip * 1.57079632679f / 6;
+        for (size_t rate = 0; rate < sizeof intervals / sizeof intervals[0]; ++rate) {
+            for (int direction = -1; direction <= 1; direction += 2) {
+                interaction_t m;
+                uint64_t time = physical_grip(&m, tilt);
+                interaction_config_t config = m.config;
+                config.pointer_gain_x = 8;
+                config.pointer_gain_y = 2;
+                config.invert_x = direction < 0;
+                assert(interaction_configure(&m, &config));
+                int total_x = 0, total_y = 0;
+                const float yaw = 25 * (float)direction;
+                for (uint64_t elapsed = 0; elapsed < 1000000; elapsed += intervals[rate]) {
+                    const input_delta_t d = physical_sample(&m, &time, intervals[rate], 0,
+                        yaw * sinf(tilt), yaw * cosf(tilt), 0, sinf(tilt), cosf(tilt));
+                    total_x += d.x; total_y += d.y;
+                }
+                assert(total_x >= 199 && total_x <= 200 && total_y == 0);
+                time = physical_grip(&m, tilt);
+                config = m.config;
+                config.pointer_gain_x = 8;
+                config.pointer_gain_y = 2;
+                config.invert_y = direction < 0;
+                assert(interaction_configure(&m, &config));
+                total_x = 0; total_y = 0;
+                for (uint64_t elapsed = intervals[rate]; elapsed <= 1000000; elapsed += intervals[rate]) {
+                    const float pitch = tilt + (float)direction * 25 * .017453292519943295f *
+                        (float)elapsed / 1000000;
+                    const input_delta_t d = physical_sample(&m, &time, intervals[rate],
+                        25 * (float)direction, 0, 0, 0, sinf(pitch), cosf(pitch));
+                    total_x += d.x; total_y += d.y;
+                }
+                assert(total_y >= 49 && total_y <= 50 && total_x == 0);
+            }
+        }
+    }
+}
+
+static void gravity_transients_gaps_and_reacquisition(void)
+{
+    interaction_t m;
+    uint64_t time = physical_grip(&m, 0);
+    for (unsigned i = 0; i < 25; ++i) {
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 25, .8f, 0, .6f);
+        assert(d.x == 1 && d.y == 0);
+        assert(m.gravity_predicted && m.gravity_ready); /* Norm alone is insufficient. */
+    }
+    assert(physical_sample(&m, &time, 10000, 0, 0, 25, .8f, 0, .6f).x == 0);
+    assert(!m.gravity_ready && m.view.motion_block_reason == INTERACTION_MOTION_BLOCK_REFERENCE);
+    for (unsigned i = 0; i < 20; ++i)
+        assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 0);
+    for (unsigned i = 0; i < 13; ++i)
+        assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
+    assert(m.gravity_ready);
+    assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 1);
+    const float failures[][3] = {{0,0,0}, {0,0,3}, {NAN,0,1}, {0,0,16}};
+    for (size_t fault = 0; fault < sizeof failures / sizeof failures[0]; ++fault) {
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 25,
+            failures[fault][0], failures[fault][1], failures[fault][2]);
+        assert(d.x == 0 && d.y == 0 && !m.gravity_ready);
+        for (unsigned i = 0; i < 15; ++i)
+            assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
+        assert(m.gravity_ready);
+        assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 1);
+    }
+    assert(physical_sample(&m, &time, 50001, 0, 0, 25, 0, 0, 1).x == 0);
+    assert(!m.gravity_ready && m.pointer_motion.x == 0);
+    for (unsigned i = 0; i < 15; ++i)
+        assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
+    interaction_set_suppressed(&m, false, false, true, time / 1000);
+    assert(physical_sample(&m, &time, 10000, 0, 0, 100, .8f, 0, .6f).x == 0);
+    assert(m.gravity_ready && m.gravity_predicted && m.view.motion_enabled);
+    interaction_set_suppressed(&m, false, false, false, time / 1000);
+    for (unsigned i = 0; i < 20; ++i)
+        assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
+    assert(m.gravity_ready && physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 1);
+    interaction_set_suppressed(&m, false, false, true, time / 1000);
+    for (unsigned i = 0; i < 26; ++i)
+        assert(physical_sample(&m, &time, 10000, 0, 0, 100, 0, 0, 1).x == 0);
+    assert(!m.gravity_ready); /* A long vibration interval cannot extend trust. */
+}
+
+static void orientation_tracks_during_touch_and_guards_vertical_axes(void)
+{
+    interaction_t m;
+    uint64_t time = physical_grip(&m, 0);
+    interaction_set_suppressed(&m, true, false, false, time / 1000);
+    for (unsigned i = 1; i <= 100; ++i) {
+        const float tilt = (float)i * 1.57079632679f / 100;
+        const input_delta_t d = physical_sample(&m, &time, 10000, 90, 0, 0, 0, sinf(tilt), cosf(tilt));
+        assert(d.x == 0 && d.y == 0 && m.gravity_ready);
+    }
+    interaction_set_suppressed(&m, false, false, false, time / 1000);
+    for (unsigned i = 0; i < 15; ++i)
+        assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 1, 0).x == 0);
+    assert(physical_sample(&m, &time, 10000, 0, 25, 0, 0, 1, 0).x == 1);
+    time = physical_grip(&m, 0);
+    bool limited_seen = false, blocked_seen = false;
+    for (unsigned i = 1; i <= 200; ++i) {
+        const float roll = (float)i * 3.14159265359f / 200;
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, -90, 0,
+            sinf(roll), 0, cosf(roll));
+        assert(d.x == 0 && d.y == 0);
+        limited_seen |= (m.view.motion_status & INTERACTION_MOTION_GEOMETRY_LIMITED) != 0;
+        blocked_seen |= m.view.motion_block_reason == INTERACTION_MOTION_BLOCK_GEOMETRY;
+    }
+    assert(limited_seen && blocked_seen && m.geometry_ready && m.gravity_ready);
+    assert(physical_sample(&m, &time, 10000, 0, 0, -25, 0, 0, -1).x == 1);
+    interaction_config_t config = m.config;
+    config.freeze_ms = 1000;
+    assert(interaction_configure(&m, &config));
+    interaction_freeze_after(&m, UINT64_MAX - 10);
+    assert(m.freeze_until_ms == UINT64_MAX && m.pointer_motion.x == 0);
+    const interaction_config_t good = m.config;
+    for (unsigned fault = 0; fault < 6; ++fault) {
+        config = good;
+        if (fault == 0) config.pointer_gain_y = INFINITY;
+        if (fault == 1) config.pointer_gain_x = .24f;
+        if (fault == 2) config.freeze_ms = 1001;
+        if (fault == 3) config.selector_axis_x = 0;
+        if (fault == 4) config.selector_axis_y = -config.selector_axis_x;
+        if (fault == 5) config.selector_axis_x = -128;
+        assert(!interaction_configure(&m, &config));
+        assert(m.config.freeze_ms == good.freeze_ms);
+    }
+}
+
+static void calibration_cancellation_requires_a_new_explicit_start(void)
+{
+    interaction_t m; setup(&m, INPUT_MOUSE);
+    for (uint64_t i=0; i<63; ++i) {
+        const interaction_imu_sample_t s=sample(i*10000,1,-2);
+        (void)interaction_motion_sample(&m,&s);
+    }
+    assert(m.view.calibrating && m.view.calibration_samples==63);
+    interaction_calibration_cancel(&m);
+    for (uint64_t i=63; i<200; ++i) {
+        const interaction_imu_sample_t s=sample(i*10000,1,-2);
+        const input_delta_t d=interaction_motion_sample(&m,&s);
+        assert(!d.x && !d.y && !m.view.calibrating && !m.view.calibrated && !m.gravity_ready);
+    }
+    assert(!m.view.calibration_samples && !m.view.motion_enabled);
+    interaction_calibrate(&m);
+    for (uint64_t i=200; i<264; ++i) {
+        const interaction_imu_sample_t s=sample(i*10000,1,-2);
+        (void)interaction_motion_sample(&m,&s);
+    }
+    assert(m.view.calibrated && !m.view.calibrating && m.gravity_ready && !m.view.motion_enabled);
+}
+
 int main(void)
 {
     nine_cell_grid_and_preview();
@@ -772,6 +1207,18 @@ int main(void)
     asynchronous_freeze();
     canonical_boundaries();
     invalid_configuration_and_samples();
-    puts("PASS: nine-cell grid, 64-character preview, send prefixes, gestures, calibration and motion suppression");
+    pad_single_double_and_drag_effects();
+    pad_timing_distance_and_raw_slop_boundaries();
+    pad_movement_only_and_external_drag_never_click();
+    pad_admission_rejection_and_cleanup_latch();
+    pad_context_changes_and_congestion_release();
+    pad_heartbeat_deadlines_and_old_gesture_isolation();
+    pad_event_time_staleness_clock_and_malformed_input();
+    pad_configuration_and_token_exhaustion();
+    auto_grip_projection_and_independent_gains();
+    gravity_transients_gaps_and_reacquisition();
+    orientation_tracks_during_touch_and_guards_vertical_axes();
+    calibration_cancellation_requires_a_new_explicit_start();
+    puts("PASS: nine-cell grid, 64-character preview, send prefixes, tap/double/drag admission and cleanup, calibration and motion suppression");
     return 0;
 }

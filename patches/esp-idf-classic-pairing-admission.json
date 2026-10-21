@@ -1,0 +1,14 @@
+{
+  "sdk_commit": "383dda6c182e3dabf6355160166fe007df775629",
+  "files": {
+    "components/bt/host/bluedroid/btc/core/btc_dm.c": {
+      "before": "16e91ff95a984e398a8df2046f439223fe4627402b5dd6e99aaefdfcddb1bd8b",
+      "after": "3a509ef1f9723efe5a5d8061d8203cbcff8852b56e1333070d1b6e9e060ea739"
+    },
+    "components/bt/host/bluedroid/api/include/api/esp_gap_bt_api.h": {
+      "before": "29970cfc8865de4dea7ffe2ec6e9436633764dac744be5d57e8dd2bac486940e",
+      "after": "3e9f8b8b4bc90c6627ece08bdd385f1d5285b92d6991814e6c2cd29c6f57b9e8"
+    }
+  },
+  "patch_sha256": "8ed3b8ea114774db5566afef8d439925cbb4458945aa02995414faf2a45dcf25"
+}

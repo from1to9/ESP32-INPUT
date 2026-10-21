@@ -14,7 +14,9 @@ typedef struct {
 } settings_store_status_t;
 
 /* Startup only, after nvs_flash_init. Installs defaults before attempting a
- * validated load. Missing data is normal; corrupt/unsupported data is retained
+ * validated 16-byte legacy or 40-byte schema-3 load. Legacy decoding defaults
+ * only new fields; unchanged values do not schedule a format upgrade/write.
+ * Missing data is normal; corrupt/unsupported data is retained
  * and reported. Never erases NVS or stores defaults merely because of boot. */
 esp_err_t settings_store_init(device_settings_t *settings);
 

@@ -1,0 +1,30 @@
+--- a/firmware/main/ble_hid.c
++++ b/firmware/main/ble_hid.c
+@@ -2301 +2301 @@
+-esp_err_t ble_hid_init(void)
++static esp_err_t initialize_adapter(bool shared_stack)
+@@ -2323,2 +2323,2 @@
+-    if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE ||
+-        esp_bluedroid_get_status() != ESP_BLUEDROID_STATUS_UNINITIALIZED) {
++    if (esp_bt_controller_get_status() != (shared_stack ? ESP_BT_CONTROLLER_STATUS_ENABLED : ESP_BT_CONTROLLER_STATUS_IDLE) ||
++        esp_bluedroid_get_status() != (shared_stack ? ESP_BLUEDROID_STATUS_ENABLED : ESP_BLUEDROID_STATUS_UNINITIALIZED)) {
+@@ -2335,2 +2335,2 @@
+-    error = esp_bt_controller_init(&configuration);
+-    if (error == ESP_OK) {
++    error = shared_stack ? ESP_OK : esp_bt_controller_init(&configuration);
++    if (error == ESP_OK && !shared_stack) {
+@@ -2344 +2344 @@
+-    if (error == ESP_OK) {
++    if (error == ESP_OK && !shared_stack) {
+@@ -2348 +2348 @@
+-    if (error == ESP_OK) {
++    if (error == ESP_OK && !shared_stack) {
+@@ -2444,0 +2445,3 @@
++
++esp_err_t ble_hid_init(void) { return initialize_adapter(false); }
++esp_err_t ble_hid_init_on_shared_stack(void) { return initialize_adapter(true); }
+--- a/firmware/main/ble_hid.h
++++ b/firmware/main/ble_hid.h
+@@ -192,0 +193,2 @@
++/* Shared owner must enable BTDM + Bluedroid before this call. No singleton setup. */
++esp_err_t ble_hid_init_on_shared_stack(void);

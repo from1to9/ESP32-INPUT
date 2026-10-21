@@ -14,6 +14,10 @@ static struct {
     uint64_t time_us;
     unsigned critical_depth;
     esp_err_t variant_error, power_error, button_error;
+    esp_err_t display_new_error, observer_error;
+    esp_err_t motor_error;
+    unsigned motor_writes;
+    unsigned display_new_calls, observer_installs;
     esp_err_t imu_init_error, imu_start_error, gyro_error, accel_error, cleanup_error;
     button_event_t register_fail;
     button_event_t registration_order[BUTTON_EVENT_MAX];
@@ -68,6 +72,7 @@ static lv_indev_t touch;
 static struct bmi2_dev sensor;
 static int physical_button;
 static int gauge_device, gauge_bus;
+static int panel_token, panel_io_token;
 static jmp_buf worker_exit;
 
 const char *esp_err_to_name(esp_err_t error)
@@ -199,9 +204,31 @@ esp_err_t bsp_power_init(void)
 
 lv_display_t *bsp_display_start_with_config(const bsp_display_config_t *config)
 {
-    assert(config->enable_touch);
+    assert(config->enable_touch && hw.display_new_calls == 1 && hw.observer_installs == 1);
     hw.display_started = true;
     return &display;
+}
+
+esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_handle_t *panel)
+{
+    assert(config->enable_touch && panel && !hw.display_started);
+    ++hw.display_new_calls;
+    if (hw.display_new_error == ESP_OK) *panel = (esp_lcd_panel_handle_t)&panel_token;
+    return hw.display_new_error;
+}
+
+esp_lcd_panel_io_handle_t bsp_display_get_panel_io(void)
+{
+    assert(hw.display_new_calls == 1 && !hw.display_started);
+    return (esp_lcd_panel_io_handle_t)&panel_io_token;
+}
+
+esp_err_t board_display_transfer_install(esp_lcd_panel_handle_t panel, esp_lcd_panel_io_handle_t io)
+{
+    assert(!hw.display_started && hw.display_new_calls == 1);
+    assert(panel == (esp_lcd_panel_handle_t)&panel_token && io == (esp_lcd_panel_io_handle_t)&panel_io_token);
+    ++hw.observer_installs;
+    return hw.observer_error;
 }
 
 esp_err_t spi_bus_get_max_transaction_len(spi_host_device_t host_id, size_t *max_bytes)
@@ -355,8 +382,9 @@ esp_err_t bsp_motor_init(void)
 esp_err_t bsp_motor_set_strength(uint8_t strength)
 {
     assert(hw.critical_depth == 1 && strength <= 100);
-    hw.motor_strength = strength;
-    return ESP_OK;
+    ++hw.motor_writes;
+    if (hw.motor_error == ESP_OK) hw.motor_strength = strength;
+    return hw.motor_error;
 }
 
 esp_err_t bsp_motor_set(bool on)
@@ -489,6 +517,8 @@ static void reset(void)
     s_button_event_callback = NULL;
     s_haptic_task = NULL;
     memset(&s_haptics, 0, sizeof(s_haptics));
+    s_haptic_status = (board_haptic_status_t){.error = ESP_ERR_INVALID_STATE};
+    s_haptic_diagnostic_pending = false;
     s_imu_task = NULL;
     memset(&s_imu_sample, 0, sizeof(s_imu_sample));
     s_imu_sample_valid = false;
@@ -604,8 +634,8 @@ static void test_imu_real_units_and_nonblocking_cache(void)
     assert(hw.imu_stack == 3072 && hw.imu_priority == 2 && hw.task_creations == 3);
     board_imu_sample_t sample;
     assert(board_imu_read(&sample) == ESP_OK);
-    assert(sample.x_dps == 1.25f && sample.y_dps == -2.5f && sample.z_dps == 3.75f);
-    assert(sample.x_g == 0.1f && sample.y_g == -0.2f && sample.z_g == 0.95f);
+    assert(sample.x_dps == 2.5f && sample.y_dps == 1.25f && sample.z_dps == 3.75f);
+    assert(sample.x_g == 0.2f && sample.y_g == 0.1f && sample.z_g == 0.95f);
     assert(sample.timestamp_us < hw.time_us); /* Other board initialization does not retimestamp the cache. */
     const unsigned status_reads = hw.status_reads;
     const unsigned gyro_reads = hw.gyro_reads;
@@ -620,6 +650,47 @@ static void test_imu_real_units_and_nonblocking_cache(void)
     assert(!board_capabilities().imu);
     assert(imu_update() == ESP_ERR_TIMEOUT);
     assert(hw.status_reads == status_reads); /* Faulted stream does not reacquire. */
+}
+
+static void test_imu_display_frame_is_one_proper_rotation(void)
+{
+    reset();
+    assert(board_init(legacy_hold) == ESP_OK);
+    const float expected[3][3] = {{0, 1, 0}, {-1, 0, 0}, {0, 0, 1}};
+    float transformed[3][3];
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        for (unsigned component = 0; component < 3; ++component)
+            hw.gyro[component] = hw.accel[component] = component == axis ? 1.0f : 0.0f;
+        hw.time_us += 10000;
+        assert(imu_update() == ESP_OK);
+        const board_imu_sample_t raw_cache = s_imu_sample;
+        const unsigned bus_reads = hw.gyro_reads + hw.accel_reads + hw.status_reads;
+        board_imu_sample_t output;
+        assert(board_imu_read(&output) == ESP_OK);
+        transformed[axis][0] = output.x_dps;
+        transformed[axis][1] = output.y_dps;
+        transformed[axis][2] = output.z_dps;
+        assert(output.x_g == output.x_dps && output.y_g == output.y_dps && output.z_g == output.z_dps);
+        for (unsigned component = 0; component < 3; ++component)
+            assert(transformed[axis][component] == expected[axis][component]);
+        assert(output.timestamp_us == raw_cache.timestamp_us);
+        assert(s_imu_sample.x_dps == raw_cache.x_dps && s_imu_sample.y_dps == raw_cache.y_dps && s_imu_sample.z_dps == raw_cache.z_dps);
+        assert(s_imu_sample.x_g == raw_cache.x_g && s_imu_sample.y_g == raw_cache.y_g && s_imu_sample.z_g == raw_cache.z_g);
+        assert(s_imu_sample.timestamp_us == raw_cache.timestamp_us);
+        assert(bus_reads == hw.gyro_reads + hw.accel_reads + hw.status_reads);
+    }
+    /* A rotation preserves orthonormality and handedness: R(eX) x R(eY) = R(eZ).
+     * An improper axis permutation would fail this determinant +1 invariant. */
+    for (unsigned a = 0; a < 3; ++a) {
+        for (unsigned b = 0; b < 3; ++b) {
+            float dot = 0;
+            for (unsigned c = 0; c < 3; ++c) dot += transformed[a][c] * transformed[b][c];
+            assert(dot == (a == b ? 1.0f : 0.0f));
+        }
+        unsigned b = (a + 1) % 3, c = (a + 2) % 3;
+        float cross = transformed[0][b] * transformed[1][c] - transformed[0][c] * transformed[1][b];
+        assert(cross == transformed[2][a]);
+    }
 }
 
 static void test_imu_start_waits_for_gyro_with_a_finite_deadline(void)
@@ -1080,11 +1151,102 @@ static void test_worker_rate_limits_battery_during_brightness_flood(void)
     }
 }
 
+static void test_display_observer_installs_before_adapter(void)
+{
+    reset();
+    assert(board_init(legacy_hold) == ESP_OK && hw.observer_installs == 1 && hw.display_started);
+    reset(); hw.display_new_error = ESP_FAIL;
+    assert(board_init(legacy_hold) == ESP_FAIL && !hw.observer_installs && !hw.display_started);
+    reset(); hw.observer_error = ESP_FAIL;
+    assert(board_init(legacy_hold) == ESP_OK && hw.display_started);
+}
+
+static void haptic_step(uint64_t time_ms, uint64_t *generation)
+{
+    hw.time_us = time_ms * 1000U;
+    haptics_service(generation);
+}
+
+static void test_haptic_diagnostic_actual_receipts(void)
+{
+    reset();
+    uint64_t request_id = 99, applied = 0;
+    assert(board_haptics_request(BOARD_HAPTIC_TEST, BOARD_FEEDBACK_CONFIRM, &request_id) == ESP_ERR_INVALID_STATE && request_id == 99);
+    assert(board_init(legacy_hold) == ESP_OK);
+    haptic_step(1000, &applied);
+    const board_feedback_t patterns[] = {BOARD_FEEDBACK_CONFIRM, BOARD_FEEDBACK_MODE, BOARD_FEEDBACK_LOCK, BOARD_FEEDBACK_ERROR};
+    uint64_t previous_id = 0;
+    for (size_t p = 0; p < sizeof(patterns)/sizeof(patterns[0]); ++p) {
+        uint64_t start = 1500 + p * 500;
+        hw.time_us = start * 1000;
+        unsigned writes = hw.motor_writes;
+        assert(board_haptics_request(BOARD_HAPTIC_TEST, patterns[p], &request_id) == ESP_OK && request_id > previous_id);
+        previous_id = request_id;
+        board_haptic_status_t status = board_haptics_status();
+        assert(status.state == BOARD_HAPTIC_PENDING && !status.on_confirmed && hw.motor_writes == writes);
+        assert(board_haptics_request(BOARD_HAPTIC_TEST, patterns[p], &request_id) == ESP_ERR_INVALID_STATE);
+        haptic_step(start, &applied);
+        status = board_haptics_status();
+        assert(status.state == BOARD_HAPTIC_ACTIVE && status.on_confirmed && status.started_ms == start);
+        for (uint64_t i = 1; i <= 20; ++i) haptic_step(start + i * 10, &applied);
+        status = board_haptics_status();
+        assert(status.request_id == previous_id && status.state == BOARD_HAPTIC_COMPLETED && status.on_confirmed && status.off_confirmed);
+        assert(!board_haptics_active() && hw.motor_strength == 0 && hw.motor_writes > writes);
+        writes = hw.motor_writes; (void)board_haptics_status(); (void)board_haptics_status();
+        assert(hw.motor_writes == writes);
+    }
+    hw.time_us = 4000000;
+    assert(board_haptics_request(BOARD_HAPTIC_TEST, BOARD_FEEDBACK_CONFIRM, &request_id) == ESP_OK);
+    unsigned writes = hw.motor_writes;
+    haptic_step(4101, &applied);
+    assert(board_haptics_status().state == BOARD_HAPTIC_NO_EFFECT && !board_haptics_status().on_confirmed && hw.motor_writes == writes);
+    hw.time_us = 4500000;
+    assert(board_haptics_request(BOARD_HAPTIC_TEST, BOARD_FEEDBACK_CONFIRM, &request_id) == ESP_OK);
+    haptic_step(4500, &applied); haptic_step(4530, &applied);
+    assert(board_haptics_status().state == BOARD_HAPTIC_COMPLETED);
+    assert(board_haptics_request(BOARD_HAPTIC_TEST, BOARD_FEEDBACK_MODE, &request_id) == ESP_OK);
+    haptic_step(4531, &applied);
+    assert(board_haptics_status().state == BOARD_HAPTIC_NO_EFFECT && !board_haptics_status().on_confirmed);
+    hw.time_us = 5000000;
+    assert(board_haptics_request(BOARD_HAPTIC_TEST, BOARD_FEEDBACK_CONFIRM, &request_id) == ESP_OK);
+    haptic_step(5000, &applied); board_haptics_enable(false); haptic_step(5001, &applied);
+    assert(board_haptics_status().state == BOARD_HAPTIC_CANCELLED && board_haptics_status().off_confirmed);
+    board_haptics_enable(true); haptic_step(5500, &applied);
+    hw.time_us = 5800000;
+    assert(board_haptics_request(BOARD_HAPTIC_TEST, BOARD_FEEDBACK_CONFIRM, &request_id) == ESP_OK);
+    hw.motor_error = ESP_FAIL; haptic_step(5800, &applied);
+    assert(board_haptics_status().state == BOARD_HAPTIC_UNCERTAIN && !board_haptics_status().off_confirmed && !board_capabilities().haptics);
+    hw.motor_error = ESP_OK;
+    assert(board_haptics_request(BOARD_HAPTIC_RECOVER, BOARD_FEEDBACK_CONFIRM, &request_id) == ESP_OK);
+    haptic_step(5801, &applied);
+    assert(board_haptics_status().state == BOARD_HAPTIC_COMPLETED && !board_haptics_status().on_confirmed && board_haptics_status().off_confirmed);
+    assert(!board_haptics_enabled() && board_capabilities().haptics);
+    board_haptics_enable(true); haptic_step(6200, &applied);
+    hw.time_us = 6500000;
+    assert(board_haptics_request(BOARD_HAPTIC_TEST, BOARD_FEEDBACK_ERROR, &request_id) == ESP_OK);
+    writes = hw.motor_writes;
+    assert(board_haptics_cancel(request_id + 1) == ESP_ERR_INVALID_STATE);
+    assert(board_haptics_cancel(request_id) == ESP_OK && hw.motor_writes == writes && board_haptics_enabled());
+    haptic_step(6501, &applied);
+    assert(board_haptics_status().state == BOARD_HAPTIC_CANCELLED && !board_haptics_status().on_confirmed && board_haptics_status().off_confirmed);
+    hw.time_us = 7000000;
+    assert(board_haptics_request(BOARD_HAPTIC_TEST, BOARD_FEEDBACK_ERROR, &request_id) == ESP_OK);
+    haptic_step(7000, &applied); writes = hw.motor_writes;
+    assert(board_haptics_status().state == BOARD_HAPTIC_ACTIVE && board_haptics_cancel(request_id) == ESP_OK && hw.motor_writes == writes);
+    haptic_step(7001, &applied);
+    assert(board_haptics_status().state == BOARD_HAPTIC_CANCELLED && board_haptics_status().on_confirmed && board_haptics_status().off_confirmed && board_haptics_enabled());
+    s_haptic_status.request_id = UINT64_MAX;
+    assert(board_haptics_request(BOARD_HAPTIC_RECOVER, BOARD_FEEDBACK_CONFIRM, &request_id) == ESP_ERR_INVALID_STATE);
+}
+
 int main(void)
 {
+    test_display_observer_installs_before_adapter();
+    test_haptic_diagnostic_actual_receipts();
     test_display_spi_diagnostic_is_observational();
     test_raw_button_authority_and_registration();
     test_imu_real_units_and_nonblocking_cache();
+    test_imu_display_frame_is_one_proper_rotation();
     test_imu_start_waits_for_gyro_with_a_finite_deadline();
     test_optional_sensor_failures();
     test_imu_health_is_nonmutating_and_retains_first_fault();

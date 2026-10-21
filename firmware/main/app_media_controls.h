@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+#include "app_ui.h"
+
+/* One coordinator owner. All runtime/store reads are bounded cached copies;
+ * mutations only submit to their worker. No LVGL, codec, filesystem or radio IO.
+ * Initialize after the media runtime/store endpoints have been initialized. */
+typedef struct {
+    uint64_t epoch, ui_revision;
+    input_mode_t mode;
+    app_overlay_t overlay;
+    app_keyboard_submode_t keyboard_submode;
+    bool locked, screen_off;
+    size_t preview_characters; /* Actual draft size; confirm needs free capacity. */
+} app_media_controls_context_t;
+typedef struct {
+    bool handled;
+    bool open_overlay;
+    app_overlay_t overlay;
+    app_confirmation_t confirmation;
+    char preview_character; /* Append once through interaction; never send HID. */
+    char message[97];
+} app_media_controls_effect_t;
+
+bool app_media_controls_init(void);
+void app_media_controls_context(const app_media_controls_context_t *);
+/* Parent must first validate normal physical-touch/current input identity.
+ * This layer also validates mode/panel, media/object/candidate identity and
+ * explicit immutable confirmations. Return false for an unrelated UI action. */
+bool app_media_controls_handle(const app_intent_t *, app_media_controls_effect_t *);
+/* Run from the coordinator. Poll consumes only this layer's retained tokens,
+ * copies query payload before acknowledging, and never retries a mutation. */
+void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *);
+/* Copies media/review/storage plus the legacy audio/recognition fields and
+ * capture_indicator_required/generation/state from observed owner state.
+ * APP_CLOSE remains parent-owned; context invalidates a departed confirmation.
+ * Speech context cancellation remains in app_media_runtime_environment. */
+void app_media_controls_fill(app_view_t *);

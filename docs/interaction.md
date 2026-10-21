@@ -10,9 +10,13 @@ Show the foreground mode and a compact selected-input/target cue in its context.
 
 Provide a motion toggle, compact fine-gain chooser, much larger touchpad, separate scroll controls, clicks and explicit drag/release. No edge swipe or navigation gesture crosses the pad: pointer deltas must not be emitted before deciding to navigate. Any touch suppresses motion; release starts a short freeze. Menus and mode changes cancel drag. Motion follows wrist rotation, not absolute device tilt.
 
+Input settings provides **Tap to click**, default on. The input recognizer owns single tap, double tap and double-tap-and-hold drag; the UI forwards real touch boundaries, displacement and bounded stationary-contact freshness. With the setting off, the pad moves only; explicit mouse buttons and scroll still work. Motion help reports the actual selected provider, readiness, calibration and sensor conditions. Selecting USB does not by itself establish that the sensor is calibrated or that USB input is ready.
+
 ### Keyboard
 
 One compact chooser opens **Motion**, **Touch**, **Spoken letters** and **Shortcuts**; four persistent submode tabs are unnecessary. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. The nine-cell layout is an explicit user revision of the original six-cell prototype. Motion moves local focus only; empty cells never receive focus or confirm input.
+
+The chooser also opens **Common keys**, a separate live-host panel for Esc, Tab, Enter, Backspace, forward Delete, Home, End and arrows. It names the selected input host and states that keys send immediately while the preview stays unchanged. **Delete draft** removes a preview character only. Copy/Paste/Undo retain the existing Ctrl/Command modifier choice in Shortcuts; there are no sticky modifiers. The main nine-cell layout remains spacious.
 
 Flow: choose group -> choose character -> confirm into preview -> send. Keep delete, space and send visible. Sending never includes Enter; expose stop and accepted-prefix progress. An Alpha sample yields an A candidate, which needs confirmation before entering preview. Prefer spelling words for easily confused letter sounds.
 
@@ -93,10 +97,23 @@ recover or disconnect; the switch otherwise stops after five seconds and keeps
 the old selection. USB removal never redirects input automatically to Bluetooth.
 Preserve the preview, mode and lock; motion stays off after a switch.
 
-Wi-Fi setup opens a temporary protected hotspot and displays its network name,
-passcode and local browser URL only on the setup page. Leaving setup, explicit
-Stop, expiry or locking closes setup. Saved network forgetting requires local
-confirmation. Failed setup never enables the future remote-control/MCP API.
+Wi-Fi normally scans nearby networks on the device, shows four records per page,
+and accepts a local password before Join once or Remember and join. The computer
+stays on its existing Wi-Fi. LAN association/address acquisition, saved-record
+status and actual Web/API availability remain separate; a LAN IP is not evidence
+of a running backend. The temporary protected hotspot remains an explicit
+Recovery hotspot option. Its passcode and local browser URL appear only on the
+setup page; leaving, Stop, expiry or locking closes it. Forget still requires
+local confirmation. Failed setup never enables remote-control/MCP authority.
+
+Bluetooth settings can edit this device's local name without renaming a host.
+Name and Wi-Fi password entry share a local-only editor with separate bounded
+buffers and purpose/session identity. Passwords are masked, never prefilled and
+never sent into the HID preview, ordinary intents, labels or diagnostics. Only
+explicit Apply/Join submits a private copy; acceptance is not manager completion.
+Close, Back, AI double, lock, screen-off, session replacement and the five-minute
+deadline clear local drafts. AI single cannot activate the hidden HID grid.
+See the [native setup contract](../design/native-wifi-ui.md) for limits and states.
 
 ## Runtime and revision safety
 

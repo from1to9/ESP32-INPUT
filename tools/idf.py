@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from idf_patches import verify_sdk
 
 ROOT = Path(__file__).resolve().parents[1]
 PIN = json.loads((ROOT / "toolchain.lock.json").read_text())
@@ -49,7 +50,7 @@ def setup(python):
         run(["git", "-C", SDK, "remote", "add", "origin", PIN["idf_repository"]])
         run(["git", "-C", SDK, "fetch", "--depth", "1", "origin", PIN["idf_commit"]])
         run(["git", "-C", SDK, "checkout", "--detach", "FETCH_HEAD"])
-    verify_revision(SDK, PIN["idf_commit"])
+    verify_sdk(SDK, PIN["idf_commit"])
     run(["git", "-C", SDK, "submodule", "update", "--init", "--recursive", "--depth", "1"])
     run(["git", "-C", ROOT, "submodule", "update", "--init", "--recursive"])
     verify_revision(ROOT / "third_party/esp-mosaico-bsp", PIN["bsp_commit"])
@@ -65,7 +66,7 @@ def setup(python):
 def build(action):
     if not SDK.exists():
         raise SystemExit("SDK missing. Run: python3 tools/idf.py setup --python <python3.11-or-newer>")
-    verify_revision(SDK, PIN["idf_commit"])
+    verify_sdk(SDK, PIN["idf_commit"])
     verify_revision(ROOT / "third_party/esp-mosaico-bsp", PIN["bsp_commit"])
     candidates = list((TOOLS / "python_env").glob("idf6.2_py*_env/bin/python"))
     if len(candidates) != 1:

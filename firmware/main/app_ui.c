@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define UI_TASK_BSS EXT_RAM_BSS_ATTR
+#else
+#define UI_TASK_BSS
+#endif
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -38,10 +44,15 @@ typedef struct {
     app_action_t action;
     int value;
     lv_obj_t *object;
+    uint32_t wifi_generation;
+    uint16_t wifi_record;
+    app_motion_field_t motion_field;
+    bool motion_delta;
 } binding_t;
 
 static app_submit_fn s_submit;
-static app_view_t s_view;
+/* Only the LVGL owner reads/writes this snapshot; never ISR or cache-disabled code. */
+static UI_TASK_BSS app_view_t s_view;
 static char s_message_text[160];
 static char s_target_text[96];
 static binding_t s_bindings[MAX_BINDINGS];
@@ -49,6 +60,7 @@ static size_t s_binding_count;
 static lv_obj_t *s_screen, *s_panels[3], *s_mode_title, *s_context, *s_status;
 static lv_obj_t *s_critical, *s_keyboard_choice, *s_audio_choice, *s_gain;
 static lv_obj_t *s_motion, *s_pad, *s_drag, *s_mouse_controls[4];
+static lv_obj_t *s_pad_hint;
 static lv_obj_t *s_submodes[4], *s_preview, *s_progress, *s_clear;
 static lv_obj_t *s_grid_page, *s_grid[APP_UI_GRID_CELLS], *s_back, *s_case, *s_symbols;
 static lv_obj_t *s_voice_page, *s_voice_candidate, *s_voice_hint, *s_voice_confirm;
@@ -75,11 +87,67 @@ static app_overlay_t s_built_overlay;
 static app_settings_page_t s_built_settings;
 static uint32_t s_gesture;
 static uint64_t s_touch_epoch, s_touch_revision;
+static uint64_t s_touch_settings_revision;
+static uint64_t s_touch_recording_storage_generation, s_touch_recording_storage_revision;
 static bool s_touch_active;
+static bool s_touch_local_blocked;
 static lv_obj_t *s_touch_target;
 static lv_indev_t *s_touch_device;
 static app_touch_surface_t s_touch_surface;
 static lv_point_t s_last_point;
+static uint32_t s_last_touch_heartbeat;
+static app_local_edit_submit_fn s_local_submit;
+static char s_wifi_password[APP_UI_WIFI_PASSWORD_CAPACITY];
+static char s_bluetooth_name[APP_UI_BLUETOOTH_NAME_CAPACITY];
+static uint64_t s_editor_session, s_touch_editor_session;
+static app_local_edit_purpose_t s_editor_purpose;
+static bool s_editor_consumed, s_editor_lowercase, s_editor_symbols;
+static int s_editor_group = -1;
+static const char *s_editor_feedback;
+static uint32_t s_built_scan_generation;
+static unsigned s_built_scan_page;
+static uint64_t s_built_editor_session;
+static app_local_edit_purpose_t s_built_editor_purpose;
+static lv_obj_t *s_scan_rows[4], *s_scan_meta[4], *s_scan_state, *s_scan_empty;
+static lv_obj_t *s_scan_previous, *s_scan_next, *s_scan_page, *s_scan_refresh;
+static lv_obj_t *s_network_name, *s_network_detail, *s_network_note, *s_network_join[2];
+static lv_obj_t *s_wifi_find, *s_wifi_saved, *s_wifi_backend, *s_name_edit, *s_tap_click;
+static lv_obj_t *s_motion_detail, *s_common_context, *s_common_keys[11];
+static lv_obj_t *s_motion_values[5], *s_motion_sliders[5], *s_motion_nudges[5][2];
+static lv_obj_t *s_motion_presets[2][3], *s_motion_invert[2], *s_motion_reference;
+static lv_obj_t *s_gesture_help, *s_gesture_drag, *s_gesture_release;
+static lv_obj_t *s_record_store_state, *s_record_store_profile, *s_record_store_capacity;
+static lv_obj_t *s_record_store_time, *s_record_store_reason, *s_record_store_prepare;
+static lv_obj_t *s_editor_preview, *s_editor_context, *s_editor_source, *s_editor_status, *s_editor_grid[9];
+static lv_obj_t *s_editor_back, *s_editor_case, *s_editor_symbol, *s_editor_delete;
+static lv_obj_t *s_editor_space, *s_editor_apply;
+
+static void render_editor(void);
+static void media_press(lv_obj_t *target);
+static void media_action(lv_obj_t *target, int level);
+static void render_media_core(void);
+static void render_speech(void);
+static void connection_press(lv_obj_t *target);
+static void connection_action(lv_obj_t *target);
+static void remote_review_press(lv_obj_t *target);
+static void remote_review_action(lv_obj_t *target, bool confirm);
+
+static void secure_clear(void *buffer, size_t capacity)
+{
+    volatile unsigned char *bytes = buffer;
+    while (capacity--) *bytes++ = 0;
+}
+
+static void clear_editor(void)
+{
+    secure_clear(s_wifi_password, sizeof(s_wifi_password));
+    secure_clear(s_bluetooth_name, sizeof(s_bluetooth_name));
+    s_editor_consumed = true;
+    s_editor_feedback = NULL;
+    s_editor_group = -1;
+    s_editor_lowercase = false;
+    s_editor_symbols = false;
+}
 
 typedef enum { STYLE_BACKGROUND, STYLE_TEXT, STYLE_BORDER } color_property_t;
 typedef struct {
@@ -92,6 +160,34 @@ typedef struct {
 static color_binding_t s_colors[MAX_COLOR_BINDINGS];
 static size_t s_color_count;
 static bool s_dark_theme;
+static app_ui_capture_indicator_t s_capture_indicator;
+static uint64_t s_capture_indicator_revision;
+
+static bool capture_warning_required(const app_view_t *view)
+{
+    return view->capture_indicator_required || view->listening ||
+        (view->audio_active && view->audio_kind == APP_AUDIO_VOICE && !view->microphone_muted);
+}
+
+static bool recording_storage_can_prepare(const app_view_t *view)
+{
+    const app_recording_storage_view_t *store = &view->recording_storage;
+    return store->state == APP_RECORD_STORE_UNPREPARED &&
+        store->backend == APP_RECORD_BACKEND_INTERNAL_RESERVED &&
+        store->generation != 0 && store->reserved_region_verified && store->can_prepare;
+}
+
+static const char *capture_warning(const app_view_t *view, bool compact)
+{
+    if (!view->capture_indicator_required) return compact ? "Mic active\nStop + lock" : "Microphone active";
+    switch (view->capture_state) {
+    case APP_CAPTURE_STARTING: return compact ? "Mic starting\nStop + lock" : "Microphone starting";
+    case APP_CAPTURE_ACTIVE: return compact ? "Mic active\nStop + lock" : "Microphone active";
+    case APP_CAPTURE_STOPPING: return compact ? "Mic stopping\nStop + lock" : "Stopping microphone; waiting for confirmation";
+    case APP_CAPTURE_UNCERTAIN: return compact ? "Mic uncertain\nStop + lock" : "Microphone stop unconfirmed";
+    default: return compact ? "Mic unknown\nStop + lock" : "Microphone status unknown; stop required";
+    }
+}
 
 static lv_color_t themed_color(uint32_t token)
 {
@@ -246,6 +342,13 @@ static void slider_value(lv_obj_t *object, int value)
         lv_slider_set_value(object, value, LV_ANIM_OFF);
 }
 
+static void storage_bytes(char *output, size_t capacity, uint64_t bytes)
+{
+    if (bytes < 1024) snprintf(output, capacity, "%llu bytes", (unsigned long long)bytes);
+    else snprintf(output, capacity, "%llu.%02llu KiB", (unsigned long long)(bytes / 1024),
+                  (unsigned long long)((bytes % 1024) * 100 / 1024));
+}
+
 static void text(lv_obj_t *object, const char *value)
 {
     if (!object) return;
@@ -297,18 +400,29 @@ static void single_line(lv_obj_t *object)
     lv_label_set_long_mode(object, LV_LABEL_LONG_DOT);
 }
 
-static bool submit(app_action_t action, int x, int y)
+static bool submit_identity(app_action_t action, int x, int y, uint32_t generation, uint16_t record)
 {
     app_intent_t intent = {
         .action = action, .epoch = s_gesture ? s_touch_epoch : s_view.epoch,
         .ui_revision = s_gesture ? s_touch_revision : s_view.ui_revision, .x = x, .y = y,
-        .gesture = s_gesture, .surface = s_touch_surface
+        .gesture = s_gesture, .surface = s_touch_surface,
+        .wifi_scan_generation = generation, .wifi_record_index = record
     };
+    if (action == APP_RECORDING_STORAGE_PREPARE_REQUEST ||
+        (action == APP_CONFIRM && s_view.confirmation == APP_CONFIRM_RECORDING_STORAGE_PREPARE)) {
+        intent.recording_storage_generation = s_touch_recording_storage_generation;
+        intent.recording_storage_revision = s_touch_recording_storage_revision;
+    }
     bool accepted = s_submit && s_submit(&intent);
     if (!accepted && s_status) {
         label_text(s_status, "Input busy. Please try again.");
     }
     return accepted;
+}
+
+static bool submit(app_action_t action, int x, int y)
+{
+    return submit_identity(action, x, y, 0, 0);
 }
 
 static bool in_overlay(lv_obj_t *object)
@@ -320,11 +434,88 @@ static bool in_overlay(lv_obj_t *object)
     return false;
 }
 
+static bool motion_settings_valid(const app_motion_settings_view_t *settings)
+{
+    return settings->available && settings->gain_x_centi >= 25 && settings->gain_x_centi <= 10000 &&
+        settings->gain_y_centi >= 25 && settings->gain_y_centi <= 10000 &&
+        settings->deadzone_mdps <= 10000 && settings->filter_ms <= 1000 && settings->freeze_ms <= 1000;
+}
+
+static int motion_setting(app_motion_field_t field)
+{
+    const app_motion_settings_view_t *settings = &s_view.motion_settings;
+    switch (field) {
+    case APP_MOTION_FIELD_GAIN_X: return settings->gain_x_centi;
+    case APP_MOTION_FIELD_GAIN_Y: return settings->gain_y_centi;
+    case APP_MOTION_FIELD_DEADZONE: return settings->deadzone_mdps;
+    case APP_MOTION_FIELD_FILTER: return settings->filter_ms;
+    case APP_MOTION_FIELD_FREEZE: return settings->freeze_ms;
+    case APP_MOTION_FIELD_INVERT_X: return settings->invert_x;
+    case APP_MOTION_FIELD_INVERT_Y: return settings->invert_y;
+    default: return -1;
+    }
+}
+
+static void submit_motion(app_motion_field_t field, int value)
+{
+    if (!motion_settings_valid(&s_view.motion_settings) || !s_view.motion_settings.editable ||
+        s_view.locked || s_view.screen_off || s_wake_touch || s_touch_local_blocked ||
+        s_view.overlay != APP_OVERLAY_SETTINGS ||
+        (s_view.settings_page != APP_SETTINGS_MOTION && s_view.settings_page != APP_SETTINGS_MOTION_ADVANCED) ||
+        s_touch_epoch != s_view.epoch || s_touch_revision != s_view.ui_revision ||
+        s_touch_settings_revision != s_view.motion_settings.revision) return;
+    int minimum = field <= APP_MOTION_FIELD_GAIN_Y ? 25 : 0;
+    int maximum = field <= APP_MOTION_FIELD_DEADZONE ? 10000 :
+                  field <= APP_MOTION_FIELD_FREEZE ? 1000 : 1;
+    if ((unsigned)field > APP_MOTION_FIELD_INVERT_Y || value < minimum || value > maximum) return;
+    app_intent_t intent = {
+        .action = APP_MOTION_CONFIG, .epoch = s_touch_epoch, .ui_revision = s_touch_revision,
+        .gesture = s_gesture, .surface = APP_SURFACE_CONTROL,
+        .motion_patch = {.field = field, .expected_settings_revision = s_touch_settings_revision}
+    };
+    if (field <= APP_MOTION_FIELD_GAIN_Y) intent.motion_patch.value.gain_centi = (uint16_t)value;
+    else if (field == APP_MOTION_FIELD_DEADZONE) intent.motion_patch.value.deadzone_mdps = (uint16_t)value;
+    else if (field <= APP_MOTION_FIELD_FREEZE) intent.motion_patch.value.milliseconds = (uint16_t)value;
+    else intent.motion_patch.value.inverted = value != 0;
+    if ((!s_submit || !s_submit(&intent)) && s_status) label_text(s_status, "Input busy. Please try again.");
+}
+
 static void on_action(lv_event_t *event)
 {
     binding_t *binding = lv_event_get_user_data(event);
     if (s_view.locked || s_view.screen_off || s_wake_touch || (s_view.overlay != APP_OVERLAY_NONE && !in_overlay(binding->object))) return;
+    if (binding->action == APP_CONFIRM && s_view.confirmation == APP_CONFIRM_REMOTE) {
+        remote_review_action(binding->object, binding->value != 0); return;
+    }
+    if (binding->action == APP_API_COMMISSIONING || binding->action == APP_WIFI_PROFILE_CONTROL ||
+        binding->action == APP_BLUETOOTH_TARGET_CONTROL || binding->action == APP_API_INPUT_ALLOW_SET) { connection_action(binding->object); return; }
+    if (binding->action == APP_MEDIA_CONTROL || binding->object == s_audio_power ||
+        binding->object == s_audio_mute || binding->object == s_voice_confirm ||
+        (binding->action == APP_CONFIRM && binding->value == 1 &&
+         s_view.confirmation >= APP_CONFIRM_RECORDING_START && s_view.confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD)) {
+        media_action(binding->object, -1);
+        return;
+    }
     int value = binding->value;
+    if (binding->action == APP_RECORDING_STORAGE_PREPARE_REQUEST ||
+        (binding->action == APP_CONFIRM && value == 1 && s_view.confirmation == APP_CONFIRM_RECORDING_STORAGE_PREPARE)) {
+        if (!recording_storage_can_prepare(&s_view) || s_touch_local_blocked ||
+            s_touch_epoch != s_view.epoch || s_touch_revision != s_view.ui_revision ||
+            s_touch_recording_storage_generation != s_view.recording_storage.generation ||
+            s_touch_recording_storage_revision != s_view.recording_storage.revision) return;
+    }
+    if (binding->action == APP_MOTION_CONFIG) {
+        if (binding->motion_field >= APP_MOTION_FIELD_INVERT_X) value = !motion_setting(binding->motion_field);
+        else if (binding->motion_delta) {
+            value += motion_setting(binding->motion_field);
+            int minimum = binding->motion_field <= APP_MOTION_FIELD_GAIN_Y ? 25 : 0;
+            int maximum = binding->motion_field <= APP_MOTION_FIELD_DEADZONE ? 10000 : 1000;
+            if (value < minimum) value = minimum;
+            if (value > maximum) value = maximum;
+        }
+        submit_motion(binding->motion_field, value);
+        return;
+    }
     switch (binding->action) {
     case APP_MOTION: value = !s_view.motion_enabled; break;
     case APP_DRAG: value = !s_view.dragging; break;
@@ -332,22 +523,34 @@ static void on_action(lv_event_t *event)
     case APP_CASE: value = !s_view.lowercase; break;
     case APP_SYMBOLS: value = !s_view.symbols; break;
     case APP_HAPTICS: value = !s_view.haptics_enabled; break;
+    case APP_TAP_TO_CLICK: value = !s_view.tap_to_click_enabled; break;
     case APP_AUDIO_POWER: value = !s_view.audio_active; break;
     case APP_AUDIO_MUTE: value = !s_view.microphone_muted; break;
     default: break;
     }
     app_action_t action = binding->action;
+    if (binding->object == s_keyboard_choice && s_view.mode == INPUT_MOUSE)
+        value = APP_OVERLAY_TARGET;
     if (action == APP_SETTINGS_PAGE && value == APP_SETTINGS_HOME && s_view.overlay == APP_OVERLAY_SETTINGS) {
         if (s_view.settings_page == APP_SETTINGS_HOME) { action = APP_MENU; value = APP_OVERLAY_MODES; }
         else if (s_view.settings_page == APP_SETTINGS_BLUETOOTH || s_view.settings_page == APP_SETTINGS_WIFI) value = APP_SETTINGS_CONNECTIVITY;
+        else if (s_view.settings_page == APP_SETTINGS_MOTION || s_view.settings_page == APP_SETTINGS_GESTURES) value = APP_SETTINGS_INPUT;
+        else if (s_view.settings_page == APP_SETTINGS_MOTION_ADVANCED) value = APP_SETTINGS_MOTION;
     }
     if ((binding->object == s_critical || binding->object == s_overlay_critical) &&
-        (s_view.listening || (s_view.audio_active && s_view.audio_kind == APP_AUDIO_VOICE && !s_view.microphone_muted)))
+        capture_warning_required(&s_view))
         action = APP_LOCK;
     if (action == APP_BLUETOOTH_PAGE) value += (int)s_view.bluetooth_page;
+    if (action == APP_WIFI_SCAN_PAGE) value += (int)s_built_scan_page;
+    if (binding->object == s_scan_refresh) value = s_view.wifi_scan.can_cancel ? 0 : 1;
     if (action == APP_SEND && s_view.sending) action = APP_STOP;
     if (action == APP_VOICE_START && s_view.voice_candidate) action = APP_VOICE_CONFIRM;
-    (void)submit(action, value, 0);
+    bool accepted = submit_identity(action, value, 0, binding->wifi_generation, binding->wifi_record);
+    if (accepted && s_view.overlay == APP_OVERLAY_LOCAL_EDITOR &&
+        (action == APP_CLOSE || action == APP_MENU || action == APP_SETTINGS_PAGE || action == APP_LOCK)) {
+        clear_editor();
+        render_editor();
+    }
 }
 
 static lv_obj_t *button(lv_obj_t *parent, const char *value, int x, int y,
@@ -400,7 +603,7 @@ static void critical_state(lv_obj_t *object, bool alert, bool capture, bool prov
     const app_view_t *view = &s_view;
     bool confirmation = view->overlay == APP_OVERLAY_CONFIRM;
     enabled(object, !confirmation || capture || view->remote_owned);
-    const char *caption = capture ? "Mic active\nStop + lock" :
+    const char *caption = capture ? capture_warning(view, true) :
         view->remote_owned ? "Remote\nTake local" :
         view->release_pending ? "Releasing\nDetails" :
         view->transport_error ? "Input error\nDetails" :
@@ -410,8 +613,9 @@ static void critical_state(lv_obj_t *object, bool alert, bool capture, bool prov
     if (confirmation && !capture && !view->remote_owned)
         caption = view->transport_error ? "Input error" : view->release_pending ? "Releasing" : "Input not ready";
     text(object, caption);
-    foreground(object, view->transport_error ? ERROR : WARNING, 0);
-    border(object, view->transport_error ? ERROR : WARNING, 0);
+    bool error = view->transport_error || (capture && view->capture_state == APP_CAPTURE_UNCERTAIN);
+    foreground(object, error ? ERROR : WARNING, 0);
+    border(object, error ? ERROR : WARNING, 0);
 }
 
 static void on_touch(lv_event_t *event)
@@ -429,12 +633,21 @@ static void on_touch(lv_event_t *event)
         if (!s_gesture) ++s_gesture;
         s_touch_epoch = s_view.epoch;
         s_touch_revision = s_view.ui_revision;
+        s_touch_settings_revision = s_view.motion_settings.revision;
+        s_touch_recording_storage_generation = s_view.recording_storage.generation;
+        s_touch_recording_storage_revision = s_view.recording_storage.revision;
+        s_touch_editor_session = s_view.local_editor.session;
+        media_press(target);
+        connection_press(target);
+        remote_review_press(target);
         s_touch_active = true;
         s_touch_target = target;
         s_touch_device = device;
         s_wake_touch = s_view.screen_off;
+        s_touch_local_blocked = s_view.remote_owned || s_view.locked;
         s_touch_surface = target == s_pad ? APP_SURFACE_TOUCHPAD : APP_SURFACE_CONTROL;
         s_last_point = point;
+        s_last_touch_heartbeat = lv_tick_get();
         (void)submit(APP_TOUCH_BEGIN, point.x, point.y);
     } else if (code == LV_EVENT_PRESSING && s_touch_active &&
                s_touch_surface == APP_SURFACE_TOUCHPAD && !s_view.locked &&
@@ -444,7 +657,12 @@ static void on_touch(lv_event_t *event)
         int dx = point.x - s_last_point.x;
         int dy = point.y - s_last_point.y;
         s_last_point = point;
-        if (dx || dy) (void)submit(APP_TOUCH_MOVE, dx, dy);
+        /* A stationary held finger is still a live physical contact. The
+         * coordinator/recognizer needs bounded freshness for safe drag holds. */
+        if (dx || dy || lv_tick_elaps(s_last_touch_heartbeat) >= 50) {
+            (void)submit(APP_TOUCH_MOVE, dx, dy);
+            s_last_touch_heartbeat = lv_tick_get();
+        }
     } else if (s_touch_active && (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)) {
         (void)submit(code == LV_EVENT_RELEASED ? APP_TOUCH_END : APP_TOUCH_CANCEL, point.x, point.y);
         s_touch_active = false;
@@ -465,10 +683,7 @@ static void on_haptics(lv_event_t *event)
 
 static void on_volume(lv_event_t *event)
 {
-    if (!s_view.locked && !s_view.screen_off && !s_wake_touch &&
-        s_view.overlay == APP_OVERLAY_NONE && s_view.audio_available) {
-        (void)submit(APP_AUDIO_VOLUME, lv_slider_get_value(lv_event_get_target(event)), 0);
-    }
+    media_action(lv_event_get_target(event), lv_slider_get_value(lv_event_get_target(event)));
 }
 
 static lv_obj_t *metadata(lv_obj_t *parent, const char *value, int x, int y, int width)
@@ -513,6 +728,284 @@ static void on_brightness(lv_event_t *event)
     }
 }
 
+static void on_motion_slider(lv_event_t *event)
+{
+    lv_obj_t *object = lv_event_get_target(event);
+    for (unsigned i = 0; i < 5; ++i) {
+        if (object == s_motion_sliders[i]) {
+            submit_motion((app_motion_field_t)i, lv_slider_get_value(object));
+            return;
+        }
+    }
+}
+
+static lv_obj_t *motion_button(lv_obj_t *parent, const char *caption, int x, int y,
+                              int width, app_motion_field_t field, int value, bool delta)
+{
+    lv_obj_t *object = button(parent, caption, x, y, width, 44, APP_MOTION_CONFIG, value);
+    s_bindings[s_binding_count - 1].motion_field = field;
+    s_bindings[s_binding_count - 1].motion_delta = delta;
+    return object;
+}
+
+static void motion_adjustment(lv_obj_t *parent, app_motion_field_t field,
+                              const char *caption, int y, int step)
+{
+    label(parent, caption, 0, y, 260, INK);
+    s_motion_values[field] = label(parent, "Unavailable", 264, y, 184, MUTED);
+    lv_obj_set_style_text_align(s_motion_values[field], LV_TEXT_ALIGN_RIGHT, 0);
+    single_line(s_motion_values[field]);
+    s_motion_nudges[field][0] = motion_button(parent, "-", 0, y + 22, 56, field, -step, true);
+    s_motion_nudges[field][1] = motion_button(parent, "+", 392, y + 22, 56, field, step, true);
+    s_motion_sliders[field] = slider(parent, 84, y + 38, 280,
+        field <= APP_MOTION_FIELD_GAIN_Y ? 25 : 0,
+        field <= APP_MOTION_FIELD_DEADZONE ? 10000 : 1000, on_motion_slider);
+}
+
+static const char *motion_reason(const app_view_t *view)
+{
+    switch (view->motion_reason) {
+    case APP_MOTION_READY: return "Touch pauses motion.";
+    case APP_MOTION_SENSOR_UNAVAILABLE: return "Motion sensor unavailable.";
+    case APP_MOTION_CALIBRATION_REQUIRED: return "Calibrate motion in Input settings.";
+    case APP_MOTION_CALIBRATING: return "Keep the device still to calibrate.";
+    case APP_MOTION_PROVIDER_UNAVAILABLE: return "Selected input provider unavailable.";
+    case APP_MOTION_DISCONNECTED: return view->input_transport == APP_INPUT_USB ?
+        "Connect a USB data host." : "Connect a Bluetooth input host.";
+    case APP_MOTION_INPUT_NOT_READY: return "Host connected; input is not ready.";
+    case APP_MOTION_RELEASING: return "Waiting for held input to release.";
+    case APP_MOTION_TRANSPORT_SWITCHING: return "Switching input connection.";
+    case APP_MOTION_TRANSPORT_ERROR: return "Input connection error. Open Status.";
+    default: return "Motion status unavailable. Open Status.";
+    }
+}
+
+static bool name_bytes_valid(const char *name, size_t length)
+{
+    if (!length || length >= APP_UI_BLUETOOTH_NAME_CAPACITY) return false;
+    for (size_t i = 0; i < length;) {
+        unsigned char first = (unsigned char)name[i++];
+        uint32_t code = first;
+        unsigned trailing = 0;
+        uint32_t minimum = 0;
+        if (first >= 0xc2 && first <= 0xdf) { trailing = 1; code &= 0x1f; minimum = 0x80; }
+        else if (first >= 0xe0 && first <= 0xef) { trailing = 2; code &= 0x0f; minimum = 0x800; }
+        else if (first >= 0xf0 && first <= 0xf4) { trailing = 3; code &= 7; minimum = 0x10000; }
+        else if (first >= 0x80) return false;
+        if (trailing > length - i) return false;
+        while (trailing--) {
+            unsigned char byte = (unsigned char)name[i++];
+            if ((byte & 0xc0) != 0x80) return false;
+            code = (code << 6) | (byte & 0x3f);
+        }
+        if (code < minimum || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ||
+            code < 0x20 || (code >= 0x7f && code <= 0x9f)) return false;
+    }
+    return true;
+}
+
+static bool name_valid(const char *name, size_t length)
+{
+    return name_bytes_valid(name, length) && name[0] != ' ' && name[length - 1] != ' ';
+}
+
+/* The bundled font is ASCII-oriented. Escaping unsupported UTF-8 bytes is a
+ * display operation only; the name draft retains its original bytes. */
+static void name_label(char *output, size_t capacity, const char *name)
+{
+    size_t out = 0;
+    for (size_t i = 0; i < APP_UI_BLUETOOTH_NAME_CAPACITY - 1 && name[i]; ++i) {
+        unsigned char byte = (unsigned char)name[i];
+        if (byte >= 0x20 && byte < 0x7f) {
+            if (out + 1 >= capacity) break;
+            output[out++] = (char)byte;
+        } else {
+            if (out + 4 >= capacity) break;
+            (void)snprintf(output + out, capacity - out, "\\x%02X", byte);
+            out += 4;
+        }
+    }
+    output[out] = '\0';
+}
+
+static char *editor_buffer(void)
+{
+    return s_editor_purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE ? s_wifi_password : s_bluetooth_name;
+}
+
+static size_t editor_capacity(void)
+{
+    return s_editor_purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE ? sizeof(s_wifi_password) : sizeof(s_bluetooth_name);
+}
+
+static bool editor_live(void)
+{
+    return !s_view.locked && !s_view.screen_off && s_view.overlay == APP_OVERLAY_LOCAL_EDITOR &&
+        s_editor_session && s_editor_session == s_view.local_editor.session &&
+        s_editor_purpose == s_view.local_editor.purpose && s_view.local_editor.seconds_left &&
+        !s_editor_consumed;
+}
+
+static const char *editor_group(unsigned index)
+{
+    static const char *const letters[] = {"ABC", "DEF", "GHI", "JKL", "MNO", "PQR", "STU", "VWX", "YZ"};
+    static const char *const symbols[] = {"12345", "67890", ".,!?", "@#$%", "^&*()", "-_=+", "[]{}", ";:'\"", "/\\|<>`~"};
+    return index < 9 ? (s_editor_symbols ? symbols[index] : letters[index]) : "";
+}
+
+static char editor_character(char value)
+{
+    return s_editor_lowercase && value >= 'A' && value <= 'Z' ? (char)(value + ('a' - 'A')) : value;
+}
+
+static void editor_append(char character)
+{
+    char *buffer = editor_buffer();
+    size_t length = bounded_length(buffer, editor_capacity());
+    if (length + 1 >= editor_capacity()) { s_editor_feedback = "Byte limit reached."; return; }
+    buffer[length] = character;
+    buffer[length + 1] = '\0';
+}
+
+static void on_editor_action(lv_event_t *event)
+{
+    if (!editor_live() || s_wake_touch || s_touch_local_blocked || s_view.remote_owned || s_touch_editor_session != s_editor_session ||
+        s_touch_epoch != s_view.epoch || s_touch_revision != s_view.ui_revision) return;
+    unsigned operation = (unsigned)(uintptr_t)lv_event_get_user_data(event);
+    char *buffer = editor_buffer();
+    size_t length = bounded_length(buffer, editor_capacity());
+    s_editor_feedback = NULL;
+    if (operation < 9) {
+        if (s_editor_group < 0) s_editor_group = (int)operation;
+        else {
+            const char *group = editor_group((unsigned)s_editor_group);
+            if (operation < strlen(group)) editor_append(editor_character(group[operation]));
+            s_editor_group = -1;
+        }
+    } else if (operation == 9) s_editor_group = -1;
+    else if (operation == 10) s_editor_lowercase = !s_editor_lowercase;
+    else if (operation == 11) { s_editor_symbols = !s_editor_symbols; s_editor_group = -1; }
+    else if (operation == 12 && length) {
+        size_t end = length - 1;
+        if (s_editor_purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME)
+            while (end && ((unsigned char)buffer[end] & 0xc0) == 0x80) --end;
+        secure_clear(buffer + end, editor_capacity() - end);
+    } else if (operation == 13) editor_append(' ');
+    else if (operation == 14) {
+        bool valid = s_editor_purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE ?
+            length >= 8 && length <= 63 : name_valid(buffer, length);
+        if (!valid || !s_view.local_editor.submit_available || !s_local_submit) return;
+        app_local_edit_request_t request = {
+            .purpose = s_editor_purpose, .epoch = s_touch_epoch,
+            .ui_revision = s_touch_revision, .editor_session = s_editor_session,
+            .gesture = s_gesture
+        };
+        if (s_editor_purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE) {
+            request.value.wifi.scan_generation = s_view.local_editor.wifi_scan_generation;
+            request.value.wifi.record_index = s_view.local_editor.wifi_record_index;
+            request.value.wifi.remember = s_view.local_editor.wifi_remember;
+            request.value.wifi.length = length;
+            memcpy(request.value.wifi.password, buffer, length + 1);
+        } else {
+            request.value.bluetooth.length = length;
+            memcpy(request.value.bluetooth.name, buffer, length + 1);
+        }
+        app_local_edit_result_t result = s_local_submit(&request);
+        secure_clear(&request, sizeof(request));
+        if (result == APP_LOCAL_EDIT_ACCEPTED || result == APP_LOCAL_EDIT_STALE) {
+            clear_editor();
+            s_editor_feedback = result == APP_LOCAL_EDIT_ACCEPTED ? "Submitted / waiting for result." : "Editor expired. Open a new editor.";
+        } else s_editor_feedback = result == APP_LOCAL_EDIT_BUSY ? "Input busy. Try again." :
+            result == APP_LOCAL_EDIT_INVALID ? "Entry rejected. Check the value." : "Submission unavailable.";
+    }
+    render_editor();
+}
+
+static lv_obj_t *editor_button(lv_obj_t *parent, const char *caption, int x, int y,
+                               int width, int height, unsigned operation)
+{
+    lv_obj_t *object = button(parent, caption, x, y, width, height, APP_CLOSE, 0);
+    lv_obj_remove_event_cb(object, on_action);
+    lv_obj_add_event_cb(object, on_editor_action, LV_EVENT_CLICKED, (void *)(uintptr_t)operation);
+    return object;
+}
+
+static void render_editor(void)
+{
+    if (!s_editor_preview) return;
+    bool wifi = s_editor_purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE;
+    bool live = editor_live();
+    size_t length = bounded_length(editor_buffer(), editor_capacity());
+    char preview[APP_UI_BLUETOOTH_NAME_CAPACITY * 4];
+    if (wifi) {
+        size_t masks = length < 24 ? length : 24;
+        memset(preview, '*', masks);
+        preview[masks] = '\0';
+        if (length > masks) memcpy(preview + masks, "...", 4);
+    } else name_label(preview, sizeof(preview), s_bluetooth_name);
+    label_text(s_editor_preview, *preview ? preview : wifi ? "Password hidden" : "Enter device name");
+    if (wifi) label_text(s_editor_source, s_view.wifi_selection.network.label);
+    else {
+        char effective[APP_UI_BLUETOOTH_NAME_CAPACITY * 4];
+        name_label(effective, sizeof(effective), s_view.bluetooth_name.effective);
+        label_format(s_editor_source, "Effective device name: %s",
+            s_view.bluetooth_name.effective_valid ? effective : "unavailable");
+    }
+    label_format(s_editor_context, wifi ? "%u / 63 bytes / %s" : "%u / 18 bytes / %s", (unsigned)length,
+        wifi ? s_view.local_editor.wifi_remember ? "Remember and join" : "Join once" : "This device / not the host");
+    label_text(s_editor_status, s_editor_feedback ? s_editor_feedback : *s_view.local_editor.message ?
+        s_view.local_editor.message : !live ? "Editor unavailable / draft cleared" :
+        !s_local_submit || !s_view.local_editor.submit_available ? "Submission unavailable. Close and retry." :
+        wifi ? "8-63 ASCII bytes / never sent as keyboard input" : "1-18 UTF-8 bytes / no outer spaces");
+    for (unsigned i = 0; i < 9; ++i) {
+        char cell[10] = {0};
+        const char *group = editor_group(s_editor_group < 0 ? i : (unsigned)s_editor_group);
+        if (s_editor_group < 0) {
+            for (size_t j = 0; j < sizeof(cell) - 1 && group[j]; ++j) cell[j] = editor_character(group[j]);
+        } else if (i < strlen(group)) cell[0] = editor_character(group[i]);
+        text(s_editor_grid[i], cell);
+        visible(s_editor_grid[i], *cell != '\0');
+        enabled(s_editor_grid[i], live && *cell);
+    }
+    text(s_editor_case, s_editor_lowercase ? "abc" : "ABC");
+    text(s_editor_symbol, s_editor_symbols ? "Letters" : "Symbols");
+    text(s_editor_apply, wifi ? "Join" : "Apply");
+    enabled(s_editor_back, live && s_editor_group >= 0);
+    enabled(s_editor_case, live && !s_editor_symbols);
+    enabled(s_editor_symbol, live);
+    enabled(s_editor_delete, live && length);
+    enabled(s_editor_space, live && length + 1 < editor_capacity());
+    enabled(s_editor_apply, live && s_local_submit && s_view.local_editor.submit_available &&
+        (wifi ? length >= 8 && length <= 63 : name_valid(s_bluetooth_name, length)));
+}
+
+static void reconcile_editor(const app_view_t *view)
+{
+    const app_local_editor_view_t *editor = &view->local_editor;
+    bool valid = !view->locked && !view->screen_off && view->overlay == APP_OVERLAY_LOCAL_EDITOR &&
+        editor->session && editor->seconds_left && (editor->purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE ||
+        editor->purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME);
+    if (!valid) {
+        clear_editor();
+        return;
+    }
+    if (s_editor_session == editor->session && s_editor_purpose == editor->purpose) return;
+    clear_editor();
+    s_editor_session = editor->session;
+    s_editor_purpose = editor->purpose;
+    s_editor_consumed = false;
+    if (editor->purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME) {
+        size_t length = bounded_length(editor->bluetooth_initial, sizeof(editor->bluetooth_initial));
+        /* Preserve a bounded UTF-8 draft for repair; outer spaces still block
+         * Apply until the user removes them. Never truncate malformed input. */
+        if (name_bytes_valid(editor->bluetooth_initial, length)) memcpy(s_bluetooth_name, editor->bluetooth_initial, length + 1);
+    }
+}
+
+#include "app_ui_media.inc"
+#include "app_ui_remote_review.inc"
+#include "app_ui_connections.inc"
+
 static void create_mouse(lv_obj_t *panel)
 {
     s_pad = box(panel, 0, 0, 396, 292, SOFT);
@@ -520,8 +1013,10 @@ static void create_mouse(lv_obj_t *panel)
     lv_obj_add_flag(s_pad, LV_OBJ_FLAG_PRESS_LOCK);
     lv_obj_t *title = heading(s_pad, "Touchpad", 16, 112, 364);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_t *hint = metadata(s_pad, "Touch pauses motion", 16, 148, 364);
-    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    s_pad_hint = label(s_pad, "Motion status unavailable", 16, 148, 364, MUTED);
+    lv_obj_set_style_text_font(s_pad_hint, META_FONT, 0);
+    lv_obj_set_height(s_pad_hint, 80);
+    lv_obj_set_style_text_align(s_pad_hint, LV_TEXT_ALIGN_CENTER, 0);
     s_mouse_controls[0] = button(panel, LV_SYMBOL_UP, 404, 0, 52, 142, APP_SCROLL, 1);
     s_mouse_controls[1] = button(panel, LV_SYMBOL_DOWN, 404, 150, 52, 142, APP_SCROLL, -1);
     s_mouse_controls[2] = button(panel, "Left click", 0, 304, 144, 48, APP_CLICK, 1);
@@ -554,7 +1049,8 @@ static void create_keyboard(lv_obj_t *panel)
     heading(s_voice_page, "Spoken letters", 16, 24, 424);
     s_voice_candidate = heading(s_voice_page, "A-Z", 16, 100, 82);
     s_voice_hint = label(s_voice_page, "Unavailable", 112, 82, 328, MUTED);
-    s_voice_confirm = button(s_voice_page, "Start listening", 112, 176, 328, 48, APP_VOICE_START, 0);
+    s_voice_confirm = button(s_voice_page, "Start listening", 112, 176, 208, 48, APP_MEDIA_CONTROL, 0);
+    s_voice_reject = button(s_voice_page, "Reject", 328, 176, 112, 48, APP_MEDIA_CONTROL, 0);
     s_shortcut_page = box(panel, 0, 76, 456, 244, SURFACE);
     const char *shortcuts[] = {"Copy", "Paste", "Undo", "Tab", "Esc", "Enter"};
     for (int i = 0; i < 6; ++i) {
@@ -562,7 +1058,7 @@ static void create_keyboard(lv_obj_t *panel)
                                 (i / 3) * 128, 144, 116, APP_SHORTCUT, i);
     }
     s_status = metadata(panel, "Local control / preview first / no Enter", 0, 328, 456);
-    s_delete = button(panel, "Delete", 0, 360, 144, 48, APP_DELETE, 0);
+    s_delete = button(panel, "Delete draft", 0, 360, 144, 48, APP_DELETE, 0);
     s_space = button(panel, "Space", 156, 360, 144, 48, APP_SPACE, 0);
     s_send = button(panel, "Send", 312, 360, 144, 48, APP_SEND, 0);
 }
@@ -632,21 +1128,36 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         lv_obj_t *wifi = settings;
         s_wifi_state = label(wifi, "Unavailable", 0, 0, 448, INK);
         single_line(s_wifi_state);
-        s_wifi_ssid = label(wifi, "No network", 0, 36, 448, INK);
-        lv_obj_set_height(s_wifi_ssid, 42);
+        s_wifi_ssid = label(wifi, "No network", 0, 28, 448, INK);
+        lv_obj_set_height(s_wifi_ssid, 36);
         lv_label_set_long_mode(s_wifi_ssid, LV_LABEL_LONG_DOT);
-        s_wifi_detail = metadata(wifi, "No saved network", 0, 96, 448);
-        s_wifi_note = metadata(wifi, "", 0, 124, 448);
-        s_wifi_setup = button(wifi, "Set up Wi-Fi", 0, 160, 448, 44, APP_WIFI_SETUP, 1);
-        s_wifi_forget = button(wifi, "Forget network", 0, 212, 448, 44, APP_WIFI_FORGET_REQUEST, 0);
+        s_wifi_detail = metadata(wifi, "No active network", 0, 72, 448);
+        lv_obj_t *saved_nav = button(wifi, "Saved networks", 0, 96, 448, 44, APP_MENU, APP_OVERLAY_WIFI_PROFILES);
+        s_wifi_saved = lv_obj_get_child(saved_nav, 0);
+        lv_obj_set_height(s_wifi_saved, 36);
+        lv_label_set_long_mode(s_wifi_saved, LV_LABEL_LONG_DOT);
+        lv_obj_t *api_nav = button(wifi, "Web/API", 0, 144, 448, 44, APP_MENU, APP_OVERLAY_API_CONNECTION);
+        s_wifi_backend = lv_obj_get_child(api_nav, 0);
+        lv_obj_set_height(s_wifi_backend, 40);
+        lv_label_set_long_mode(s_wifi_backend, LV_LABEL_LONG_DOT);
+        s_wifi_note = label(wifi, "", 0, 192, 448, MUTED);
+        lv_obj_set_style_text_font(s_wifi_note, META_FONT, 0);
+        lv_obj_set_height(s_wifi_note, 32);
+        s_wifi_find = button(wifi, "Find networks", 0, 232, 448, 44, APP_WIFI_SCAN, 1);
+        s_wifi_setup = button(wifi, "Recovery hotspot", 0, 284, 220, 44, APP_WIFI_SETUP, 1);
+        s_wifi_forget = button(wifi, "Forget network", 228, 284, 220, 44, APP_WIFI_FORGET_REQUEST, 0);
         return;
     }
     if (page == APP_SETTINGS_BLUETOOTH) {
         lv_obj_t *bluetooth = settings;
         for (unsigned i = 0; i < APP_UI_BONDS_PER_PAGE; ++i) {
-            lv_obj_t *row = box(bluetooth, 0, (int)i * 56, 456, 52, SURFACE);
+            lv_obj_t *row = button(bluetooth, "Host", 0, (int)i * 56, 456, 52, APP_BLUETOOTH_TARGET_CONTROL, 0);
             s_bond_rows[i] = row;
-            s_bond_names[i] = label(row, "Host", 0, 0, 304, INK);
+            s_bond_names[i] = lv_obj_get_child(row, 0);
+            lv_obj_set_align(s_bond_names[i], LV_ALIGN_TOP_LEFT);
+            lv_obj_set_pos(s_bond_names[i], 8, 0);
+            lv_obj_set_width(s_bond_names[i], 296);
+            lv_obj_set_style_text_align(s_bond_names[i], LV_TEXT_ALIGN_LEFT, 0);
             single_line(s_bond_names[i]);
             s_bond_ids[i] = metadata(row, "Identity unavailable", 0, 20, 304);
             s_bond_states[i] = label(row, "Saved", 320, 8, 128, MUTED);
@@ -666,6 +1177,9 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         s_pairing_buttons[1] = button(bluetooth, "Close pairing", 0, 280, 144, 44, APP_PAIRING_REQUEST, APP_PAIR_CLOSE);
         s_bond_disconnect = button(bluetooth, "Disconnect", 156, 280, 144, 44, APP_PAIRING_REQUEST, APP_PAIR_DISCONNECT);
         s_pairing_buttons[2] = button(bluetooth, "Forget all", 312, 280, 144, 44, APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL);
+        lv_obj_set_width(s_settings_back, 224);
+        lv_obj_set_width(lv_obj_get_child(s_settings_back, 0), 216);
+        s_name_edit = button(bluetooth, "Device name", 232, 360, 224, 48, APP_BLUETOOTH_NAME_EDIT, 0);
         return;
     }
     if (page == APP_SETTINGS_DISPLAY) {
@@ -712,7 +1226,47 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         lv_obj_add_flag(s_haptics, LV_OBJ_FLAG_EVENT_BUBBLE);
         lv_obj_add_event_cb(s_haptics, on_haptics, LV_EVENT_VALUE_CHANGED, NULL);
         s_calibrate = button(input, "Calibrate motion", 0, 144, 448, 44, APP_CALIBRATE, 0);
-        label(input, "Use a US ANSI English host layout.\nHold AI to lock; double-click AI for Menu.", 0, 208, 448, MUTED);
+        s_tap_click = button(input, "Tap to click / unavailable", 0, 200, 448, 44, APP_TAP_TO_CLICK, 0);
+        button(input, "Motion settings", 0, 256, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_MOTION);
+        button(input, "Gesture help", 228, 256, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_GESTURES);
+        s_motion_detail = label(input, "Motion status unavailable", 0, 308, 448, MUTED);
+        single_line(s_motion_detail);
+        lv_obj_set_style_text_font(s_motion_detail, META_FONT, 0);
+        return;
+    }
+    if (page == APP_SETTINGS_MOTION) {
+        s_motion_reference = label(settings, "Automatic reference unavailable", 0, 0, 448, MUTED);
+        lv_obj_set_height(s_motion_reference, 36);
+        lv_obj_set_style_text_font(s_motion_reference, META_FONT, 0);
+        const char *presets[] = {"Slow", "Default", "Fast"};
+        const int values[] = {200, 400, 800};
+        for (unsigned axis = 0; axis < 2; ++axis) {
+            int y = axis ? 160 : 40;
+            motion_adjustment(settings, (app_motion_field_t)axis, axis ? "Vertical sensitivity" : "Horizontal sensitivity", y, 25);
+            for (unsigned preset = 0; preset < 3; ++preset)
+                s_motion_presets[axis][preset] = motion_button(settings, presets[preset], (int)preset * 152,
+                    y + 70, 144, (app_motion_field_t)axis, values[preset], false);
+        }
+        button(settings, "Smoothing and direction", 0, 284, 448, 44,
+               APP_SETTINGS_PAGE, APP_SETTINGS_MOTION_ADVANCED);
+        return;
+    }
+    if (page == APP_SETTINGS_MOTION_ADVANCED) {
+        motion_adjustment(settings, APP_MOTION_FIELD_DEADZONE, "Ignore small movements", 0, 100);
+        motion_adjustment(settings, APP_MOTION_FIELD_FILTER, "Smoothing", 92, 10);
+        motion_adjustment(settings, APP_MOTION_FIELD_FREEZE, "Pause after touch", 184, 25);
+        s_motion_invert[0] = motion_button(settings, "Reverse horizontal", 0, 280, 220, APP_MOTION_FIELD_INVERT_X, 0, false);
+        s_motion_invert[1] = motion_button(settings, "Reverse vertical", 228, 280, 220, APP_MOTION_FIELD_INVERT_Y, 0, false);
+        return;
+    }
+    if (page == APP_SETTINGS_GESTURES) {
+        s_gesture_drag = label(settings, "Drag status unavailable", 0, 0, 448, INK);
+        lv_obj_set_height(s_gesture_drag, 36);
+        s_gesture_help = label(settings, "Gesture information unavailable", 0, 48, 448, MUTED);
+        lv_obj_set_height(s_gesture_help, 140);
+        s_tap_click = button(settings, "Tap to click / unavailable", 0, 200, 448, 44, APP_TAP_TO_CLICK, 0);
+        s_gesture_release = button(settings, "Cancel drag", 0, 256, 448, 44, APP_RELEASE, 0);
+        metadata(settings, "Touch pauses Motion until release and a short pause.", 0, 308, 448);
         return;
     }
     if (page == APP_SETTINGS_ABOUT) {
@@ -732,6 +1286,28 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
 
 static void clear_panel_bindings(void)
 {
+    clear_media_panel();
+    clear_connection_panel();
+    clear_remote_review_panel();
+    memset(s_scan_rows, 0, sizeof(s_scan_rows));
+    memset(s_scan_meta, 0, sizeof(s_scan_meta));
+    memset(s_network_join, 0, sizeof(s_network_join));
+    memset(s_common_keys, 0, sizeof(s_common_keys));
+    memset(s_editor_grid, 0, sizeof(s_editor_grid));
+    s_scan_state = s_scan_empty = s_scan_previous = s_scan_next = s_scan_page = s_scan_refresh = NULL;
+    s_network_name = s_network_detail = s_network_note = NULL;
+    s_wifi_find = s_wifi_saved = s_wifi_backend = s_name_edit = s_tap_click = NULL;
+    s_motion_detail = s_common_context = NULL;
+    memset(s_motion_values, 0, sizeof(s_motion_values));
+    memset(s_motion_sliders, 0, sizeof(s_motion_sliders));
+    memset(s_motion_nudges, 0, sizeof(s_motion_nudges));
+    memset(s_motion_presets, 0, sizeof(s_motion_presets));
+    memset(s_motion_invert, 0, sizeof(s_motion_invert));
+    s_motion_reference = s_gesture_help = s_gesture_drag = s_gesture_release = NULL;
+    s_record_store_state = s_record_store_profile = s_record_store_capacity = NULL;
+    s_record_store_time = s_record_store_reason = s_record_store_prepare = NULL;
+    s_editor_preview = s_editor_context = s_editor_source = s_editor_status = NULL;
+    s_editor_back = s_editor_case = s_editor_symbol = s_editor_delete = s_editor_space = s_editor_apply = NULL;
     memset(&s_submodes, 0, sizeof(s_submodes));
     memset(&s_audio_kinds, 0, sizeof(s_audio_kinds));
     memset(&s_overlay_target, 0, sizeof(s_overlay_target));
@@ -789,6 +1365,93 @@ static void clear_panel_bindings(void)
     memset(&s_mode_choices, 0, sizeof(s_mode_choices));
 }
 
+static void binding_identity(lv_obj_t *object, uint32_t generation, uint16_t record)
+{
+    for (size_t i = s_core_bindings; i < s_binding_count; ++i) {
+        if (s_bindings[i].object != object) continue;
+        s_bindings[i].wifi_generation = generation;
+        s_bindings[i].wifi_record = record;
+        return;
+    }
+}
+
+static void create_extension(lv_obj_t *body, lv_obj_t *title, app_overlay_t kind)
+{
+    if (kind == APP_OVERLAY_WIFI_NETWORKS) {
+        label_text(title, "Nearby Wi-Fi");
+        s_scan_state = label(body, "Scan unavailable", 0, 0, 456, MUTED);
+        lv_obj_set_style_text_font(s_scan_state, META_FONT, 0);
+        lv_obj_set_height(s_scan_state, 36);
+        lv_label_set_long_mode(s_scan_state, LV_LABEL_LONG_DOT);
+        for (unsigned i = 0; i < 4; ++i) {
+            s_scan_rows[i] = button(body, "Network", 0, 44 + (int)i * 60, 456, 52, APP_WIFI_NETWORK_SELECT, 0);
+            lv_obj_t *caption = lv_obj_get_child(s_scan_rows[i], 0);
+            lv_obj_set_align(caption, LV_ALIGN_TOP_LEFT);
+            lv_obj_set_pos(caption, 8, 4);
+            lv_obj_set_width(caption, 440);
+            lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_LEFT, 0);
+            s_scan_meta[i] = metadata(s_scan_rows[i], "", 8, 29, 440);
+            binding_identity(s_scan_rows[i], s_view.wifi_scan.generation, s_view.wifi_scan.rows[i].record_index);
+        }
+        s_scan_empty = label(body, "No scan results", 0, 112, 456, MUTED);
+        lv_obj_set_height(s_scan_empty, 120);
+        s_scan_previous = button(body, "Previous", 0, 292, 144, 44, APP_WIFI_SCAN_PAGE, -1);
+        s_scan_page = metadata(body, "", 156, 306, 144);
+        lv_obj_set_style_text_align(s_scan_page, LV_TEXT_ALIGN_CENTER, 0);
+        s_scan_next = button(body, "Next", 312, 292, 144, 44, APP_WIFI_SCAN_PAGE, 1);
+        s_scan_refresh = button(body, "Refresh", 0, 360, 224, 48, APP_WIFI_SCAN, 1);
+        binding_identity(s_scan_previous, s_view.wifi_scan.generation, 0);
+        binding_identity(s_scan_next, s_view.wifi_scan.generation, 0);
+        binding_identity(s_scan_refresh, s_view.wifi_scan.generation, 0);
+        button(body, "Wi-Fi settings", 232, 360, 224, 48, APP_SETTINGS_PAGE, APP_SETTINGS_WIFI);
+    } else if (kind == APP_OVERLAY_WIFI_NETWORK) {
+        label_text(title, "Wi-Fi network");
+        s_network_name = heading(body, "Network unavailable", 0, 0, 456);
+        lv_obj_set_style_text_font(s_network_name, BODY_FONT, 0);
+        lv_obj_set_height(s_network_name, 116);
+        lv_label_set_long_mode(s_network_name, LV_LABEL_LONG_DOT);
+        s_network_detail = label(body, "", 0, 128, 456, MUTED);
+        lv_obj_set_height(s_network_detail, 64);
+        s_network_note = label(body, "", 0, 204, 456, MUTED);
+        lv_obj_set_height(s_network_note, 84);
+        s_network_join[0] = button(body, "Join once", 0, 300, 224, 48, APP_WIFI_CREDENTIAL_OPEN, 0);
+        s_network_join[1] = button(body, "Remember + join", 232, 300, 224, 48, APP_WIFI_CREDENTIAL_OPEN, 1);
+        for (unsigned i = 0; i < 2; ++i)
+            binding_identity(s_network_join[i], s_view.wifi_selection.generation, s_view.wifi_selection.network.record_index);
+        button(body, "Back to networks", 0, 360, 456, 48, APP_MENU, APP_OVERLAY_WIFI_NETWORKS);
+    } else if (kind == APP_OVERLAY_LOCAL_EDITOR) {
+        bool wifi = s_view.local_editor.purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE;
+        label_text(title, wifi ? "Wi-Fi password" : "Device name");
+        lv_obj_t *preview = box(body, 0, 0, 456, 64, SOFT);
+        s_editor_source = metadata(preview, "", 12, 4, 432);
+        s_editor_preview = label(preview, "", 12, 24, 432, INK);
+        single_line(s_editor_preview);
+        s_editor_context = metadata(preview, "", 12, 46, 432);
+        for (unsigned i = 0; i < 9; ++i)
+            s_editor_grid[i] = editor_button(body, "", (int)(i % 3) * 120, 76 + (int)(i / 3) * 84, 112, 76, i);
+        s_editor_back = editor_button(body, "Groups", 360, 76, 96, 76, 9);
+        s_editor_case = editor_button(body, "ABC", 360, 160, 96, 76, 10);
+        s_editor_symbol = editor_button(body, "Symbols", 360, 244, 96, 76, 11);
+        s_editor_status = metadata(body, "", 0, 328, 456);
+        s_editor_delete = editor_button(body, "Delete", 0, 360, 144, 48, 12);
+        s_editor_space = editor_button(body, "Space", 156, 360, 144, 48, 13);
+        s_editor_apply = editor_button(body, wifi ? "Join" : "Apply", 312, 360, 144, 48, 14);
+        selected(s_editor_apply, true);
+    } else if (kind == APP_OVERLAY_COMMON_KEYS) {
+        label_text(title, "Live host keys");
+        s_common_context = metadata(body, "", 0, 0, 456);
+        const char *names[] = {"Esc", "Tab", "Enter", "Backspace", "Delete", "Home", "Up", "End", "Left", "Down", "Right"};
+        const int usages[] = {0x29, 0x2b, 0x28, 0x2a, 0x4c, 0x4a, 0x52, 0x4d, 0x50, 0x51, 0x4f};
+        for (unsigned i = 0; i < 11; ++i) {
+            unsigned cell = i < 5 ? i : i + 1;
+            s_common_keys[i] = button(body, names[i], (int)(cell % 3) * 156, 40 + (int)(cell / 3) * 76, 144, 68, APP_KEY, usages[i]);
+        }
+        lv_obj_t *note = label(body, "Sends now\nPreview stays", 316, 128, 136, MUTED);
+        lv_obj_set_style_text_font(note, META_FONT, 0);
+        button(body, "Back to keyboard", 0, 360, 456, 48, APP_CLOSE, 0);
+    }
+}
+
 static void create_overlay(app_overlay_t kind, app_settings_page_t page)
 {
     s_overlay = box(s_screen, 0, 0, 480, 480, SURFACE);
@@ -826,7 +1489,8 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         lv_obj_set_height(s_telemetry, 36);
         s_overlay_state = label(body, "", 0, 244, 456, MUTED);
         lv_obj_set_height(s_overlay_state, 44);
-        button(body, "Connectivity settings", 0, 300, 456, 48, APP_SETTINGS_PAGE, APP_SETTINGS_CONNECTIVITY);
+        button(body, "Connections", 0, 300, 224, 48, APP_SETTINGS_PAGE, APP_SETTINGS_CONNECTIVITY);
+        button(body, "Input settings", 232, 300, 224, 48, APP_SETTINGS_PAGE, APP_SETTINGS_INPUT);
         button(body, "Back to Menu", 0, 360, 456, 48, APP_MENU, APP_OVERLAY_MODES);
     } else if (kind == APP_OVERLAY_SETTINGS) {
         s_settings_title = title;
@@ -837,11 +1501,37 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         const char *names[] = {"Motion", "Touch", "Spoken letters", "Shortcuts"};
         const char *audio[] = {"Voice / meeting", "Speaker"};
         for (int i = 0; i < (keyboard ? 4 : 2); ++i) {
-            lv_obj_t *choice = button(body, keyboard ? names[i] : audio[i], 0, i * 88, 456, 76,
+            lv_obj_t *choice = button(body, keyboard ? names[i] : audio[i], 0, i * (keyboard ? 72 : 88), 456, keyboard ? 64 : 76,
                                      keyboard ? APP_KEYBOARD_SUBMODE : APP_AUDIO_KIND, i);
             if (keyboard) s_submodes[i] = choice;
             else s_audio_kinds[i] = choice;
         }
+        if (keyboard) button(body, "Common keys", 0, 288, 456, 64, APP_MENU, APP_OVERLAY_COMMON_KEYS);
+        else {
+            button(body, "Routes and roles", 0, 176, 224, 64, APP_MENU, APP_OVERLAY_MEDIA_OPTIONS);
+            button(body, "Record", 232, 176, 224, 64, APP_MENU, APP_OVERLAY_RECORDING_START);
+            button(body, "Recordings", 0, 252, 456, 64, APP_MENU, APP_OVERLAY_RECORDINGS);
+            button(body, "Recording storage", 0, 328, 456, 64, APP_MENU, APP_OVERLAY_RECORDING_STORAGE);
+        }
+    } else if (kind >= APP_OVERLAY_MEDIA_OPTIONS && kind <= APP_OVERLAY_RECORDING_START) {
+        create_media_panel(body, title, kind);
+    } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_BLUETOOTH_TARGET) {
+        create_connection_panel(body, title, kind);
+    } else if (kind == APP_OVERLAY_RECORDING_STORAGE) {
+        label_text(title, "Recording storage");
+        s_record_store_state = heading(body, "Storage status unknown", 0, 0, 456);
+        lv_obj_set_height(s_record_store_state, 48);
+        s_record_store_profile = label(body, "Recording profile unavailable", 0, 56, 456, MUTED);
+        lv_obj_set_height(s_record_store_profile, 40);
+        s_record_store_capacity = label(body, "Capacity unavailable", 0, 104, 456, INK);
+        lv_obj_set_height(s_record_store_capacity, 48);
+        s_record_store_time = label(body, "Remaining time unavailable", 0, 168, 456, INK);
+        lv_obj_set_height(s_record_store_time, 40);
+        s_record_store_reason = label(body, "", 0, 216, 456, MUTED);
+        lv_obj_set_style_text_font(s_record_store_reason, META_FONT, 0);
+        lv_obj_set_height(s_record_store_reason, 72);
+        s_record_store_prepare = button(body, "Prepare unavailable", 0, 304, 456, 44, APP_RECORDING_STORAGE_PREPARE_REQUEST, 0);
+        button(body, "Back to Audio", 0, 360, 456, 48, APP_MENU, APP_OVERLAY_AUDIO);
     } else if (kind == APP_OVERLAY_WIFI_SETUP) {
         label_text(title, "Set up Wi-Fi");
         s_setup_state = metadata(body, "Preparing setup...", 0, 0, 456);
@@ -860,6 +1550,9 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         label(body, "Save your home Wi-Fi there.\nSetup ends automatically.", 0, 292, 456, MUTED);
         s_setup_stop = button(body, "Stop setup", 0, 360, 456, 48, APP_WIFI_SETUP, 0);
     } else if (kind == APP_OVERLAY_CONFIRM) {
+        if (s_view.confirmation == APP_CONFIRM_REMOTE) {
+            create_remote_review(body, title);
+        } else {
         label_text(title, "Confirm action");
         s_confirm_title = heading(body, "Confirm action", 0, 32, 456);
         lv_obj_set_height(s_confirm_title, 64);
@@ -868,7 +1561,8 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         button(body, "Cancel", 0, 360, 224, 48, APP_CONFIRM, 0);
         s_confirm_accept = button(body, "Confirm", 232, 360, 224, 48, APP_CONFIRM, 1);
         selected(s_confirm_accept, true);
-    }
+        }
+    } else create_extension(body, title, kind);
     /* Safety surfaces remain above newly created ordinary navigation. */
     lv_obj_move_foreground(s_lock_shield);
     lv_obj_move_foreground(s_sleep_shield);
@@ -878,7 +1572,12 @@ static bool reconcile_overlay(const app_view_t *view)
 {
     app_overlay_t desired = view->locked || view->screen_off ? APP_OVERLAY_NONE : view->overlay;
     bool same = desired == s_built_overlay &&
-        (desired != APP_OVERLAY_SETTINGS || view->settings_page == s_built_settings);
+        (desired != APP_OVERLAY_CONFIRM || s_built_remote_review == (view->confirmation == APP_CONFIRM_REMOTE)) &&
+        (desired != APP_OVERLAY_SETTINGS || view->settings_page == s_built_settings) &&
+        (desired != APP_OVERLAY_WIFI_NETWORKS || (view->wifi_scan.generation == s_built_scan_generation && view->wifi_scan.page == s_built_scan_page)) &&
+        (desired != APP_OVERLAY_WIFI_NETWORK || (view->wifi_selection.generation == s_built_scan_generation && view->wifi_selection.network.record_index == s_built_scan_page)) &&
+        (desired != APP_OVERLAY_LOCAL_EDITOR || (view->local_editor.session == s_built_editor_session &&
+            view->local_editor.purpose == s_built_editor_purpose));
     if (same) return true;
     /* Never delete a pressed object or its callback binding. A stale intent
      * retains its press-time revision and is rejected by the coordinator. */
@@ -889,15 +1588,37 @@ static bool reconcile_overlay(const app_view_t *view)
     s_color_count = s_core_colors;
     clear_panel_bindings();
     s_built_overlay = desired;
+    s_built_remote_review = desired == APP_OVERLAY_CONFIRM && view->confirmation == APP_CONFIRM_REMOTE;
     s_built_settings = view->settings_page;
+    s_built_scan_generation = desired == APP_OVERLAY_WIFI_NETWORK ? view->wifi_selection.generation : view->wifi_scan.generation;
+    s_built_scan_page = desired == APP_OVERLAY_WIFI_NETWORK ? view->wifi_selection.network.record_index : view->wifi_scan.page;
+    s_built_editor_session = view->local_editor.session;
+    s_built_editor_purpose = view->local_editor.purpose;
     if (desired != APP_OVERLAY_NONE) create_overlay(desired, view->settings_page);
     return true;
+}
+
+static void on_screen_delete(lv_event_t *event)
+{
+    if (lv_event_get_target(event) != s_screen) return;
+    clear_editor();
+    secure_clear(&s_view, sizeof(s_view));
+    s_local_submit = NULL;
+    s_screen = NULL;
+    s_capture_indicator = (app_ui_capture_indicator_t){0};
 }
 
 void app_ui_create(lv_display_t *display, app_submit_fn callback)
 {
     s_submit = callback;
+    s_local_submit = NULL;
+    clear_editor();
+    s_editor_session = 0;
+    s_editor_purpose = APP_LOCAL_EDIT_NONE;
     s_binding_count = 0;
+    s_media_binding_count = 0;
+    s_core_media_bindings = 0;
+    memset(s_media_bindings, 0, sizeof(s_media_bindings));
     s_color_count = 0;
     s_dark_theme = false;
     s_gesture = 0;
@@ -905,6 +1626,7 @@ void app_ui_create(lv_display_t *display, app_submit_fn callback)
     s_touch_target = NULL;
     s_touch_device = NULL;
     s_wake_touch = false;
+    s_capture_indicator = (app_ui_capture_indicator_t){0};
     memset(&s_view, 0, sizeof(s_view));
     s_screen = lv_display_get_screen_active(display);
     lv_obj_remove_style_all(s_screen);
@@ -914,6 +1636,7 @@ void app_ui_create(lv_display_t *display, app_submit_fn callback)
     foreground(s_screen, INK, 0);
     lv_obj_remove_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_screen, on_touch, LV_EVENT_ALL, NULL);
+    lv_obj_add_event_cb(s_screen, on_screen_delete, LV_EVENT_DELETE, NULL);
     clear_panel_bindings();
     s_overlay = NULL;
     s_built_overlay = APP_OVERLAY_NONE;
@@ -935,12 +1658,20 @@ void app_ui_create(lv_display_t *display, app_submit_fn callback)
     heading(s_lock_shield, "Hold AI again to unlock.", 24, 352, 432);
     s_sleep_shield = box(s_screen, 0, 0, 480, 480, 0x000000);
     lv_obj_add_flag(s_sleep_shield, LV_OBJ_FLAG_PRESS_LOCK);
+    render_media_core();
+    render_speech();
+    s_core_media_bindings = s_media_binding_count;
     s_core_bindings = s_binding_count;
     s_core_colors = s_color_count;
-    app_view_t initial = {.mode = INPUT_MOUSE, .dark_theme = true,
+    static const app_view_t initial = {.mode = INPUT_MOUSE, .dark_theme = true,
         .keyboard_group = -1, .gain_divisor = 1,
         .microphone_muted = true};
     app_ui_render(&initial);
+}
+
+void app_ui_set_local_edit_submit(app_local_edit_submit_fn callback)
+{
+    s_local_submit = callback;
 }
 
 static const char *battery_state_name(app_battery_state_t state)
@@ -951,6 +1682,97 @@ static const char *battery_state_name(app_battery_state_t state)
     case APP_BATTERY_FULL: return "Full";
     case APP_BATTERY_IDLE: return "Idle";
     default: return "State unknown";
+    }
+}
+
+static const char *security_name(app_ui_wifi_security_t security)
+{
+    switch (security) {
+    case APP_UI_SECURITY_OPEN: return "Open";
+    case APP_UI_SECURITY_WEP: return "WEP";
+    case APP_UI_SECURITY_WPA: return "WPA";
+    case APP_UI_SECURITY_WPA2: return "WPA2";
+    case APP_UI_SECURITY_WPA_WPA2: return "WPA/WPA2";
+    case APP_UI_SECURITY_WPA3: return "WPA3";
+    case APP_UI_SECURITY_WPA2_WPA3: return "WPA2/WPA3";
+    case APP_UI_SECURITY_ENTERPRISE: return "Enterprise";
+    case APP_UI_SECURITY_OWE: return "OWE";
+    case APP_UI_SECURITY_OTHER: return "Other security";
+    default: return "Security unknown";
+    }
+}
+
+static const char *join_reason(app_ui_join_availability_t availability)
+{
+    switch (availability) {
+    case APP_UI_JOIN_AVAILABLE: return "Password required";
+    case APP_UI_JOIN_HIDDEN_SSID: return "Hidden network / manual entry unavailable";
+    case APP_UI_JOIN_UNSUPPORTED_SSID: return "Network name is unsupported";
+    case APP_UI_JOIN_UNSUPPORTED_SECURITY: return "Security type is unsupported";
+    default: return "Join unavailable";
+    }
+}
+
+static void render_extension(const app_view_t *view, bool hid_ready)
+{
+    if (view->overlay == APP_OVERLAY_LOCAL_EDITOR) { render_editor(); return; }
+    if (view->overlay == APP_OVERLAY_COMMON_KEYS) {
+        label_format(s_common_context, "%s / %s / preview unchanged",
+            view->input_transport == APP_INPUT_USB ? "USB" : "Bluetooth", s_target_text);
+        for (unsigned i = 0; i < 11; ++i)
+            enabled(s_common_keys[i], hid_ready && view->mode == INPUT_KEYBOARD && !view->sending);
+        return;
+    }
+    if (view->overlay == APP_OVERLAY_WIFI_NETWORKS) {
+        const app_wifi_scan_view_t *scan = &view->wifi_scan;
+        const char *phase = scan->state == APP_UI_SCAN_IDLE ? "Ready to scan" :
+            scan->state == APP_UI_SCAN_QUEUED ? "Scan queued" :
+            scan->state == APP_UI_SCAN_RUNNING ? "Scanning nearby networks..." :
+            scan->state == APP_UI_SCAN_CANCELLING ? "Cancelling scan..." :
+            scan->state == APP_UI_SCAN_READY ? "Scan ready" :
+            scan->state == APP_UI_SCAN_CANCELLED ? "Scan cancelled" :
+            scan->state == APP_UI_SCAN_ERROR ? "Scan failed" :
+            scan->state == APP_UI_SCAN_EXPIRED ? "Scan expired / refresh to continue" : "Scan unavailable";
+        label_text(s_scan_state, *scan->message ? scan->message : phase);
+        bool ready = scan->state == APP_UI_SCAN_READY && scan->generation && !scan->cleanup_pending;
+        size_t count = ready ? scan->row_count : 0;
+        for (unsigned i = 0; i < 4; ++i) {
+            bool show = i < count;
+            visible(s_scan_rows[i], show);
+            if (!show) continue;
+            const app_wifi_row_view_t *row = &scan->rows[i];
+            text(s_scan_rows[i], *row->label ? row->label : "Unnamed network");
+            char signal[24];
+            if (row->rssi_valid) snprintf(signal, sizeof(signal), "%d dBm", row->rssi_dbm);
+            else snprintf(signal, sizeof(signal), "Signal unknown");
+            label_format(s_scan_meta[i], "%s / %s%s%s%s", security_name(row->security), signal,
+                row->current ? " / current" : "", row->remembered ? " / saved" : "",
+                row->availability != APP_UI_JOIN_AVAILABLE ? " / unsupported" : "");
+            enabled(s_scan_rows[i], true); /* Unsupported rows still explain why. */
+            if (!s_touch_active) binding_identity(s_scan_rows[i], scan->generation, row->record_index);
+        }
+        visible(s_scan_empty, !count);
+        label_text(s_scan_empty, ready ? "No networks found. Refresh to try again." : phase);
+        unsigned pages = ((unsigned)scan->count + 3U) / 4U;
+        if (!pages) pages = 1;
+        label_format(s_scan_page, "%u / %u%s", scan->page + 1, pages, scan->capacity_reached ? " / capped" : "");
+        enabled(s_scan_previous, ready && scan->page > 0);
+        enabled(s_scan_next, ready && scan->page + 1 < pages);
+        text(s_scan_refresh, scan->can_cancel ? "Cancel scan" : scan->retry_seconds ? "Scan cooling down" : "Refresh");
+        enabled(s_scan_refresh, scan->can_cancel || scan->can_start);
+        return;
+    }
+    if (view->overlay == APP_OVERLAY_WIFI_NETWORK) {
+        const app_wifi_selection_view_t *selection = &view->wifi_selection;
+        const app_wifi_row_view_t *row = &selection->network;
+        label_text(s_network_name, selection->valid ? row->label : "Network selection expired");
+        label_format(s_network_detail, "%s%s%s\n%s", security_name(row->security),
+            row->current ? " / current" : "", row->remembered ? " / saved" : "",
+            selection->valid ? join_reason(row->availability) : "Return to the list and refresh.");
+        label_text(s_network_note, *selection->message ? selection->message :
+            "Joins your existing Wi-Fi network.\nYour computer stays on its Wi-Fi.\nWeb/API availability is shown separately.");
+        enabled(s_network_join[0], selection->valid && selection->can_join_once && row->availability == APP_UI_JOIN_AVAILABLE);
+        enabled(s_network_join[1], selection->valid && selection->can_remember && row->availability == APP_UI_JOIN_AVAILABLE);
     }
 }
 
@@ -968,19 +1790,24 @@ static void render_device(const app_view_t *view, const char *link)
         view->wifi_state == APP_UI_WIFI_UNAVAILABLE ? "unavailable" :
         view->wifi_state == APP_UI_WIFI_ERROR ? "error" :
         view->wifi_state == APP_UI_WIFI_CONNECTING ? "connecting" :
+        view->wifi_state == APP_UI_WIFI_OBTAINING_IP ? "getting address" :
         view->wifi_state == APP_UI_WIFI_RETRYING ? "reconnecting" : "disconnected";
     if (view->wifi_state == APP_UI_WIFI_CONNECTED && view->wifi_rssi_valid)
         label_format(s_telemetry, "%s / Wi-Fi %d dBm", battery, view->wifi_rssi_dbm);
     else label_format(s_telemetry, "%s / Wi-Fi %s", battery, wifi_status);
-    const char *titles[] = {"Settings", "Connectivity", "Display", "Input", "About", "Bluetooth hosts", "Wi-Fi"};
-    unsigned page = (unsigned)view->settings_page < 7 ? (unsigned)view->settings_page : 0;
+    const char *titles[] = {"Settings", "Connectivity", "Display", "Input", "About", "Bluetooth hosts", "Wi-Fi",
+        "Motion sensitivity", "Motion tuning", "Touch gestures"};
+    unsigned page = (unsigned)view->settings_page < sizeof(titles) / sizeof(titles[0]) ? (unsigned)view->settings_page : 0;
     label_text(s_settings_title, titles[page]);
     const char *saved = view->settings_save_state == APP_SAVE_SAVED ? "Settings saved" :
         view->settings_save_state == APP_SAVE_PENDING ? "Saving settings..." :
         view->settings_save_state == APP_SAVE_ERROR ? "Could not save settings. Try again." :
-        view->settings_save_state == APP_SAVE_DEFAULTS ? "Defaults active / not saved yet" : "Settings storage unavailable";
-    label_text(s_save_status, saved);
-    foreground(s_save_status, view->settings_save_state == APP_SAVE_ERROR ? WARNING : MUTED, 0);
+        view->settings_save_state == APP_SAVE_DEFAULTS ? "Defaults active / not saved yet" :
+        view->settings_save_state == APP_SAVE_VOLATILE ? "Temporary settings / not saved" : "Settings storage unavailable";
+    if (view->settings_page != APP_SETTINGS_BLUETOOTH) {
+        label_text(s_save_status, saved);
+        foreground(s_save_status, view->settings_save_state == APP_SAVE_ERROR ? WARNING : MUTED, 0);
+    }
     bool usb_selected = view->input_transport == APP_INPUT_USB;
     selected(s_transports[0], !usb_selected);
     selected(s_transports[1], usb_selected);
@@ -1040,7 +1867,10 @@ static void render_device(const app_view_t *view, const char *link)
         size_t index = (size_t)host_page * APP_UI_BONDS_PER_PAGE + i;
         bool show = view->bluetooth_hosts_available && index < host_count;
         visible(s_bond_rows[i], show);
-        if (!show) continue;
+        if (!show) {
+            connection_bind(s_bond_rows[i], APP_BLUETOOTH_TARGET_CONTROL, (connection_request_t){0}, false);
+            continue;
+        }
         const app_bond_view_t *host = &view->bluetooth_hosts[index];
         char name[48];
         size_t length = bounded_length(host->identity, sizeof(host->identity));
@@ -1050,6 +1880,7 @@ static void render_device(const app_view_t *view, const char *link)
         label_text(s_bond_ids[i], *host->identity ? host->identity : "Identity unavailable");
         label_text(s_bond_states[i], host->connected ? "Connected" : "Saved");
         foreground(s_bond_states[i], host->connected ? ACCENT : MUTED, 0);
+        bind_bluetooth_row(s_bond_rows[i], host);
     }
     char capacity[32];
     if (!capacity_known) snprintf(capacity, sizeof(capacity), "Limit unknown");
@@ -1060,8 +1891,21 @@ static void render_device(const app_view_t *view, const char *link)
     foreground(s_bond_page, pairings_full ? WARNING : MUTED, 0);
     enabled(s_bond_previous, view->bluetooth_hosts_available && host_page > 0);
     enabled(s_bond_next, view->bluetooth_hosts_available && host_page + 1 < page_count);
+    enabled(s_name_edit, view->bluetooth_name.available && !view->bluetooth_name.pending && !view->bluetooth_name.uncertain);
+    if (view->overlay == APP_OVERLAY_SETTINGS && view->settings_page == APP_SETTINGS_BLUETOOTH) {
+        char name[APP_UI_BLUETOOTH_NAME_CAPACITY * 4];
+        name_label(name, sizeof(name), view->bluetooth_name.effective);
+        label_format(s_save_status, "This device: %s / %s", view->bluetooth_name.effective_valid ? name : "Name unavailable",
+            view->bluetooth_name.uncertain ? "outcome unknown" : view->bluetooth_name.pending ? "applying name" :
+            view->bluetooth_name.save_state == APP_SAVE_ERROR ? "name not saved" :
+            view->bluetooth_name.save_state == APP_SAVE_PENDING ? "saving name" :
+            view->bluetooth_name.save_state == APP_SAVE_SAVED ? "name saved" :
+            view->bluetooth_name.save_state == APP_SAVE_VOLATILE ? "temporary name / not saved" : "save unconfirmed");
+        foreground(s_save_status, view->bluetooth_name.uncertain || view->bluetooth_name.save_state == APP_SAVE_ERROR ? WARNING : MUTED, 0);
+    }
     const char *wifi = view->wifi_state == APP_UI_WIFI_CONNECTED ? "Connected" :
         view->wifi_state == APP_UI_WIFI_CONNECTING ? "Connecting" :
+        view->wifi_state == APP_UI_WIFI_OBTAINING_IP ? "Getting address" :
         view->wifi_state == APP_UI_WIFI_RETRYING ? "Reconnecting" :
         view->wifi_state == APP_UI_WIFI_ERROR ? "Connection error" :
         view->wifi_state == APP_UI_WIFI_DISCONNECTED ? "Disconnected" : "Unavailable";
@@ -1071,7 +1915,7 @@ static void render_device(const app_view_t *view, const char *link)
     label_text(s_wifi_state, wifi);
     label_text(s_wifi_ssid, *view->wifi_ssid ? view->wifi_ssid : "No network");
     label_text(s_wifi_note, *view->wifi_message ? view->wifi_message :
-               view->wifi_saved_network ? "Saved network reconnects automatically." : "Use setup to save a network.");
+               "Join here; keep your computer on its Wi-Fi.");
     if (view->wifi_rssi_valid && view->wifi_state == APP_UI_WIFI_CONNECTED)
         snprintf(summary, sizeof(summary), "%d dBm / %s", view->wifi_rssi_dbm,
                  *view->wifi_ipv4 ? view->wifi_ipv4 : "IP unavailable");
@@ -1080,11 +1924,23 @@ static void render_device(const app_view_t *view, const char *link)
     else snprintf(summary, sizeof(summary), "%s", view->wifi_state == APP_UI_WIFI_UNAVAILABLE ?
                   "Signal and IP unavailable" : "No active network connection");
     label_text(s_wifi_detail, summary);
-    text(s_wifi_setup, view->wifi_setup_active ? "View setup" : view->wifi_operation_pending ? "Please wait..." : "Set up Wi-Fi");
+    label_format(s_wifi_saved, "%s%s%s", view->wifi_storage_uncertain ? "Saved state uncertain" :
+        !view->wifi_stored_known ? "Saved state unknown" : !view->wifi_stored_present ? "No saved network" :
+        !view->wifi_stored_valid ? "Saved record unavailable" : "Saved", *view->wifi_stored_label ? ": " : "", view->wifi_stored_label);
+    const char *backend = view->wifi_lan_service == APP_UI_LAN_SERVICE_READY ? "Web/API ready" :
+        view->wifi_lan_service == APP_UI_LAN_SERVICE_STARTING ? "Web/API starting" :
+        view->wifi_lan_service == APP_UI_LAN_SERVICE_DISABLED ? "Web/API disabled" :
+        view->wifi_lan_service == APP_UI_LAN_SERVICE_ERROR ? "Web/API error" : "Web/API unavailable";
+    label_format(s_wifi_backend, "%s / %s%s%s", view->wifi_lan_ready ? "LAN connected" : "LAN not ready", backend,
+        view->wifi_lan_service == APP_UI_LAN_SERVICE_READY && *view->wifi_lan_service_url ? "\n" :
+        *view->wifi_lan_service_message ? "\n" : "",
+        view->wifi_lan_service == APP_UI_LAN_SERVICE_READY ? view->wifi_lan_service_url : view->wifi_lan_service_message);
+    enabled(s_wifi_find, view->wifi_scan.can_start && !view->wifi_operation_pending);
+    text(s_wifi_setup, view->wifi_setup_active ? "View recovery hotspot" : view->wifi_operation_pending ? "Please wait..." : "Recovery hotspot");
     enabled(s_wifi_setup, view->wifi_state != APP_UI_WIFI_UNAVAILABLE &&
             (!view->wifi_operation_pending || view->wifi_setup_active));
     enabled(s_wifi_forget, view->wifi_state != APP_UI_WIFI_UNAVAILABLE &&
-            view->wifi_saved_network && !view->wifi_operation_pending);
+            (!view->wifi_stored_known || view->wifi_stored_present || view->wifi_storage_uncertain) && !view->wifi_operation_pending);
     if (view->brightness_available) label_format(s_brightness_text, "%u%%", view->brightness_percent);
     else label_text(s_brightness_text, "Unavailable");
     if (s_brightness) {
@@ -1117,10 +1973,17 @@ static void render_device(const app_view_t *view, const char *link)
     const char *title = "Confirm action";
     const char *detail = "No action is pending. Return to Settings.";
     const char *accept = "Confirm";
+    char pairing_detail[192];
     switch (view->confirmation) {
     case APP_CONFIRM_PAIR_OPEN:
         title = "Open Bluetooth pairing?";
-        detail = "Nearby hosts can pair while pairing is open.\nChoose ESP32-INPUT in the host's\nBluetooth settings.";
+        {
+            char name[APP_UI_BLUETOOTH_NAME_CAPACITY * 4];
+            name_label(name, sizeof(name), view->bluetooth_name.effective);
+            snprintf(pairing_detail, sizeof(pairing_detail), "Nearby hosts can pair while pairing is open.\nDevice name: %s\nChoose it in the host's Bluetooth settings.",
+                view->bluetooth_name.effective_valid ? name : "unavailable");
+            detail = pairing_detail;
+        }
         accept = "Open pairing";
         break;
     case APP_CONFIRM_PAIR_CLOSE:
@@ -1140,20 +2003,54 @@ static void render_device(const app_view_t *view, const char *link)
         break;
     case APP_CONFIRM_WIFI_FORGET:
         title = "Forget Wi-Fi network?";
-        detail = "The saved Wi-Fi network will be removed.\nWi-Fi disconnects and setup stops.\nSet up Wi-Fi again to reconnect.";
+        detail = "The saved Wi-Fi network will be removed.\nIt disconnects if currently in use.\nSet up this network again to reconnect.";
         accept = "Forget network";
         break;
+    case APP_CONFIRM_RECORDING_STORAGE_PREPARE:
+        title = "Prepare recording storage?";
+        detail = "Initialize the dedicated internal recording area.\nAny data in that reserved area will be removed.\nFactory NAND storage stays untouched.\nRecording starts only after a separate action.";
+        accept = "Prepare storage";
+        break;
     default: break;
+    }
+    if (view->confirmation == APP_CONFIRM_REMOTE) { render_remote_review(); return; }
+    if (view->confirmation >= APP_CONFIRM_RECORDING_START && view->confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD) {
+        render_media_confirmation();
+        return;
     }
     label_text(s_confirm_title, title);
     label_text(s_confirm_detail, detail);
     text(s_confirm_accept, accept);
-    enabled(s_confirm_accept, view->confirmation != APP_CONFIRM_NONE);
+    enabled(s_confirm_accept, view->confirmation != APP_CONFIRM_NONE &&
+        (view->confirmation != APP_CONFIRM_RECORDING_STORAGE_PREPARE || recording_storage_can_prepare(view)));
+}
+
+static void arm_capture_indicator(lv_obj_t *region, const app_ui_capture_indicator_t *previous)
+{
+    lv_obj_update_layout(region);
+    if (!s_view.capture_indicator_generation || !lv_obj_is_visible(region)) return;
+    lv_area_t area;
+    lv_obj_get_coords(region, &area);
+    if (area.x1 < 0 || area.y1 < 0 || area.x2 >= 480 || area.y2 >= 480 ||
+        area.x2 < area.x1 || area.y2 < area.y1) return;
+    bool same = previous->armed && previous->capture_generation == s_view.capture_indicator_generation &&
+        previous->x1 == area.x1 && previous->y1 == area.y1 && previous->x2 == area.x2 && previous->y2 == area.y2;
+    if (!same && s_capture_indicator_revision == UINT64_MAX) return;
+    if (!same) ++s_capture_indicator_revision;
+    s_capture_indicator = (app_ui_capture_indicator_t){
+        .armed = true, .capture_generation = s_view.capture_indicator_generation,
+        .indicator_revision = s_capture_indicator_revision,
+        .x1 = (int16_t)area.x1, .y1 = (int16_t)area.y1, .x2 = (int16_t)area.x2, .y2 = (int16_t)area.y2
+    };
+    if (!same) lv_obj_invalidate(region);
 }
 
 void app_ui_render(const app_view_t *view)
 {
     if (!view || !s_screen) return;
+    app_ui_capture_indicator_t previous_indicator = s_capture_indicator;
+    s_capture_indicator = (app_ui_capture_indicator_t){0};
+    observe_remote_review_clock(&view->remote_review);
     s_view = *view;
     snprintf(s_target_text, sizeof(s_target_text), "%s", view->target_name && *view->target_name ?
              view->target_name : view->connected ?
@@ -1175,6 +2072,38 @@ void app_ui_render(const app_view_t *view)
     s_view.device_id[23] = '\0';
     s_view.transport_message[64] = '\0';
     s_view.bluetooth_target_name[47] = '\0';
+    s_view.wifi_scan.message[64] = '\0';
+    if (s_view.wifi_scan.row_count > APP_UI_WIFI_ROWS_PER_PAGE)
+        s_view.wifi_scan.row_count = APP_UI_WIFI_ROWS_PER_PAGE;
+    for (unsigned i = 0; i < APP_UI_WIFI_ROWS_PER_PAGE; ++i)
+        s_view.wifi_scan.rows[i].label[APP_UI_WIFI_LABEL_CAPACITY - 1] = '\0';
+    s_view.wifi_selection.network.label[APP_UI_WIFI_LABEL_CAPACITY - 1] = '\0';
+    s_view.wifi_selection.message[64] = '\0';
+    s_view.wifi_stored_label[APP_UI_WIFI_LABEL_CAPACITY - 1] = '\0';
+    s_view.wifi_lan_service_message[64] = '\0';
+    s_view.wifi_lan_service_url[95] = '\0';
+    if (bounded_length(s_view.bluetooth_name.configured, APP_UI_BLUETOOTH_NAME_CAPACITY) == APP_UI_BLUETOOTH_NAME_CAPACITY) {
+        memset(s_view.bluetooth_name.configured, 0, sizeof(s_view.bluetooth_name.configured));
+        s_view.bluetooth_name.configured_valid = false;
+    }
+    if (bounded_length(s_view.bluetooth_name.effective, APP_UI_BLUETOOTH_NAME_CAPACITY) == APP_UI_BLUETOOTH_NAME_CAPACITY) {
+        memset(s_view.bluetooth_name.effective, 0, sizeof(s_view.bluetooth_name.effective));
+        s_view.bluetooth_name.effective_valid = false;
+    }
+    if (bounded_length(s_view.bluetooth_name.requested, APP_UI_BLUETOOTH_NAME_CAPACITY) == APP_UI_BLUETOOTH_NAME_CAPACITY)
+        memset(s_view.bluetooth_name.requested, 0, sizeof(s_view.bluetooth_name.requested));
+    s_view.bluetooth_name.message[64] = '\0';
+    if (bounded_length(s_view.local_editor.bluetooth_initial, APP_UI_BLUETOOTH_NAME_CAPACITY) == APP_UI_BLUETOOTH_NAME_CAPACITY) {
+        secure_clear(s_view.local_editor.bluetooth_initial, sizeof(s_view.local_editor.bluetooth_initial));
+        s_view.local_editor.submit_available = false;
+        snprintf(s_view.local_editor.message, sizeof(s_view.local_editor.message), "Initial name unavailable. Close and retry.");
+    }
+    s_view.local_editor.message[64] = '\0';
+    s_view.recording_storage.profile[32] = '\0';
+    s_view.recording_storage.reason[96] = '\0';
+    sanitize_media();
+    sanitize_connections();
+    sanitize_remote_review();
     for (unsigned i = 0; i < APP_UI_BOND_CAPACITY; ++i) {
         s_view.bluetooth_hosts[i].identity[23] = '\0';
         s_view.bluetooth_hosts[i].name[32] = '\0';
@@ -1186,6 +2115,7 @@ void app_ui_render(const app_view_t *view)
         memset(s_view.wifi_setup_url, 0, sizeof(s_view.wifi_setup_url));
     }
     view = &s_view;
+    reconcile_editor(view);
     apply_theme(view->dark_theme);
     bool usb = view->input_transport == APP_INPUT_USB;
     bool provider_available = usb ? view->usb_available : view->bluetooth_available;
@@ -1194,10 +2124,11 @@ void app_ui_render(const app_view_t *view)
         !view->connected ? (usb ? "Connect USB" : "Pair device") :
         view->release_pending ? "Releasing input" : view->congested ? "Host busy" :
         view->ready ? "Input ready" : "Connecting input";
-    bool capture = view->listening || (view->audio_active &&
-        view->audio_kind == APP_AUDIO_VOICE && !view->microphone_muted);
+    bool capture = capture_warning_required(view);
     bool alert = view->remote_owned || capture || view->release_pending || view->transport_error ||
         !provider_available || !view->ready || view->transport_switch_pending;
+    bool hid_ready = view->connected && view->ready && !view->release_pending &&
+        !view->transport_error && provider_available && !view->transport_switch_pending;
     /* A lock/wake shield does not depend on navigation teardown. Clear any
      * setup labels immediately even when a held gesture defers destruction. */
     if (view->locked || view->screen_off || view->overlay != APP_OVERLAY_WIFI_SETUP) {
@@ -1210,25 +2141,70 @@ void app_ui_render(const app_view_t *view)
     bool reconciled = reconcile_overlay(view);
     visible(s_overlay, !view->locked && !view->screen_off);
     if (view->locked && !view->screen_off) {
-        label_text(s_lock_detail, view->release_pending ?
-            "Input stopped. Releasing held keys...\nRecognition stopped; microphone muted.\nUnsent characters remain in preview." :
-            "Input stopped. Recognition stopped and\nmicrophone muted. Unsent characters\nremain in preview.");
+        label_format(s_lock_detail, "%s\n%s\nUnsent characters remain in preview.",
+            view->release_pending ? "Input stopped. Releasing held keys..." : "Input stopped.",
+            capture ? capture_warning(view, false) : view->capture_state == APP_CAPTURE_OFF_CONFIRMED ?
+            "Microphone off (confirmed)." : "Microphone status unavailable.");
+        foreground(s_lock_detail, capture ? ERROR : MUTED, 0);
+        if (view->capture_indicator_required) arm_capture_indicator(s_lock_shield, &previous_indicator);
+    } else if (!view->screen_off) {
+        /* Update the actual visible surface even while a held press defers
+         * navigation teardown. An old panel must never hide a new warning. */
+        lv_obj_t *indicator = s_overlay ? s_overlay_critical : s_critical;
+        critical_state(indicator, alert, capture, provider_available);
+        if (view->capture_indicator_required && indicator) arm_capture_indicator(indicator, &previous_indicator);
     }
     if (view->locked || view->screen_off || !reconciled) return;
     if (view->overlay != APP_OVERLAY_NONE) {
         critical_state(s_overlay_critical, alert, capture, provider_available);
         render_device(view, link);
+        render_extension(view, hid_ready);
+        if (view->overlay == APP_OVERLAY_RECORDING_STORAGE) {
+            const app_recording_storage_view_t *store = &view->recording_storage;
+            const char *status = store->state == APP_RECORD_STORE_UNPREPARED ? "Storage not prepared" :
+                store->state == APP_RECORD_STORE_PREPARING ? "Preparing storage..." :
+                store->state == APP_RECORD_STORE_READY ? "Recording storage ready" :
+                store->state == APP_RECORD_STORE_FULL ? "Recording storage full" :
+                store->state == APP_RECORD_STORE_ERROR ? "Recording storage error" :
+                store->state == APP_RECORD_STORE_UNCERTAIN ? "Storage state uncertain" : "Storage status unknown";
+            label_text(s_record_store_state, status);
+            foreground(s_record_store_state, store->state == APP_RECORD_STORE_UNCERTAIN || store->state == APP_RECORD_STORE_ERROR ?
+                ERROR : store->state == APP_RECORD_STORE_UNPREPARED || store->state == APP_RECORD_STORE_FULL ? WARNING : INK, 0);
+            label_format(s_record_store_profile, "%s / %s",
+                store->backend == APP_RECORD_BACKEND_INTERNAL_RESERVED ? "Internal" :
+                store->backend == APP_RECORD_BACKEND_EXTERNAL_NAND ? "External NAND" : "Store unknown",
+                *store->profile ? store->profile : "profile unavailable");
+            bool capacity_known = store->capacity_known && store->free_bytes <= store->quota_bytes;
+            if (capacity_known) {
+                char free_text[40], quota_text[40];
+                storage_bytes(free_text, sizeof(free_text), store->free_bytes);
+                storage_bytes(quota_text, sizeof(quota_text), store->quota_bytes);
+                label_format(s_record_store_capacity, "Free: %s\nQuota: %s", free_text, quota_text);
+            } else label_text(s_record_store_capacity, "Capacity unavailable");
+            if (capacity_known && store->remaining_time_known &&
+                (store->state == APP_RECORD_STORE_READY || store->state == APP_RECORD_STORE_FULL))
+                label_format(s_record_store_time, "Remaining: %um %02us at this profile",
+                    (unsigned)(store->remaining_seconds / 60), (unsigned)(store->remaining_seconds % 60));
+            else label_text(s_record_store_time, "Remaining time unavailable");
+            label_text(s_record_store_reason, *store->reason ? store->reason :
+                store->state == APP_RECORD_STORE_UNPREPARED ? "Prepare the reserved recording area before recording." :
+                store->state == APP_RECORD_STORE_READY ? "Available time reflects this profile and the current quota." :
+                "Storage status has not been confirmed.");
+            text(s_record_store_prepare, recording_storage_can_prepare(view) ? "Prepare storage" :
+                store->state == APP_RECORD_STORE_PREPARING ? "Preparing..." :
+                store->state == APP_RECORD_STORE_READY ? "Storage ready" : "Prepare unavailable");
+            enabled(s_record_store_prepare, recording_storage_can_prepare(view));
+        }
+        render_media_panel();
+        render_connection_panel();
         label_text(s_overlay_target, s_target_text);
         if (view->overlay == APP_OVERLAY_MODES)
             label_format(s_overlay_state, "%s / %s", usb ? "USB" : "Bluetooth", link);
-        else label_text(s_overlay_state, *s_message_text ? s_message_text :
-            capture ? "Microphone active / hold AI to stop and lock" :
+        else label_text(s_overlay_state, capture ? capture_warning(view, false) : *s_message_text ? s_message_text :
             view->remote_owned ? "Remote control / touch to take local control" : "Local control");
         label_text(s_target_detail, s_target_text);
         label_text(s_target_heading, usb ? "USB input" : "Bluetooth input");
-        label_text(s_target_note, usb ?
-            "USB is selected for input in every mode.\nConnect a host using the USB data port." :
-            "Bluetooth is selected for input in every mode.\nPair from the host's Bluetooth settings.");
+        label_format(s_target_note, "%s input / Motion: %s", usb ? "USB" : "Bluetooth", motion_reason(view));
         /* Detail retains simultaneous conditions which cannot all fit in the
          * compact alert. A disconnected link does not erase a release/error. */
         label_format(s_target_link, "%s%s%s%s", link,
@@ -1251,6 +2227,55 @@ void app_ui_render(const app_view_t *view)
         }
         text(s_calibrate, view->calibrating ? "Calibrating... keep still" : "Calibrate motion");
         enabled(s_calibrate, (view->calibration_available || view->motion_available) && !view->calibrating);
+        text(s_tap_click, !view->tap_to_click_available ? "Tap to click / unavailable" :
+            view->tap_to_click_enabled ? "Tap to click / on" : "Tap to click / off");
+        selected(s_tap_click, view->tap_to_click_available && view->tap_to_click_enabled);
+        enabled(s_tap_click, view->tap_to_click_available);
+        label_text(s_motion_detail, motion_reason(view));
+        bool settings_known = motion_settings_valid(&view->motion_settings);
+        bool settings_editable = settings_known && view->motion_settings.editable;
+        const char *reference = view->motion_settings.reference == APP_REFERENCE_READY ? "Automatic orientation / ready" :
+            view->motion_settings.reference == APP_REFERENCE_ACQUIRING ? "Automatic orientation / finding a reference" :
+            view->motion_settings.reference == APP_REFERENCE_UNSTABLE ? "Automatic orientation / hold still briefly" :
+            view->motion_settings.reference == APP_REFERENCE_UNAVAILABLE ? "Automatic orientation unavailable" :
+            "Automatic orientation status unknown";
+        label_text(s_motion_reference, reference);
+        for (unsigned field = 0; field < 5; ++field) {
+            int value = motion_setting((app_motion_field_t)field);
+            int minimum = field <= APP_MOTION_FIELD_GAIN_Y ? 25 : 0;
+            int maximum = field <= APP_MOTION_FIELD_DEADZONE ? 10000 : 1000;
+            if (!settings_known) label_text(s_motion_values[field], "Unavailable");
+            else if (field <= APP_MOTION_FIELD_GAIN_Y)
+                label_format(s_motion_values[field], "%d.%02d", value / 100, value % 100);
+            else if (field == APP_MOTION_FIELD_DEADZONE)
+                label_format(s_motion_values[field], "%d.%03d deg/s", value / 1000, value % 1000);
+            else label_format(s_motion_values[field], "%d ms", value);
+            if (settings_known) slider_value(s_motion_sliders[field], value);
+            enabled(s_motion_sliders[field], settings_editable);
+            enabled(s_motion_nudges[field][0], settings_editable && value > minimum);
+            enabled(s_motion_nudges[field][1], settings_editable && value < maximum);
+        }
+        const int preset_values[] = {200, 400, 800};
+        for (unsigned axis = 0; axis < 2; ++axis) {
+            for (unsigned preset = 0; preset < 3; ++preset) {
+                selected(s_motion_presets[axis][preset], settings_known && motion_setting((app_motion_field_t)axis) == preset_values[preset]);
+                enabled(s_motion_presets[axis][preset], settings_editable);
+            }
+            bool inverted = axis ? view->motion_settings.invert_y : view->motion_settings.invert_x;
+            text(s_motion_invert[axis], !settings_known ? (axis ? "Vertical unavailable" : "Horizontal unavailable") :
+                axis ? (inverted ? "Vertical / reversed" : "Vertical / normal") :
+                (inverted ? "Horizontal / reversed" : "Horizontal / normal"));
+            selected(s_motion_invert[axis], settings_known && inverted);
+            enabled(s_motion_invert[axis], settings_editable);
+        }
+        label_text(s_gesture_drag, view->release_pending ? "Releasing input..." : view->dragging ? "Dragging / hold active" : "Drag released");
+        label_format(s_gesture_help, "%s\n\n%s", !view->tap_to_click_available ?
+            "Tap gestures unavailable. Use the mouse buttons." : view->tap_to_click_enabled ?
+            "Tap to click. Double tap for a double click.\nDouble-tap and hold, then move to drag.\nLift your finger to release a touch drag." :
+            "Movement only. Tap gestures are off.\nExplicit mouse buttons still work.",
+            view->two_finger_scroll_available ? "Use two fingers to scroll." :
+            view->swipe_scroll_available ? "Swipe to scroll." : "Use the Scroll controls for scrolling.");
+        enabled(s_gesture_release, view->dragging || view->release_pending);
         return;
     }
     /* The opaque panel/safety surfaces cover the entire core, including its
@@ -1260,7 +2285,7 @@ void app_ui_render(const app_view_t *view)
     label_text(s_mode_title, (unsigned)view->mode < 3 ? mode_names[view->mode] : "Input");
     label_format(s_context, "%s / %s", usb ? "USB" : "BT", s_target_text);
     critical_state(s_critical, alert, capture, provider_available);
-    visible(s_keyboard_choice, view->mode == INPUT_KEYBOARD);
+    visible(s_keyboard_choice, view->mode == INPUT_KEYBOARD || view->mode == INPUT_MOUSE);
     visible(s_audio_choice, view->mode == INPUT_AUDIO);
     if (view->mode == INPUT_KEYBOARD)
         text(s_keyboard_choice, (unsigned)view->keyboard_submode < 4 ? entry_names[view->keyboard_submode] : "Entry");
@@ -1269,12 +2294,14 @@ void app_ui_render(const app_view_t *view)
 
     /* Only the foreground mode is refreshed. Hidden uptime/settings changes
      * cannot invalidate primary input pixels, even with FULL rendering. */
-    bool hid_ready = view->connected && view->ready && !view->release_pending &&
-        !view->transport_error && provider_available && !view->transport_switch_pending;
     if (view->mode == INPUT_MOUSE) {
+        text(s_keyboard_choice, "Motion help");
+        label_format(s_pad_hint, "%s\n\n%s", motion_reason(view), !view->tap_to_click_available ? "Tap gestures unavailable" : view->tap_to_click_enabled ?
+            "Tap / double tap / double-tap hold to drag" : "Tap to click off / movement only");
         text(s_motion, view->calibrating ? "Calibrating..." : view->motion_enabled ? "Motion / on" : "Motion / off");
         selected(s_motion, view->motion_enabled);
-        enabled(s_motion, view->motion_available && hid_ready && !view->calibrating);
+        enabled(s_motion, view->motion_enabled || (view->motion_available && hid_ready &&
+            !view->calibrating && view->motion_reason == APP_MOTION_READY));
         text(s_gain, view->gain_divisor == 4 ? "Fine gain / 1/4x" : view->gain_divisor == 8 ? "Fine gain / 1/8x" : "Fine gain / 1x");
         text(s_drag, view->dragging ? "Release" : "Drag");
         selected(s_drag, view->dragging);
@@ -1307,14 +2334,7 @@ void app_ui_render(const app_view_t *view)
                 border(s_grid[i], focused ? ACCENT : SOFT, 0);
             }
         } else if (view->keyboard_submode == APP_KEYBOARD_SPOKEN) {
-            char candidate[2] = {view->voice_candidate, '\0'};
-            label_text(s_voice_candidate, view->voice_candidate ? candidate : view->listening ? "..." : "A-Z");
-            label_text(s_voice_hint, !view->recognition_available ?
-                "Spoken letters unavailable\nNo microphone is active." : view->voice_candidate ?
-                "Confirm the candidate\nto add it to preview." : view->listening ?
-                "Listening for a letter...\nNothing is sent automatically." : "Say Alpha-Zulu.\nConfirm before sending.");
-            text(s_voice_confirm, view->voice_candidate ? "Confirm" : view->listening ? "Stop listening" : "Start listening");
-            enabled(s_voice_confirm, view->recognition_available && !view->sending);
+            render_speech();
         } else if (view->keyboard_submode == APP_KEYBOARD_SHORTCUTS) {
             const char *ctrl[] = {"Ctrl+C", "Ctrl+V", "Ctrl+Z"};
             const char *command[] = {"Cmd+C", "Cmd+V", "Cmd+Z"};
@@ -1329,20 +2349,37 @@ void app_ui_render(const app_view_t *view)
         selected(s_send, true);
         enabled(s_send, view->sending || (hid_ready && *view->preview));
     } else if (view->mode == INPUT_AUDIO) {
-        bool speaker = view->audio_kind == APP_AUDIO_SPEAKER;
-        label_text(s_audio_capability, view->audio_available ? "Available" : "Unavailable");
-        label_text(s_audio_title, speaker ? (view->audio_active ? "Speaker active" : "Speaker is off") :
-            !view->audio_available || view->microphone_muted ? "Microphone muted" : "Microphone active");
-        label_text(s_audio_profile, speaker ? "Music playback" : "Voice and meetings");
-        text(s_audio_power, view->audio_active ? "Stop audio" : "Start audio");
-        selected(s_audio_power, true);
-        enabled(s_audio_power, view->audio_available);
-        enabled(s_audio_mute, !speaker && view->audio_available && view->audio_active);
-        enabled(s_volume, view->audio_available);
-        slider_value(s_volume, (int)(view->volume <= 100 ? view->volume : 100));
-        if (view->audio_available) label_format(s_volume_text, "%u%%", view->volume);
-        else label_text(s_volume_text, "--");
-        label_text(s_audio_note, !view->audio_available ? "Audio unavailable on this device." :
-            speaker ? "Speaker mode never uploads microphone audio." : "Independent audio mode / microphone defaults muted.");
+        render_media_core();
     }
+}
+
+uint64_t app_ui_capture_indicator_armed_generation(void)
+{
+    return app_ui_capture_indicator().capture_generation;
+}
+
+app_ui_capture_indicator_t app_ui_capture_indicator(void)
+{
+    return s_screen && lv_obj_is_visible(s_screen) ? s_capture_indicator : (app_ui_capture_indicator_t){0};
+}
+
+app_ui_touch_context_t app_ui_touch_context(void)
+{
+    app_ui_touch_context_t context = {0};
+    if (!s_screen) return context;
+    context.epoch = s_view.epoch;
+    context.ui_revision = s_view.ui_revision;
+    if (!s_pad || s_view.mode != INPUT_MOUSE || s_view.overlay != APP_OVERLAY_NONE ||
+        s_overlay || s_view.locked || s_view.screen_off || s_view.remote_owned ||
+        !lv_obj_is_visible(s_screen) || !lv_obj_is_visible(s_pad)) return context;
+    lv_area_t area;
+    lv_obj_get_coords(s_pad, &area);
+    if (area.x1 < 0 || area.y1 < 0 || area.x2 >= 480 || area.y2 >= 480 ||
+        area.x2 < area.x1 || area.y2 < area.y1) return context;
+    context.eligible_pad = true;
+    context.x1 = (int16_t)area.x1;
+    context.y1 = (int16_t)area.y1;
+    context.x2 = (int16_t)area.x2;
+    context.y2 = (int16_t)area.y2;
+    return context;
 }

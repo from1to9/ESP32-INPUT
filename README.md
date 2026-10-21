@@ -14,22 +14,38 @@ Keyboard mode reserves **spoken letter commands**, such as `Alpha -> A`, feeding
 
 ## Current implementation
 
-This is a development baseline, not ready-to-use device firmware.
+This is an integrated development firmware. Source implementation, local tests,
+independent review and target compilation are separate from physical qualification.
+The combined delivery does not flash or test a device; see the
+[delivery checklist](docs/delivery-checklist.md) and [validation record](docs/validation.md).
 
-- The official BSP is pinned as a Git submodule with upstream notices intact.
-- Requirements, interaction rules, architecture and staged acceptance criteria are documented.
-- `design/` contains an interactive browser prototype. All connection, voice and audio states are simulated.
-- `components/input_core/` contains portable state gates, motion integration and US ANSI key encoding.
-- `components/hid_engine/` implements composite reports, bounded queues, cancellation and release recovery.
-- `components/interaction/` implements the approved two-stage nine-cell character grid, 64-character preview, button gestures, calibration and motion selection.
-- `components/device_settings/` implements versioned preferences and whole-gesture display wake rules without hardware dependencies.
-- `components/haptics/` implements bounded, nonblocking feedback policy.
-- `firmware/` connects the input transports to the three-mode LVGL product layout through a Mosaico board adapter. It includes a relative touchpad, explicit drag, preview-first keyboard, real IMU sampling, contextual AI gestures, USB diagnostics and haptic settings. System connection choice is independent of functional mode.
-- Settings provides Light/Dark appearance, haptic feedback and Ctrl/Command selection. Dark starts with a black background, near-white text and a light-blue accent; preferences are saved through a validated, coalesced settings store.
-- Device basics include measured battery/Wi-Fi status, multiple saved Bluetooth peers and current-host display, local Wi-Fi setup, brightness and safe display timeout. Their physical behavior and coexistence still require device qualification.
-- Spoken letters, audio and Wi-Fi remote control remain unavailable; their UI and network control contracts preserve the intended product structure without simulated operation. Physical motion tuning and host compatibility require device evidence.
-- Host C11 tests have passed with strict warnings and address/undefined-behavior sanitizers. Browser interaction checks are recorded in [validation](docs/validation.md).
-- The pinned ESP-IDF toolchain has compiled the minimal S31 firmware. Device and host-family qualification are tracked separately in [validation](docs/validation.md).
+- One coordinator serves BLE/USB composite HID, wrist motion, a relative touchpad,
+  default tap/double-tap/drag, capability-gated two-finger gestures and a preview-first
+  nine-cell keyboard. Common keys and Ctrl/Command shortcuts share the same release barriers.
+- Motion uses gravity-referenced grip adaptation with independent axis settings.
+  Spoken letters use the pinned English recognition model and require confirmation
+  into the draft before Send; this is not general offline dictation.
+- One audio manager owns the codec, HFP voice, A2DP playback, USB UAC, local recording
+  and speech consumers. Readiness, microphone indicators, mute acknowledgements,
+  link identities and cleanup are observable. Concurrent paths require physical qualification.
+- Recording uses an explicitly prepared, bounded encrypted NOR partition. Unknown
+  storage is preserved. The external NAND is not automatically formatted or used.
+- Wi-Fi joins an existing LAN through native scan/password controls and remembers
+  up to eight ordered profiles. Authenticated HTTPS/WebSocket APIs and the
+  [MCP companion](bridge/README.md) expose the typed operation registry. USB enrollment
+  requires an explicit local commissioning window and review; LAN access alone grants no control.
+- Saved Bluetooth peers, explicit pairing windows, device naming, target preferences,
+  local override and bounded remote-input leases are integrated. Input ownership and
+  independent media authorization have separate lifetimes.
+- Compact native workspaces, Light/Dark themes, boot logo, battery/connectivity status,
+  50% default brightness, configurable display blanking and haptics use actual capabilities.
+  Temporary settings remain distinct from saved preferences.
+- Signed firmware staging uses an inactive application slot and explicit authorization.
+  The new partition layout requires a separately planned initial migration; downloading
+  an OTA image does not migrate a partition table or replace recovery backups.
+- The official BSP, SDK, dependencies and speech model are pinned. Portable engines,
+  named hardware adapters and capability reporting keep other board ports isolated.
+  The browser prototype remains a design reference with simulated connections and audio.
 
 Repository: [from1to9/ESP32-INPUT](https://github.com/from1to9/ESP32-INPUT) (private).
 

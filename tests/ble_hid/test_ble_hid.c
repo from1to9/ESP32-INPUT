@@ -45,6 +45,20 @@ static unsigned encryption_calls;
 static esp_err_t rssi_request_result = ESP_OK, remove_request_result = ESP_OK;
 static esp_bd_addr_t last_rssi_address, last_remove_address;
 static bool last_security_accept;
+static char fake_sdk_name[33] = BLE_HID_DEFAULT_NAME;
+static char configured_adv_name[33], configured_scan_name[33];
+static unsigned name_set_calls, name_get_calls, name_reads_pending, close_calls, adv_stop_calls;
+static esp_err_t name_set_result = ESP_OK, name_get_result = ESP_OK;
+static esp_err_t adv_data_result = ESP_OK, scan_data_result = ESP_OK;
+static esp_err_t adv_start_result = ESP_OK, adv_stop_result = ESP_OK;
+static bool drop_name_set;
+static int shared_bond_count = -2;
+static uint8_t target_durable_blob[2048], target_staged_blob[2048];
+static size_t target_durable_length, target_staged_length;
+static unsigned target_commit_calls;
+static esp_err_t target_open_error, target_write_error, target_commit_error, target_read_error;
+static bool target_commit_persists_on_error, target_corrupt_readback;
+static void (*target_commit_hook)(void);
 
 psa_status_t psa_crypto_init(void) {
     crypto_initialized = crypto_init_result == PSA_SUCCESS;
@@ -66,6 +80,12 @@ psa_status_t psa_hash_compute(unsigned int algorithm, const uint8_t *data, size_
     return PSA_SUCCESS;
 }
 esp_err_t nvs_open(const char *name, nvs_open_mode_t mode, nvs_handle_t *handle) {
+    if (strcmp(name, "hid_targets") == 0) {
+        assert(!callback_active);
+        if (target_open_error) return target_open_error;
+        if (mode == NVS_READONLY && !target_durable_length) return ESP_ERR_NVS_NOT_FOUND;
+        *handle = 2; return ESP_OK;
+    }
     assert(!callback_active && strcmp(name, "hid_cccd") == 0);
     if (storage_result != ESP_OK) return storage_result;
     if (mode == NVS_READONLY && durable_length == 0) return ESP_ERR_NVS_NOT_FOUND;
@@ -73,6 +93,14 @@ esp_err_t nvs_open(const char *name, nvs_open_mode_t mode, nvs_handle_t *handle)
     return ESP_OK;
 }
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *value, size_t *length) {
+    if (handle == 2) {
+        assert(!callback_active && strcmp(key, "preferences") == 0);
+        if (target_read_error) return target_read_error;
+        if (*length < target_durable_length) return ESP_ERR_INVALID_SIZE;
+        memcpy(value, target_durable_blob, target_durable_length); *length = target_durable_length;
+        if (target_corrupt_readback && *length) ((uint8_t *)value)[*length - 1] ^= 1U;
+        return ESP_OK;
+    }
     assert(!callback_active && handle == 1 && strcmp(key, "subscriptions") == 0);
     assert(*length >= durable_length);
     memcpy(value, durable_blob, durable_length);
@@ -80,6 +108,11 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *value, size_t
     return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, size_t length) {
+    if (handle == 2) {
+        assert(!callback_active && strcmp(key, "preferences") == 0 && length <= sizeof(target_staged_blob));
+        if (target_write_error) return target_write_error;
+        memcpy(target_staged_blob, value, length); target_staged_length = length; return ESP_OK;
+    }
     assert(!callback_active && handle == 1 && strcmp(key, "subscriptions") == 0);
     assert(length <= sizeof(staged_blob));
     memcpy(staged_blob, value, length);
@@ -87,6 +120,15 @@ esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, 
     return storage_result;
 }
 esp_err_t nvs_commit(nvs_handle_t handle) {
+    if (handle == 2) {
+        assert(!callback_active);
+        if (target_commit_hook) target_commit_hook();
+        if (!target_commit_error || target_commit_persists_on_error) {
+            memcpy(target_durable_blob, target_staged_blob, target_staged_length);
+            target_durable_length = target_staged_length;
+        }
+        ++target_commit_calls; return target_commit_error;
+    }
     assert(!callback_active && handle == 1);
     if (commit_hook) commit_hook();
     if (commit_result != ESP_OK) return commit_result;
@@ -95,7 +137,7 @@ esp_err_t nvs_commit(nvs_handle_t handle) {
     ++commit_calls;
     return ESP_OK;
 }
-void nvs_close(nvs_handle_t handle) { assert(!callback_active && handle == 1); }
+void nvs_close(nvs_handle_t handle) { assert(!callback_active && (handle == 1 || handle == 2)); }
 int esp_ble_get_bond_device_num(void) {
     assert(!callback_active);
     int count = fake_bond_count;
@@ -161,7 +203,15 @@ const char *esp_err_to_name(esp_err_t error) { (void)error; return "test error";
 esp_err_t nvs_flash_init(void) { return nvs_result; }
 esp_bt_controller_status_t esp_bt_controller_get_status(void) { return ESP_BT_CONTROLLER_STATUS_IDLE; }
 esp_err_t esp_bt_controller_init(esp_bt_controller_config_t *config) { (void)config; return controller_init_result; }
-esp_err_t esp_bt_controller_enable(esp_bt_mode_t mode) { assert(mode == ESP_BT_MODE_BLE); return ESP_OK; }
+esp_err_t esp_bt_controller_enable(esp_bt_mode_t mode) {
+#if CONFIG_BT_CLASSIC_ENABLED
+    assert(mode == ESP_BT_MODE_BTDM);
+#else
+    assert(mode == ESP_BT_MODE_BLE);
+#endif
+    return ESP_OK;
+}
+int btc_storage_get_num_all_bond_devices(void) { assert(!callback_active); return shared_bond_count == -2 ? fake_bond_count : shared_bond_count; }
 esp_bluedroid_status_t esp_bluedroid_get_status(void) { return ESP_BLUEDROID_STATUS_UNINITIALIZED; }
 esp_err_t esp_bluedroid_init(void) { return ESP_OK; }
 esp_err_t esp_bluedroid_enable(void) { return ESP_OK; }
@@ -176,13 +226,29 @@ esp_err_t esp_ble_gap_set_security_param(esp_ble_sm_param_t type, void *value, u
     }
     return ESP_OK;
 }
-esp_err_t esp_ble_gap_set_device_name(const char *name) { assert(strcmp(name, "ESP32-INPUT") == 0); return ESP_OK; }
+esp_err_t esp_ble_gap_set_device_name(const char *name) {
+    assert(!callback_active && name && strlen(name) < sizeof(fake_sdk_name));
+    ++name_set_calls;
+    if (name_set_result == ESP_OK && !drop_name_set) strcpy(fake_sdk_name, name);
+    return name_set_result;
+}
+esp_err_t esp_ble_gap_get_device_name(void) {
+    assert(!callback_active);
+    ++name_get_calls;
+    if (name_get_result == ESP_OK) {
+        ++name_reads_pending;
+        assert(name_reads_pending == 1);
+    }
+    return name_get_result;
+}
 esp_err_t esp_ble_gap_config_adv_data(esp_ble_adv_data_t *data) {
     ++adv_config_calls;
     /* Pinned esp_gap_ble_api.c:39-53: structured UUID input is 16*n bytes,
      * even when the assigned service is compressed to 16 bits on air. */
     if (!data || (data->service_uuid_len & 0x0fU)) return ESP_ERR_INVALID_ARG;
-    return ESP_OK;
+    if (data->set_scan_rsp) strcpy(configured_scan_name, fake_sdk_name);
+    else strcpy(configured_adv_name, fake_sdk_name);
+    return data->set_scan_rsp ? scan_data_result : adv_data_result;
 }
 esp_err_t esp_ble_gatts_app_register(uint16_t app_id) {
     assert(app_id == HID_APP_ID);
@@ -208,10 +274,10 @@ esp_err_t esp_ble_remove_bond_device(esp_bd_addr_t address) {
     ++remove_calls;
     return remove_request_result;
 }
-esp_err_t esp_ble_gatts_close(esp_gatt_if_t interface, uint16_t conn_id) { (void)interface; (void)conn_id; ++sdk_calls; return ESP_OK; }
+esp_err_t esp_ble_gatts_close(esp_gatt_if_t interface, uint16_t conn_id) { (void)interface; (void)conn_id; ++close_calls; ++sdk_calls; return ESP_OK; }
 esp_err_t esp_ble_gatts_send_response(esp_gatt_if_t interface, uint16_t conn_id, uint32_t transaction, esp_gatt_status_t status, esp_gatt_rsp_t *response) { (void)interface; (void)conn_id; (void)transaction; assert(response); last_response = *response; last_response_status = status; last_response_commit_count = commit_calls; ++response_calls; ++sdk_calls; return ESP_OK; }
-esp_err_t esp_ble_gap_start_advertising(esp_ble_adv_params_t *parameters) { assert(parameters); ++advertising_calls; return ESP_OK; }
-esp_err_t esp_ble_gap_stop_advertising(void) { ++sdk_calls; return ESP_OK; }
+esp_err_t esp_ble_gap_start_advertising(esp_ble_adv_params_t *parameters) { assert(parameters); ++advertising_calls; return adv_start_result; }
+esp_err_t esp_ble_gap_stop_advertising(void) { ++adv_stop_calls; ++sdk_calls; return adv_stop_result; }
 esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t interface, uint16_t conn_id, uint16_t handle, uint16_t length, uint8_t *value, bool confirmation) {
     assert(interface == 7 && conn_id == 3 && handle && length <= sizeof(copied_payload) && !confirmation);
     memcpy(copied_payload, value, length);
@@ -233,6 +299,18 @@ static control_command_t pop(void) { control_command_t command; assert(xQueueRec
 static void reset(void) {
     memset(&state, 0, sizeof(state));
     first_failure = (ble_hid_failure_t){.stage = "none", .error = ESP_OK};
+    memset(&device_name, 0, sizeof(device_name));
+    strcpy(fake_sdk_name, BLE_HID_DEFAULT_NAME);
+    strcpy(configured_adv_name, BLE_HID_DEFAULT_NAME);
+    strcpy(configured_scan_name, BLE_HID_DEFAULT_NAME);
+    name_set_calls = name_get_calls = name_reads_pending = close_calls = adv_stop_calls = 0;
+    name_set_result = name_get_result = adv_data_result = scan_data_result = ESP_OK;
+    adv_start_result = adv_stop_result = ESP_OK;
+    drop_name_set = false;
+    shared_bond_count = -2;
+    target_durable_length = target_staged_length = 0; target_commit_calls = 0;
+    target_open_error = target_write_error = target_commit_error = target_read_error = ESP_OK;
+    target_commit_persists_on_error = target_corrupt_readback = false; target_commit_hook = NULL;
     fake_uptime_us = -1;
     uptime_reads = 0;
     controller_init_result = ESP_OK;
@@ -259,6 +337,7 @@ static void reset(void) {
     callback_active = false;
     state.interface = 7;
     state.public.initialized = true;
+    state.target.loaded = true;
     state.service_started = true;
     state.adv_configured = true;
     state.scan_configured = true;
@@ -513,6 +592,7 @@ static void test_advertising_prerequisites(void) {
 static void reset_startup(void) {
     reset();
     state.public.initialized = false;
+    state.target.loaded = false;
     state.service_started = state.adv_configured = state.scan_configured = false;
     state.interface = ESP_GATT_IF_NONE;
     state.bonds_loaded = false;
@@ -530,7 +610,12 @@ static void test_advertising_initialization_contract(void) {
     };
     assert(advertising_data.service_uuid_len == sizeof(expected_hid_uuid));
     assert(memcmp(advertising_data.p_service_uuid, expected_hid_uuid, sizeof(expected_hid_uuid)) == 0);
-    assert(advertising_data.flag == 0x06 && advertising_data.appearance == 0x03c0);
+#if CONFIG_BT_CLASSIC_ENABLED
+    assert(advertising_data.flag == 0x02); /* A BTDM controller supports BR/EDR. */
+#else
+    assert(advertising_data.flag == 0x06);
+#endif
+    assert(advertising_data.appearance == 0x03c0);
     assert(advertising_data.include_name && !advertising_data.set_scan_rsp);
     assert(scan_data.include_name && scan_data.set_scan_rsp);
 
@@ -1837,7 +1922,683 @@ static void test_first_failure_ignores_nonfaults_and_stale_jobs(void) {
     assert(!state.public.failed && !ble_hid_failure().recorded && uptime_reads == 0);
 }
 
+static void name_read_complete(int status, const char *value) {
+    assert(name_reads_pending == 1);
+    name_reads_pending = 0;
+    esp_ble_gap_cb_param_t p = {0};
+    p.get_dev_name_cmpl.status = status;
+    p.get_dev_name_cmpl.name = (char *)value;
+    callback_active = true;
+    gap_callback(ESP_GAP_BLE_GET_DEV_NAME_COMPLETE_EVT, &p);
+    callback_active = false;
+}
+
+static void name_payload_complete(bool scan, int status) {
+    esp_ble_gap_cb_param_t p = {0};
+    if (scan) p.scan_rsp_data_cmpl.status = status;
+    else p.adv_data_cmpl.status = status;
+    callback_active = true;
+    gap_callback(scan ? ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT :
+        ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT, &p);
+    callback_active = false;
+}
+
+static void name_start_complete(int status) {
+    esp_ble_gap_cb_param_t p = {0};
+    p.adv_start_cmpl.status = status;
+    callback_active = true;
+    gap_callback(ESP_GAP_BLE_ADV_START_COMPLETE_EVT, &p);
+    callback_active = false;
+}
+
+static void name_finish_payloads(void) {
+    worker_cycle(); assert(device_name.ack == NAME_ACK_ADV);
+    name_payload_complete(false, ESP_BT_STATUS_SUCCESS);
+    worker_cycle(); assert(device_name.ack == NAME_ACK_SCAN);
+    name_payload_complete(true, ESP_BT_STATUS_SUCCESS);
+    worker_cycle();
+    if (!state.public.connected) {
+        assert(device_name.ack == NAME_ACK_START);
+        name_start_complete(ESP_BT_STATUS_SUCCESS);
+    }
+}
+
+static void name_begin_runtime(const char *name, bool advertising) {
+    unsigned previous_gets = name_get_calls;
+    state.advertising = advertising;
+    assert(ble_hid_name_request(name, strlen(name), NULL) == ESP_OK);
+    worker_cycle();
+    if (advertising) {
+        assert(device_name.ack == NAME_ACK_STOP && name_get_calls == previous_gets);
+        advertising_stopped(ESP_BT_STATUS_SUCCESS);
+        worker_cycle();
+    }
+    assert(device_name.ack == NAME_ACK_GET);
+    name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    worker_cycle();
+    assert(device_name.ack == NAME_ACK_GET && strcmp(fake_sdk_name, name) == 0);
+    name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+}
+
+static void test_name_validation_submission_and_copy(void) {
+    reset_startup();
+    const char *invalid[] = {"", " leading", "trailing ", "line\nname", "\x7f", "\xc0\xaf", "\xed\xa0\x80",
+        "1234567890123456789"};
+    uint64_t id = 99;
+    assert(ble_hid_name_request(NULL, 1, &id) == ESP_ERR_INVALID_ARG);
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        assert(ble_hid_name_request(invalid[i], strlen(invalid[i]), &id) == ESP_ERR_INVALID_ARG);
+    }
+    const char embedded[] = {'a', '\0', 'b'};
+    assert(ble_hid_name_request(embedded, sizeof(embedded), &id) == ESP_ERR_INVALID_ARG);
+    assert(id == 99 && name_set_calls == 0 && name_get_calls == 0 && !ble_hid_failure().recorded);
+    char input[] = {'D', 'e', 's', 'k'}; /* Explicit bounded input, no terminator. */
+    assert(ble_hid_name_request(input, sizeof(input), &id) == ESP_OK && id != 0);
+    memset(input, 'X', sizeof(input));
+    ble_hid_name_snapshot_t snapshot = ble_hid_name_snapshot();
+    assert(snapshot.status == BLE_HID_NAME_PENDING && strcmp(snapshot.requested, "Desk") == 0);
+    assert(!snapshot.active_known && name_set_calls == 0 && name_get_calls == 0);
+    uint64_t unchanged = 88;
+    assert(ble_hid_name_request("Other", 5, &unchanged) == ESP_ERR_INVALID_STATE && unchanged == 88);
+    assert(ble_hid_name_snapshot().request_id == id);
+    callback_active = true;
+    for (unsigned i = 0; i < 1000; ++i) assert(ble_hid_name_snapshot().request_id == id);
+    callback_active = false;
+    assert(name_set_calls == 0 && name_get_calls == 0);
+}
+
+static void test_name_preinit_and_startup_callback_ownership(void) {
+    reset_startup();
+    uint64_t id;
+    assert(ble_hid_name_request("Desk Input", 10, &id) == ESP_OK);
+    assert(ble_hid_init() == ESP_OK && strcmp(fake_sdk_name, "Desk Input") == 0);
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_PENDING && advertising_calls == 0);
+    esp_ble_gatts_cb_param_t gatt = {0};
+    gatt.reg.app_id = HID_APP_ID; gatt.reg.status = ESP_GATT_OK;
+    gatts_callback(ESP_GATTS_REG_EVT, 7, &gatt); worker_cycle();
+    uint16_t handles[ATTR_COUNT];
+    for (unsigned i = 0; i < ATTR_COUNT; ++i) handles[i] = (uint16_t)(20U + i);
+    memset(&gatt, 0, sizeof(gatt));
+    gatt.add_attr_tab.status = ESP_GATT_OK; gatt.add_attr_tab.num_handle = ATTR_COUNT;
+    gatt.add_attr_tab.handles = handles;
+    gatts_callback(ESP_GATTS_CREAT_ATTR_TAB_EVT, 7, &gatt); worker_cycle();
+    memset(&gatt, 0, sizeof(gatt)); gatt.start.status = ESP_GATT_OK;
+    gatt.start.service_handle = handles[ATTR_SERVICE];
+    gatts_callback(ESP_GATTS_START_EVT, 7, &gatt);
+    name_payload_complete(false, ESP_BT_STATUS_SUCCESS); worker_cycle();
+    assert(name_get_calls == 0 && advertising_calls == 0);
+    name_payload_complete(true, ESP_BT_STATUS_SUCCESS); worker_cycle();
+    assert(name_get_calls == 1 && advertising_calls == 0);
+    name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name); worker_cycle();
+    assert(device_name.ack == NAME_ACK_START && ble_hid_name_snapshot().status == BLE_HID_NAME_APPLYING);
+    name_start_complete(ESP_BT_STATUS_SUCCESS);
+    ble_hid_name_snapshot_t snapshot = ble_hid_name_snapshot();
+    assert(snapshot.request_id == id && snapshot.status == BLE_HID_NAME_APPLIED && snapshot.active_known);
+    assert(strcmp(snapshot.active, "Desk Input") == 0 && snapshot.error == ESP_OK);
+    assert(name_set_calls == 1 && adv_config_calls == 2 && commit_calls == 0 && close_calls == 0);
+    assert(strcmp(configured_adv_name, "Desk Input") == 0 && strcmp(configured_scan_name, "Desk Input") == 0);
+}
+
+static void test_name_connected_apply_preserves_hid_and_bonds(void) {
+    start_bonded(); subscribe();
+    uint64_t generation = state.public.generation;
+    unsigned commits = commit_calls;
+    uint8_t fingerprint[SUBSCRIPTION_DIGEST_LENGTH];
+    memcpy(fingerprint, state.bond_fingerprint, sizeof(fingerprint));
+    assert(ble_hid_name_request("Desk Mouse", 10, NULL) == ESP_OK);
+    worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    assert(state.public.ready && state.public.generation == generation && !state.public.failed);
+    uint8_t report[8] = {0};
+    assert(ble_hid_send(1, report, sizeof(report))); complete_notification(ESP_GATT_OK);
+    name_finish_payloads();
+    ble_hid_name_snapshot_t snapshot = ble_hid_name_snapshot();
+    assert(snapshot.status == BLE_HID_NAME_APPLIED && snapshot.active_known);
+    assert(strcmp(snapshot.active, "Desk Mouse") == 0 && strcmp(fake_sdk_name, "Desk Mouse") == 0);
+    assert(strcmp(configured_adv_name, "Desk Mouse") == 0 && strcmp(configured_scan_name, "Desk Mouse") == 0);
+    assert(state.public.ready && state.public.generation == generation && close_calls == 0 && adv_stop_calls == 0);
+    assert(commit_calls == commits && fake_bond_count == 1 && subscriptions.count == 1);
+    assert(memcmp(fingerprint, state.bond_fingerprint, sizeof(fingerprint)) == 0);
+    unsigned sets = name_set_calls, gets = name_get_calls, configs = adv_config_calls;
+    uint64_t old_id = snapshot.request_id, new_id;
+    assert(ble_hid_name_request("Desk Mouse", 10, &new_id) == ESP_OK && new_id != old_id);
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_APPLIED);
+    worker_cycle(); assert(sets == name_set_calls && gets == name_get_calls && configs == adv_config_calls);
+}
+
+static void test_name_utf8_full_advertisement_and_rollback(void) {
+    reset();
+    const char utf8[] = "\xe6\x88\x91\xe6\x88\x91\xe6\x88\x91\xe6\x88\x91\xe6\x88\x91\xe6\x88\x91";
+    assert(sizeof(utf8) - 1U == BLE_HID_NAME_MAX_BYTES);
+    name_begin_runtime(utf8, true);
+    name_finish_payloads();
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_APPLIED && state.advertising);
+    assert(strcmp(configured_adv_name, utf8) == 0 && strcmp(configured_scan_name, utf8) == 0);
+    /* Independent AD budget: flags 3, appearance 4, HID UUID 4, name header 2. */
+    assert(3U + 4U + 4U + 2U + strlen(configured_adv_name) == 31U);
+    assert(close_calls == 0 && remove_calls == 0 && commit_calls == 0);
+
+    name_begin_runtime("Other Input", true);
+    worker_cycle(); name_payload_complete(false, 7);
+    assert(device_name.rollback && !state.public.failed && !state.advertising);
+    assert(ble_hid_name_snapshot().rollback_attempted && !ble_hid_name_snapshot().rollback_confirmed);
+    worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    name_finish_payloads();
+    ble_hid_name_snapshot_t snapshot = ble_hid_name_snapshot();
+    assert(snapshot.status == BLE_HID_NAME_FAILED && snapshot.error == ESP_FAIL);
+    assert(snapshot.sdk_status_known && snapshot.sdk_status == 7);
+    assert(snapshot.rollback_confirmed && snapshot.rollback_error == ESP_OK && snapshot.active_known);
+    assert(strcmp(snapshot.active, utf8) == 0 && strcmp(snapshot.requested, "Other Input") == 0);
+    assert(strcmp(fake_sdk_name, utf8) == 0 && state.advertising && !state.public.failed);
+    assert(strcmp(configured_adv_name, utf8) == 0 && strcmp(configured_scan_name, utf8) == 0);
+    assert(close_calls == 0 && commit_calls == 0 && remove_calls == 0);
+    uint64_t previous_id = snapshot.request_id;
+    assert(ble_hid_name_request(utf8, sizeof(utf8) - 1U, NULL) == ESP_OK);
+    snapshot = ble_hid_name_snapshot();
+    assert(snapshot.status == BLE_HID_NAME_APPLIED && snapshot.error == ESP_OK);
+    assert(snapshot.request_id != previous_id && !snapshot.rollback_attempted);
+}
+
+static void test_name_readback_and_rollback_failures(void) {
+    reset();
+    assert(ble_hid_name_request("Changed", 7, NULL) == ESP_OK);
+    worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    drop_name_set = true;
+    worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    assert(device_name.rollback && ble_hid_name_snapshot().error == ESP_ERR_INVALID_STATE);
+    drop_name_set = false;
+    worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    name_finish_payloads();
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_FAILED && ble_hid_name_snapshot().rollback_confirmed);
+
+    start_bonded(); subscribe();
+    uint64_t generation = state.public.generation;
+    name_begin_runtime("Changed", false);
+    worker_cycle(); name_payload_complete(false, 9);
+    name_set_result = ESP_ERR_NO_MEM;
+    worker_cycle();
+    ble_hid_name_snapshot_t snapshot = ble_hid_name_snapshot();
+    assert(snapshot.status == BLE_HID_NAME_UNCERTAIN && snapshot.error == ESP_FAIL);
+    assert(snapshot.rollback_error == ESP_ERR_NO_MEM && !snapshot.rollback_confirmed && !snapshot.active_known);
+    assert(ble_hid_name_request("Again", 5, NULL) == ESP_ERR_INVALID_STATE);
+    assert(state.public.ready && state.public.generation == generation && close_calls == 0 && !state.public.failed);
+}
+
+static void test_name_timeout_and_late_callbacks(void) {
+    reset(); assert(ble_hid_name_request("Changed", 7, NULL) == ESP_OK);
+    worker_cycle(); assert(name_reads_pending == 1);
+    fake_tick = BLE_HID_NAME_TIMEOUT_MS;
+    notification_watchdog(NULL);
+    uint64_t id = ble_hid_name_snapshot().request_id;
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_UNCERTAIN);
+    assert(ble_hid_name_snapshot().error == ESP_ERR_TIMEOUT);
+    assert(ble_hid_name_request("Again", 5, NULL) == ESP_ERR_INVALID_STATE);
+    name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name); worker_cycle();
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_UNCERTAIN && ble_hid_name_snapshot().request_id == id);
+    assert(name_set_calls == 0 && advertising_calls == 0 && !state.public.failed);
+
+    start_bonded(); subscribe(); name_begin_runtime("Changed", false);
+    worker_cycle(); assert(device_name.ack == NAME_ACK_ADV);
+    fake_tick = BLE_HID_NAME_TIMEOUT_MS; notification_watchdog(NULL);
+    name_payload_complete(false, 7); worker_cycle();
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_UNCERTAIN && !state.public.failed);
+    assert(state.public.ready && close_calls == 0 && advertising_calls == 0);
+    assert(ble_hid_name_request("Again", 5, NULL) == ESP_ERR_INVALID_STATE);
+}
+
+static void test_name_connect_during_stop_and_restart(void) {
+    reset(); state.advertising = true;
+    assert(ble_hid_name_request("Changed", 7, NULL) == ESP_OK); worker_cycle();
+    connect_peer(); drain();
+    advertising_stopped(7); /* Connection proves legacy advertising already stopped. */
+    worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+    name_finish_payloads();
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_APPLIED && state.public.connected);
+    assert(!state.public.failed && close_calls == 0);
+
+    reset(); name_begin_runtime("Changed", false);
+    worker_cycle(); name_payload_complete(false, ESP_BT_STATUS_SUCCESS);
+    worker_cycle(); name_payload_complete(true, ESP_BT_STATUS_SUCCESS);
+    worker_cycle(); assert(device_name.ack == NAME_ACK_START);
+    connect_peer(); drain(); disconnect_peer();
+    name_start_complete(ESP_BT_STATUS_SUCCESS);
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_APPLIED && !state.advertising);
+    assert(close_calls == 0 && !state.public.failed);
+    worker_cycle(); assert(state.adv_pending); /* A fresh normal advertisement is needed. */
+}
+
+static void test_name_submission_and_restart_failures(void) {
+    reset(); state.advertising = true; adv_stop_result = ESP_FAIL;
+    assert(ble_hid_name_request("Changed", 7, NULL) == ESP_OK); worker_cycle();
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_FAILED && state.advertising);
+    assert(!state.public.failed && name_set_calls == 0 && name_get_calls == 0 && close_calls == 0);
+
+    reset(); state.advertising = true;
+    assert(ble_hid_name_request("Changed", 7, NULL) == ESP_OK); worker_cycle();
+    advertising_stopped(7); worker_cycle();
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_FAILED && state.advertising);
+    assert(!state.adv_stop_pending && !state.public.failed && name_set_calls == 0);
+
+    reset(); name_get_result = ESP_ERR_NO_MEM;
+    assert(ble_hid_name_request("Changed", 7, NULL) == ESP_OK); worker_cycle();
+    assert(name_reads_pending == 0 && device_name.ack == NAME_ACK_START);
+    name_start_complete(ESP_BT_STATUS_SUCCESS);
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_FAILED && name_set_calls == 0);
+    assert(ble_hid_name_snapshot().error == ESP_ERR_NO_MEM && !state.public.failed);
+
+    for (unsigned failure = 0; failure < 4; ++failure) {
+        reset(); name_begin_runtime("Changed", false);
+        if (failure == 0) {
+            adv_data_result = ESP_ERR_NO_MEM;
+            worker_cycle();
+            adv_data_result = ESP_OK;
+        } else {
+            worker_cycle(); name_payload_complete(false, ESP_BT_STATUS_SUCCESS);
+            if (failure == 1) {
+                scan_data_result = ESP_ERR_NO_MEM; worker_cycle(); scan_data_result = ESP_OK;
+            } else {
+                worker_cycle();
+                if (failure == 2) name_payload_complete(true, 7);
+                else {
+                    name_payload_complete(true, ESP_BT_STATUS_SUCCESS);
+                    adv_start_result = ESP_ERR_NO_MEM; worker_cycle(); adv_start_result = ESP_OK;
+                }
+            }
+        }
+        assert(device_name.rollback && ble_hid_name_snapshot().rollback_attempted);
+        assert(!state.public.failed && !state.advertising && close_calls == 0);
+        worker_cycle(); name_read_complete(ESP_BT_STATUS_SUCCESS, fake_sdk_name);
+        name_finish_payloads();
+        ble_hid_name_snapshot_t snapshot = ble_hid_name_snapshot();
+        assert(snapshot.status == BLE_HID_NAME_FAILED && snapshot.rollback_confirmed && snapshot.active_known);
+        assert(strcmp(snapshot.active, BLE_HID_DEFAULT_NAME) == 0 && state.advertising);
+        assert(commit_calls == 0 && remove_calls == 0 && close_calls == 0);
+    }
+}
+
+static void test_name_guards_and_start_timeout(void) {
+    reset_startup();
+    assert(ble_hid_name_request("Changed", 7, NULL) == ESP_OK);
+    nvs_result = ESP_ERR_NO_MEM;
+    assert(ble_hid_init() == ESP_ERR_NO_MEM);
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_FAILED && name_set_calls == 0);
+
+    reset(); state.init_attempted = true; state.public.initialized = false;
+    assert(ble_hid_name_request("Changed", 7, NULL) == ESP_ERR_INVALID_STATE);
+    reset(); assert(ble_hid_forget_bonds(state.public.generation));
+    assert(ble_hid_name_request("Changed", 7, NULL) == ESP_ERR_INVALID_STATE);
+    reset(); assert(ble_hid_name_request("Changed", 7, NULL) == ESP_OK);
+    assert(!ble_hid_forget_bonds(state.public.generation));
+
+    reset(); name_begin_runtime("Changed", false);
+    worker_cycle(); name_payload_complete(false, ESP_BT_STATUS_SUCCESS);
+    worker_cycle(); name_payload_complete(true, ESP_BT_STATUS_SUCCESS);
+    worker_cycle(); assert(device_name.ack == NAME_ACK_START);
+    fake_tick = BLE_HID_NAME_TIMEOUT_MS; notification_watchdog(NULL);
+    name_start_complete(ESP_BT_STATUS_SUCCESS); worker_cycle();
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_UNCERTAIN && state.adv_stop_pending);
+    advertising_stopped(ESP_BT_STATUS_SUCCESS); worker_cycle();
+    assert(!state.advertising && !state.public.failed && close_calls == 0);
+    assert(ble_hid_name_snapshot().status == BLE_HID_NAME_UNCERTAIN);
+    assert(ble_hid_name_request("Again", 5, NULL) == ESP_ERR_INVALID_STATE);
+}
+
+static ble_hid_target_t target_key(unsigned int index) {
+    ble_hid_target_t key = {.address_type = fake_bonds[index].bd_addr_type};
+    memcpy(key.address, fake_bonds[index].bd_addr, 6); return key;
+}
+static void test_saved_target_selection_and_order(void) {
+    reset();
+    assert(psa_crypto_init() == PSA_SUCCESS);
+    for (unsigned int i = 0; i < 3; ++i) {
+        save_sdk_bond(i, (uint8_t)(0xc2U + i), (uint8_t)(i + 1));
+        memcpy(fake_bonds[i].bond_key.pid_key.static_addr, fake_bonds[i].bd_addr, 6);
+    }
+    /* One offline private/pseudo key remains visible but not selectable. */
+    fake_bonds[2].bd_addr_type = 2;
+    assert(refresh_known_bonds() == ESP_OK);
+    ble_hid_bond_list_t list = ble_hid_bond_list();
+    assert(list.bonds[0].selection_supported && !list.bonds[2].selection_supported);
+    ble_hid_target_t order[] = {target_key(1), target_key(0), target_key(2)};
+    ble_hid_target_t duplicate[] = {target_key(1), target_key(1), target_key(2)};
+    assert(ble_hid_target_order(list.revision, duplicate, 3) == ESP_ERR_INVALID_ARG);
+    assert(ble_hid_target_order(list.revision, order, 2) == ESP_ERR_INVALID_ARG);
+    assert(ble_hid_target_order(list.revision + 1, order, 3) == ESP_ERR_INVALID_STATE);
+    assert(ble_hid_target_order(list.revision, order, 3) == ESP_OK);
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_PENDING && target_commit_calls == 0);
+    worker_cycle(); assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_APPLIED);
+    assert(ble_hid_bond_list().bonds[0].address[0] == 0xc3);
+    assert(refresh_known_bonds() == ESP_OK && ble_hid_bond_list().bonds[0].address[0] == 0xc3);
+    list = ble_hid_bond_list();
+    assert(ble_hid_target_select(list.revision, &order[2]) == ESP_ERR_NOT_SUPPORTED);
+    assert(ble_hid_target_select(list.revision, &order[0]) == ESP_OK);
+    worker_cycle(); assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_APPLIED);
+    assert(!ble_hid_pairing_open(BLE_HID_PAIRING_DEFAULT_MS));
+    assert(ble_hid_bond_list().bonds[0].is_selected);
+    ble_hid_target_snapshot_t selected = ble_hid_target_snapshot();
+    assert(selected.selected && selected.host_initiated_only && !selected.nearby_detection_supported);
+    active_peer = 0xc2; connect_peer(); assert(state.rejected_pending && !state.public.connected); drain(); disconnect_peer();
+    active_peer = 0xc3; connect_peer(); assert(state.public.connected && !state.rejected_pending); drain();
+    assert(ble_hid_target_select(list.revision, NULL) == ESP_ERR_INVALID_STATE);
+    disconnect_peer();
+    /* A now-unresolvable selected key blocks all admission until explicit clear. */
+    fake_bonds[1].bd_addr_type = 2;
+    assert(refresh_known_bonds() == ESP_OK);
+    active_peer = 0xc3; connect_peer(); assert(state.rejected_pending && !state.public.connected); drain(); disconnect_peer();
+    assert(ble_hid_target_select(ble_hid_bond_list().revision, NULL) == ESP_OK);
+    worker_cycle();
+    assert(!ble_hid_target_snapshot().selected && ble_hid_pairing_open(BLE_HID_PAIRING_DEFAULT_MS));
+    assert(fake_bond_count == 3 && remove_calls == 0 && commit_calls == 0);
+}
+static void test_shared_classic_pairing_guard(void) {
+    reset(); assert(!ble_hid_pairing_claim_classic());
+    ble_hid_pairing_close(); assert(ble_hid_pairing_claim_classic());
+    assert(!ble_hid_pairing_open(1000) && !ble_hid_pairing_claim_classic());
+    active_peer = 0x80; connect_peer(); assert(state.rejected_pending && !state.public.connected);
+    drain(); disconnect_peer(); ble_hid_pairing_release_classic();
+    assert(ble_hid_pairing_open(1000));
+    connect_peer(); drain(); assert(state.pairing_admission_pending && !ble_hid_pairing_claim_classic());
+#if CONFIG_BT_CLASSIC_ENABLED
+    shared_bond_count = PAIRING_BOND_CAPACITY;
+    service_pairing_admission();
+    assert(!state.pairing_admitted && state.link_fault && encryption_calls == 0);
+    reset(); ble_hid_pairing_close(); assert(ble_hid_pairing_open(1000)); connect_peer(); drain();
+    shared_bond_count = -1; service_pairing_admission();
+    assert(!state.pairing_admitted && state.link_fault && encryption_calls == 0);
+#endif
+}
+
+static void prepare_durable_targets(void) {
+    reset(); assert(psa_crypto_init() == PSA_SUCCESS);
+    for (unsigned int i = 0; i < 2; ++i) {
+        save_sdk_bond(i, (uint8_t)(0xc2U + i), (uint8_t)(i + 1));
+        memcpy(fake_bonds[i].bond_key.pid_key.static_addr, fake_bonds[i].bd_addr, 6);
+    }
+    assert(refresh_known_bonds() == ESP_OK);
+}
+static ble_hid_target_t public_target(const ble_hid_bond_t *row) {
+    ble_hid_target_t key = {.address_type = row->address_type, .bond_id_known = row->bond_id_known};
+    memcpy(key.address, row->address, 6); memcpy(key.bond_id, row->bond_id, BLE_HID_BOND_ID_BYTES); return key;
+}
+static ble_hid_target_preferences_request_t target_request(void) {
+    ble_hid_bond_list_t list = ble_hid_bond_list();
+    assert(list.count == 2 && list.bonds[0].bond_id_known && list.bonds[1].bond_id_known);
+    return (ble_hid_target_preferences_request_t){.expected_bond_revision = list.revision,
+        .expected_revision = ble_hid_target_snapshot().revision, .selected = true,
+        .target = public_target(&list.bonds[1]), .count = 2,
+        .order = {public_target(&list.bonds[1]), public_target(&list.bonds[0])}};
+}
+static void reboot_target_preferences(void) {
+    uint8_t saved[sizeof(target_durable_blob)]; size_t length = target_durable_length;
+    esp_ble_bond_dev_t bonds[SUBSCRIPTION_CAPACITY]; int count = fake_bond_count;
+    memcpy(saved, target_durable_blob, length); memcpy(bonds, fake_bonds, sizeof(bonds));
+    reset(); memcpy(target_durable_blob, saved, length); target_durable_length = length;
+    memcpy(fake_bonds, bonds, sizeof(bonds)); fake_bond_count = count;
+    state.target.loaded = false; state.bonds_loaded = false; state.bond_list.known = false;
+    state.public.pairing_open = false; worker_cycle();
+}
+static void test_durable_target_reboot_replay_and_identity(void) {
+    prepare_durable_targets();
+    ble_hid_target_preferences_request_t request = target_request(), replay = request;
+    uint64_t id = 0;
+    assert(ble_hid_target_preferences_request(&request, &id) == ESP_OK && id == 1);
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_PENDING &&
+        ble_hid_target_snapshot().revision == 0 && !ble_hid_target_snapshot().selected && target_commit_calls == 0);
+    assert(!ble_hid_pairing_open(1000) && !ble_hid_forget_bonds(state.public.generation));
+    assert(ble_hid_name_request("Blocked", 7, NULL) == ESP_ERR_INVALID_STATE);
+    active_peer = 0xc2; connect_peer(); assert(state.rejected_pending && !state.public.connected); drain(); disconnect_peer();
+    memset(&request, 0, sizeof(request)); /* Submitted value cannot retain borrowed storage. */
+    worker_cycle();
+    ble_hid_target_snapshot_t snapshot = ble_hid_target_snapshot();
+    assert(snapshot.loaded && snapshot.durable && snapshot.selected && snapshot.available &&
+        snapshot.revision == 1 && snapshot.request_id == id && snapshot.request_status == BLE_HID_TARGET_APPLIED);
+    assert(target_commit_calls == 1 && ble_hid_bond_list().bonds[0].address[0] == 0xc3);
+    assert(ble_hid_target_preferences_request(&replay, NULL) == ESP_ERR_INVALID_STATE && target_commit_calls == 1);
+    assert(ble_hid_target_snapshot().request_id == id && ble_hid_target_snapshot().request_status == BLE_HID_TARGET_APPLIED);
+    reboot_target_preferences(); snapshot = ble_hid_target_snapshot();
+    assert(snapshot.loaded && snapshot.durable && snapshot.revision == 1 && snapshot.selected && snapshot.available);
+    assert(snapshot.request_status == BLE_HID_TARGET_IDLE && target_commit_calls == 0);
+    assert(ble_hid_target_preferences_request(&replay, NULL) == ESP_ERR_INVALID_STATE && target_commit_calls == 0);
+    assert(ble_hid_bond_list().bonds[0].address[0] == 0xc3 && ble_hid_bond_list().bonds[0].is_selected);
+    active_peer = 0xc2; connect_peer(); assert(state.rejected_pending && !state.public.connected); drain(); disconnect_peer();
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true);
+    assert(state.public.connected && state.bond_resolved && !state.link_fault); disconnect_peer();
+    fake_bonds[1].bond_key.penc_key.ltk[0] ^= 1U;
+    assert(refresh_known_bonds() == ESP_OK);
+    snapshot = ble_hid_target_snapshot(); assert(snapshot.selected && !snapshot.available && snapshot.error == ESP_ERR_NOT_FOUND);
+    connect_peer(); assert(state.rejected_pending && !state.public.connected); drain(); disconnect_peer();
+    reboot_target_preferences(); assert(ble_hid_target_snapshot().selected && !ble_hid_target_snapshot().available);
+    fake_bond_count = 1; assert(refresh_known_bonds() == ESP_OK);
+    reboot_target_preferences(); snapshot = ble_hid_target_snapshot();
+    assert(snapshot.selected && !snapshot.available && snapshot.error == ESP_ERR_NOT_FOUND && snapshot.revision == 1);
+    assert(ble_hid_target_select(ble_hid_bond_list().revision, NULL) == ESP_OK);
+    worker_cycle(); assert(ble_hid_target_snapshot().revision == 2 && !ble_hid_target_snapshot().selected);
+    reboot_target_preferences(); snapshot = ble_hid_target_snapshot();
+    assert(snapshot.loaded && snapshot.durable && snapshot.available && !snapshot.selected && snapshot.revision == 2);
+    assert(fake_bond_count == 1 && remove_calls == 0);
+}
+static void test_durable_target_storage_failures(void) {
+    for (unsigned int failure = 0; failure < 5; ++failure) {
+        prepare_durable_targets(); ble_hid_target_preferences_request_t request = target_request();
+        assert(ble_hid_target_preferences_request(&request, NULL) == ESP_OK);
+        if (failure == 0) target_open_error = ESP_FAIL;
+        if (failure == 1) target_write_error = ESP_FAIL;
+        if (failure == 2) target_commit_error = ESP_FAIL;
+        if (failure == 3) target_read_error = ESP_FAIL;
+        if (failure == 4) target_corrupt_readback = true;
+        worker_cycle(); ble_hid_target_snapshot_t snapshot = ble_hid_target_snapshot();
+        assert(snapshot.revision == 0 && !snapshot.selected && !snapshot.durable && snapshot.request_error != ESP_OK);
+        assert(snapshot.request_status == (failure == 0 ? BLE_HID_TARGET_FAILED : BLE_HID_TARGET_UNCERTAIN));
+        if (failure) {
+            assert(!snapshot.available && !ble_hid_pairing_open(1000));
+            assert(ble_hid_target_select(ble_hid_bond_list().revision, NULL) == ESP_ERR_INVALID_STATE);
+            active_peer = 0xc2; connect_peer(); assert(state.rejected_pending && !state.public.connected); drain(); disconnect_peer();
+        }
+        reboot_target_preferences(); snapshot = ble_hid_target_snapshot();
+        assert(snapshot.loaded && snapshot.available && !state.public.failed);
+        assert(snapshot.selected == (failure >= 3)); /* Actual committed record wins after reboot. */
+    }
+    prepare_durable_targets(); ble_hid_target_preferences_request_t request = target_request();
+    assert(ble_hid_target_preferences_request(&request, NULL) == ESP_OK);
+    target_commit_error = ESP_FAIL; target_commit_persists_on_error = true; worker_cycle();
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_UNCERTAIN && target_durable_length);
+    reboot_target_preferences(); assert(ble_hid_target_snapshot().selected && ble_hid_target_snapshot().revision == 1);
+    size_t retained = target_durable_length; target_durable_blob[20] ^= 1U;
+    reboot_target_preferences();
+    assert(state.public.failed && !ble_hid_target_snapshot().loaded && target_durable_length == retained && target_commit_calls == 0);
+    active_peer = 0xc3; connect_peer(); assert(state.rejected_pending && !state.public.connected);
+}
+static void peer_during_target_commit(void) {
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_APPLYING);
+    callback_active = true; active_peer = 0xc3; connect_peer(); callback_active = false;
+    assert(state.rejected_pending && !state.public.connected && !state.public.ready);
+}
+static void test_durable_target_commit_race_and_old_record(void) {
+    prepare_durable_targets(); ble_hid_target_preferences_request_t request = target_request();
+    assert(ble_hid_target_preferences_request(&request, NULL) == ESP_OK);
+    target_commit_hook = peer_during_target_commit; worker_cycle(); target_commit_hook = NULL;
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_APPLIED && !state.public.connected);
+    disconnect_peer(); drain();
+    for (unsigned int persisted = 0; persisted < 2; ++persisted) {
+        prepare_durable_targets(); request = target_request();
+        assert(ble_hid_target_preferences_request(&request, NULL) == ESP_OK); worker_cycle();
+        ble_hid_bond_list_t list = ble_hid_bond_list();
+        request = (ble_hid_target_preferences_request_t){.expected_bond_revision = list.revision,
+            .expected_revision = 1, .selected = true, .target = public_target(&list.bonds[1]),
+            .count = 2, .order = {public_target(&list.bonds[0]), public_target(&list.bonds[1])}};
+        assert(request.target.address[0] == 0xc2);
+        assert(ble_hid_target_preferences_request(&request, NULL) == ESP_OK);
+        target_commit_error = ESP_FAIL; target_commit_persists_on_error = persisted != 0; worker_cycle();
+        ble_hid_target_snapshot_t snapshot = ble_hid_target_snapshot();
+        assert(snapshot.request_status == BLE_HID_TARGET_UNCERTAIN && snapshot.selected &&
+            snapshot.target.address[0] == 0xc3 && snapshot.revision == 1 && !snapshot.available);
+        reboot_target_preferences(); snapshot = ble_hid_target_snapshot();
+        assert(snapshot.loaded && snapshot.durable && snapshot.available &&
+            snapshot.target.address[0] == (persisted ? 0xc2 : 0xc3) && snapshot.revision == (persisted ? 2U : 1U));
+    }
+}
+
+static void test_durable_target_stale_request_and_schema(void) {
+    prepare_durable_targets(); ble_hid_target_preferences_request_t request = target_request();
+    request.order[0].bond_id[0] ^= 1U;
+    assert(ble_hid_target_preferences_request(&request, NULL) == ESP_ERR_INVALID_ARG && target_commit_calls == 0);
+    request = target_request(); assert(ble_hid_target_preferences_request(&request, NULL) == ESP_OK);
+    assert(refresh_known_bonds() == ESP_OK); worker_cycle();
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_APPLIED && target_commit_calls == 1);
+    request = target_request(); assert(ble_hid_target_preferences_request(&request, NULL) == ESP_OK);
+    fake_bonds[0].bond_key.penc_key.ltk[0] ^= 1U; authentication_event(true, true); worker_cycle();
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_FAILED && target_commit_calls == 1);
+    request = target_request(); assert(ble_hid_target_preferences_request(&request, NULL) == ESP_OK); worker_cycle();
+    target_durable_blob[3] = 2; size_t retained = target_durable_length;
+    reboot_target_preferences();
+    assert(state.public.failed && ble_hid_target_snapshot().request_error == ESP_ERR_NOT_SUPPORTED && target_durable_length == retained);
+    prepare_durable_targets();
+    fake_bonds[0].bond_key.key_mask &= (uint8_t)~ESP_BLE_ENC_KEY_MASK;
+    assert(refresh_known_bonds() == ESP_OK);
+    ble_hid_bond_list_t list = ble_hid_bond_list();
+    assert(!list.bonds[0].bond_id_known && !list.bonds[0].selection_supported && list.bonds[1].selection_supported);
+    ble_hid_target_t modern = public_target(&list.bonds[1]);
+    assert(ble_hid_target_select(list.revision, &modern) == ESP_OK); worker_cycle();
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_APPLIED && ble_hid_bond_list().count == 2);
+    reboot_target_preferences();
+    assert(ble_hid_target_snapshot().selected && ble_hid_target_snapshot().available && ble_hid_bond_list().count == 2);
+}
+
+static ble_hid_target_t single_target(void) {
+    ble_hid_bond_list_t list = ble_hid_bond_list();
+    assert(list.known && list.count == 2 && list.bonds[1].bond_id_known);
+    return public_target(&list.bonds[1]);
+}
+static uint64_t request_single(const ble_hid_target_t *target) {
+    uint64_t id = 0;
+    assert(ble_hid_forget_bond_request(state.public.generation, ble_hid_bond_list().revision, target, &id) == ESP_OK);
+    assert(id && ble_hid_bond_forget_snapshot().request_id == id && ble_hid_bond_forget_snapshot().cancellable);
+    return id;
+}
+static void test_single_bond_forget_success_and_preservation(void) {
+    prepare_durable_targets();
+    for (unsigned i = 0; i < 2; ++i) { active_peer = (uint8_t)(0xc2U + i); connect_peer(); drain(); authorize_peer(true); subscribe(); disconnect_peer(); }
+    assert(subscriptions.count == 2);
+    ble_hid_target_t target = single_target();
+    assert(ble_hid_target_select(ble_hid_bond_list().revision, &target) == ESP_OK); worker_cycle();
+    uint64_t preference_revision = ble_hid_target_snapshot().revision;
+    assert(ble_hid_bond_list().preferences_revision == preference_revision);
+    esp_ble_gap_cb_param_t started = {.adv_start_cmpl.status = ESP_BT_STATUS_SUCCESS};
+    gap_callback(ESP_GAP_BLE_ADV_START_COMPLETE_EVT, &started);
+    uint64_t id = request_single(&target);
+    assert(!ble_hid_forget_bonds(state.public.generation) && !ble_hid_pairing_open(1000));
+    worker_cycle(); assert(state.adv_stop_pending && !remove_calls);
+    advertising_stopped(ESP_BT_STATUS_SUCCESS); worker_cycle();
+    assert(remove_calls == 1 && ble_hid_bond_forget_snapshot().sdk_inflight && !memcmp(last_remove_address, target.address, 6));
+    assert(ble_hid_forget_bond_cancel(id) == ESP_ERR_NOT_SUPPORTED);
+    esp_bd_addr_t unrelated = {0xff}; remove_complete(unrelated, ESP_BT_STATUS_SUCCESS, false); worker_cycle();
+    assert(ble_hid_bond_forget_snapshot().status == BLE_HID_BOND_FORGET_REMOVING && remove_calls == 1);
+    remove_complete(target.address, ESP_BT_STATUS_SUCCESS, true); worker_cycle();
+    ble_hid_bond_forget_snapshot_t job = ble_hid_bond_forget_snapshot();
+    assert(job.request_id == id && job.status == BLE_HID_BOND_FORGET_SUCCEEDED && !job.sdk_inflight && !job.cancellable);
+    ble_hid_bond_list_t list = ble_hid_bond_list();
+    assert(list.known && !list.updating && list.count == 1 && list.bonds[0].address[0] == 0xc2 && fake_bond_count == 1);
+    assert(subscriptions.count == 1 && subscription_mask(list.bonds[0].bond_id) == 3 && durable_blob[3] == 1);
+    assert(remove_calls == 1 && !ble_hid_snapshot().pairing_open && ble_hid_target_snapshot().selected &&
+        !ble_hid_target_snapshot().available && ble_hid_target_snapshot().revision == preference_revision);
+}
+static void test_single_bond_forget_cancel_and_stale(void) {
+    prepare_durable_targets(); ble_hid_target_t target = single_target(); uint64_t id;
+    assert(ble_hid_forget_bond_request(state.public.generation + 1U, ble_hid_bond_list().revision, &target, NULL) == ESP_ERR_INVALID_STATE);
+    assert(ble_hid_forget_bond_request(state.public.generation, ble_hid_bond_list().revision + 1U, &target, NULL) == ESP_ERR_INVALID_STATE);
+    ble_hid_target_t wrong = target; wrong.bond_id[0] ^= 1U;
+    assert(ble_hid_forget_bond_request(state.public.generation, ble_hid_bond_list().revision, &wrong, NULL) == ESP_ERR_NOT_FOUND);
+    wrong = target; wrong.bond_id_known = false;
+    assert(ble_hid_forget_bond_request(state.public.generation, ble_hid_bond_list().revision, &wrong, NULL) == ESP_ERR_NOT_SUPPORTED);
+    active_peer = 0xc2; connect_peer(); drain();
+    assert(ble_hid_forget_bond_request(state.public.generation, ble_hid_bond_list().revision, &target, NULL) == ESP_ERR_INVALID_STATE); disconnect_peer();
+    id = request_single(&target); assert(ble_hid_forget_bond_cancel(id + 1U) == ESP_ERR_INVALID_STATE);
+    assert(ble_hid_forget_bond_cancel(id) == ESP_OK && ble_hid_forget_bond_cancel(id) == ESP_OK);
+    worker_cycle(); assert(!remove_calls && fake_bond_count == 2 && ble_hid_bond_forget_snapshot().status == BLE_HID_BOND_FORGET_CANCELLED);
+    uint64_t second = request_single(&target); assert(second > id && ble_hid_forget_bond_cancel(id) == ESP_ERR_INVALID_STATE);
+    fake_bonds[1].bond_key.penc_key.ltk[0] ^= 1U; authentication_event(true, true); worker_cycle();
+    assert(!remove_calls && ble_hid_bond_forget_snapshot().status == BLE_HID_BOND_FORGET_FAILED && fake_bond_count == 2);
+}
+static void test_single_bond_forget_failures_and_late_events(void) {
+    for (unsigned failure = 0; failure < 5; ++failure) {
+        prepare_durable_targets(); ble_hid_target_t target = single_target(); uint64_t id = request_single(&target);
+        if (failure == 0) bond_result = ESP_FAIL;
+        if (failure == 1) remove_request_result = ESP_FAIL;
+        worker_cycle();
+        if (failure <= 1) {
+            assert(ble_hid_bond_forget_snapshot().status == BLE_HID_BOND_FORGET_FAILED && fake_bond_count == 2);
+            if (!failure) assert(!remove_calls && !ble_hid_bond_list().known);
+            else assert(remove_calls == 1 && !ble_hid_bond_forget_snapshot().sdk_inflight);
+            continue;
+        }
+        assert(ble_hid_bond_forget_snapshot().sdk_inflight);
+        if (failure == 2) remove_complete(target.address, 1, false);
+        if (failure == 3) remove_complete(target.address, ESP_BT_STATUS_SUCCESS, false);
+        if (failure == 4) { fake_tick += FORGET_TIMEOUT_MS; notification_watchdog(NULL); }
+        worker_cycle(); ble_hid_bond_forget_snapshot_t job = ble_hid_bond_forget_snapshot();
+        assert(job.request_id == id && job.status == (failure == 2 ? BLE_HID_BOND_FORGET_FAILED : BLE_HID_BOND_FORGET_UNCERTAIN));
+        assert(remove_calls == 1 && fake_bond_count == 2);
+        if (failure == 4) {
+            assert(job.sdk_inflight && state.public.failed);
+            remove_complete(target.address, ESP_BT_STATUS_SUCCESS, true); worker_cycle();
+            assert(ble_hid_bond_forget_snapshot().status == BLE_HID_BOND_FORGET_UNCERTAIN && !ble_hid_bond_forget_snapshot().sdk_inflight);
+        }
+    }
+}
+static void test_single_bond_forget_private_and_partial_cleanup(void) {
+    prepare_durable_targets(); fake_bonds[1].bd_addr_type = 2; assert(refresh_known_bonds() == ESP_OK);
+    ble_hid_target_t target = single_target(); assert(!ble_hid_bond_list().bonds[1].selection_supported);
+    request_single(&target); worker_cycle(); remove_complete(target.address, ESP_BT_STATUS_SUCCESS, true); worker_cycle();
+    assert(ble_hid_bond_forget_snapshot().status == BLE_HID_BOND_FORGET_SUCCEEDED && fake_bond_count == 1);
+    prepare_durable_targets();
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe(); disconnect_peer();
+    target = single_target(); request_single(&target); worker_cycle();
+    remove_complete(target.address, ESP_BT_STATUS_SUCCESS, true); commit_result = ESP_FAIL; worker_cycle();
+    assert(ble_hid_bond_forget_snapshot().status == BLE_HID_BOND_FORGET_UNCERTAIN && state.public.failed && fake_bond_count == 1);
+    prepare_durable_targets(); target = single_target(); request_single(&target); worker_cycle();
+    remove_complete(target.address, ESP_BT_STATUS_SUCCESS, true); fake_bond_count = 0; worker_cycle();
+    assert(ble_hid_bond_forget_snapshot().status == BLE_HID_BOND_FORGET_UNCERTAIN); /* Unrelated deletion cannot be hidden. */
+}
+
+static void test_quiet_forget_all_and_empty_durable_preferences(void) {
+    prepare_durable_targets(); ble_hid_target_t target = single_target();
+    assert(ble_hid_target_select(ble_hid_bond_list().revision, &target) == ESP_OK); worker_cycle();
+    esp_ble_gap_cb_param_t started = {.adv_start_cmpl.status = ESP_BT_STATUS_SUCCESS};
+    gap_callback(ESP_GAP_BLE_ADV_START_COMPLETE_EVT, &started);
+    assert(ble_hid_forget_bonds_without_pairing(state.public.generation));
+    assert(!state.public.pairing_open); worker_cycle();
+    assert(state.adv_stop_pending); advertising_stopped(ESP_BT_STATUS_SUCCESS); worker_cycle();
+    for (unsigned i = 0; i < BLE_HID_MAX_BONDS + 1U && state.public.bond_forget_state == BLE_HID_FORGET_RUNNING; ++i) {
+        assert(state.remove_inflight && !state.public.pairing_open);
+        esp_bd_addr_t address; memcpy(address, last_remove_address, sizeof(address));
+        remove_complete(address, ESP_BT_STATUS_SUCCESS, true); worker_cycle();
+        assert(!state.public.pairing_open);
+    }
+    assert(state.public.bond_forget_state == BLE_HID_FORGET_DONE && !fake_bond_count && remove_calls == 2);
+    ble_hid_target_preferences_request_t empty = {.expected_bond_revision = ble_hid_bond_list().revision,
+        .expected_revision = ble_hid_target_snapshot().revision};
+    assert(ble_hid_target_preferences_request(&empty, NULL) == ESP_OK); worker_cycle();
+    assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_APPLIED && ble_hid_target_snapshot().durable &&
+        !ble_hid_target_snapshot().selected && !state.target_order_count && !state.public.pairing_open);
+    reboot_target_preferences();
+    assert(ble_hid_target_snapshot().loaded && ble_hid_target_snapshot().durable && !ble_hid_target_snapshot().selected &&
+        !state.target_order_count && !state.public.pairing_open);
+    assert(ble_hid_pairing_open(1000)); /* A later explicit local action still works. */
+}
+
 int main(void) {
+    test_quiet_forget_all_and_empty_durable_preferences();
+    test_single_bond_forget_success_and_preservation(); test_single_bond_forget_cancel_and_stale();
+    test_single_bond_forget_failures_and_late_events(); test_single_bond_forget_private_and_partial_cleanup();
+    test_durable_target_reboot_replay_and_identity(); test_durable_target_storage_failures();
+    test_durable_target_stale_request_and_schema(); test_durable_target_commit_race_and_old_record();
+    test_saved_target_selection_and_order(); test_shared_classic_pairing_guard();
+    test_name_validation_submission_and_copy(); test_name_preinit_and_startup_callback_ownership();
+    test_name_connected_apply_preserves_hid_and_bonds(); test_name_utf8_full_advertisement_and_rollback();
+    test_name_readback_and_rollback_failures(); test_name_timeout_and_late_callbacks();
+    test_name_connect_during_stop_and_restart();
+    test_name_submission_and_restart_failures(); test_name_guards_and_start_timeout();
     test_first_failure_initialization(); test_first_failure_asynchronous_setup();
     test_first_failure_recovery_and_observation(); test_first_failure_authentication_and_deadline();
     test_first_failure_ignores_nonfaults_and_stale_jobs();
@@ -1865,5 +2626,5 @@ int main(void) {
     test_auth_disconnect_refreshes_durable_bonds(); test_auth_after_disconnect_and_refresh_failure();
     test_pairing_rechecks_actual_capacity(); test_auth_invalidates_an_inflight_cache_read();
     test_bond_list_cache_availability(); test_partial_forget_cached_list();
-    puts("BLE adapter: advertising initialization, gates, missed edges, malformed writes, reconnect submission race, backpressure, persistence, pairing, RSSI, saved-host cache, bond removal, first-failure diagnostics, failures and 100000 lifecycle cycles passed");
+    puts("BLE adapter: advertising initialization, gates, missed edges, malformed writes, reconnect submission race, backpressure, persistence, pairing, RSSI, saved-host cache, bond removal, first-failure diagnostics, configurable name apply/rollback, failures and 100000 lifecycle cycles passed");
 }

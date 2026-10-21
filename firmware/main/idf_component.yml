@@ -4,3 +4,6 @@ dependencies:
     path: "../../third_party/esp-mosaico-bsp/components/esp-mosaico-bsp"
   espressif/esp_tinyusb:
     version: "^2.0.1~1"
+  espressif/esp-sr:
+    git: "https://github.com/espressif/esp-sr.git"
+    version: "78a923d29a45e4e1433b909d3da12ab5b0f994fc"

@@ -6,6 +6,14 @@ C11 diagnostics, AddressSanitizer and UndefinedBehaviorSanitizer. It uses the
 real pinned TinyUSB headers and descriptor macros; hardware, FreeRTOS and
 esp_tinyusb calls are controllable doubles below that API boundary.
 
+Console regressions begin with fully buffered real C streams, verify that a
+completed stdout/stderr line reaches the underlying file without another burst,
+and keep partial text buffered until newline. A full-buffered positive control
+checks the observer. Both line-buffer setup failures retain failed startup and
+prevent reinstall/reconfiguration. The production repair only restores line
+buffering after redirection; CDC VFS backpressure remains nonblocking and may
+drop diagnostics. Host stdio tests do not establish USB delivery or losslessness.
+
 One `usb_console_start()` installation owns CDC diagnostics and a report-only
 HID keyboard/mouse interface. `usb_hid_init()` starts that same owner. Concurrent
 startup observes an initializing error; repeated completed calls return the

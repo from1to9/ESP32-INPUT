@@ -30,19 +30,40 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 | M01 | Motion mouse | No continuous stationary drift after calibration; rotation gives relative movement; no stale movement burst |
 | M02 | Touch fine control | Relative single-finger movement; quarter/eighth gain; touch priority and a short release freeze |
 | M03 | Mouse buttons | Left/right click, explicit drag and separate scroll; interruptions release drag |
+| M04 | Touchpad gestures | Configurable tap-to-click: single tap, double tap and double-tap-and-hold drag; movement-only when disabled |
 | K01 | Composite HID | One stable HID service with separate mouse/keyboard report IDs; no re-pairing when changing modes |
 | K02 | Motion character selection | Group -> character -> explicit confirmation into preview; local focus only |
 | K03 | Character entry | A-Z/a-z, digits, space, delete, common ASCII punctuation and clear-preview action |
 | K04 | Explicit send | Visible target, preview and progress; no appended Enter; remaining queue can be cancelled |
 | K05 | Shortcuts | Host-specific Ctrl/Command configuration rather than one hardcoded mapping |
+| K06 | Common keys | Explicit Esc, Tab, Enter, Backspace, forward Delete, arrows, Home and End without modifying the preview |
 | S01 | Lock | Release HID, cancel queued input, suspend remote control and mute; long press again to unlock |
 | S02 | Reconnect | No replay of old clicks, keys or text; motion stays off and remote tasks stay stopped |
 
 ### Mouse behavior
 
-Convert calibrated angular velocity to relative HID movement using actual monotonic sample intervals and fractional carry. Axis orientation, gain, deadzone, filtering and click freeze are tunable. Initial proposals are a 150 ms freeze and quarter-speed fine control; actual values need hardware tuning. HID units are not screen pixels.
+Convert calibrated angular velocity to relative HID movement using actual monotonic sample intervals and fractional carry. Automatically adapt horizontal motion to both screen-up and tilted screen-facing grips using a validated gravity reference; posture changes must not cause pointer jumps. Horizontal and vertical gains are independently configurable, alongside axis directions, deadzone, filtering and click freeze. The current physical feedback reports fast vertical motion but slow horizontal motion, so raising a shared gain is not an adequate correction. Initial proposals are a 150 ms freeze and quarter-speed fine control; actual values need hardware tuning. HID units are not screen pixels.
 
 Touch start, physical button down, menus, calibration and keyboard selection suppress host pointer output. Entering keyboard/audio clears the motion intent; returning to mouse requires explicit re-enabling. Leaving fine control may restore the previous motion intent. Haptic feedback must also suppress IMU output during vibration.
+
+Tap-to-click defaults on and is a durable preference. A short stationary contact
+produces one left click; a second short contact produces the second click. On a
+second contact held or moved, dragging holds the left button until release.
+Movement outside the tap slop suppresses ordinary click recognition. With the
+preference off, the touchpad only moves the pointer; explicit click/drag controls
+remain available. Menus, lock, wake capture, owner/transport changes, stale
+gestures and cancellation must not generate clicks or leave a held button.
+Gesture time and distance bounds belong to the portable interaction profile.
+
+Motion and touchpad gestures coexist. Enabling Motion does not disable the
+default single/double tap or double-tap-and-hold drag behavior. An explicitly
+saved movement-only preference remains respected. Touch takes pointer priority;
+release applies the configured settling freeze before restoring the existing
+motion intent. Single-finger swipes move the pointer without a hidden navigation
+action. Additional scroll/right-click gestures require actual multi-touch
+provider evidence; unavailable multi-touch must not be simulated from ambiguous
+single contacts. Expose concise gesture help, visible drag state and a clear
+release/cancel action. Gesture interruption must never leave a host button held.
 
 ### Keyboard behavior
 
@@ -50,6 +71,7 @@ Touch start, physical button down, menus, calibration and keyboard selection sup
 - Motion changes local focus; AI single-click confirms. Touch uses the same grid and buffer.
 - Integrate relative angular movement, reset the center after confirmation, apply boundary hysteresis and never auto-confirm from dwell or jitter.
 - Characters enter preview first. Send emits key-down/key-up pairs without Enter. Track the accepted prefix and preserve only unsent text after interruption; never automatically replay a partial send.
+- A separate common-keys panel sends explicit key-down/key-up pairs to the selected host. Enter is deliberate and never appended by Send. Preview deletion, host Backspace and host forward Delete are distinct operations; key-panel actions leave the preview unchanged.
 - Initial encoding is US ANSI. The host must use a matching physical layout and English input mode. Other layouts require explicit support.
 - Transport acceptance does not prove text reached the intended field. Focus is user-controlled until a separate visual feedback loop exists.
 
@@ -64,6 +86,7 @@ Touch start, physical button down, menus, calibration and keyboard selection sup
 | A02 | Speaker | A2DP Sink with SBC; appropriate mono mix, no stereo-speaker claim |
 | A03 | Audio controls | Local microphone mute, playback volume, link and resource ownership status |
 | A04 | Echo handling | Duplex playback/capture requires AEC and acoustic tests; otherwise limit experiments to separated output or half duplex |
+| A05 | Local recording | Explicit start/stop, visible capture state, bounded storage and duration, recoverable partial files, playback/list/delete/export and truthful completion; no automatic restart or upload |
 
 On-device letter recognition consumes local microphone frames; it does not require HFP transport. One audio manager owns capture/codec resources. Recognition and HFP must not independently reopen the codec.
 
@@ -98,11 +121,12 @@ These additions preserve the original Mouse / Keyboard / Audio workflows.
 | --- | --- | --- |
 | D01 | Power and connection status | A compact context indicator and on-demand Status panel show actual gauge-reported battery percentage/charge state, Wi-Fi state/signal and the selected input transport. Bluetooth shows connection/readiness and the current peer, without signal bars. Unknown, stale and unavailable readings remain distinct. Never derive a host name or external power from a guess. |
 | D02 | Multiple Bluetooth pairings | Retain multiple saved peers within the configured SDK capacity (15 in the initial build; list storage is bounded at 32), with current-peer marking only when verified. Refuse additional pairing at capacity without evicting existing peers. A visible, bounded pairing window admits additional hosts; existing bonds may reconnect outside it. Show remaining time, readiness and failures. Disconnect retains bonds; forgetting requires local confirmation and safe input cancellation/disconnection. Support one active HID connection initially, without promising peripheral-initiated connection or simultaneous host control. |
-| D03 | Wi-Fi setup | A local action opens a temporary password-protected setup hotspot and a bounded browser form. Remember one network, reconnect with bounded backoff, show actual SSID/IP/signal, and support confirmed forgetting. No remote HID or MCP endpoint is enabled by provisioning. |
+| D03 | Wi-Fi setup | The device scans existing Wi-Fi networks, provides local selection and masked router-password entry, and joins the existing LAN. The computer stays on its network and never needs a generated device-hotspot password for normal setup. Remember networks, reconnect with bounded backoff, show actual SSID/IP/signal, and support confirmed forgetting. A recovery hotspot is an explicit secondary service only. Provisioning alone does not enable remote HID or MCP. |
 | D04 | Display timeout | Default five minutes; choices are one, five, ten, thirty minutes or Off. Blank only the screen, leaving radios and enabled mouse control running. Apply on all power states so unknown supply telemetry does not defeat the plugged-in use case. |
 | D05 | Safe wake and preferences | The first complete touch/AI gesture wakes only. Pause hidden keyboard selection; preserve the draft and lock state. Brightness, theme, haptics, shortcut modifier and timeout persist through a versioned validated record, coalesced writes and truthful save errors. |
-| D06 | Consistent UI and device information | Use shared layout metrics, aligned text/control grids and both themes on every page. Separate Connectivity, Display, Input and About pages. Show firmware/board/capabilities without secrets; retain explicit unavailable audio and speech. |
+| D06 | Consistent UI and device information | Use shared layout metrics, aligned text/control grids and both themes on every page. Separate Connectivity, Display, Input and About pages. Show firmware/board/capabilities without secrets; show actual audio/speech availability, session and fault state, with reasons for unavailable routes. |
 | D07 | Input transport selection | System settings offers Bluetooth and USB, independent of foreground mode. Standard USB composite mouse/keyboard retains diagnostics under one USB stack. Cancel queued input and complete old-host releases before switching; an already disconnected old host permits explicit switching without claiming release delivery. A connected, suspended or stalled host must recover or disconnect, otherwise the switch times out without changing selection. Require fresh zero reports on the new link. Never duplicate input to both hosts or automatically fall back after cable removal. Distinguish selection, physical connection, readiness, switching and unavailable capability. |
+| D08 | Startup identity | Show a lightweight ESP32-INPUT startup logo consistent with the dark/pale-blue design, then hand off to the normal Mouse workspace. No artificial startup delay, additional full-frame allocation, hidden fault or automatic microphone activation. |
 
 ### Focused mode workspace revision
 
@@ -144,6 +168,32 @@ bounded input, session validation and escaped output. Saved Wi-Fi passwords are
 never shown or logged. Development flash is not encrypted; do not claim physical
 credential protection. Provisioning security does not qualify the later remote
 control API. Wi-Fi setup must not erase bonds or unrelated settings on failure.
+
+This hotspot is a recovery-only capability, not the normal Wi-Fi setup flow.
+The user's existing router credentials stay inside the private local editor
+and network owner; they never enter the HID preview or require typing a newly
+generated device password on another computer.
+
+## Complete delivery boundary
+
+The latest user request requires all previously accepted modules, including real
+audio/recording, spoken-letter input, configuration, authenticated LAN control,
+MCP, firmware updates, motion refinement and the startup logo, to be completed
+before the next combined submission. Earlier
+published checkpoints remain historical evidence. Module self-tests and
+independent review continue during development; no placeholder or successful
+build counts as a completed physical capability. Preserve explicit hardware and
+host qualification limits, and report any requirement that cannot be implemented
+on the actual board rather than silently dropping it.
+
+The latest delivery instruction defers all device testing and flashing. Complete
+local host/native tests, the pinned target build and independent review, then
+commit and push the combined source. Do not access serial/USB, pair a host,
+install firmware or perform physical tests for this delivery. Physical
+qualification remains pending and is not a source-publication gate. Installation,
+partition migration, acoustic quality, host compatibility and endurance must not
+be reported as verified by source tests. The [delivery checklist](delivery-checklist.md)
+tracks implementation separately from that deferred evidence.
 
 ## Connection management and firmware updates
 

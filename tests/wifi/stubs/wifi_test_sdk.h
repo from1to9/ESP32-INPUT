@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <net/if.h>
 typedef int esp_err_t;
+#define WIFI_REASON_AUTH_FAIL 202
+#define WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT 15
+#define WIFI_REASON_HANDSHAKE_TIMEOUT 204
+#define ESP_ERR_NOT_FOUND 0x105
 #define ESP_OK 0
 #define ESP_FAIL -1
 #define ESP_ERR_NO_MEM 0x101
@@ -20,8 +24,10 @@ typedef int esp_err_t;
 #define CONFIG_ESP_WIFI_ENABLED 1
 #define portMUX_INITIALIZER_UNLOCKED 0
 typedef int portMUX_TYPE;
-#define portENTER_CRITICAL(p) ((void)(p))
-#define portEXIT_CRITICAL(p) ((void)(p))
+void wifi_test_enter(void);
+void wifi_test_exit(void);
+#define portENTER_CRITICAL(p) ((void)(p), wifi_test_enter())
+#define portEXIT_CRITICAL(p) ((void)(p), wifi_test_exit())
 #define pdPASS 1
 #define pdMS_TO_TICKS(ms) (ms)
 int xTaskCreate(void (*task)(void *), const char *, unsigned, void *, unsigned, void *);
@@ -32,8 +38,10 @@ void esp_fill_random(void *, size_t);
 typedef const char *esp_event_base_t;
 #define WIFI_EVENT ((esp_event_base_t)1)
 #define WIFI_EVENT_STA_DISCONNECTED 4
+#define WIFI_EVENT_SCAN_DONE 1
 #define WIFI_REASON_ASSOC_LEAVE 8
 typedef struct { uint16_t reason; } wifi_event_sta_disconnected_t;
+typedef struct { uint32_t status; uint8_t number, scan_id; } wifi_event_sta_scan_done_t;
 esp_err_t esp_event_loop_create_default(void);
 esp_err_t esp_event_handler_register(esp_event_base_t, int32_t,
     void (*handler)(void *, esp_event_base_t, int32_t, void *), void *);
@@ -57,13 +65,37 @@ typedef struct { uint8_t ssid[32], password[64], ssid_len, max_connection, chann
 typedef union { wifi_sta_config_t sta; wifi_ap_config_t ap; } wifi_config_t;
 typedef struct { int dummy; } wifi_init_config_t;
 #define WIFI_INIT_CONFIG_DEFAULT() ((wifi_init_config_t){0})
-#define WIFI_AUTH_WPA2_PSK 3
+enum {
+    WIFI_AUTH_OPEN, WIFI_AUTH_WEP, WIFI_AUTH_WPA_PSK, WIFI_AUTH_WPA2_PSK,
+    WIFI_AUTH_WPA_WPA2_PSK, WIFI_AUTH_ENTERPRISE, WIFI_AUTH_WPA3_PSK,
+    WIFI_AUTH_WPA2_WPA3_PSK, WIFI_AUTH_WAPI_PSK, WIFI_AUTH_OWE,
+    WIFI_AUTH_WPA3_ENT_192, WIFI_AUTH_DUMMY_1, WIFI_AUTH_DUMMY_2, WIFI_AUTH_DPP,
+    WIFI_AUTH_WPA3_ENTERPRISE, WIFI_AUTH_WPA2_WPA3_ENTERPRISE, WIFI_AUTH_WPA_ENTERPRISE
+};
 #define WIFI_IF_STA 0
 #define WIFI_IF_AP 1
 #define WIFI_MODE_STA 1
 #define WIFI_MODE_APSTA 3
 #define WIFI_STORAGE_RAM 0
-typedef struct { uint8_t ssid[33]; int8_t rssi; } wifi_ap_record_t;
+typedef struct { uint8_t ssid[33], bssid[6], primary; int8_t rssi; int authmode; } wifi_ap_record_t;
+typedef struct {
+    bool show_hidden;
+    int scan_type;
+    struct { struct { uint32_t min, max; } active; uint32_t passive; } scan_time;
+    uint8_t home_chan_dwell_time;
+    bool coex_background_scan;
+    uint8_t max_scan_ap_num;
+} wifi_scan_config_t;
+#define WIFI_SCAN_TYPE_ACTIVE 0
+#define MALLOC_CAP_INTERNAL 1U
+#define MALLOC_CAP_8BIT 2U
+size_t heap_caps_get_free_size(unsigned);
+size_t heap_caps_get_largest_free_block(unsigned);
+esp_err_t esp_wifi_scan_start(const wifi_scan_config_t *, bool);
+esp_err_t esp_wifi_scan_stop(void);
+esp_err_t esp_wifi_scan_get_ap_num(uint16_t *);
+esp_err_t esp_wifi_scan_get_ap_record(wifi_ap_record_t *);
+esp_err_t esp_wifi_clear_ap_list(void);
 esp_err_t esp_wifi_init(const wifi_init_config_t *);
 esp_err_t esp_wifi_set_storage(int);
 esp_err_t esp_wifi_set_config(int, wifi_config_t *);

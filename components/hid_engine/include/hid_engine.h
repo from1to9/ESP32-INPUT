@@ -107,6 +107,7 @@ bool hid_engine_set_mode(hid_engine_t *engine, input_mode_t mode);
 void hid_engine_set_locked(hid_engine_t *engine, bool locked);
 bool hid_engine_set_owner(hid_engine_t *engine, input_owner_t owner);
 bool hid_engine_set_gyro(hid_engine_t *engine, bool enabled);
+bool hid_engine_set_gyro_owned(hid_engine_t *engine, input_owner_t source, bool enabled);
 /* Also use cancel for target replacement without a disconnect. Always advances
  * the epoch, drops queued actions and requires both zero release reports. */
 void hid_engine_cancel(hid_engine_t *engine);

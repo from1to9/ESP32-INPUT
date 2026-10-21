@@ -1,0 +1,6452 @@
+{
+  "schema_version": 1,
+  "api_version": 1,
+  "command_limit_bytes": 2048,
+  "args_limit_bytes": 1280,
+  "max_depth": 4,
+  "max_members": 32,
+  "scopes": [
+    "view",
+    "input.control",
+    "input.configure",
+    "config.write",
+    "connections.manage",
+    "wifi.configure",
+    "audio.control",
+    "audio.capture",
+    "audio.playback",
+    "recording.control",
+    "recording.configure",
+    "recording.read",
+    "recording.export",
+    "recording.delete",
+    "capture.consent",
+    "admin.clients",
+    "admin.policy",
+    "admin.privacy",
+    "update.check",
+    "update.stage",
+    "update.activate",
+    "diagnostics.read",
+    "diagnostics.control",
+    "system.restart",
+    "system.reset"
+  ],
+  "operations": [
+    {
+      "id": 1,
+      "name": "state.get",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/state"
+    },
+    {
+      "id": 2,
+      "name": "capabilities.get",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/capabilities"
+    },
+    {
+      "id": 3,
+      "name": "operations.list",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "format": "uint64",
+            "minLength": 1,
+            "maxLength": 5
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/operations"
+    },
+    {
+      "id": 4,
+      "name": "config.get",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/config"
+    },
+    {
+      "id": 5,
+      "name": "config.schema",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "format": "uint64",
+            "minLength": 1,
+            "maxLength": 5
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/config/schema"
+    },
+    {
+      "id": 6,
+      "name": "jobs.list",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 7,
+      "name": "principals.list",
+      "scopes": [
+        "admin.clients"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 8,
+      "name": "bluetooth.peers.list",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/bluetooth/peers"
+    },
+    {
+      "id": 9,
+      "name": "wifi.scan.results",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/wifi/scans/current"
+    },
+    {
+      "id": 10,
+      "name": "wifi.profiles.list",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/wifi/profiles"
+    },
+    {
+      "id": 11,
+      "name": "imu.state",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/imu"
+    },
+    {
+      "id": 12,
+      "name": "battery.state",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 13,
+      "name": "power.state",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 14,
+      "name": "system.info",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 15,
+      "name": "audio.capabilities",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/audio/capabilities"
+    },
+    {
+      "id": 16,
+      "name": "audio.state",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/audio/state"
+    },
+    {
+      "id": 17,
+      "name": "speech.state",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/speech/state"
+    },
+    {
+      "id": 18,
+      "name": "firmware.state",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/firmware/state"
+    },
+    {
+      "id": 19,
+      "name": "firmware.releases",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/firmware/releases"
+    },
+    {
+      "id": 20,
+      "name": "recordings.list",
+      "scopes": [
+        "recording.read"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/recordings"
+    },
+    {
+      "id": 21,
+      "name": "selection.focus.get",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 22,
+      "name": "control.acquire",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "lifetime_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 3000
+          },
+          "producer": {
+            "type": "string",
+            "enum": [
+              "script",
+              "device_imu",
+              "device_touch",
+              "selection"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "state_sequence": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "state_sequence"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "acquire": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 23,
+      "name": "control.renew",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "state_sequence": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "state_sequence"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "renew": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 24,
+      "name": "control.release",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "safety": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 25,
+      "name": "session.close",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 26,
+      "name": "principals.revoke",
+      "scopes": [
+        "admin.clients"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "principal_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "principal_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 27,
+      "name": "mouse.move_relative",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "dx": {
+            "type": "integer",
+            "minimum": -127,
+            "maximum": 127
+          },
+          "dy": {
+            "type": "integer",
+            "minimum": -127,
+            "maximum": 127
+          }
+        },
+        "required": [
+          "dx",
+          "dy"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "script_movement": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 28,
+      "name": "mouse.click",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "button": {
+            "type": "string",
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "button"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 29,
+      "name": "mouse.scroll",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "wheel": {
+            "type": "integer",
+            "minimum": -127,
+            "maximum": 127
+          },
+          "horizontal": {
+            "type": "integer",
+            "minimum": -127,
+            "maximum": 127
+          }
+        },
+        "required": [
+          "wheel"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "script_movement": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 30,
+      "name": "mouse.drag.begin",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "button": {
+            "type": "string",
+            "enum": [
+              "left"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "deadman_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 1500
+          }
+        },
+        "required": [
+          "button"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 31,
+      "name": "mouse.drag.refresh",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "button": {
+            "type": "string",
+            "enum": [
+              "left"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "deadman_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 1500
+          }
+        },
+        "required": [
+          "button"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 32,
+      "name": "mouse.drag.end",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "button": {
+            "type": "string",
+            "enum": [
+              "left"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "button"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "safety": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 33,
+      "name": "keyboard.text.enqueue",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "ansi_text",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "sensitive": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false
+    },
+    {
+      "id": 34,
+      "name": "keyboard.key_tap",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "usage": {
+            "type": "integer",
+            "minimum": 4,
+            "maximum": 101
+          },
+          "modifiers": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
+        },
+        "required": [
+          "usage"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 35,
+      "name": "keyboard.shortcut",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "shortcut": {
+            "type": "string",
+            "enum": [
+              "copy",
+              "paste",
+              "undo",
+              "tab",
+              "escape",
+              "enter"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "shortcut"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 36,
+      "name": "mode.select",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "mouse",
+              "keyboard",
+              "audio"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 37,
+      "name": "input.motion.set",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 38,
+      "name": "input.transport.select",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "transport": {
+            "type": "string",
+            "enum": [
+              "bluetooth",
+              "usb"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "transport"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 39,
+      "name": "input.release_all",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "safety": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 40,
+      "name": "input.cancel",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "safety": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 41,
+      "name": "device.lock",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "locked": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "safety": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 42,
+      "name": "input.recover",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "transport": {
+            "type": "string",
+            "enum": [
+              "bluetooth",
+              "usb"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 43,
+      "name": "ui.navigate",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "overlay": {
+            "type": "string",
+            "enum": [
+              "none",
+              "modes",
+              "target",
+              "settings",
+              "wifi_networks",
+              "wifi_network",
+              "common_keys"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "page": {
+            "type": "string",
+            "enum": [
+              "home",
+              "connectivity",
+              "display",
+              "input",
+              "about",
+              "bluetooth",
+              "wifi"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "overlay"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 44,
+      "name": "ui.close",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 45,
+      "name": "ui.primary.activate",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 46,
+      "name": "ui.mode_panel.open",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 47,
+      "name": "selection.back",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 48,
+      "name": "selection.confirm",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 49,
+      "name": "preview.clear",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 50,
+      "name": "selection.activate",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cell": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8
+          },
+          "selection_revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "cell",
+          "selection_revision"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 51,
+      "name": "selection.focus.set",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "cell": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8
+          },
+          "selection_revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "cell",
+          "selection_revision"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 52,
+      "name": "selection.case.set",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "case": {
+            "type": "string",
+            "enum": [
+              "lower",
+              "upper"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "case"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 53,
+      "name": "selection.page.set",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "string",
+            "enum": [
+              "letters",
+              "symbols"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "page"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 54,
+      "name": "keyboard.submode.select",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "submode": {
+            "type": "string",
+            "enum": [
+              "motion",
+              "touch",
+              "spoken",
+              "shortcuts"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "submode"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 55,
+      "name": "preview.delete",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 64
+          },
+          "draft_revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "count",
+          "draft_revision"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 56,
+      "name": "preview.append",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 64,
+            "format": "ansi_text",
+            "minLength": 1
+          },
+          "draft_revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "text",
+          "draft_revision"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 57,
+      "name": "preview.send",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "draft_revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "draft_revision"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "initial_v1_supported": true,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 58,
+      "name": "touch.begin",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "gesture_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "surface": {
+            "type": "string",
+            "enum": [
+              "mouse_pad",
+              "keyboard_grid",
+              "ui"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 479
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 479
+          },
+          "dx": {
+            "type": "integer",
+            "minimum": -479,
+            "maximum": 479
+          },
+          "dy": {
+            "type": "integer",
+            "minimum": -479,
+            "maximum": 479
+          },
+          "deadman_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 1000
+          }
+        },
+        "required": [
+          "gesture_id"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "safety": false,
+      "script_movement": false,
+      "initial_v1_supported": true,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 59,
+      "name": "touch.move",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "gesture_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "surface": {
+            "type": "string",
+            "enum": [
+              "mouse_pad",
+              "keyboard_grid",
+              "ui"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 479
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 479
+          },
+          "dx": {
+            "type": "integer",
+            "minimum": -479,
+            "maximum": 479
+          },
+          "dy": {
+            "type": "integer",
+            "minimum": -479,
+            "maximum": 479
+          },
+          "deadman_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 1000
+          }
+        },
+        "required": [
+          "gesture_id"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "safety": false,
+      "script_movement": true,
+      "initial_v1_supported": true,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 60,
+      "name": "touch.end",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "gesture_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "surface": {
+            "type": "string",
+            "enum": [
+              "mouse_pad",
+              "keyboard_grid",
+              "ui"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 479
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 479
+          },
+          "dx": {
+            "type": "integer",
+            "minimum": -479,
+            "maximum": 479
+          },
+          "dy": {
+            "type": "integer",
+            "minimum": -479,
+            "maximum": 479
+          },
+          "deadman_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 1000
+          }
+        },
+        "required": [
+          "gesture_id"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": true,
+      "safety": false,
+      "script_movement": false,
+      "initial_v1_supported": true,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 61,
+      "name": "touch.cancel",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "gesture_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "surface": {
+            "type": "string",
+            "enum": [
+              "mouse_pad",
+              "keyboard_grid",
+              "ui"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 479
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 479
+          },
+          "dx": {
+            "type": "integer",
+            "minimum": -479,
+            "maximum": 479
+          },
+          "dy": {
+            "type": "integer",
+            "minimum": -479,
+            "maximum": 479
+          },
+          "deadman_ms": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 1000
+          }
+        },
+        "required": [
+          "gesture_id"
+        ],
+        "additionalProperties": false
+      },
+      "input": true,
+      "ui_context": false,
+      "safety": true,
+      "script_movement": false,
+      "initial_v1_supported": true,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 62,
+      "name": "imu.calibrate",
+      "scopes": [
+        "input.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 15000
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 63,
+      "name": "bluetooth.pairing.open",
+      "scopes": [
+        "connections.manage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 64,
+      "name": "bluetooth.pairing.close",
+      "scopes": [
+        "connections.manage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 65,
+      "name": "bluetooth.pairing.cancel_handshake",
+      "scopes": [
+        "connections.manage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 66,
+      "name": "bluetooth.disconnect",
+      "scopes": [
+        "connections.manage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 67,
+      "name": "bluetooth.bonds.forget_all",
+      "scopes": [
+        "connections.manage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 68,
+      "name": "bluetooth.bond.forget",
+      "scopes": [
+        "connections.manage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 69,
+      "name": "bluetooth.target.request",
+      "scopes": [
+        "connections.manage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300
+          },
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 70,
+      "name": "operation.confirm",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "digest": {
+            "type": "string",
+            "maxLength": 64,
+            "format": "sha256",
+            "minLength": 1
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "operation_id",
+          "digest",
+          "revision"
+        ],
+        "additionalProperties": false
+      },
+      "original_authority": true,
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 71,
+      "name": "operation.cancel",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "digest": {
+            "type": "string",
+            "maxLength": 64,
+            "format": "sha256",
+            "minLength": 1
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "operation_id",
+          "digest",
+          "revision"
+        ],
+        "additionalProperties": false
+      },
+      "original_authority": true,
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 72,
+      "name": "wifi.scan.start",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 73,
+      "name": "wifi.scan.cancel",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 74,
+      "name": "wifi.setup.start",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 75,
+      "name": "wifi.setup.stop",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 76,
+      "name": "wifi.storage.verify",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 77,
+      "name": "wifi.disconnect",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 78,
+      "name": "wifi.profile.forget",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "format": "id128"
+          }
+        },
+        "required": [
+          "profile_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 79,
+      "name": "wifi.selection.reserve",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "scan_generation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "format": "uint64"
+          },
+          "record_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31
+          }
+        },
+        "required": [
+          "scan_generation",
+          "record_index"
+        ],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 80,
+      "name": "wifi.selection.release",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "selection_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "format": "uint64"
+          }
+        },
+        "required": [
+          "selection_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 81,
+      "name": "wifi.join",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "ssid": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "ssid",
+            "minLength": 1
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 63,
+            "format": "passphrase",
+            "minLength": 1
+          },
+          "remember": {
+            "type": "boolean"
+          },
+          "scan_generation": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "record_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31
+          },
+          "selection_id": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "ssid",
+          "password",
+          "remember"
+        ],
+        "additionalProperties": false
+      },
+      "sensitive": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false
+    },
+    {
+      "id": 82,
+      "name": "haptics.test",
+      "scopes": [
+        "diagnostics.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "strength_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 83,
+      "name": "haptics.recover",
+      "scopes": [
+        "diagnostics.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "strength_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 84,
+      "name": "display.wake",
+      "scopes": [
+        "config.write"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 85,
+      "name": "display.sleep",
+      "scopes": [
+        "config.write"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 86,
+      "name": "audio.kind.select",
+      "scopes": [
+        "audio.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "voice",
+              "speaker"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 87,
+      "name": "audio.route.select",
+      "scopes": [
+        "audio.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string",
+            "enum": [
+              "local",
+              "hfp_hf",
+              "a2dp_sink",
+              "usb_uac"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "route"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 88,
+      "name": "audio.link.connect",
+      "scopes": [
+        "audio.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "route"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 89,
+      "name": "audio.link.disconnect",
+      "scopes": [
+        "audio.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "peer_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "route"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 90,
+      "name": "audio.enable.set",
+      "scopes": [
+        "audio.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "microphone",
+              "speaker"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "enabled",
+          "role"
+        ],
+        "additionalProperties": false
+      },
+      "conditional_safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 91,
+      "name": "audio.mute.set",
+      "scopes": [
+        "audio.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "muted": {
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "microphone",
+              "speaker"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "muted",
+          "role"
+        ],
+        "additionalProperties": false
+      },
+      "conditional_safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 92,
+      "name": "audio.microphone.enable",
+      "scopes": [
+        "audio.capture"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "additionalProperties": false
+      },
+      "conditional_safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 93,
+      "name": "audio.microphone.mute",
+      "scopes": [
+        "audio.capture"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "muted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "muted"
+        ],
+        "additionalProperties": false
+      },
+      "conditional_safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 94,
+      "name": "audio.speaker.enable",
+      "scopes": [
+        "audio.playback"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "additionalProperties": false
+      },
+      "conditional_safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 95,
+      "name": "audio.speaker.mute",
+      "scopes": [
+        "audio.playback"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "muted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "muted"
+        ],
+        "additionalProperties": false
+      },
+      "conditional_safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 96,
+      "name": "audio.capture.start",
+      "scopes": [
+        "audio.capture"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "local_microphone"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "sample_profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "activate_microphone": {
+            "type": "boolean"
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 28800
+          },
+          "byte_limit": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 8589934592
+          }
+        },
+        "required": [
+          "source",
+          "sample_profile",
+          "consent_id",
+          "duration_seconds",
+          "byte_limit"
+        ],
+        "additionalProperties": false
+      },
+      "privacy": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 97,
+      "name": "audio.capture.stop",
+      "scopes": [
+        "audio.capture"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 98,
+      "name": "audio.playback.start",
+      "scopes": [
+        "audio.playback"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "live_stream",
+              "recording"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "sample_profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3600
+          },
+          "byte_limit": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 67108864
+          }
+        },
+        "required": [
+          "source",
+          "sample_profile",
+          "duration_seconds",
+          "byte_limit"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 99,
+      "name": "audio.playback.stop",
+      "scopes": [
+        "audio.playback"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "session_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 100,
+      "name": "recording.start",
+      "scopes": [
+        "recording.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "local_microphone"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "format": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "sample_profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "storage": {
+            "type": "string",
+            "enum": [
+              "records_partition",
+              "nand"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1800
+          },
+          "byte_limit": {
+            "type": "integer",
+            "minimum": 65536,
+            "maximum": 33554432
+          },
+          "retention": {
+            "type": "object",
+            "properties": {
+              "policy": {
+                "type": "string",
+                "enum": [
+                  "expire_after"
+                ],
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "duration_seconds": {
+                "type": "integer",
+                "minimum": 3600,
+                "maximum": 2592000
+              }
+            },
+            "required": [
+              "policy",
+              "duration_seconds"
+            ],
+            "additionalProperties": false
+          },
+          "export_policy": {
+            "type": "string",
+            "enum": [
+              "none",
+              "owner_download"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "disconnect_policy": {
+            "type": "string",
+            "enum": [
+              "stop",
+              "continue_local"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "activate_microphone": {
+            "type": "boolean"
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "background_grant_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "source",
+          "format",
+          "sample_profile",
+          "storage",
+          "duration_seconds",
+          "byte_limit",
+          "retention",
+          "export_policy",
+          "disconnect_policy",
+          "consent_id"
+        ],
+        "additionalProperties": false
+      },
+      "privacy": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 101,
+      "name": "recording.stop",
+      "scopes": [
+        "recording.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "keep_partial",
+              "discard"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "recording_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "sensitive": false
+    },
+    {
+      "id": 102,
+      "name": "recording.cancel",
+      "scopes": [
+        "recording.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "keep_partial",
+              "discard"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "recording_id",
+          "disposition"
+        ],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "sensitive": false
+    },
+    {
+      "id": 103,
+      "name": "recording.delete",
+      "scopes": [
+        "recording.delete"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "keep_partial",
+              "discard"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "recording_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "sensitive": false
+    },
+    {
+      "id": 104,
+      "name": "recording.read",
+      "scopes": [
+        "recording.read"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "keep_partial",
+              "discard"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "recording_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "sensitive": false
+    },
+    {
+      "id": 105,
+      "name": "recordings.get",
+      "scopes": [
+        "recording.read"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "keep_partial",
+              "discard"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "recording_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "sensitive": false
+    },
+    {
+      "id": 106,
+      "name": "audio.playback.pause",
+      "scopes": [
+        "audio.playback"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "position_samples": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 107,
+      "name": "audio.playback.resume",
+      "scopes": [
+        "audio.playback"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "position_samples": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 108,
+      "name": "audio.playback.seek",
+      "scopes": [
+        "audio.playback"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "position_samples": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 109,
+      "name": "recording.pause",
+      "scopes": [
+        "recording.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "position_samples": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 110,
+      "name": "recording.resume",
+      "scopes": [
+        "recording.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "position_samples": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 111,
+      "name": "recording.export",
+      "scopes": [
+        "recording.export"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "recording_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "position_samples": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 112,
+      "name": "speech.listen.start",
+      "scopes": [
+        "audio.capture"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "candidate_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "profile",
+          "duration_seconds",
+          "consent_id"
+        ],
+        "additionalProperties": false
+      },
+      "privacy": true,
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 113,
+      "name": "speech.listen.stop",
+      "scopes": [
+        "audio.capture"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "candidate_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "privacy": false,
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 114,
+      "name": "speech.candidate.confirm",
+      "scopes": [
+        "audio.capture"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "candidate_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "privacy": false,
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 115,
+      "name": "speech.candidate.reject",
+      "scopes": [
+        "audio.capture"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "candidate_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "privacy": false,
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 116,
+      "name": "audio.test_tone",
+      "scopes": [
+        "diagnostics.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "level_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 80
+          },
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "privacy": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 117,
+      "name": "audio.loopback",
+      "scopes": [
+        "diagnostics.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "level_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 80
+          },
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "privacy": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 118,
+      "name": "audio.diagnostics",
+      "scopes": [
+        "diagnostics.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "level_percent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 80
+          },
+          "profile": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "consent_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "privacy": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 119,
+      "name": "firmware.check",
+      "scopes": [
+        "update.check"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "update_authority": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 120,
+      "name": "firmware.download",
+      "scopes": [
+        "update.stage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "release_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "format": "sha256"
+          },
+          "policy_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "format": "id128"
+          },
+          "policy_revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "format": "uint64"
+          },
+          "approval_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "format": "id128"
+          }
+        },
+        "required": [
+          "release_id",
+          "digest",
+          "policy_revision"
+        ],
+        "additionalProperties": false
+      },
+      "update_authority": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 121,
+      "name": "firmware.activate",
+      "scopes": [
+        "update.activate"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "format": "uint64"
+          },
+          "digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "format": "sha256"
+          },
+          "policy_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "format": "id128"
+          },
+          "policy_revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "format": "uint64"
+          },
+          "approval_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "format": "id128"
+          }
+        },
+        "required": [
+          "job_id",
+          "digest",
+          "policy_revision"
+        ],
+        "additionalProperties": false
+      },
+      "update_authority": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 122,
+      "name": "firmware.discard",
+      "scopes": [
+        "update.stage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "format": "uint64"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "additionalProperties": false
+      },
+      "update_authority": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 123,
+      "name": "update.policy.revoke",
+      "scopes": [
+        "admin.policy"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "policy_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "policy_id"
+        ],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 124,
+      "name": "events.subscribe",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 48,
+              "minLength": 1
+            },
+            "maxItems": 8
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 125,
+      "name": "events.unsubscribe",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 48,
+              "minLength": 1
+            },
+            "maxItems": 8
+          },
+          "cursor": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 126,
+      "name": "job.get",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "command_key": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "job_id": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "original_authority": true,
+      "read_only": true,
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "sensitive": false
+    },
+    {
+      "id": 127,
+      "name": "job.cancel",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "command_key": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "job_id": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "original_authority": true,
+      "read_only": false,
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "sensitive": false
+    },
+    {
+      "id": 128,
+      "name": "diagnostics.snapshot",
+      "scopes": [
+        "diagnostics.read"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60
+          },
+          "byte_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 32,
+              "minLength": 1
+            },
+            "maxItems": 8
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 129,
+      "name": "diagnostics.capture",
+      "scopes": [
+        "diagnostics.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60
+          },
+          "byte_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 32,
+              "minLength": 1
+            },
+            "maxItems": 8
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 130,
+      "name": "diagnostics.stop",
+      "scopes": [
+        "diagnostics.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60
+          },
+          "byte_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 32,
+              "minLength": 1
+            },
+            "maxItems": 8
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 131,
+      "name": "system.restart",
+      "scopes": [
+        "system.restart"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 132,
+      "name": "preferences.reset",
+      "scopes": [
+        "system.reset"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "group": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1
+          },
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "group"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 133,
+      "name": "device.factory_reset.request",
+      "scopes": [
+        "system.reset"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "confirmation_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          },
+          "retained_manifest_digest": {
+            "type": "string",
+            "maxLength": 64,
+            "format": "sha256",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "retained_manifest_digest"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 134,
+      "name": "target.observe",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "max_age_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1500
+          }
+        },
+        "required": [
+          "target_id",
+          "max_age_ms"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": false,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 135,
+      "name": "config.stage",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "patch": {
+            "type": "object",
+            "properties": {
+              "display.theme": {
+                "type": "string",
+                "enum": [
+                  "light",
+                  "dark"
+                ],
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "display.brightness_percent": {
+                "type": "integer",
+                "minimum": 10,
+                "maximum": 100,
+                "multipleOf": 10
+              },
+              "display.idle_timeout_seconds": {
+                "type": "integer",
+                "enum": [
+                  0,
+                  60,
+                  300,
+                  600,
+                  1800
+                ]
+              },
+              "haptics.enabled": {
+                "type": "boolean"
+              },
+              "keyboard.shortcut_modifier": {
+                "type": "string",
+                "enum": [
+                  "ctrl",
+                  "command"
+                ],
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "input.preferred_transport": {
+                "type": "string",
+                "enum": [
+                  "bluetooth",
+                  "usb"
+                ],
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "touch.tap_to_click": {
+                "type": "boolean"
+              },
+              "bluetooth.device_name": {
+                "type": "string",
+                "maxLength": 18,
+                "format": "device_name",
+                "minLength": 1
+              },
+              "touch.gain_divisor": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  4,
+                  8
+                ]
+              },
+              "input.motion_enabled": {
+                "type": "boolean"
+              },
+              "input.producer": {
+                "type": "string",
+                "enum": [
+                  "script",
+                  "device_imu",
+                  "device_touch",
+                  "selection"
+                ],
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "keyboard.preview_limit_chars": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64
+              },
+              "pointer.gain_hid_per_degree": {
+                "type": "number",
+                "minimum": 0.25,
+                "maximum": 100,
+                "multipleOf": 0.01
+              },
+              "pointer.deadzone_dps": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10,
+                "multipleOf": 0.001
+              },
+              "pointer.filter_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "multipleOf": 0.001
+              },
+              "selection.cell_degrees": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 45
+              },
+              "selection.hysteresis_degrees": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 22.5
+              },
+              "keyboard.layout_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "keyboard.cell_map_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "imu.axis_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "imu.sample_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "imu.calibration_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "touch.scroll_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "buttons.mapping_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "haptics.pattern_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "wifi.reconnect_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "wifi.scan_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "bluetooth.pairing_window_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 300
+              },
+              "wifi.enabled": {
+                "type": "boolean"
+              },
+              "wifi.scan_result_limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 32
+              },
+              "wifi.setup_window_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 600
+              },
+              "wifi.profiles": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "profile_id": {
+                      "type": "string",
+                      "maxLength": 32,
+                      "format": "id128",
+                      "minLength": 1
+                    },
+                    "ssid": {
+                      "type": "string",
+                      "maxLength": 32,
+                      "format": "ssid",
+                      "minLength": 1
+                    },
+                    "password": {
+                      "type": "string",
+                      "maxLength": 63,
+                      "format": "passphrase",
+                      "minLength": 1
+                    },
+                    "keep_secret": {
+                      "type": "boolean"
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "security": {
+                      "type": "string",
+                      "enum": [
+                        "wpa2_minimum"
+                      ],
+                      "maxLength": 64,
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "profile_id",
+                    "ssid",
+                    "enabled",
+                    "security"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 8
+              },
+              "wifi.profile_order": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 32,
+                  "format": "id128",
+                  "minLength": 1
+                },
+                "maxItems": 8
+              },
+              "work.policy": {
+                "type": "string",
+                "enum": [
+                  "input_first",
+                  "balanced",
+                  "management_first"
+                ],
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "work.quiet_interval_ms": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 5000
+              },
+              "audio.route": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "audio.profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "audio.microphone_gain_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "audio.sample": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "audio.channels": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "audio.codec": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "audio.mix": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "audio.aec_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "speech.profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "speech.vocabulary": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "recording.format": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "recording.sample_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "audio.output_volume_percent": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "audio.microphone_muted": {
+                "type": "boolean"
+              },
+              "audio.speaker_muted": {
+                "type": "boolean"
+              },
+              "audio.enabled": {
+                "type": "object",
+                "properties": {
+                  "microphone": {
+                    "type": "boolean"
+                  },
+                  "speaker": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [],
+                "additionalProperties": false
+              },
+              "recording.duration_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1800
+              },
+              "recording.byte_limit": {
+                "type": "integer",
+                "minimum": 65536,
+                "maximum": 33554432
+              },
+              "recording.storage": {
+                "type": "string",
+                "enum": [
+                  "volatile",
+                  "nand"
+                ],
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "recording.retention": {
+                "type": "object",
+                "properties": {
+                  "policy": {
+                    "type": "string",
+                    "enum": [
+                      "expire_after"
+                    ],
+                    "maxLength": 64,
+                    "minLength": 1
+                  },
+                  "duration_seconds": {
+                    "type": "integer",
+                    "minimum": 3600,
+                    "maximum": 2592000
+                  }
+                },
+                "required": [
+                  "policy",
+                  "duration_seconds"
+                ],
+                "additionalProperties": false
+              },
+              "recording.export_policy": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "owner_download"
+                ],
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "lan.enabled": {
+                "type": "boolean"
+              },
+              "lan.listener_profile": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "lan.principals": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "lan.scopes": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "capture.consent_policy": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "update.policy": {
+                "type": "string",
+                "maxLength": 32,
+                "minLength": 1
+              },
+              "update.source": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "update.channel": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "update.download_budget": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "diagnostics.level": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "diagnostics.period": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "diagnostics.bytes": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "diagnostics.duration": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "remote.lease_profile": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "remote.deadman_profile": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "remote.events_rate_hz": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "pointer.gain_x_hid_per_degree": {
+                "type": "number",
+                "minimum": 0.25,
+                "maximum": 100,
+                "multipleOf": 0.01
+              },
+              "pointer.gain_y_hid_per_degree": {
+                "type": "number",
+                "minimum": 0.25,
+                "maximum": 100,
+                "multipleOf": 0.01
+              },
+              "pointer.invert_x": {
+                "type": "boolean"
+              },
+              "pointer.invert_y": {
+                "type": "boolean"
+              },
+              "pointer.freeze_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "durable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "patch"
+        ],
+        "additionalProperties": false
+      },
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 136,
+      "name": "config.apply",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "transaction_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "transaction_id"
+        ],
+        "additionalProperties": false
+      },
+      "original_authority": true,
+      "safety": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 137,
+      "name": "config.cancel",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "transaction_id": {
+            "type": "string",
+            "maxLength": 32,
+            "format": "id128",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "transaction_id"
+        ],
+        "additionalProperties": false
+      },
+      "original_authority": true,
+      "safety": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 138,
+      "name": "config.reset",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 64,
+              "minLength": 1
+            },
+            "maxItems": 16
+          },
+          "durable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "keys"
+        ],
+        "additionalProperties": false
+      },
+      "original_authority": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
+    },
+    {
+      "id": 139,
+      "name": "capture.grants.list",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/capture/grants"
+    },
+    {
+      "id": 140,
+      "name": "clock.get",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/clock"
+    },
+    {
+      "id": 141,
+      "name": "session.heartbeat",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/sessions/current"
+    },
+    {
+      "id": 142,
+      "name": "wifi.profile.save",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "format": "id128"
+          },
+          "ssid": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "format": "ssid"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "format": "passphrase"
+          },
+          "keep_password": {
+            "type": "boolean"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "join": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ssid",
+          "keep_password",
+          "enabled",
+          "join"
+        ],
+        "additionalProperties": false
+      },
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": true
+    },
+    {
+      "id": 143,
+      "name": "wifi.profile.join",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "profile_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "format": "id128"
+          }
+        },
+        "required": [
+          "profile_id"
+        ],
+        "additionalProperties": false
+      },
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 144,
+      "name": "wifi.profiles.reorder",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "profile_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "format": "id128"
+            },
+            "maxItems": 8
+          }
+        },
+        "required": [
+          "profile_ids"
+        ],
+        "additionalProperties": false
+      },
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 145,
+      "name": "wifi.profiles.forget_all",
+      "scopes": [
+        "wifi.configure"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "acknowledge_unknown_store": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "acknowledge_unknown_store"
+        ],
+        "additionalProperties": false
+      },
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 146,
+      "name": "firmware.cancel",
+      "scopes": [
+        "update.stage"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "format": "uint64"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "additionalProperties": false
+      },
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false,
+      "initial_v1_supported": true
+    },
+    {
+      "id": 147,
+      "name": "firmware.policy.get",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "resource": "/api/v1/firmware/policy",
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "read_only": true,
+      "sensitive": false,
+      "initial_v1_supported": true
+    }
+  ],
+  "configuration": [
+    {
+      "key": "display.theme",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "light",
+          "dark"
+        ],
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "config.write",
+      "default": "dark",
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "display.brightness_percent",
+      "schema": {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 100,
+        "multipleOf": 10
+      },
+      "scope": "config.write",
+      "default": 50,
+      "apply_policy": "now",
+      "persistence": "durable",
+      "unit": "percent"
+    },
+    {
+      "key": "display.idle_timeout_seconds",
+      "schema": {
+        "type": "integer",
+        "enum": [
+          0,
+          60,
+          300,
+          600,
+          1800
+        ]
+      },
+      "scope": "config.write",
+      "default": 300,
+      "apply_policy": "now",
+      "persistence": "durable",
+      "unit": "seconds"
+    },
+    {
+      "key": "haptics.enabled",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "config.write",
+      "default": true,
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "keyboard.shortcut_modifier",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "ctrl",
+          "command"
+        ],
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "config.write",
+      "default": "ctrl",
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "input.preferred_transport",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "bluetooth",
+          "usb"
+        ],
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "input.configure",
+      "default": "bluetooth",
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "touch.tap_to_click",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "input.configure",
+      "default": true,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "bluetooth.device_name",
+      "schema": {
+        "type": "string",
+        "maxLength": 18,
+        "format": "device_name",
+        "minLength": 1
+      },
+      "scope": "connections.manage",
+      "default": "ESP32-INPUT",
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "touch.gain_divisor",
+      "schema": {
+        "type": "integer",
+        "enum": [
+          1,
+          4,
+          8
+        ]
+      },
+      "scope": "config.write",
+      "default": 1,
+      "apply_policy": "release",
+      "persistence": "volatile"
+    },
+    {
+      "key": "input.motion_enabled",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "input.control",
+      "default": false,
+      "apply_policy": "release",
+      "persistence": "volatile"
+    },
+    {
+      "key": "input.producer",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "script",
+          "device_imu",
+          "device_touch",
+          "selection"
+        ],
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "input.control",
+      "default": "script",
+      "apply_policy": "release",
+      "persistence": "volatile"
+    },
+    {
+      "key": "keyboard.preview_limit_chars",
+      "schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 64
+      },
+      "scope": "input.configure",
+      "default": 64,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "pointer.gain_hid_per_degree",
+      "schema": {
+        "type": "number",
+        "minimum": 0.25,
+        "maximum": 100,
+        "multipleOf": 0.01
+      },
+      "scope": "input.configure",
+      "default": 4,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "pointer.deadzone_dps",
+      "schema": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 10,
+        "multipleOf": 0.001
+      },
+      "scope": "input.configure",
+      "default": 0.5,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "pointer.filter_seconds",
+      "schema": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "multipleOf": 0.001
+      },
+      "scope": "input.configure",
+      "default": 0.03,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "selection.cell_degrees",
+      "schema": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 45
+      },
+      "scope": "input.configure",
+      "default": 6,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "selection.hysteresis_degrees",
+      "schema": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 22.5
+      },
+      "scope": "input.configure",
+      "default": 1,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "keyboard.layout_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "input.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "keyboard.cell_map_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "input.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "imu.axis_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "input.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "imu.sample_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "input.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "imu.calibration_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "input.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "touch.scroll_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "input.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "buttons.mapping_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "input.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "haptics.pattern_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "config.write",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "wifi.reconnect_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "wifi.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "wifi.scan_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "wifi.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "bluetooth.pairing_window_seconds",
+      "schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 300
+      },
+      "scope": "connections.manage",
+      "default": 120,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "wifi.enabled",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "wifi.configure",
+      "default": true,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "wifi.scan_result_limit",
+      "schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 32
+      },
+      "scope": "wifi.configure",
+      "default": 32,
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "wifi.setup_window_seconds",
+      "schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600
+      },
+      "scope": "wifi.configure",
+      "default": 600,
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "wifi.profiles",
+      "schema": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "profile_id": {
+              "type": "string",
+              "maxLength": 32,
+              "format": "id128",
+              "minLength": 1
+            },
+            "ssid": {
+              "type": "string",
+              "maxLength": 32,
+              "format": "ssid",
+              "minLength": 1
+            },
+            "password": {
+              "type": "string",
+              "maxLength": 63,
+              "format": "passphrase",
+              "minLength": 1
+            },
+            "keep_secret": {
+              "type": "boolean"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "security": {
+              "type": "string",
+              "enum": [
+                "wpa2_minimum"
+              ],
+              "maxLength": 64,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "profile_id",
+            "ssid",
+            "enabled",
+            "security"
+          ],
+          "additionalProperties": false
+        },
+        "maxItems": 8
+      },
+      "scope": "wifi.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable",
+      "sensitive": true
+    },
+    {
+      "key": "wifi.profile_order",
+      "schema": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 32,
+          "format": "id128",
+          "minLength": 1
+        },
+        "maxItems": 8
+      },
+      "scope": "wifi.configure",
+      "default": null,
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "work.policy",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "input_first",
+          "balanced",
+          "management_first"
+        ],
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "admin.policy",
+      "default": "input_first",
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "work.quiet_interval_ms",
+      "schema": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 5000
+      },
+      "scope": "admin.policy",
+      "default": 500,
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.route",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.control",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.control",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.microphone_gain_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.capture",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.sample",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.control",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.channels",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.control",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.codec",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.control",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.mix",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.control",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.aec_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.control",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "speech.profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.capture",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "speech.vocabulary",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "audio.capture",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "recording.format",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "recording.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "recording.sample_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "recording.configure",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.output_volume_percent",
+      "schema": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100
+      },
+      "scope": "audio.control",
+      "default": 30,
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "audio.microphone_muted",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "audio.control",
+      "default": true,
+      "apply_policy": "now",
+      "persistence": "volatile"
+    },
+    {
+      "key": "audio.speaker_muted",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "audio.control",
+      "default": true,
+      "apply_policy": "now",
+      "persistence": "volatile"
+    },
+    {
+      "key": "audio.enabled",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "microphone": {
+            "type": "boolean"
+          },
+          "speaker": {
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "scope": "audio.control",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "volatile"
+    },
+    {
+      "key": "recording.duration_seconds",
+      "schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1800
+      },
+      "scope": "recording.configure",
+      "default": 300,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "recording.byte_limit",
+      "schema": {
+        "type": "integer",
+        "minimum": 65536,
+        "maximum": 33554432
+      },
+      "scope": "recording.configure",
+      "default": 16777216,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "recording.storage",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "volatile",
+          "nand"
+        ],
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "recording.configure",
+      "default": "volatile",
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "recording.retention",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "type": "string",
+            "enum": [
+              "expire_after"
+            ],
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 3600,
+            "maximum": 2592000
+          }
+        },
+        "required": [
+          "policy",
+          "duration_seconds"
+        ],
+        "additionalProperties": false
+      },
+      "scope": "recording.configure",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "recording.export_policy",
+      "schema": {
+        "type": "string",
+        "enum": [
+          "none",
+          "owner_download"
+        ],
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "recording.configure",
+      "default": "none",
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "lan.enabled",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "admin.policy",
+      "default": false,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "lan.listener_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "admin.policy",
+      "default": null,
+      "apply_policy": "link",
+      "persistence": "durable"
+    },
+    {
+      "key": "lan.principals",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "admin.clients",
+      "default": null,
+      "apply_policy": "now",
+      "persistence": "durable",
+      "protected_record_reference": true
+    },
+    {
+      "key": "lan.scopes",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "admin.clients",
+      "default": null,
+      "apply_policy": "now",
+      "persistence": "durable",
+      "protected_record_reference": true
+    },
+    {
+      "key": "capture.consent_policy",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "admin.privacy",
+      "default": null,
+      "apply_policy": "now",
+      "persistence": "durable",
+      "protected_record_reference": true
+    },
+    {
+      "key": "update.policy",
+      "schema": {
+        "type": "string",
+        "maxLength": 32,
+        "minLength": 1
+      },
+      "scope": "admin.policy",
+      "default": null,
+      "apply_policy": "now",
+      "persistence": "durable",
+      "protected_record_reference": true
+    },
+    {
+      "key": "update.source",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "admin.policy",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "update.channel",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "admin.policy",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "update.download_budget",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "admin.policy",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "diagnostics.level",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "diagnostics.control",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "diagnostics.period",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "diagnostics.control",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "diagnostics.bytes",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "diagnostics.control",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "diagnostics.duration",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "diagnostics.control",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "remote.lease_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "admin.policy",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "remote.deadman_profile",
+      "schema": {
+        "type": "string",
+        "maxLength": 64,
+        "minLength": 1
+      },
+      "scope": "admin.policy",
+      "default": null,
+      "apply_policy": "next_job",
+      "persistence": "durable"
+    },
+    {
+      "key": "remote.events_rate_hz",
+      "schema": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+      },
+      "scope": "admin.policy",
+      "default": 10,
+      "apply_policy": "now",
+      "persistence": "durable"
+    },
+    {
+      "key": "pointer.gain_x_hid_per_degree",
+      "schema": {
+        "type": "number",
+        "minimum": 0.25,
+        "maximum": 100,
+        "multipleOf": 0.01
+      },
+      "scope": "input.configure",
+      "default": 4,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "pointer.gain_y_hid_per_degree",
+      "schema": {
+        "type": "number",
+        "minimum": 0.25,
+        "maximum": 100,
+        "multipleOf": 0.01
+      },
+      "scope": "input.configure",
+      "default": 4,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "pointer.invert_x",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "input.configure",
+      "default": false,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "pointer.invert_y",
+      "schema": {
+        "type": "boolean"
+      },
+      "scope": "input.configure",
+      "default": false,
+      "apply_policy": "release",
+      "persistence": "durable"
+    },
+    {
+      "key": "pointer.freeze_ms",
+      "schema": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000
+      },
+      "scope": "input.configure",
+      "default": 150,
+      "apply_policy": "release",
+      "persistence": "durable"
+    }
+  ]
+}

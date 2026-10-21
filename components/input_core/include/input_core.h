@@ -23,6 +23,7 @@ void input_set_owner(input_state_t *s, input_owner_t owner);
 /* Also call when replacing a target without an intervening disconnect. */
 void input_invalidate(input_state_t *s);
 bool input_set_gyro(input_state_t *s, bool enabled);
+bool input_set_gyro_owned(input_state_t *s, input_owner_t source, bool enabled);
 /* ACK only after transport has accepted zero mouse AND keyboard reports. */
 bool input_ack_release(input_state_t *s, uint64_t epoch);
 bool input_can_emit(const input_state_t *s, uint64_t epoch,

@@ -1,8 +1,11 @@
 # Composite input firmware
 
-This development build uses the official Mosaico BSP and ESP-IDF commit pinned in [toolchain.lock.json](../toolchain.lock.json). The current integration adds selectable Bluetooth/USB mouse and keyboard input to the three-mode LVGL product layout. Audio and spoken-letter controls remain explicitly unavailable. Implementation, reviewed builds and actual device/host evidence are distinguished in [validation](../docs/validation.md).
+This development build uses the official Mosaico BSP and ESP-IDF commit pinned in [toolchain.lock.json](../toolchain.lock.json). The current integration adds selectable Bluetooth/USB mouse and keyboard input to the three-mode LVGL product layout. Audio, spoken-letter, native connection management and authenticated LAN control are integrated through separate owners. Implementation, reviewed builds and actual device/host evidence are distinguished in [validation](../docs/validation.md).
 
 ## Implemented boundary
+
+See the [combined checklist](../docs/delivery-checklist.md) for all module paths and
+their deferred physical acceptance. Historical device results do not qualify this image.
 
 - A stable report-only HID service: keyboard ID 1 (8 input bytes, 1 LED output byte) and mouse ID 2 (4 input bytes).
 - LE Secure Connections bonding, encryption, both notification subscriptions, suspension, congestion and connection generation checks before output. Just Works bonding has no MITM authentication. A visible two-minute window admits new peers; existing saved peers can reconnect outside it. Legacy bonds without an exported SC encryption key are rejected and preserved, not silently erased.
@@ -14,11 +17,11 @@ This development build uses the official Mosaico BSP and ESP-IDF commit pinned i
 - AI single-click toggles mouse motion or confirms keyboard selection; double-click opens the mode chooser. A 900 ms hold locks or unlocks. Clicks wait through a 280 ms double-click decision window. Button-down and touch freeze motion; unlock never resumes old input.
 - Discrete haptic feedback with a persistent enable switch. Continuous movement is silent; motor faults disable capability.
 - A versioned settings record for theme, brightness, display timeout, haptics, shortcut modifier and preferred input transport, with coalesced writes and visible storage failures. Schema-1 records migrate to Bluetooth preference without a boot-time rewrite.
-- Actual battery measurements and Wi-Fi status. Local protected hotspot provisioning, one remembered station network, bounded reconnect and explicit forgetting are separate from the future remote-control API.
-- USB CDC diagnostics and composite HID share the official managed TinyUSB stack. There is no serial command parser, remote wakeup or automatic reset/download action. USB HID integration and real-host acceptance must pass their own gates.
+- Actual battery measurements and Wi-Fi status. Native scan/password entry joins an existing LAN; eight saved network profiles support priority, explicit selection and bounded reconnect. A recovery access point is secondary and requires explicit activation. The authenticated control server runs on the LAN station connection.
+- USB CDC diagnostics, composite HID and UAC2 share the official managed TinyUSB stack. A bounded commissioning parser is admitted only inside an explicit local window. Remote restart is a separately reviewed, authenticated operation with maintenance and reply barriers; there is no automatic download-mode action. Real-host acceptance remains a separate gate.
 - System transport switching cancels pending work and drains old-host releases before changing selection, or permits explicit switching when the old host is already disconnected without claiming release delivery. A suspended/stalled connected host blocks switching until recovery or timeout. Cable removal never redirects input automatically.
 - Default five-minute display blanking with 1 / 5 / 10 / 30 minutes and Off, adjustable brightness, and whole-gesture wake consumption. Radios and enabled mouse control remain active; hidden keyboard selection pauses.
-- Periodic health logs and a coordinator task watchdog. Audio, speech and Wi-Fi remote input are not enabled. Real motion axis direction, calibration drift and physical touch usability still need device acceptance.
+- Periodic health logs and a coordinator task watchdog. Audio, speech and remote input have bounded worker queues, cancellation and independent grants. Real motion direction, calibration drift, audio quality and physical touch usability still need device acceptance.
 
 Bluetooth Battery and Device Information services are not implemented in this minimal transport; the local UI's battery/About pages are separate. Full HOGP profile compliance and host-family interoperability are not claimed. The initial SDK capacity is 15 remembered peers, with one active BLE HID connection. Additional pairing is refused at capacity without evicting existing peers. The UI exposes current-peer identity only when actually known.
 
@@ -40,7 +43,7 @@ The setup helper installs the pinned SDK under `.tools/esp-idf` and its tools un
 
 Build outputs are in `firmware/build/`. First-party source lives in `main/`, portable components in `../components/`, and all Mosaico BSP calls in `main/board_mosaico.c`. See [porting](../docs/porting.md) for adapter boundaries.
 
-The Mosaico configuration uses its documented 16 MiB flash and a 4 MiB factory application partition. There is no OTA update path in this build. Reproduce a clean configuration after deliberate defaults changes by preserving the existing ignored `firmware/sdkconfig` outside the firmware directory before rebuilding. Do not silently discard a contributor's custom configuration.
+The Mosaico profile uses 16 MiB flash with two 6 MiB application slots, a 3 MiB speech-model partition, 64 KiB control storage and 832 KiB recording storage. The layout identity is `esp32s31-16m-ota6-v3`. Signed OTA writes only the inactive compatible application slot. Existing factory-layout devices need a separately authorized migration; an ordinary OTA update rejects an incompatible layout and cannot migrate it. Reproduce a clean configuration after deliberate defaults changes by preserving the existing ignored `firmware/sdkconfig` outside the firmware directory before rebuilding. Do not silently discard a contributor's custom configuration.
 
 ### Display memory policy
 

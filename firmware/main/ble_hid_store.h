@@ -238,6 +238,46 @@ static esp_err_t subscription_save(const uint8_t fingerprint[SUBSCRIPTION_DIGEST
     return error;
 }
 
+static esp_err_t subscription_forget_one(const uint8_t fingerprint[SUBSCRIPTION_DIGEST_LENGTH])
+{
+    unsigned int count = 0;
+    for (unsigned int i = 0; i < subscriptions.count; ++i) {
+        if (memcmp(subscriptions.records[i].fingerprint, fingerprint, SUBSCRIPTION_DIGEST_LENGTH) != 0)
+            subscriptions.candidate[count++] = subscriptions.records[i];
+    }
+    if (count == subscriptions.count) return ESP_OK;
+    uint8_t *blob = subscriptions.blob;
+    blob[0] = 'H'; blob[1] = 'C'; blob[2] = 1; blob[3] = (uint8_t)count;
+    for (unsigned int i = 0; i < count; ++i) {
+        uint8_t *record = blob + 4U + i * SUBSCRIPTION_RECORD_LENGTH;
+        memcpy(record, subscriptions.candidate[i].fingerprint, SUBSCRIPTION_DIGEST_LENGTH);
+        record[SUBSCRIPTION_DIGEST_LENGTH] = subscriptions.candidate[i].mask;
+    }
+    nvs_handle_t handle;
+    esp_err_t error = nvs_open("hid_cccd", NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        error = nvs_set_blob(handle, "subscriptions", blob, 4U + (size_t)count * SUBSCRIPTION_RECORD_LENGTH);
+        if (error == ESP_OK) error = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (error == ESP_OK) {
+        uint8_t verified[SUBSCRIPTION_BLOB_LENGTH];
+        size_t length = sizeof(verified), expected = 4U + (size_t)count * SUBSCRIPTION_RECORD_LENGTH;
+        error = nvs_open("hid_cccd", NVS_READONLY, &handle);
+        if (error == ESP_OK) {
+            error = nvs_get_blob(handle, "subscriptions", verified, &length);
+            nvs_close(handle);
+            if (error == ESP_OK && (length != expected || memcmp(blob, verified, expected) != 0)) error = ESP_ERR_INVALID_STATE;
+        }
+    }
+    if (error == ESP_OK) {
+        memset(subscriptions.records, 0, sizeof(subscriptions.records));
+        memcpy(subscriptions.records, subscriptions.candidate, count * sizeof(*subscriptions.records));
+        subscriptions.count = (uint8_t)count;
+    }
+    return error;
+}
+
 static esp_err_t subscription_forget_all(void)
 {
     const uint8_t empty[] = {'H', 'C', 1, 0};

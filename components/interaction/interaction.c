@@ -3,6 +3,9 @@
 #include <math.h>
 #include <string.h>
 
+static void invalidate_reference(interaction_t *m);
+static void reset_calibration(interaction_t *m);
+
 static const char *const letters[INTERACTION_GRID_CELLS] = {
     "ABCD", "EFGH", "IJKL", "MNOP", "QRST", "UVWX", "YZ01", "2345", "6789"
 };
@@ -37,6 +40,8 @@ static void refresh_grid(interaction_t *m)
 
 static void reset_motion(interaction_t *m)
 {
+    m->view.motion_status |= INTERACTION_MOTION_OUTPUT_SUPPRESSED;
+    m->view.motion_block_reason = INTERACTION_MOTION_BLOCK_CONTROL;
     input_motion_reset(&m->pointer_motion);
     memset(m->filtered, 0, sizeof m->filtered);
     memset(m->touch_carry, 0, sizeof m->touch_carry);
@@ -71,10 +76,10 @@ static void reset_grid(interaction_t *m)
     reset_focus(m);
 }
 
-static uint64_t after_freeze(uint64_t now_ms)
+static uint64_t after_freeze(const interaction_t *m, uint64_t now_ms)
 {
-    return now_ms > UINT64_MAX - INTERACTION_FREEZE_MS ? UINT64_MAX :
-        now_ms + INTERACTION_FREEZE_MS;
+    return now_ms > UINT64_MAX - m->config.freeze_ms ? UINT64_MAX :
+        now_ms + m->config.freeze_ms;
 }
 
 static bool observe_clock(interaction_t *m, uint64_t now_ms)
@@ -83,21 +88,29 @@ static bool observe_clock(interaction_t *m, uint64_t now_ms)
     m->clock_seen = true;
     m->now_ms = now_ms;
     if (!valid) {
+        invalidate_reference(m);
+        reset_calibration(m);
+        m->sample_seen = false;
         m->view.motion_enabled = false;
         m->click_pending = false;
         m->second_click = false;
         m->press_consumed = true;
         m->hold_emitted = m->view.button_down;
-        m->freeze_until_ms = after_freeze(now_ms);
+        m->freeze_until_ms = after_freeze(m, now_ms);
         reset_motion(m);
     }
     return valid;
 }
 
-static bool editable(const interaction_t *m)
+static bool valid_source(input_owner_t source)
 {
-    return m->view.mode == INPUT_KEYBOARD && !m->control.locked &&
-        m->control.owner == INPUT_LOCAL && !m->send_open && !m->view.menu_open;
+    return source == INPUT_LOCAL || source == INPUT_REMOTE;
+}
+
+static bool editable_by(const interaction_t *m, input_owner_t source)
+{
+    return valid_source(source) && m->view.mode == INPUT_KEYBOARD && !m->control.locked &&
+        m->control.owner == source && !m->send_open && !m->view.menu_open;
 }
 
 static void draft_edited(interaction_t *m)
@@ -111,12 +124,14 @@ void interaction_init(interaction_t *m)
     *m = (interaction_t){0};
     input_init(&m->control);
     m->config = (interaction_config_t){
-        .pointer_gain = 4, .deadzone_dps = .5f, .filter_seconds = .03f,
-        .selector_cell_degrees = 6, .selector_hysteresis_degrees = 1
+        .pointer_gain_x = 4, .pointer_gain_y = 4, .freeze_ms = INTERACTION_FREEZE_MS,
+        .deadzone_dps = .5f, .filter_seconds = .03f, .selector_cell_degrees = 6,
+        .selector_hysteresis_degrees = 1, .selector_axis_x = 1, .selector_axis_y = 2
     };
     m->view.mode = INPUT_MOUSE;
     m->view.keyboard_motion = true;
     m->view.touch_divisor = 1;
+    interaction_touch_defaults(&m->touch_config);
     reset_grid(m);
     interaction_calibrate(m);
 }
@@ -124,6 +139,14 @@ void interaction_init(interaction_t *m)
 void interaction_get_view(const interaction_t *m, interaction_view_t *view)
 {
     *view = m->view;
+    if (!m->view.motion_enabled || !m->output_ready || m->control.locked ||
+        m->control.owner != m->motion_source || m->view.touch_active || m->view.menu_open ||
+        m->view.haptic_active || m->view.button_down ||
+        (m->touch.active && m->touch.source == m->control.owner) || m->now_ms < m->freeze_until_ms) {
+        view->motion_status |= INTERACTION_MOTION_OUTPUT_SUPPRESSED;
+        if (view->motion_block_reason == INTERACTION_MOTION_BLOCK_NONE)
+            view->motion_block_reason = INTERACTION_MOTION_BLOCK_CONTROL;
+    }
 }
 
 void interaction_sync(interaction_t *m, const input_state_t *state,
@@ -138,11 +161,13 @@ void interaction_sync(interaction_t *m, const input_state_t *state,
     m->output_ready = output_ready && state->connected && !state->locked &&
         !state->release_pending;
     if (boundary) {
+        (void)interaction_touch_cancel(m);
+        m->touch.latest_gesture = 0;
         m->view.motion_enabled = false;
         m->click_pending = false;
         m->second_click = false;
         m->press_consumed = m->view.button_down;
-        m->freeze_until_ms = after_freeze(now_ms);
+        m->freeze_until_ms = after_freeze(m, now_ms);
         if (m->send_open) {
             m->view.sending = false;
             m->view.send_settling = true;
@@ -153,7 +178,12 @@ void interaction_sync(interaction_t *m, const input_state_t *state,
 
 bool interaction_configure(interaction_t *m, const interaction_config_t *c)
 {
-    if (!c || !isfinite(c->pointer_gain) || c->pointer_gain < 0 || c->pointer_gain > 100 ||
+    if (!c || !isfinite(c->pointer_gain_x) || c->pointer_gain_x < .25f || c->pointer_gain_x > 100 ||
+        !isfinite(c->pointer_gain_y) || c->pointer_gain_y < .25f || c->pointer_gain_y > 100 ||
+        c->freeze_ms > 1000 ||
+        c->selector_axis_x == 0 || c->selector_axis_x < -3 || c->selector_axis_x > 3 ||
+        c->selector_axis_y == 0 || c->selector_axis_y < -3 || c->selector_axis_y > 3 ||
+        c->selector_axis_x == c->selector_axis_y || c->selector_axis_x == -c->selector_axis_y ||
         !isfinite(c->deadzone_dps) || c->deadzone_dps < 0 || c->deadzone_dps > 10 ||
         !isfinite(c->filter_seconds) || c->filter_seconds < 0 || c->filter_seconds > 1 ||
         !isfinite(c->selector_cell_degrees) || c->selector_cell_degrees < 1 ||
@@ -167,8 +197,15 @@ bool interaction_configure(interaction_t *m, const interaction_config_t *c)
 
 bool interaction_set_motion(interaction_t *m, bool enabled)
 {
+    return interaction_set_motion_owned(m, INPUT_LOCAL, enabled);
+}
+
+bool interaction_set_motion_owned(interaction_t *m, input_owner_t source, bool enabled)
+{
+    if (!valid_source(source)) return false;
     if (enabled && (m->view.mode != INPUT_MOUSE || !m->output_ready ||
-        m->control.owner != INPUT_LOCAL || m->view.menu_open)) return false;
+        m->control.owner != source || m->view.menu_open)) return false;
+    m->motion_source = source;
     m->view.motion_enabled = enabled;
     reset_motion(m);
     return true;
@@ -186,7 +223,7 @@ void interaction_set_suppressed(interaction_t *m, bool touch, bool menu,
     (void)observe_clock(m, now_ms);
     if (m->view.touch_active != touch || m->view.menu_open != menu ||
         m->view.haptic_active != haptic) {
-        m->freeze_until_ms = after_freeze(now_ms);
+        m->freeze_until_ms = after_freeze(m, now_ms);
         reset_motion(m);
     }
     if (menu && !m->view.menu_open) {
@@ -204,6 +241,11 @@ void interaction_freeze_until(interaction_t *m, uint64_t deadline_ms)
     if (deadline_ms <= m->freeze_until_ms) return;
     m->freeze_until_ms = deadline_ms;
     reset_motion(m);
+}
+
+void interaction_freeze_after(interaction_t *m, uint64_t event_ms)
+{
+    interaction_freeze_until(m, after_freeze(m, event_ms));
 }
 
 bool interaction_set_touch_divisor(interaction_t *m, unsigned int divisor)
@@ -226,9 +268,16 @@ static int8_t touch_axis(float *carry, float delta, unsigned int divisor)
 
 input_delta_t interaction_touch_move(interaction_t *m, float dx, float dy)
 {
+    return interaction_touch_move_owned(m, INPUT_LOCAL, dx, dy);
+}
+
+input_delta_t interaction_touch_move_owned(interaction_t *m, input_owner_t source, float dx, float dy)
+{
     if (!isfinite(dx) || !isfinite(dy) || fabsf(dx) > 4096 || fabsf(dy) > 4096 ||
-        !m->view.touch_active || m->view.mode != INPUT_MOUSE || !m->output_ready ||
-        m->control.owner != INPUT_LOCAL || m->view.menu_open || m->view.button_down) {
+        !valid_source(source) ||
+        !(source == INPUT_LOCAL ? m->view.touch_active : m->touch.active && m->touch.source == source) ||
+        m->view.mode != INPUT_MOUSE || !m->output_ready ||
+        m->control.owner != source || m->view.menu_open || m->view.button_down) {
         memset(m->touch_carry, 0, sizeof m->touch_carry);
         return (input_delta_t){0};
     }
@@ -236,89 +285,320 @@ input_delta_t interaction_touch_move(interaction_t *m, float dx, float dy)
                            touch_axis(&m->touch_carry[1], dy, m->view.touch_divisor)};
 }
 
-bool interaction_append(interaction_t *m, unsigned char c)
+void interaction_touch_defaults(interaction_touch_config_t *config)
+{
+    if (config) *config = (interaction_touch_config_t){
+        .tap_to_click = true, .tap_max_ms = 250, .double_window_ms = 280,
+        .contact_timeout_ms = 1000, .drag_max_ms = 30000,
+        .tap_slop_px = 8, .double_slop_px = 16
+    };
+}
+
+static interaction_touch_result_t touch_none(bool motion)
+{
+    return (interaction_touch_result_t){.allow_motion = motion};
+}
+
+static interaction_touch_result_t touch_effect(interaction_t *m, interaction_touch_effect_t effect)
+{
+    interaction_touch_state_t *t = &m->touch;
+    if (t->serial >= UINT64_MAX - 1) {
+        t->exhausted = true;
+        if (effect != INTERACTION_TOUCH_RELEASE_REQUIRED) {
+            t->active = t->candidate = t->second = t->have_tap = false;
+            t->pending = touch_none(false);
+            return t->held ? touch_effect(m, INTERACTION_TOUCH_RELEASE_REQUIRED) : touch_none(false);
+        }
+        t->serial = UINT64_MAX;
+    } else ++t->serial;
+    t->pending = (interaction_touch_result_t){.effect = effect, .token = t->serial};
+    return t->pending;
+}
+
+interaction_touch_result_t interaction_touch_cancel(interaction_t *m)
+{
+    if (!m) return touch_none(false);
+    interaction_touch_state_t *t = &m->touch;
+    const bool release = t->held || t->pending.effect != INTERACTION_TOUCH_NONE;
+    t->active = t->candidate = t->second = t->have_tap = false;
+    if (t->pending.effect == INTERACTION_TOUCH_RELEASE_REQUIRED) return t->pending;
+    t->pending = touch_none(false);
+    return release ? touch_effect(m, INTERACTION_TOUCH_RELEASE_REQUIRED) : touch_none(false);
+}
+
+bool interaction_touch_configure(interaction_t *m, const interaction_touch_config_t *c)
+{
+    if (!m || !c || c->tap_max_ms < 50 || c->tap_max_ms > 500 ||
+        c->double_window_ms < 100 || c->double_window_ms > 500 ||
+        c->contact_timeout_ms < 100 || c->contact_timeout_ms > 2000 ||
+        c->drag_max_ms < 1000 || c->drag_max_ms > 60000 ||
+        !isfinite(c->tap_slop_px) || c->tap_slop_px < 2 || c->tap_slop_px > 24 ||
+        !isfinite(c->double_slop_px) || c->double_slop_px < c->tap_slop_px ||
+        c->double_slop_px > 48) return false;
+    const interaction_touch_config_t *old = &m->touch_config;
+    if (old->tap_to_click == c->tap_to_click && old->tap_max_ms == c->tap_max_ms &&
+        old->double_window_ms == c->double_window_ms && old->contact_timeout_ms == c->contact_timeout_ms &&
+        old->drag_max_ms == c->drag_max_ms && old->tap_slop_px == c->tap_slop_px &&
+        old->double_slop_px == c->double_slop_px) return true;
+    (void)interaction_touch_cancel(m);
+    m->touch_config = *c;
+    return true;
+}
+
+static bool touch_context(const interaction_t *m, uint64_t revision)
+{
+    return m->control.connected && !m->control.locked && valid_source(m->touch.source) &&
+        m->control.owner == m->touch.source &&
+        m->control.mode == INPUT_MOUSE && !m->view.menu_open && !m->view.button_down &&
+        m->touch.epoch == m->control.epoch && m->touch.ui_revision == revision;
+}
+
+interaction_touch_result_t interaction_touch_tick(interaction_t *m,
+    uint64_t now_ms, uint64_t current_ui_revision)
+{
+    if (!m) return touch_none(false);
+    interaction_touch_state_t *t = &m->touch;
+    const bool backwards = t->now_seen && now_ms < t->observed_ms;
+    t->observed_ms = now_ms; t->now_seen = true;
+    if (backwards) {
+        t->clock_seen = false;
+        return interaction_touch_cancel(m);
+    }
+    if ((t->active || t->have_tap || t->held) && !touch_context(m, current_ui_revision))
+        return interaction_touch_cancel(m);
+    if ((t->active || t->held) && (now_ms < t->contact_ms ||
+        now_ms - t->contact_ms >= m->touch_config.contact_timeout_ms ||
+        ((t->second || t->held) && (now_ms < t->started_ms ||
+         now_ms - t->started_ms >= m->touch_config.drag_max_ms))))
+        return interaction_touch_cancel(m);
+    if (t->pending.effect == INTERACTION_TOUCH_CLICK &&
+        (now_ms < t->tap_ms || now_ms - t->tap_ms >= m->touch_config.contact_timeout_ms))
+        return interaction_touch_cancel(m);
+    return t->pending.effect != INTERACTION_TOUCH_NONE ? t->pending : touch_none(false);
+}
+
+interaction_touch_result_t interaction_touch_admit(interaction_t *m, uint64_t token, bool accepted)
+{
+    if (!m || !token || m->touch.pending.effect == INTERACTION_TOUCH_NONE ||
+        token != m->touch.pending.token) return touch_none(false);
+    interaction_touch_state_t *t = &m->touch;
+    const interaction_touch_effect_t effect = t->pending.effect;
+    if (effect == INTERACTION_TOUCH_RELEASE_REQUIRED && !accepted) return t->pending;
+    t->pending = touch_none(false);
+    if (effect == INTERACTION_TOUCH_LEFT_UP && !accepted) return interaction_touch_cancel(m);
+    if (effect == INTERACTION_TOUCH_LEFT_DOWN) {
+        if (accepted) t->held = true;
+        else { t->active = t->candidate = t->second = t->have_tap = false; }
+    } else if (effect == INTERACTION_TOUCH_LEFT_UP || effect == INTERACTION_TOUCH_RELEASE_REQUIRED) {
+        t->held = false;
+    } else if (effect == INTERACTION_TOUCH_CLICK) t->have_tap = accepted;
+    return touch_none(false);
+}
+
+bool interaction_touch_holding(const interaction_t *m)
+{
+    return m && (m->touch.held || m->touch.pending.effect == INTERACTION_TOUCH_LEFT_DOWN ||
+        m->touch.pending.effect == INTERACTION_TOUCH_LEFT_UP ||
+        m->touch.pending.effect == INTERACTION_TOUCH_RELEASE_REQUIRED);
+}
+
+interaction_touch_result_t interaction_touch_input(interaction_t *m,
+    const interaction_touch_event_t *event, uint64_t now_ms,
+    uint64_t current_ui_revision, bool tap_allowed)
+{
+    return interaction_touch_input_owned(m, INPUT_LOCAL, event, now_ms, current_ui_revision, tap_allowed);
+}
+
+interaction_touch_result_t interaction_touch_input_owned(interaction_t *m, input_owner_t source,
+    const interaction_touch_event_t *event, uint64_t now_ms,
+    uint64_t current_ui_revision, bool tap_allowed)
+{
+    if (!m || !event) return touch_none(false);
+    interaction_touch_state_t *t = &m->touch;
+    if (!valid_source(source)) return touch_none(false);
+    if (m->control.owner != source)
+        return t->source == source ? interaction_touch_cancel(m) : touch_none(false);
+    if (!event->gesture || event->phase < INTERACTION_TOUCH_BEGIN || event->phase > INTERACTION_TOUCH_CANCEL)
+        return interaction_touch_cancel(m);
+    /* Old gestures cannot cancel or refresh a newer gesture, even with old time. */
+    if (event->phase == INTERACTION_TOUCH_BEGIN) {
+        if (event->gesture <= t->latest_gesture) return touch_none(false);
+    } else if (!t->active || event->gesture != t->gesture) return touch_none(false);
+    interaction_touch_result_t pending = interaction_touch_tick(m, now_ms, current_ui_revision);
+    if (pending.effect != INTERACTION_TOUCH_NONE) return pending;
+    if (!t->active && event->phase != INTERACTION_TOUCH_BEGIN) return touch_none(false);
+    if (event->epoch != m->control.epoch || event->ui_revision != current_ui_revision ||
+        event->timestamp_ms > now_ms || now_ms - event->timestamp_ms >= m->touch_config.contact_timeout_ms ||
+        (t->clock_seen && event->timestamp_ms < t->last_ms) ||
+        !isfinite(event->x) || !isfinite(event->y) || fabsf(event->x) > 4096 || fabsf(event->y) > 4096) {
+        if (event->phase == INTERACTION_TOUCH_BEGIN) t->latest_gesture = event->gesture;
+        return interaction_touch_cancel(m);
+    }
+    t->last_ms = event->timestamp_ms; t->clock_seen = true;
+    if (event->phase == INTERACTION_TOUCH_CANCEL) return interaction_touch_cancel(m);
+    if (event->phase == INTERACTION_TOUCH_BEGIN) {
+        t->latest_gesture = event->gesture;
+        if (t->active || t->exhausted) return interaction_touch_cancel(m);
+        const bool second = t->have_tap && tap_allowed && m->touch_config.tap_to_click &&
+            event->timestamp_ms >= t->tap_ms &&
+            event->timestamp_ms - t->tap_ms <= m->touch_config.double_window_ms &&
+            hypotf(event->x - t->tap_x, event->y - t->tap_y) <= m->touch_config.double_slop_px;
+        t->source = source; t->gesture = event->gesture; t->epoch = event->epoch; t->ui_revision = event->ui_revision;
+        t->started_ms = t->contact_ms = event->timestamp_ms;
+        t->start_x = t->x = event->x; t->start_y = t->y = event->y;
+        t->active = true; t->candidate = tap_allowed && m->touch_config.tap_to_click;
+        t->second = second; t->have_tap = false;
+        if (!touch_context(m, current_ui_revision) || !m->output_ready) return interaction_touch_cancel(m);
+        if (second) return touch_effect(m, INTERACTION_TOUCH_LEFT_DOWN);
+        return touch_none(false);
+    }
+    if (!touch_context(m, current_ui_revision)) return interaction_touch_cancel(m);
+    if (!tap_allowed || !m->touch_config.tap_to_click) {
+        if (t->held || t->second) return interaction_touch_cancel(m);
+        t->candidate = t->have_tap = false;
+    }
+    if (event->phase == INTERACTION_TOUCH_MOVE) { t->x += event->x; t->y += event->y; }
+    else { t->x = event->x; t->y = event->y; }
+    if (!isfinite(t->x) || !isfinite(t->y) ||
+        hypotf(t->x - t->start_x, t->y - t->start_y) > m->touch_config.tap_slop_px)
+        t->candidate = false;
+    t->contact_ms = event->timestamp_ms;
+    if (event->phase == INTERACTION_TOUCH_END) {
+        t->active = false;
+        if (t->held) return touch_effect(m, INTERACTION_TOUCH_LEFT_UP);
+        const bool click = t->candidate && m->output_ready &&
+            event->timestamp_ms - t->started_ms <= m->touch_config.tap_max_ms;
+        t->candidate = t->second = false;
+        if (click) {
+            t->tap_ms = event->timestamp_ms; t->tap_x = t->x; t->tap_y = t->y;
+            return touch_effect(m, INTERACTION_TOUCH_CLICK);
+        }
+        return touch_none(false);
+    }
+    return touch_none(event->phase == INTERACTION_TOUCH_MOVE && m->output_ready);
+}
+
+static bool append_character(interaction_t *m, unsigned char c)
 {
     if (m->view.lowercase) c = lower(c);
     input_key_report_t report;
-    if (!editable(m) || m->view.preview_length >= INTERACTION_PREVIEW_CAPACITY ||
-        !input_ascii_report(c, &report)) return false;
+    if (m->view.preview_length >= INTERACTION_PREVIEW_CAPACITY || !input_ascii_report(c, &report)) return false;
     m->view.preview[m->view.preview_length++] = (char)c;
     m->view.preview[m->view.preview_length] = '\0';
-    draft_edited(m);
-    reset_grid(m);
+    draft_edited(m); reset_grid(m);
     return true;
+}
+
+static bool confirm_cell(interaction_t *m)
+{
+    if (m->view.focus >= INTERACTION_GRID_CELLS || !m->view.cells[m->view.focus][0]) return false;
+    if (m->view.group < 0) {
+        m->view.group = (int)m->view.focus; refresh_grid(m); reset_focus(m); return true;
+    }
+    return append_character(m, (unsigned char)m->view.cells[m->view.focus][0]);
+}
+
+bool interaction_edit_owned(interaction_t *m, input_owner_t source, const interaction_edit_t *edit)
+{
+    if (!edit || !editable_by(m, source)) return false;
+    switch (edit->kind) {
+    case INTERACTION_EDIT_ACTIVATE:
+    case INTERACTION_EDIT_FOCUS:
+        if (edit->cell >= INTERACTION_GRID_CELLS || !m->view.cells[edit->cell][0]) return false;
+        if (edit->kind == INTERACTION_EDIT_ACTIVATE && m->view.group >= 0 &&
+            m->view.preview_length >= INTERACTION_PREVIEW_CAPACITY) return false;
+        m->view.focus = edit->cell;
+        if (edit->kind == INTERACTION_EDIT_ACTIVATE) return confirm_cell(m);
+        reset_motion(m); return true;
+    case INTERACTION_EDIT_CONFIRM: return confirm_cell(m);
+    case INTERACTION_EDIT_BACK: reset_grid(m); return true;
+    case INTERACTION_EDIT_CASE:
+        m->view.lowercase = edit->lowercase; refresh_grid(m); return true;
+    case INTERACTION_EDIT_PAGE:
+        if (edit->page != INTERACTION_LETTERS && edit->page != INTERACTION_SYMBOLS) return false;
+        m->view.page = edit->page; reset_grid(m); return true;
+    case INTERACTION_EDIT_APPEND:
+        if (!edit->text || !edit->length || edit->length > INTERACTION_PREVIEW_CAPACITY - m->view.preview_length)
+            return false;
+        for (size_t i = 0; i < edit->length; ++i) {
+            input_key_report_t report;
+            if (!input_ascii_report((unsigned char)edit->text[i], &report)) return false;
+        }
+        for (size_t i = 0; i < edit->length; ++i) (void)append_character(m, (unsigned char)edit->text[i]);
+        return true;
+    case INTERACTION_EDIT_DELETE:
+        if (!edit->length || edit->length > m->view.preview_length) return false;
+        m->view.preview_length -= edit->length; m->view.preview[m->view.preview_length] = '\0';
+        draft_edited(m); return true;
+    case INTERACTION_EDIT_CLEAR:
+        m->view.preview_length = 0; m->view.preview[0] = '\0';
+        draft_edited(m); reset_grid(m); return true;
+    default: return false;
+    }
+}
+
+bool interaction_append(interaction_t *m, unsigned char c)
+{
+    const char character = (char)c;
+    const interaction_edit_t edit = {.kind = INTERACTION_EDIT_APPEND, .text = &character, .length = 1};
+    return interaction_edit_owned(m, INPUT_LOCAL, &edit);
 }
 
 bool interaction_confirm(interaction_t *m)
 {
-    if (!editable(m) || m->view.focus >= INTERACTION_GRID_CELLS ||
-        m->view.cells[m->view.focus][0] == '\0') return false;
-    if (m->view.group < 0) {
-        m->view.group = (int)m->view.focus;
-        refresh_grid(m);
-        reset_focus(m);
-        return true;
-    }
-    return interaction_append(m, (unsigned char)m->view.cells[m->view.focus][0]);
+    const interaction_edit_t edit = {.kind = INTERACTION_EDIT_CONFIRM};
+    return interaction_edit_owned(m, INPUT_LOCAL, &edit);
 }
 
 bool interaction_select_cell(interaction_t *m, unsigned int cell)
 {
-    if (!editable(m) || cell >= INTERACTION_GRID_CELLS || !m->view.cells[cell][0]) return false;
-    m->view.focus = cell;
-    return interaction_confirm(m);
+    const interaction_edit_t edit = {.kind = INTERACTION_EDIT_ACTIVATE, .cell = cell};
+    return interaction_edit_owned(m, INPUT_LOCAL, &edit);
 }
 
 void interaction_back(interaction_t *m)
 {
-    if (editable(m)) reset_grid(m);
+    const interaction_edit_t edit = {.kind = INTERACTION_EDIT_BACK};
+    (void)interaction_edit_owned(m, INPUT_LOCAL, &edit);
 }
 
 bool interaction_set_page(interaction_t *m, interaction_page_t page)
 {
-    if (!editable(m) || (page != INTERACTION_LETTERS && page != INTERACTION_SYMBOLS)) return false;
-    m->view.page = page;
-    reset_grid(m);
-    return true;
+    const interaction_edit_t edit = {.kind = INTERACTION_EDIT_PAGE, .page = page};
+    return interaction_edit_owned(m, INPUT_LOCAL, &edit);
 }
 
 bool interaction_set_lowercase(interaction_t *m, bool lowercase)
 {
-    if (!editable(m)) return false;
-    m->view.lowercase = lowercase;
-    refresh_grid(m);
-    return true;
+    const interaction_edit_t edit = {.kind = INTERACTION_EDIT_CASE, .lowercase = lowercase};
+    return interaction_edit_owned(m, INPUT_LOCAL, &edit);
 }
 
 bool interaction_delete(interaction_t *m)
 {
-    if (!editable(m) || m->view.preview_length == 0) return false;
-    m->view.preview[--m->view.preview_length] = '\0';
-    draft_edited(m);
-    return true;
+    const interaction_edit_t edit = {.kind = INTERACTION_EDIT_DELETE, .length = 1};
+    return interaction_edit_owned(m, INPUT_LOCAL, &edit);
 }
 
 bool interaction_clear(interaction_t *m)
 {
-    if (!editable(m)) return false;
-    m->view.preview_length = 0;
-    m->view.preview[0] = '\0';
-    draft_edited(m);
-    reset_grid(m);
-    return true;
+    const interaction_edit_t edit = {.kind = INTERACTION_EDIT_CLEAR};
+    return interaction_edit_owned(m, INPUT_LOCAL, &edit);
 }
 
 uint64_t interaction_send_begin(interaction_t *m)
 {
-    if (!editable(m) || !m->output_ready || !m->view.preview_length ||
+    return interaction_send_begin_owned(m, INPUT_LOCAL);
+}
+
+uint64_t interaction_send_begin_owned(interaction_t *m, input_owner_t source)
+{
+    if (!editable_by(m, source) || !m->output_ready || !m->view.preview_length ||
         m->view.send_token == UINT64_MAX) return 0;
     ++m->view.send_token;
-    m->send_epoch = m->control.epoch;
-    m->send_open = true;
-    m->view.sending = true;
-    m->view.send_settling = false;
-    m->view.send_total = m->view.preview_length;
-    m->view.send_accepted = 0;
+    m->send_epoch = m->control.epoch; m->send_open = true;
+    m->view.sending = true; m->view.send_settling = false;
+    m->view.send_total = m->view.preview_length; m->view.send_accepted = 0;
     reset_motion(m);
     return m->view.send_token;
 }
@@ -368,7 +648,7 @@ unsigned int interaction_button_update(interaction_t *m, bool down, uint64_t now
     }
     if (down == m->view.button_down) return events;
     m->view.button_down = down;
-    m->freeze_until_ms = after_freeze(now_ms);
+    m->freeze_until_ms = after_freeze(m, now_ms);
     reset_motion(m);
     if (down) {
         m->second_click = m->click_pending;
@@ -403,14 +683,148 @@ static void reset_calibration(interaction_t *m)
     memset(m->calibration_m2, 0, sizeof m->calibration_m2);
 }
 
+static float dot3(const float a[3], const float b[3])
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static bool normalize3(float v[3])
+{
+    const float norm = sqrtf(dot3(v, v));
+    if (!isfinite(norm) || norm < .0001f) return false;
+    for (size_t i = 0; i < 3; ++i) v[i] /= norm;
+    return true;
+}
+
+/* A world-fixed vector rotates oppositely to the body. Rodrigues propagation
+ * keeps finite rotations stable at the maximum accepted sample interval. */
+static void propagate3(float v[3], const float gyro[3], float dt)
+{
+    const float speed = sqrtf(dot3(gyro, gyro));
+    if (speed < .00001f || dt <= 0) return;
+    const float axis[] = {gyro[0] / speed, gyro[1] / speed, gyro[2] / speed};
+    const float angle = speed * dt * .017453292519943295f;
+    const float c = cosf(angle), s = sinf(angle), projection = dot3(axis, v);
+    const float cross[] = {axis[1] * v[2] - axis[2] * v[1],
+                           axis[2] * v[0] - axis[0] * v[2],
+                           axis[0] * v[1] - axis[1] * v[0]};
+    for (size_t i = 0; i < 3; ++i)
+        v[i] = v[i] * c - cross[i] * s + axis[i] * projection * (1 - c);
+}
+
+static void invalidate_reference(interaction_t *m)
+{
+    m->gravity_ready = false;
+    m->gravity_predicted = false;
+    m->gravity_acquire_samples = 0;
+    m->accel_seen = false;
+    m->geometry_ready = false;
+    m->geometry_acquire_us = 0;
+    m->view.motion_status &= (uint32_t)INTERACTION_MOTION_CALIBRATED;
+    m->view.motion_status |= INTERACTION_MOTION_OUTPUT_SUPPRESSED;
+    m->view.motion_block_reason = INTERACTION_MOTION_BLOCK_REFERENCE;
+}
+
+static void motion_status(interaction_t *m, interaction_motion_block_t reason, bool limited)
+{
+    m->view.motion_status = (m->view.calibrated ? INTERACTION_MOTION_CALIBRATED : 0U) |
+        (m->gravity_ready ? INTERACTION_MOTION_GRAVITY_READY : 0U) |
+        (m->gravity_ready && m->gravity_predicted ? INTERACTION_MOTION_GRAVITY_PREDICTED : 0U) |
+        (limited ? INTERACTION_MOTION_GEOMETRY_LIMITED : 0U) |
+        (reason != INTERACTION_MOTION_BLOCK_NONE ? INTERACTION_MOTION_OUTPUT_SUPPRESSED : 0U);
+    m->view.motion_block_reason = reason;
+}
+
+static bool update_reference(interaction_t *m, const interaction_imu_sample_t *sample,
+                             const float gyro[3], float dt)
+{
+    float accel[] = {sample->ax_g, sample->ay_g, sample->az_g};
+    const float norm = sqrtf(dot3(accel, accel));
+    if (m->view.haptic_active) {
+        m->gravity_acquire_samples = 0;
+        m->accel_seen = false;
+        if (!m->gravity_ready) return false;
+        if (sample->timestamp_us - m->gravity_trusted_us > 250000) {
+            invalidate_reference(m);
+            return false;
+        }
+        propagate3(m->gravity, gyro, dt);
+        if (!normalize3(m->gravity)) { invalidate_reference(m); return false; }
+        m->gravity_predicted = true;
+        return true;
+    }
+    if (norm < .25f || norm > 2.5f) {
+        invalidate_reference(m);
+        return false;
+    }
+    float expected[] = {m->previous_accel[0], m->previous_accel[1], m->previous_accel[2]};
+    propagate3(expected, gyro, dt);
+    const float change[] = {accel[0] - expected[0], accel[1] - expected[1], accel[2] - expected[2]};
+    const bool gentle = !m->accel_seen || (dt > 0 && sqrtf(dot3(change, change)) <= 3 * dt);
+    memcpy(m->previous_accel, accel, sizeof accel);
+    m->accel_seen = true;
+    const bool near_one_g = fabsf(norm - 1) <= .08f;
+    if (!m->gravity_ready) {
+        const float deviation[] = {accel[0] - m->acquire_accel[0],
+            accel[1] - m->acquire_accel[1], accel[2] - m->acquire_accel[2]};
+        const bool still = near_one_g && gentle && fabsf(gyro[0]) <= 5 &&
+            fabsf(gyro[1]) <= 5 && fabsf(gyro[2]) <= 5;
+        if (!still) { m->gravity_acquire_samples = 0; return false; }
+        if (!m->gravity_acquire_samples || sqrtf(dot3(deviation, deviation)) > .03f) {
+            memcpy(m->acquire_accel, accel, sizeof accel);
+            m->gravity_acquire_us = sample->timestamp_us;
+            m->gravity_acquire_samples = 1;
+            return false;
+        }
+        ++m->gravity_acquire_samples;
+        if (m->gravity_acquire_samples < 8 || sample->timestamp_us - m->gravity_acquire_us < 100000)
+            return false;
+        if (!normalize3(accel)) return false;
+        memcpy(m->gravity, accel, sizeof accel);
+        m->gravity_ready = true;
+        m->gravity_predicted = false;
+        m->gravity_trusted_us = sample->timestamp_us;
+        m->geometry_ready = sqrtf(fmaxf(0, 1 - accel[0] * accel[0])) >= .35f;
+        return true;
+    }
+    propagate3(m->gravity, gyro, dt);
+    if (!normalize3(m->gravity)) { invalidate_reference(m); return false; }
+    for (size_t i = 0; i < 3; ++i) accel[i] /= norm;
+    /* Magnitude alone cannot identify lateral acceleration near one g. Check
+     * its innovation against gyro prediction, and gyro-compensated jerk. */
+    const bool trusted = near_one_g && gentle && dot3(accel, m->gravity) >= .939692621f;
+    if (trusted) {
+        const float alpha = 1 - expf(-dt / .5f);
+        for (size_t i = 0; i < 3; ++i) m->gravity[i] += alpha * (accel[i] - m->gravity[i]);
+        if (!normalize3(m->gravity)) { invalidate_reference(m); return false; }
+        m->gravity_trusted_us = sample->timestamp_us;
+    } else if (sample->timestamp_us - m->gravity_trusted_us > 250000) {
+        invalidate_reference(m);
+        return false;
+    }
+    m->gravity_predicted = !trusted;
+    return true;
+}
+
 void interaction_calibrate(interaction_t *m)
 {
     m->view.calibrating = true;
     m->view.calibrated = false;
     m->view.motion_enabled = false;
     m->sample_seen = false;
+    invalidate_reference(m);
+    m->view.motion_status &= ~(uint32_t)INTERACTION_MOTION_CALIBRATED;
     reset_calibration(m);
     reset_motion(m);
+}
+
+void interaction_calibration_cancel(interaction_t *m)
+{
+    m->view.calibrating = false; m->view.calibrated = false; m->view.motion_enabled = false;
+    m->sample_seen = false;
+    memset(m->bias, 0, sizeof m->bias);
+    reset_calibration(m); invalidate_reference(m); reset_motion(m);
+    motion_status(m, INTERACTION_MOTION_BLOCK_CALIBRATION, false);
 }
 
 static void calibrate_sample(interaction_t *m, const interaction_imu_sample_t *s)
@@ -448,6 +862,16 @@ static void calibrate_sample(interaction_t *m, const interaction_imu_sample_t *s
     memcpy(m->bias, m->calibration_mean, sizeof m->bias);
     m->view.calibrating = false;
     m->view.calibrated = true;
+    m->gravity[0] = s->ax_g / norm;
+    m->gravity[1] = s->ay_g / norm;
+    m->gravity[2] = s->az_g / norm;
+    memcpy(m->previous_accel, accel, sizeof accel);
+    m->accel_seen = true;
+    m->gravity_ready = true;
+    m->gravity_predicted = false;
+    m->gravity_trusted_us = s->timestamp_us;
+    m->geometry_ready = sqrtf(fmaxf(0, 1 - m->gravity[0] * m->gravity[0])) >= .35f;
+    motion_status(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
     reset_motion(m);
 }
 
@@ -491,15 +915,42 @@ static void move_focus(interaction_t *m, float x, float y, float dt)
     }
 }
 
+static float selected_rate(const float gyro[3], int8_t axis)
+{
+    const int index = axis < 0 ? -axis - 1 : axis - 1;
+    return gyro[index] * (axis < 0 ? -1.0f : 1.0f);
+}
+
+static input_delta_t blocked_motion(interaction_t *m, interaction_motion_block_t reason,
+                                    bool limited)
+{
+    reset_motion(m);
+    motion_status(m, reason, limited);
+    return (input_delta_t){0};
+}
+
 input_delta_t interaction_motion_sample(interaction_t *m, const interaction_imu_sample_t *s)
 {
+    return interaction_motion_sample_owned(m, INPUT_LOCAL, s);
+}
+
+input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t source,
+                                              const interaction_imu_sample_t *s)
+{
+    if (!valid_source(source)) return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
+    if (!s) {
+        invalidate_reference(m);
+        m->sample_seen = false;
+        reset_calibration(m);
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
+    }
     const float values[] = {s->gx_dps, s->gy_dps, s->gz_dps, s->ax_g, s->ay_g, s->az_g};
     for (size_t i = 0; i < 6; ++i) {
-        if (!isfinite(values[i]) || fabsf(values[i]) > (i < 3 ? 2000 : 16)) {
-            reset_motion(m);
+        if (!isfinite(values[i]) || fabsf(values[i]) >= (i < 3 ? 2000 : 16)) {
+            invalidate_reference(m);
             reset_calibration(m);
             m->sample_seen = false;
-            return (input_delta_t){0};
+            return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
         }
     }
     const bool first = !m->sample_seen;
@@ -507,33 +958,79 @@ input_delta_t interaction_motion_sample(interaction_t *m, const interaction_imu_
     m->sample_seen = true;
     m->sample_us = s->timestamp_us;
     if (!first && (s->timestamp_us <= previous || s->timestamp_us - previous > 50000)) {
-        reset_motion(m);
+        invalidate_reference(m);
         reset_calibration(m);
-        return (input_delta_t){0};
+        m->sample_seen = false;
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
     }
     if (m->view.calibrating) {
         calibrate_sample(m, s);
-        return (input_delta_t){0};
+        return blocked_motion(m, m->view.calibrating ? INTERACTION_MOTION_BLOCK_CALIBRATION :
+                              INTERACTION_MOTION_BLOCK_CONTROL, false);
     }
-    if (first || !m->view.calibrated || m->control.locked || m->control.owner != INPUT_LOCAL ||
-        m->view.touch_active || m->view.menu_open || m->view.haptic_active || m->view.button_down ||
+    if (!m->view.calibrated)
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_CALIBRATION, false);
+    const float dt = first ? 0 : (float)(s->timestamp_us - previous) / 1000000.0f;
+    const float gyro[] = {s->gx_dps - m->bias[0], s->gy_dps - m->bias[1], s->gz_dps - m->bias[2]};
+    const bool had_reference = m->gravity_ready;
+    const bool reference = update_reference(m, s, gyro, dt);
+    if (first || !m->view.calibrated || m->control.locked || m->control.owner != source ||
+        m->view.touch_active || (m->touch.active && m->touch.source == source) ||
+        m->view.menu_open || m->view.haptic_active || m->view.button_down ||
         (m->view.mode == INPUT_KEYBOARD && m->click_pending) ||
         s->timestamp_us / 1000 < m->freeze_until_ms) {
-        reset_motion(m);
-        return (input_delta_t){0};
+        return blocked_motion(m, !m->view.calibrated ? INTERACTION_MOTION_BLOCK_CALIBRATION :
+                              INTERACTION_MOTION_BLOCK_CONTROL, false);
     }
-    const float dt = (float)(s->timestamp_us - previous) / 1000000.0f;
-    const float rates[] = {s->gx_dps - m->bias[0], s->gy_dps - m->bias[1]};
-    const float alpha = m->config.filter_seconds == 0 ? 1 : dt / (m->config.filter_seconds + dt);
+    float rates[2];
+    if (m->view.mode == INPUT_KEYBOARD) {
+        rates[0] = selected_rate(gyro, m->config.selector_axis_x);
+        rates[1] = selected_rate(gyro, m->config.selector_axis_y);
+    } else {
+        if (!reference || !had_reference)
+            return blocked_motion(m, INTERACTION_MOTION_BLOCK_REFERENCE, false);
+        const float right_norm = sqrtf(fmaxf(0, 1 - m->gravity[0] * m->gravity[0]));
+        const bool limited = right_norm < .35f;
+        if (right_norm < .15f) {
+            m->geometry_ready = false;
+            m->geometry_acquire_us = 0;
+        } else if (!m->geometry_ready) {
+            if (limited) m->geometry_acquire_us = 0;
+            else if (!m->geometry_acquire_us) m->geometry_acquire_us = s->timestamp_us;
+            else if (s->timestamp_us - m->geometry_acquire_us >= 100000) {
+                m->geometry_ready = true;
+                m->geometry_acquire_us = 0;
+                return blocked_motion(m, INTERACTION_MOTION_BLOCK_GEOMETRY, false);
+            }
+        }
+        if (!m->geometry_ready)
+            return blocked_motion(m, INTERACTION_MOTION_BLOCK_GEOMETRY, true);
+        const float right[] = {(1 - m->gravity[0] * m->gravity[0]) / right_norm,
+            -m->gravity[0] * m->gravity[1] / right_norm,
+            -m->gravity[0] * m->gravity[2] / right_norm};
+        const float fade = fminf(1, fmaxf(0, (right_norm - .15f) / .2f));
+        rates[0] = dot3(gyro, m->gravity) * (m->config.invert_x ? -1.0f : 1.0f);
+        rates[1] = dot3(gyro, right) * fade * (m->config.invert_y ? -1.0f : 1.0f);
+        motion_status(m, INTERACTION_MOTION_BLOCK_NONE, limited);
+    }
+    const float alpha = m->config.filter_seconds == 0 ? 1 :
+        1 - expf(-dt / m->config.filter_seconds);
     for (size_t axis = 0; axis < 2; ++axis) {
         if (fabsf(rates[axis]) <= m->config.deadzone_dps) m->filtered[axis] = 0;
         else m->filtered[axis] += alpha * (rates[axis] - m->filtered[axis]);
     }
-    if (m->view.mode == INPUT_KEYBOARD && editable(m) && m->view.keyboard_motion) {
+    if (m->view.mode == INPUT_KEYBOARD && editable_by(m, source) && m->view.keyboard_motion) {
         move_focus(m, m->filtered[0], m->filtered[1], dt);
+        motion_status(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
         return (input_delta_t){0};
     }
-    return input_motion_step(&m->pointer_motion, m->filtered[0], m->filtered[1], dt,
-        m->config.pointer_gain, m->config.deadzone_dps,
-        m->view.mode == INPUT_MOUSE && m->view.motion_enabled && m->output_ready);
+    if (m->view.mode != INPUT_MOUSE || !m->view.motion_enabled || m->motion_source != source || !m->output_ready)
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
+    /* Threshold in angular units before applying independent gains. The shared
+     * bounded integrator retains per-axis fractions and drops clamped excess. */
+    const float x = fabsf(m->filtered[0]) <= m->config.deadzone_dps ? 0 :
+        m->filtered[0] * m->config.pointer_gain_x;
+    const float y = fabsf(m->filtered[1]) <= m->config.deadzone_dps ? 0 :
+        m->filtered[1] * m->config.pointer_gain_y;
+    return input_motion_step(&m->pointer_motion, x, y, dt, 1, 0, true);
 }

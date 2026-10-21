@@ -7,6 +7,12 @@ driver doubles model the ESP-IDF/BSP boundary; they do not claim hardware or
 radio success. Task creation records ownership and allocation, while the sensor
 worker's stop path runs against a deterministic clock.
 
+Display setup checks create the panel and install the first-party transfer
+observer before the adapter can register its callback/start rendering. A panel
+creation error stops setup; unavailable observation leaves the ordinary display
+working while capture presentation remains unconfirmed. The observer itself is
+tested in [the display transfer suite](../display_transfer/README.md).
+
 Checks cover raw physical down/up registration and timestamp delivery, release
 registration before press, exclusive raw versus legacy hold callbacks, 900 ms
 legacy hold, mandatory button failure, 100 Hz gyro/accelerometer configuration,
@@ -40,6 +46,23 @@ has separate gyro and acceleration getters; the adapter calls both in one
 bounded batch, which is not an atomic six-axis sensor frame. Actual ODR,
 sampling jitter, bus timing, axis mapping, calibration quality, stack margin,
 switch behavior and endurance still require device qualification.
+
+`board_imu_read` rotates both acceleration and angular velocity into the same
+right-handed display frame (X right, Y top, Z toward the viewer):
+`(-sensorY, sensorX, sensorZ)`. Acquisition/cache diagnostics stay in sensor
+coordinates. The basis-vector regression checks both vectors, orthonormality,
+the determinant +1 cross-product invariant, unchanged raw cache and timestamps,
+and no sensor access during consumption. This replaces the former improper
+permutation at the application boundary; consumers must use these fields
+directly rather than rotate them again.
+
+Provenance: the [official factory orientation code at commit 2e1017e](https://github.com/esp-mosaico/esp-mosaico-claw/blob/2e1017e42d507cd9216d4da5b2c7d45cb2007971/main/platform/mosaic_imu_platform.c#L113-L125)
+documents a 90-degree clockwise BMI270 mounting and maps screen pitch to sensor
+roll, screen roll to negative sensor pitch, and leaves yaw unchanged. The vector
+rotation follows that code's roll/pitch conventions. This is source-grounded
+evidence; installed display orientation, positive physical direction and air
+pointer feel remain pending physical qualification. The BSP getters themselves
+only scale sensor values and do not establish chip placement.
 
 Power checks use controllable checked I2C responses at the BSP-owned bus
 boundary. They verify little-endian readings, signed current, gauge readiness,

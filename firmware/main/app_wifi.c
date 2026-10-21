@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_wifi.h"
+#include "app_wifi_profiles.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -10,6 +11,7 @@
 #if SOC_WIFI_SUPPORTED && CONFIG_ESP_WIFI_ENABLED
 #include <net/if.h>
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "esp_random.h"
@@ -24,6 +26,10 @@
 #define FORGET_NETWORK 4U
 #define SAVE_NETWORK 8U
 #define VERIFY_STORAGE 16U
+#define SCAN_START 32U
+#define SCAN_CANCEL 64U
+#define JOIN_NETWORK 128U
+#define PROFILE_MUTATION 256U
 #define FORM_LIMIT 512U
 #define CONNECT_TIMEOUT_MS 15000U
 #define RETRY_MAX_MS 30000U
@@ -31,6 +37,13 @@
 #define CLEANUP_RETRY_MS 1000U
 
 typedef struct { char ssid[33]; char password[64]; } credentials_t;
+typedef struct {
+    char ssid[33];
+    uint8_t bssid[6], channel;
+    int8_t rssi;
+    uint16_t authmode;
+    bool current, remembered, malformed_ssid;
+} scan_record_t;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static app_wifi_snapshot_t s_snapshot;
 static app_wifi_setup_info_t s_setup;
@@ -39,6 +52,7 @@ static credentials_t s_pending;
 static uint32_t s_pending_generation, s_generation, s_station_generation;
 static uint32_t s_commands;
 static bool s_started, s_accept_form, s_close_on_connect;
+static bool s_maintenance;
 static bool s_ap_cleanup_needed;
 static httpd_handle_t s_server;
 static esp_netif_t *s_sta, *s_ap;
@@ -48,6 +62,26 @@ static uint32_t s_retry_delay = 1000U;
 static uint16_t s_reason;
 static uint32_t s_event_generation;
 static bool s_disconnected;
+static app_wifi_scan_snapshot_t s_scan;
+static scan_record_t s_scan_records[APP_WIFI_SCAN_CAPACITY];
+static bool s_scan_wait_event, s_scan_done, s_scan_stop_sent, s_scan_cancelled;
+static uint32_t s_scan_status;
+static uint64_t s_scan_deadline, s_scan_completed_at, s_scan_next_at, s_scan_cleanup_at;
+static uint64_t s_scan_cancel_until;
+static bool s_pending_remember;
+static uint32_t s_pending_scan_generation;
+static uint16_t s_pending_record_index;
+static uint32_t s_selection_counter, s_selection_id, s_selection_scan_generation;
+static app_wifi_selection_owner_t s_selection_owner;
+static uint16_t s_selection_index;
+static char s_selection_ssid[APP_WIFI_SSID_CAPACITY];
+static uint16_t s_selection_authmode;
+static uint64_t s_selection_until, s_pending_selection_until;
+
+static bool profile_remembered_locked(const char *ssid);
+static bool profile_capacity_locked(const char *ssid);
+static void profile_reconnect(uint64_t now, uint16_t reason);
+static esp_err_t join_locked(const app_wifi_join_request_t *,const app_wifi_selection_owner_t *);
 
 static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000U; }
 static void clear_secret(void *memory, size_t length)
@@ -95,10 +129,217 @@ static bool valid_text(const char *text, size_t maximum, bool ascii)
     return true;
 }
 
+static app_wifi_security_t scan_security(uint16_t authmode)
+{
+    switch (authmode) {
+    case WIFI_AUTH_OPEN: return APP_WIFI_SECURITY_OPEN;
+    case WIFI_AUTH_WEP: return APP_WIFI_SECURITY_WEP;
+    case WIFI_AUTH_WPA_PSK: return APP_WIFI_SECURITY_WPA;
+    case WIFI_AUTH_WPA2_PSK: return APP_WIFI_SECURITY_WPA2;
+    case WIFI_AUTH_WPA_WPA2_PSK: return APP_WIFI_SECURITY_WPA_WPA2;
+    case WIFI_AUTH_WPA3_PSK: return APP_WIFI_SECURITY_WPA3;
+    case WIFI_AUTH_WPA2_WPA3_PSK: return APP_WIFI_SECURITY_WPA2_WPA3;
+    case WIFI_AUTH_OWE: return APP_WIFI_SECURITY_OWE;
+    case WIFI_AUTH_ENTERPRISE:
+    case WIFI_AUTH_WPA3_ENT_192:
+    case WIFI_AUTH_WPA3_ENTERPRISE:
+    case WIFI_AUTH_WPA2_WPA3_ENTERPRISE:
+    case WIFI_AUTH_WPA_ENTERPRISE: return APP_WIFI_SECURITY_ENTERPRISE;
+    default: return APP_WIFI_SECURITY_OTHER;
+    }
+}
+
+static app_wifi_join_availability_t scan_availability(const scan_record_t *record)
+{
+    if (record->malformed_ssid) return APP_WIFI_JOIN_UNSUPPORTED_SSID;
+    if (!record->ssid[0]) return APP_WIFI_JOIN_HIDDEN_SSID;
+    if (!valid_text(record->ssid, 32, false)) return APP_WIFI_JOIN_UNSUPPORTED_SSID;
+    if (record->authmode != WIFI_AUTH_WPA2_PSK && record->authmode != WIFI_AUTH_WPA_WPA2_PSK)
+        return APP_WIFI_JOIN_UNSUPPORTED_SECURITY;
+    return APP_WIFI_JOIN_AVAILABLE;
+}
+
+/* Caller holds s_lock. No driver reads or side effects in validation. */
+static bool fresh_scan_row(uint32_t generation, uint16_t index, const char *ssid)
+{
+    return s_scan.state == APP_WIFI_SCAN_READY && !s_scan.cleanup_pending &&
+        generation == s_scan.generation && index < s_scan.count &&
+        now_ms() - s_scan_completed_at < APP_WIFI_SCAN_RESULT_TTL_MS &&
+        scan_availability(&s_scan_records[index]) == APP_WIFI_JOIN_AVAILABLE &&
+        strcmp(ssid, s_scan_records[index].ssid) == 0;
+}
+
+static void scan_event(void *context, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)context;
+    if (base != WIFI_EVENT || id != WIFI_EVENT_SCAN_DONE) return;
+    const wifi_event_sta_scan_done_t *event = data;
+    portENTER_CRITICAL(&s_lock);
+    if (s_scan_wait_event && !s_scan_done) {
+        s_scan_done = true;
+        s_scan_status = event ? event->status : 1U;
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static bool scan_busy(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool busy = s_scan.state == APP_WIFI_SCAN_QUEUED ||
+        s_scan.state == APP_WIFI_SCAN_RUNNING || s_scan.state == APP_WIFI_SCAN_CANCELLING ||
+        s_scan.cleanup_pending;
+    portEXIT_CRITICAL(&s_lock);
+    return busy;
+}
+
+static void finish_scan(app_wifi_scan_state_t state, esp_err_t error, esp_err_t cleanup)
+{
+    portENTER_CRITICAL(&s_lock);
+    if (state == APP_WIFI_SCAN_READY && (s_commands & (SCAN_CANCEL | FORGET_NETWORK)))
+        state = APP_WIFI_SCAN_CANCELLED;
+    s_scan.state = cleanup != ESP_OK && state == APP_WIFI_SCAN_CANCELLED ?
+        APP_WIFI_SCAN_CANCELLING : state;
+    s_scan.error = error == ESP_OK && state == APP_WIFI_SCAN_ERROR ? cleanup : error;
+    s_scan.cleanup_error = cleanup;
+    s_scan.cleanup_pending = cleanup != ESP_OK;
+    s_scan_wait_event = false;
+    s_scan_done = false;
+    if (state != APP_WIFI_SCAN_READY) {
+        s_scan.count = 0;
+        memset(s_scan_records, 0, sizeof(s_scan_records));
+    }
+    s_scan_completed_at = now_ms();
+    publish();
+    portEXIT_CRITICAL(&s_lock);
+    s_scan_cleanup_at = cleanup != ESP_OK ? now_ms() + CLEANUP_RETRY_MS : 0;
+}
+
+static void start_scan(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool cancelled = s_commands & (SCAN_CANCEL | FORGET_NETWORK);
+    portEXIT_CRITICAL(&s_lock);
+    if (cancelled) {
+        finish_scan(APP_WIFI_SCAN_CANCELLED, ESP_OK, ESP_OK);
+        return;
+    }
+    /* Provisional reserves are admission limits, not heap/radio qualification. */
+    unsigned caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    esp_err_t error = ESP_OK;
+    if (heap_caps_get_free_size(caps) < 32768U ||
+        heap_caps_get_largest_free_block(caps) < 16384U) error = ESP_ERR_NO_MEM;
+    wifi_scan_config_t config = {
+        .show_hidden = true,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = {.active = {.min = 30, .max = 60}, .passive = 120},
+        .home_chan_dwell_time = 30,
+        .coex_background_scan = true,
+        .max_scan_ap_num = APP_WIFI_SCAN_CAPACITY
+    };
+    portENTER_CRITICAL(&s_lock);
+    cancelled = s_commands & (SCAN_CANCEL | FORGET_NETWORK);
+    if (cancelled) {
+        portEXIT_CRITICAL(&s_lock);
+        finish_scan(APP_WIFI_SCAN_CANCELLED, ESP_OK, ESP_OK);
+        return;
+    }
+    s_scan_wait_event = error == ESP_OK;
+    s_scan_done = s_scan_stop_sent = s_scan_cancelled = false;
+    s_scan_status = 0;
+    s_scan.state = APP_WIFI_SCAN_RUNNING;
+    publish();
+    portEXIT_CRITICAL(&s_lock);
+    if (error == ESP_OK) error = esp_wifi_scan_start(&config, false);
+    if (error != ESP_OK) {
+        /* Failed admission must not manufacture a successful empty scan. */
+        finish_scan(APP_WIFI_SCAN_ERROR, error, esp_wifi_clear_ap_list());
+    } else s_scan_deadline = now_ms() + APP_WIFI_SCAN_TIMEOUT_MS;
+}
+
+static void service_scan(bool cancel)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool awaiting = s_scan_wait_event, done = s_scan_done;
+    bool cleanup = s_scan.cleanup_pending;
+    uint32_t status = s_scan_status;
+    portEXIT_CRITICAL(&s_lock);
+    uint64_t now = now_ms();
+    if (awaiting && (cancel || s_scan_cancelled || now >= s_scan_deadline)) {
+        if (!s_scan_cancelled) s_scan_cancel_until = now + 2000U;
+        s_scan_cancelled = true;
+        portENTER_CRITICAL(&s_lock);
+        s_scan.state = now >= s_scan_cancel_until ? APP_WIFI_SCAN_ERROR : APP_WIFI_SCAN_CANCELLING;
+        s_scan.count = 0;
+        if (now >= s_scan_deadline && s_scan.error == ESP_OK) s_scan.error = ESP_ERR_TIMEOUT;
+        if (now >= s_scan_cancel_until && s_scan.error == ESP_OK) s_scan.error = ESP_ERR_TIMEOUT;
+        publish();
+        portEXIT_CRITICAL(&s_lock);
+        if (!done && !s_scan_stop_sent && now >= s_scan_cleanup_at) {
+            esp_err_t stopped = esp_wifi_scan_stop();
+            s_scan_stop_sent = stopped == ESP_OK;
+            s_scan_cleanup_at = now + CLEANUP_RETRY_MS;
+            portENTER_CRITICAL(&s_lock);
+            s_scan.cleanup_pending = true;
+            s_scan.cleanup_error = stopped;
+            publish();
+            portEXIT_CRITICAL(&s_lock);
+        }
+        /* Even a successful stop awaits its documented completion event.
+         * Without that evidence new scan/join/reconnect remains blocked. */
+    }
+    if (awaiting && done) {
+        if (s_scan_cancelled || status != 0) {
+            esp_err_t error = s_scan.error;
+            if (!s_scan_cancelled && status && error == ESP_OK) error = ESP_FAIL;
+            finish_scan(s_scan_cancelled && error == ESP_OK ? APP_WIFI_SCAN_CANCELLED :
+                APP_WIFI_SCAN_ERROR, error, esp_wifi_clear_ap_list());
+        } else {
+            uint16_t count = 0;
+            esp_err_t error = esp_wifi_scan_get_ap_num(&count);
+            wifi_ap_record_t current = {0};
+            bool current_known = esp_wifi_sta_get_ap_info(&current) == ESP_OK;
+            uint16_t kept = count < APP_WIFI_SCAN_CAPACITY ? count : APP_WIFI_SCAN_CAPACITY;
+            for (uint16_t i = 0; error == ESP_OK && i < kept; ++i) {
+                wifi_ap_record_t ap = {0};
+                error = esp_wifi_scan_get_ap_record(&ap);
+                if (error != ESP_OK) break;
+                scan_record_t record = {.channel = ap.primary, .rssi = ap.rssi,
+                    .authmode = (uint16_t)ap.authmode};
+                memcpy(record.ssid, ap.ssid, 32);
+                size_t name_length = strnlen(record.ssid, 32);
+                for (size_t k = name_length; k < 32; ++k)
+                    if (record.ssid[k]) record.malformed_ssid = true;
+                memcpy(record.bssid, ap.bssid, sizeof(record.bssid));
+                record.current = current_known && memcmp(current.bssid, ap.bssid, 6) == 0;
+                portENTER_CRITICAL(&s_lock);
+                record.remembered = s_snapshot.stored_data_known && s_snapshot.stored_data_present &&
+                    !s_snapshot.storage_uncertain && scan_availability(&record) == APP_WIFI_JOIN_AVAILABLE &&
+                    profile_remembered_locked(record.ssid);
+                s_scan_records[i] = record;
+                portEXIT_CRITICAL(&s_lock);
+            }
+            esp_err_t cleared = esp_wifi_clear_ap_list();
+            portENTER_CRITICAL(&s_lock);
+            s_scan.count = error == ESP_OK ? kept : 0;
+            s_scan.capacity_reached = count >= APP_WIFI_SCAN_CAPACITY;
+            bool cancelled = s_commands & (SCAN_CANCEL | FORGET_NETWORK);
+            portEXIT_CRITICAL(&s_lock);
+            finish_scan(error == ESP_OK && !cancelled && cleared == ESP_OK ? APP_WIFI_SCAN_READY :
+                cancelled ? APP_WIFI_SCAN_CANCELLED : APP_WIFI_SCAN_ERROR, error, cleared);
+        }
+    } else if (!awaiting && cleanup && now >= s_scan_cleanup_at) {
+        app_wifi_scan_state_t terminal = s_scan.state == APP_WIFI_SCAN_CANCELLING ?
+            (s_scan.error == ESP_OK ? APP_WIFI_SCAN_CANCELLED : APP_WIFI_SCAN_ERROR) : s_scan.state;
+        finish_scan(terminal, s_scan.error, esp_wifi_clear_ap_list());
+    } else if (!awaiting && cancel && !cleanup) {
+        finish_scan(APP_WIFI_SCAN_CANCELLED, ESP_OK, ESP_OK);
+    }
+}
+
 static void storage_result(esp_err_t error, bool known, bool present,
                            const credentials_t *credentials)
 {
-    bool valid = error == ESP_OK || (error == ESP_ERR_NVS_NOT_FOUND && known && !present);
+    bool valid = error == ESP_OK || (error == ESP_ERR_NVS_NOT_FOUND && known);
     portENTER_CRITICAL(&s_lock);
     s_snapshot.stored_data_known = known;
     s_snapshot.stored_data_present = known && present;
@@ -111,7 +352,7 @@ static void storage_result(esp_err_t error, bool known, bool present,
     portEXIT_CRITICAL(&s_lock);
 }
 
-static esp_err_t read_credentials(credentials_t *value, bool *known, bool *present)
+static esp_err_t read_legacy_credentials(credentials_t *value, bool *known, bool *present)
 {
     nvs_handle_t handle;
     uint8_t blob[STORE_LENGTH] = {0};
@@ -145,28 +386,7 @@ static esp_err_t read_credentials(credentials_t *value, bool *known, bool *prese
     return error;
 }
 
-static esp_err_t write_credentials(const credentials_t *value)
-{
-    nvs_handle_t handle;
-    esp_err_t error = nvs_open("app_wifi", NVS_READWRITE, &handle);
-    if (error != ESP_OK) return error;
-    if (!value) {
-        error = nvs_erase_key(handle, "network");
-        if (error == ESP_ERR_NVS_NOT_FOUND) error = ESP_OK;
-    } else {
-        uint8_t blob[STORE_LENGTH] = {0};
-        memcpy(blob, "WIF1", 4);
-        blob[4] = (uint8_t)strlen(value->ssid);
-        blob[5] = (uint8_t)strlen(value->password);
-        memcpy(blob + 6, value->ssid, blob[4]);
-        memcpy(blob + 38, value->password, blob[5]);
-        error = nvs_set_blob(handle, "network", blob, sizeof(blob));
-        clear_secret(blob, sizeof(blob));
-    }
-    if (error == ESP_OK) error = nvs_commit(handle);
-    nvs_close(handle);
-    return error;
-}
+#include "app_wifi_profiles.inc"
 
 static esp_err_t set_station(const credentials_t *value)
 {
@@ -269,7 +489,8 @@ static esp_err_t form_get(httpd_req_t *request)
         !escape_html(snapshot.stored_ssid, stored_ssid, sizeof(stored_ssid)))
         return send_page(request, "500 Internal Server Error", "Cannot render setup.");
     static const char *const states[] = {
-        "Unavailable", "Idle", "Connecting", "Connected", "Waiting to retry", "Needs attention"
+        "Unavailable", "Idle", "Connecting", "Connected", "Waiting to retry", "Needs attention",
+        "Obtaining IP address"
     };
     const char *state = (unsigned)snapshot.state < sizeof(states) / sizeof(states[0]) ?
         states[snapshot.state] : "Unknown";
@@ -387,7 +608,7 @@ static esp_err_t form_post(httpd_req_t *request)
             for (unsigned i = 0; i < 32; ++i)
                 difference |= (unsigned char)token[i] ^ (unsigned char)s_token[i];
             if (difference == 0 && s_accept_form && s_snapshot.setup_active &&
-                now_ms() < s_setup_until && !(s_commands & (SAVE_NETWORK | STOP_SETUP | FORGET_NETWORK))) {
+                now_ms() < s_setup_until && !(s_commands & (SAVE_NETWORK | JOIN_NETWORK | STOP_SETUP | FORGET_NETWORK))) {
                 s_pending = credentials;
                 s_pending_generation = s_generation;
                 s_accept_form = false;
@@ -476,10 +697,14 @@ static esp_err_t start_setup(void)
     config.ap.authmode = WIFI_AUTH_WPA2_PSK;
     config.ap.max_connection = 1;
     config.ap.channel = 1;
+    if (!s_ap) s_ap = esp_netif_create_default_wifi_ap();
+    esp_err_t error = s_ap ? ESP_OK : ESP_ERR_NO_MEM;
     /* Treat an attempted AP mode transition as needing explicit cleanup even
      * if a driver error leaves its side effects uncertain. */
-    s_ap_cleanup_needed = true;
-    esp_err_t error = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (error == ESP_OK) {
+        s_ap_cleanup_needed = true;
+        error = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    }
     if (error == ESP_OK) error = esp_wifi_set_config(WIFI_IF_AP, &config);
     clear_secret(&config, sizeof(config));
     esp_netif_ip_info_t ip;
@@ -540,16 +765,22 @@ static void backoff(uint64_t now, esp_err_t error, uint16_t reason)
     portENTER_CRITICAL(&s_lock);
     s_snapshot.state = APP_WIFI_BACKOFF;
     s_snapshot.ip[0] = '\0';
+    s_snapshot.lan_ready = false;
     s_snapshot.rssi_valid = false;
     s_snapshot.connection_error = error;
     s_snapshot.disconnect_reason = reason;
     publish();
     portEXIT_CRITICAL(&s_lock);
+    profile_reconnect(now, reason);
 }
 
 static void service_step(void)
 {
     uint32_t commands, pending_generation;
+    uint32_t pending_scan_generation;
+    uint16_t pending_record_index;
+    bool remember;
+    uint64_t pending_selection_until;
     credentials_t pending = {0};
     bool disconnected;
     uint16_t reason;
@@ -557,7 +788,11 @@ static void service_step(void)
     commands = s_commands;
     s_commands = 0;
     pending_generation = s_pending_generation;
-    if (commands & SAVE_NETWORK) pending = s_pending;
+    if (commands & (SAVE_NETWORK | JOIN_NETWORK)) pending = s_pending;
+    remember = (commands & SAVE_NETWORK) || s_pending_remember;
+    pending_scan_generation = s_pending_scan_generation;
+    pending_record_index = s_pending_record_index;
+    pending_selection_until = s_pending_selection_until;
     clear_secret(&s_pending, sizeof(s_pending));
     disconnected = s_disconnected && s_event_generation == s_station_generation;
     reason = s_reason;
@@ -565,6 +800,21 @@ static void service_step(void)
     portEXIT_CRITICAL(&s_lock);
     esp_err_t error = ESP_OK;
     uint64_t now = now_ms();
+    service_scan(commands & (SCAN_CANCEL | FORGET_NETWORK));
+    if (commands & PROFILE_MUTATION) {
+        esp_err_t mutation = service_profile_mutation();
+        if (mutation != ESP_OK) error = mutation;
+    }
+    if ((commands & FORGET_NETWORK) && scan_busy()) {
+        /* Keep the destructive intent, but finish old driver/event ownership
+         * before clearing configuration or admitting reconnect. */
+        portENTER_CRITICAL(&s_lock);
+        s_commands |= FORGET_NETWORK;
+        s_snapshot.operation_pending = true;
+        portEXIT_CRITICAL(&s_lock);
+        clear_secret(&pending, sizeof(pending));
+        return;
+    }
     if (commands & (STOP_SETUP | FORGET_NETWORK)) error = stop_setup();
     if (commands & FORGET_NETWORK) {
         esp_err_t forgotten = write_credentials(NULL);
@@ -580,6 +830,7 @@ static void service_step(void)
                 s_snapshot.configured = false;
                 s_snapshot.ssid[0] = '\0';
                 s_snapshot.ip[0] = '\0';
+                s_snapshot.lan_ready = false;
                 s_snapshot.rssi_valid = false;
                 s_snapshot.state = APP_WIFI_IDLE;
                 publish();
@@ -593,18 +844,28 @@ static void service_step(void)
             }
         }
         if (error == ESP_OK) error = forgotten;
-    } else if ((commands & SAVE_NETWORK) && !(commands & STOP_SETUP)) {
+    } else if ((commands & (SAVE_NETWORK | JOIN_NETWORK)) && !(commands & STOP_SETUP)) {
         portENTER_CRITICAL(&s_lock);
-        bool current = pending_generation == s_generation && now < s_setup_until;
+        bool current = pending_generation == s_generation &&
+            ((commands & JOIN_NETWORK) ? (pending_selection_until ? now < pending_selection_until :
+                (!pending_scan_generation || fresh_scan_row(pending_scan_generation,
+                    pending_record_index, pending.ssid))) : now < s_setup_until);
         portEXIT_CRITICAL(&s_lock);
-        if (!current) error = ESP_ERR_INVALID_STATE;
+        if (!current || scan_busy()) error = ESP_ERR_INVALID_STATE;
         else {
-            error = write_credentials(&pending);
-            storage_result(error, error == ESP_OK, error == ESP_OK, &pending);
+            if (remember) {
+                error = write_credentials(&pending);
+                storage_result(error, error == ESP_OK, error == ESP_OK, &pending);
+            }
+            portENTER_CRITICAL(&s_lock);
+            current = pending_generation == s_generation && !(s_commands & FORGET_NETWORK);
+            portEXIT_CRITICAL(&s_lock);
+            if (error == ESP_OK && !current) error = ESP_ERR_INVALID_STATE;
             if (error == ESP_OK) {
-                (void)esp_wifi_disconnect();
-                error = set_station(&pending);
-                s_close_on_connect = error == ESP_OK;
+                error = esp_wifi_disconnect();
+                if (error == ESP_ERR_WIFI_NOT_CONNECT) error = ESP_OK;
+                if (error == ESP_OK) error = set_station(&pending);
+                s_close_on_connect = (commands & SAVE_NETWORK) && error == ESP_OK;
                 s_connect_until = 0;
                 s_retry_delay = 1000;
                 s_retry_at = error == ESP_OK ? now : 0;
@@ -615,6 +876,7 @@ static void service_step(void)
                     memcpy(s_snapshot.ssid, pending.ssid, sizeof(pending.ssid));
                 }
                 s_snapshot.ip[0] = '\0';
+                s_snapshot.lan_ready = false;
                 s_snapshot.rssi_valid = false;
                 s_snapshot.state = error == ESP_OK ? APP_WIFI_CONNECTING : APP_WIFI_ERROR;
                 s_snapshot.connection_error = error;
@@ -623,7 +885,7 @@ static void service_step(void)
             }
         }
     }
-    if ((commands & VERIFY_STORAGE) && !(commands & (SAVE_NETWORK | FORGET_NETWORK))) {
+    if ((commands & VERIFY_STORAGE) && !(commands & (SAVE_NETWORK | JOIN_NETWORK | FORGET_NETWORK))) {
         credentials_t stored_credentials = {0};
         bool known, present;
         esp_err_t verified = read_credentials(&stored_credentials, &known, &present);
@@ -633,6 +895,7 @@ static void service_step(void)
     }
     if ((commands & START_SETUP) && !(commands & (STOP_SETUP | FORGET_NETWORK)))
         error = start_setup();
+    if ((commands & SCAN_START) && !(commands & (SCAN_CANCEL | FORGET_NETWORK))) start_scan();
     clear_secret(&pending, sizeof(pending));
     if (commands) set_error(error);
     portENTER_CRITICAL(&s_lock);
@@ -648,14 +911,15 @@ static void service_step(void)
         wifi_ap_record_t ap = {0};
         esp_netif_ip_info_t ip = {0};
         esp_err_t link = esp_wifi_sta_get_ap_info(&ap);
-        bool connected = link == ESP_OK && esp_netif_get_ip_info(s_sta, &ip) == ESP_OK &&
-            ip.ip.addr != 0 && strcmp((const char *)ap.ssid, s_snapshot.ssid) == 0;
+        bool associated = link == ESP_OK && memcmp(ap.ssid, s_snapshot.ssid, 32) == 0;
+        bool connected = associated && esp_netif_get_ip_info(s_sta, &ip) == ESP_OK && ip.ip.addr != 0;
         if (connected) {
             portENTER_CRITICAL(&s_lock);
             s_snapshot.state = APP_WIFI_CONNECTED;
             snprintf(s_snapshot.ip, sizeof(s_snapshot.ip), IPSTR, IP2STR(&ip.ip));
             s_snapshot.rssi_dbm = ap.rssi;
             s_snapshot.rssi_valid = true;
+            s_snapshot.lan_ready = true;
             s_snapshot.connection_error = ESP_OK;
             s_snapshot.disconnect_reason = 0;
             publish();
@@ -668,10 +932,19 @@ static void service_step(void)
         } else if ((disconnected && s_connect_until && reason != WIFI_REASON_ASSOC_LEAVE) ||
                    (s_connect_until && now >= s_connect_until) ||
                    (s_snapshot.state == APP_WIFI_CONNECTED)) {
-            (void)esp_wifi_disconnect();
+            if (!scan_busy()) (void)esp_wifi_disconnect();
             backoff(now, disconnected ? ESP_FAIL : ESP_ERR_TIMEOUT, disconnected ? reason : 0);
+        } else if (associated) {
+            portENTER_CRITICAL(&s_lock);
+            s_snapshot.state = APP_WIFI_OBTAINING_IP;
+            s_snapshot.lan_ready = false;
+            s_snapshot.ip[0] = '\0';
+            s_snapshot.rssi_dbm = ap.rssi;
+            s_snapshot.rssi_valid = true;
+            publish();
+            portEXIT_CRITICAL(&s_lock);
         }
-        if (!s_connect_until && s_retry_at && now >= s_retry_at) {
+        if (!scan_busy() && !s_connect_until && s_retry_at && now >= s_retry_at) {
             s_retry_at = 0;
             esp_err_t result = esp_wifi_connect();
             if (result == ESP_OK) {
@@ -702,7 +975,7 @@ static esp_err_t initialize_worker(void)
          * storage fault must not disable the only provisioning/forget UI. */
         clear_secret(&credentials, sizeof(credentials));
     }
-    bool driver_initialized = false, handler_registered = false;
+    bool driver_initialized = false, handler_registered = false, scan_registered = false;
     esp_err_t error = esp_netif_init();
     if (error == ESP_OK) {
         error = esp_event_loop_create_default();
@@ -710,8 +983,7 @@ static esp_err_t initialize_worker(void)
     }
     if (error == ESP_OK) {
         s_sta = esp_netif_create_default_wifi_sta();
-        s_ap = esp_netif_create_default_wifi_ap();
-        if (!s_sta || !s_ap) error = ESP_ERR_NO_MEM;
+        if (!s_sta) error = ESP_ERR_NO_MEM;
     }
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     if (error == ESP_OK) {
@@ -723,11 +995,17 @@ static esp_err_t initialize_worker(void)
         error = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event, NULL);
         handler_registered = error == ESP_OK;
     }
+    if (error == ESP_OK) {
+        error = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, scan_event, NULL);
+        scan_registered = error == ESP_OK;
+    }
     if (error == ESP_OK) error = esp_wifi_set_mode(WIFI_MODE_STA);
     if (error == ESP_OK) error = set_station(stored == ESP_OK ? &credentials : NULL);
     if (error == ESP_OK) error = esp_wifi_start();
     portENTER_CRITICAL(&s_lock);
     s_snapshot.initialized = error == ESP_OK;
+    s_snapshot.backend_available = false;
+    s_snapshot.backend_error = ESP_ERR_NOT_SUPPORTED;
     s_snapshot.operation_pending = false;
     s_snapshot.state = error == ESP_OK ? APP_WIFI_IDLE : APP_WIFI_ERROR;
     s_snapshot.last_error = error != ESP_OK ? error :
@@ -741,6 +1019,8 @@ static esp_err_t initialize_worker(void)
     portEXIT_CRITICAL(&s_lock);
     clear_secret(&credentials, sizeof(credentials));
     if (error != ESP_OK) {
+        if (scan_registered)
+            (void)esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, scan_event);
         if (handler_registered)
             (void)esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_event);
         if (driver_initialized) {
@@ -784,7 +1064,7 @@ esp_err_t app_wifi_init(void)
     s_started = true;
     s_snapshot.operation_pending = true;
     portEXIT_CRITICAL(&s_lock);
-    if (xTaskCreate(worker, "app_wifi", 8192, NULL, 2, NULL) != pdPASS) {
+    if (xTaskCreate(worker, "app_wifi", 16384, NULL, 2, NULL) != pdPASS) {
         portENTER_CRITICAL(&s_lock);
         s_started = false;
         s_snapshot.operation_pending = false;
@@ -797,19 +1077,43 @@ esp_err_t app_wifi_init(void)
     return ESP_OK;
 }
 
+void app_wifi_set_backend_state(bool available,esp_err_t error)
+{
+    portENTER_CRITICAL(&s_lock);
+    if(s_snapshot.backend_available!=available||s_snapshot.backend_error!=error){s_snapshot.backend_available=available;s_snapshot.backend_error=error;publish();}
+    portEXIT_CRITICAL(&s_lock);
+}
+void app_wifi_set_maintenance(bool active)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool changed=s_maintenance!=active;s_maintenance=active;
+    if(changed&&active&&s_snapshot.initialized){
+        ++s_generation;s_accept_form=false;s_selection_id=0;memset(s_selection_ssid,0,sizeof(s_selection_ssid));
+        if(s_snapshot.setup_active||s_snapshot.cleanup_pending)s_commands|=STOP_SETUP;
+        if(s_scan_wait_event||s_scan.state==APP_WIFI_SCAN_QUEUED||s_scan.cleanup_pending)s_commands|=SCAN_CANCEL;
+        if (s_commands) s_snapshot.operation_pending=true;
+        publish();
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
 static esp_err_t admit(unsigned command)
 {
     portENTER_CRITICAL(&s_lock);
     esp_err_t result = ESP_OK;
-    if (!s_snapshot.initialized) result = ESP_ERR_INVALID_STATE;
+    if (!s_snapshot.initialized || (s_maintenance && command != STOP_SETUP && command != VERIFY_STORAGE)) result = ESP_ERR_INVALID_STATE;
     else if ((command == START_SETUP || command == VERIFY_STORAGE) &&
         (s_commands || s_snapshot.operation_pending ||
-        (command == START_SETUP && s_snapshot.setup_active))) result = ESP_ERR_INVALID_STATE;
+        (command == START_SETUP && (s_snapshot.setup_active || s_scan_wait_event ||
+            s_scan.cleanup_pending || s_scan.state == APP_WIFI_SCAN_QUEUED)))) result = ESP_ERR_INVALID_STATE;
     else {
         if (command & (STOP_SETUP | FORGET_NETWORK)) {
             ++s_generation;
             s_accept_form = false;
             s_snapshot.cleanup_pending = true;
+        }
+        if (command & (START_SETUP | FORGET_NETWORK)) {
+            s_selection_id = 0;
+            memset(s_selection_ssid, 0, sizeof(s_selection_ssid));
         }
         s_commands |= command;
         s_snapshot.operation_pending = true;
@@ -820,8 +1124,219 @@ static esp_err_t admit(unsigned command)
 }
 esp_err_t app_wifi_start_setup(void) { return admit(START_SETUP); }
 esp_err_t app_wifi_stop_setup(void) { return admit(STOP_SETUP); }
-esp_err_t app_wifi_forget_network(void) { return admit(FORGET_NETWORK); }
+esp_err_t app_wifi_forget_network(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool ambiguous = s_profiles.known && s_profiles.count > 1;
+    portEXIT_CRITICAL(&s_lock);
+    return ambiguous ? ESP_ERR_INVALID_STATE : admit(FORGET_NETWORK);
+}
 esp_err_t app_wifi_verify_storage(void) { return admit(VERIFY_STORAGE); }
+
+esp_err_t app_wifi_scan_start(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    esp_err_t error = ESP_OK;
+    if (s_maintenance || !s_snapshot.initialized || s_snapshot.operation_pending || s_commands ||
+        s_snapshot.setup_active || s_snapshot.cleanup_pending || s_scan_wait_event ||
+        s_scan.cleanup_pending || s_scan.state == APP_WIFI_SCAN_QUEUED ||
+        s_snapshot.state == APP_WIFI_CONNECTING || s_snapshot.state == APP_WIFI_OBTAINING_IP ||
+        now_ms() < s_scan_next_at || s_scan.generation == UINT32_MAX) error = ESP_ERR_INVALID_STATE;
+    else {
+        uint32_t generation = s_scan.generation + 1U;
+        s_scan = (app_wifi_scan_snapshot_t){.state = APP_WIFI_SCAN_QUEUED, .generation = generation};
+        memset(s_scan_records, 0, sizeof(s_scan_records));
+        s_scan_next_at = now_ms() + APP_WIFI_SCAN_COOLDOWN_MS;
+        s_scan_cleanup_at = 0;
+        s_commands |= SCAN_START;
+        s_snapshot.operation_pending = true;
+        publish();
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return error;
+}
+
+esp_err_t app_wifi_scan_cancel(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    esp_err_t error = ESP_OK;
+    if (!s_snapshot.initialized) error = ESP_ERR_INVALID_STATE;
+    else {
+        s_commands |= SCAN_CANCEL;
+        s_scan.state = APP_WIFI_SCAN_CANCELLING;
+        s_scan.count = 0;
+        s_snapshot.operation_pending = true;
+        publish();
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return error;
+}
+
+void app_wifi_get_scan_snapshot(app_wifi_scan_snapshot_t *snapshot)
+{
+    if (!snapshot) return;
+    portENTER_CRITICAL(&s_lock);
+    *snapshot = s_scan;
+    uint64_t now = now_ms();
+    snapshot->retry_in_ms = s_scan_next_at > now ? (uint32_t)(s_scan_next_at - now) : 0;
+    if (snapshot->state == APP_WIFI_SCAN_READY) {
+        uint64_t age = now - s_scan_completed_at;
+        snapshot->age_ms = age > UINT32_MAX ? UINT32_MAX : (uint32_t)age;
+        snapshot->remaining_ms = age < APP_WIFI_SCAN_RESULT_TTL_MS ?
+            APP_WIFI_SCAN_RESULT_TTL_MS - (uint32_t)age : 0;
+        if (!snapshot->remaining_ms) snapshot->state = APP_WIFI_SCAN_EXPIRED;
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+esp_err_t app_wifi_get_scan_record(uint32_t generation, uint16_t index,
+                                  app_wifi_scan_record_t *record)
+{
+    if (!record) return ESP_ERR_INVALID_ARG;
+    memset(record, 0, sizeof(*record));
+    scan_record_t source;
+    portENTER_CRITICAL(&s_lock);
+    bool valid = s_scan.state == APP_WIFI_SCAN_READY && !s_scan.cleanup_pending &&
+        generation == s_scan.generation && index < s_scan.count &&
+        now_ms() - s_scan_completed_at < APP_WIFI_SCAN_RESULT_TTL_MS;
+    if (valid) source = s_scan_records[index];
+    portEXIT_CRITICAL(&s_lock);
+    if (!valid) return ESP_ERR_INVALID_STATE;
+    record->ssid_length = source.malformed_ssid ? 32U : (uint8_t)strnlen(source.ssid, 32);
+    memcpy(record->ssid, source.ssid, record->ssid_length);
+    memcpy(record->bssid, source.bssid, sizeof(record->bssid));
+    record->channel = source.channel;
+    record->rssi_dbm = source.rssi;
+    record->sdk_authmode = source.authmode;
+    record->security = scan_security(source.authmode);
+    record->availability = scan_availability(&source);
+    record->current = source.current;
+    record->remembered = source.remembered;
+    if (!source.malformed_ssid && valid_text(source.ssid, 32, false)) {
+        memcpy(record->label, source.ssid, record->ssid_length);
+    } else if (!record->ssid_length) {
+        snprintf(record->label, sizeof(record->label), "Hidden network");
+    } else {
+        size_t used = 0;
+        for (unsigned i = 0; i < record->ssid_length; ++i) {
+            unsigned char c = record->ssid[i];
+            if (c >= 32 && c < 127 && c != '\\') record->label[used++] = (char)c;
+            else {
+                snprintf(record->label + used, sizeof(record->label) - used, "\\x%02X", c);
+                used += 4;
+            }
+        }
+    }
+    return ESP_OK;
+}
+
+static bool valid_selection_owner(const app_wifi_selection_owner_t *owner)
+{
+    if (!owner) return true;
+    unsigned principal=0,session=0;
+    for (unsigned i=0;i<16;++i) {principal|=owner->principal_id[i];session|=owner->session_id[i];}
+    return principal && session;
+}
+static bool same_selection_owner(const app_wifi_selection_owner_t *owner)
+{
+    const app_wifi_selection_owner_t local={0};
+    return !memcmp(&s_selection_owner,owner?owner:&local,sizeof(local));
+}
+esp_err_t app_wifi_select_scan_record_owned(uint32_t generation, uint16_t index,
+    const app_wifi_selection_owner_t *owner, app_wifi_selection_t *selection)
+{
+    if (!selection || !valid_selection_owner(owner)) return ESP_ERR_INVALID_ARG;
+    memset(selection, 0, sizeof(*selection));
+    app_wifi_scan_record_t record;
+    esp_err_t error = app_wifi_get_scan_record(generation, index, &record);
+    if (error != ESP_OK) return error;
+    portENTER_CRITICAL(&s_lock);
+    if ((s_selection_id && now_ms() < s_selection_until && !same_selection_owner(owner)) ||
+        s_maintenance || !s_snapshot.initialized || s_snapshot.operation_pending || s_commands ||
+        s_snapshot.setup_active || s_snapshot.cleanup_pending ||
+        s_selection_counter == UINT32_MAX || index >= s_scan.count ||
+        !fresh_scan_row(generation, index, s_scan_records[index].ssid)) error = ESP_ERR_INVALID_STATE;
+    else {
+        s_selection_id = ++s_selection_counter;
+        s_selection_owner = owner ? *owner : (app_wifi_selection_owner_t){0};
+        s_selection_scan_generation = generation;
+        s_selection_index = index;
+        s_selection_until = now_ms() + APP_WIFI_SELECTION_TIMEOUT_MS;
+        memcpy(s_selection_ssid, s_scan_records[index].ssid, sizeof(s_selection_ssid));
+        s_selection_authmode = s_scan_records[index].authmode;
+        *selection = (app_wifi_selection_t){.id = s_selection_id, .scan_generation = generation,
+            .record_index = index, .remaining_ms = APP_WIFI_SELECTION_TIMEOUT_MS, .record = record};
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return error;
+}
+
+esp_err_t app_wifi_release_selection_owned(uint32_t selection_id,const app_wifi_selection_owner_t *owner)
+{
+    portENTER_CRITICAL(&s_lock);
+    esp_err_t error = ESP_ERR_INVALID_STATE;
+    if (valid_selection_owner(owner) && same_selection_owner(owner) && selection_id && selection_id == s_selection_id) {
+        s_selection_id = 0;
+        memset(s_selection_ssid, 0, sizeof(s_selection_ssid));
+        error = ESP_OK;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return error;
+}
+
+/* The caller holds the one manager lock. This only validates cached state and
+ * copies into the worker mailbox; no SDK/radio/storage operation runs here. */
+static esp_err_t join_locked(const app_wifi_join_request_t *request,const app_wifi_selection_owner_t *owner)
+{
+    esp_err_t error = ESP_OK;
+    if ((s_selection_id && now_ms() < s_selection_until && !same_selection_owner(owner)) ||
+        s_maintenance || !s_snapshot.initialized || s_snapshot.operation_pending || s_commands ||
+        s_snapshot.setup_active || s_snapshot.cleanup_pending || s_scan_wait_event ||
+        s_scan.cleanup_pending || s_scan.state == APP_WIFI_SCAN_QUEUED ||
+        (request->selection_id ? (request->selection_id != s_selection_id || !same_selection_owner(owner) || now_ms() >= s_selection_until ||
+            request->scan_generation != s_selection_scan_generation || request->record_index != s_selection_index ||
+            strcmp(request->ssid, s_selection_ssid) != 0 ||
+            (s_selection_authmode != WIFI_AUTH_WPA2_PSK && s_selection_authmode != WIFI_AUTH_WPA_WPA2_PSK)) :
+            (request->scan_generation && !fresh_scan_row(request->scan_generation,
+                request->record_index, request->ssid)))) error = ESP_ERR_INVALID_STATE;
+    else if (request->remember && !profile_capacity_locked(request->ssid)) error = ESP_ERR_NO_MEM;
+    else {
+        memset(&s_pending, 0, sizeof(s_pending));
+        memcpy(s_pending.ssid, request->ssid, strlen(request->ssid));
+        memcpy(s_pending.password, request->password, strlen(request->password));
+        s_pending_generation = s_generation;
+        s_pending_remember = request->remember;
+        s_pending_scan_generation = request->scan_generation;
+        s_pending_record_index = request->record_index;
+        s_pending_selection_until = request->selection_id ? s_selection_until : 0;
+        if (request->selection_id) {
+            s_selection_id = 0;
+            memset(s_selection_ssid, 0, sizeof(s_selection_ssid));
+        }
+        s_commands |= JOIN_NETWORK;
+        s_snapshot.operation_pending = true;
+        publish();
+    }
+    return error;
+}
+esp_err_t app_wifi_join_owned(const app_wifi_join_request_t *request,const app_wifi_selection_owner_t *owner)
+{
+    if (!valid_selection_owner(owner) || !request || !valid_text(request->ssid, 32, false) ||
+        !valid_text(request->password, 63, true) || strlen(request->password) < 8 ||
+        (!request->scan_generation && (request->record_index || request->selection_id))) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_lock);
+    esp_err_t error=join_locked(request,owner);
+    portEXIT_CRITICAL(&s_lock);
+    return error;
+}
+
+esp_err_t app_wifi_select_scan_record(uint32_t generation,uint16_t index,app_wifi_selection_t *out)
+{return app_wifi_select_scan_record_owned(generation,index,NULL,out);}
+esp_err_t app_wifi_release_selection(uint32_t id)
+{return app_wifi_release_selection_owned(id,NULL);}
+esp_err_t app_wifi_join(const app_wifi_join_request_t *request)
+{return app_wifi_join_owned(request,NULL);}
+
 void app_wifi_get_snapshot(app_wifi_snapshot_t *snapshot)
 {
     if (!snapshot) return;
@@ -848,15 +1363,64 @@ esp_err_t app_wifi_get_setup_info(app_wifi_setup_info_t *info)
 }
 
 #else
+esp_err_t app_wifi_profile_result(uint64_t id,app_wifi_profile_result_t *out){(void)id;if(out)memset(out,0,sizeof(*out));return ESP_ERR_NOT_SUPPORTED;}
+void app_wifi_set_backend_state(bool available,esp_err_t error){(void)available;(void)error;}
+esp_err_t app_wifi_profiles_forget_all_request(uint64_t rev,bool ack,uint64_t *id){(void)rev;(void)ack;if(id)*id=0;return ESP_ERR_NOT_SUPPORTED;}
+void app_wifi_set_maintenance(bool active){(void)active;}
+void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out) { if(out)*out=(app_wifi_profiles_snapshot_t){.capacity=APP_WIFI_PROFILE_CAPACITY,.error=ESP_ERR_NOT_SUPPORTED}; }
+esp_err_t app_wifi_profile_save(const app_wifi_profile_save_t *p) { (void)p;return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t app_wifi_profile_join(const char *id,uint64_t rev) { (void)id;(void)rev;return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t app_wifi_profile_forget(const char *id,uint64_t rev) { (void)id;(void)rev;return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t app_wifi_profiles_reorder(const char ids[APP_WIFI_PROFILE_CAPACITY][APP_WIFI_PROFILE_ID_CAPACITY],uint8_t count,uint64_t rev) {(void)ids;(void)count;(void)rev;return ESP_ERR_NOT_SUPPORTED;}
+esp_err_t app_wifi_profiles_forget_all(uint64_t rev,bool ack) {(void)rev;(void)ack;return ESP_ERR_NOT_SUPPORTED;}
 esp_err_t app_wifi_init(void) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t app_wifi_start_setup(void) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t app_wifi_stop_setup(void) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t app_wifi_forget_network(void) { return ESP_ERR_NOT_SUPPORTED; }
 esp_err_t app_wifi_verify_storage(void) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t app_wifi_scan_start(void) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t app_wifi_scan_cancel(void) { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t app_wifi_join(const app_wifi_join_request_t *request)
+{
+    (void)request;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+esp_err_t app_wifi_select_scan_record_owned(uint32_t generation,uint16_t index,
+    const app_wifi_selection_owner_t *owner,app_wifi_selection_t *out)
+{(void)owner;(void)generation;(void)index;if(out)memset(out,0,sizeof(*out));return ESP_ERR_NOT_SUPPORTED;}
+esp_err_t app_wifi_release_selection_owned(uint32_t id,const app_wifi_selection_owner_t *owner)
+{(void)id;(void)owner;return ESP_ERR_NOT_SUPPORTED;}
+esp_err_t app_wifi_join_owned(const app_wifi_join_request_t *request,const app_wifi_selection_owner_t *owner)
+{(void)request;(void)owner;return ESP_ERR_NOT_SUPPORTED;}
+esp_err_t app_wifi_select_scan_record(uint32_t generation, uint16_t index, app_wifi_selection_t *selection)
+{
+    (void)generation;
+    (void)index;
+    if (selection) memset(selection, 0, sizeof(*selection));
+    return ESP_ERR_NOT_SUPPORTED;
+}
+esp_err_t app_wifi_release_selection(uint32_t selection_id)
+{
+    (void)selection_id;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+void app_wifi_get_scan_snapshot(app_wifi_scan_snapshot_t *snapshot)
+{
+    if (snapshot) *snapshot = (app_wifi_scan_snapshot_t){.state = APP_WIFI_SCAN_ERROR,
+        .error = ESP_ERR_NOT_SUPPORTED};
+}
+esp_err_t app_wifi_get_scan_record(uint32_t generation, uint16_t index, app_wifi_scan_record_t *record)
+{
+    (void)generation;
+    (void)index;
+    if (record) memset(record, 0, sizeof(*record));
+    return ESP_ERR_NOT_SUPPORTED;
+}
 void app_wifi_get_snapshot(app_wifi_snapshot_t *snapshot)
 {
     if (snapshot) *snapshot = (app_wifi_snapshot_t){.state = APP_WIFI_UNAVAILABLE,
-        .last_error = ESP_ERR_NOT_SUPPORTED, .storage_error = ESP_ERR_NOT_SUPPORTED};
+        .last_error = ESP_ERR_NOT_SUPPORTED, .storage_error = ESP_ERR_NOT_SUPPORTED,
+        .backend_error = ESP_ERR_NOT_SUPPORTED};
 }
 esp_err_t app_wifi_get_setup_info(app_wifi_setup_info_t *info)
 {

@@ -24,6 +24,7 @@ with tempfile.TemporaryDirectory(prefix="esp32-usb-hid-test-") as temp:
         "-I", str(root / "firmware/main"),
         "-I", str(root / "components/hid_engine/include"),
         "-I", str(root / "components/input_core/include"),
+        "-I", str(root / "components/audio_engine/include"),
         str(suite / "test_usb_hid.c"),
         str(root / "components/hid_engine/hid_engine.c"),
         str(root / "components/input_core/input_core.c"), "-lm", "-o", binary,

@@ -172,6 +172,7 @@ static void assert_defaults(const device_settings_t *settings)
     assert(settings->host_modifier == DEVICE_HOST_CTRL && settings->haptics_enabled);
     assert(settings->brightness_percent == 50 && settings->idle_timeout == DEVICE_IDLE_5_MIN);
     assert(settings->preferred_transport == DEVICE_TRANSPORT_BLUETOOTH);
+    assert(settings->tap_to_click && strcmp(settings->bluetooth_name, "ESP32-INPUT") == 0);
 }
 
 static device_settings_t alternative(void)
@@ -179,7 +180,11 @@ static device_settings_t alternative(void)
     return (device_settings_t){
         .theme = DEVICE_THEME_LIGHT, .host_modifier = DEVICE_HOST_COMMAND,
         .haptics_enabled = false, .brightness_percent = 10, .idle_timeout = DEVICE_IDLE_OFF,
-        .preferred_transport = DEVICE_TRANSPORT_USB
+        .preferred_transport = DEVICE_TRANSPORT_USB,
+        .tap_to_click = false, .bluetooth_name = "Test desktop",
+        .motion_gain_x_centi = 650, .motion_gain_y_centi = 225,
+        .motion_deadzone_mdps = 250, .motion_filter_ms = 20, .motion_freeze_ms = 75,
+        .motion_invert_x = true
     };
 }
 
@@ -251,6 +256,7 @@ static void valid_load_and_unchanged_requests_do_not_write(void)
         assert(loaded.theme == DEVICE_THEME_LIGHT && loaded.host_modifier == DEVICE_HOST_COMMAND);
         assert(!loaded.haptics_enabled && loaded.brightness_percent == chosen_brightness[choice]);
         assert(loaded.idle_timeout == DEVICE_IDLE_OFF && settings_store_status().loaded);
+        assert(device_settings_equal(&loaded, &expected));
         for (int64_t i = 0; i < 1000; ++i) {
             hw.now_us = 10000000 + i * 1000000;
             assert(settings_store_request(&loaded) == ESP_OK);
@@ -329,10 +335,10 @@ static void corrupt_and_unsupported_records_are_preserved(void)
         reset();
         device_settings_t stored = alternative();
         seed(&stored);
-        /* DSET is a 16-byte record: version at 4, length at 5 and CRC at
-         * 12..15. Confirm the fixture's intended rejection before testing NVS. */
+        /* V4 is 56 bytes: version at 4, length at 5 and CRC at 52..55.
+         * Confirm the fixture's intended rejection before testing NVS. */
         if (fault == 0) hw.durable[4] = 255;
-        if (fault == 1) hw.durable[15] ^= 0x80;
+        if (fault == 1) hw.durable[55] ^= 0x80;
         if (fault == 2) hw.durable[0] = 'X';
         if (fault == 3) hw.durable[5] = 15;
         uint8_t original[DEVICE_SETTINGS_RECORD_SIZE];
@@ -365,13 +371,16 @@ static void invalid_requests_cannot_mutate_pending_state(void)
     device_settings_t wanted = alternative();
     assert(settings_store_request(&wanted) == ESP_OK);
     assert(settings_store_request(NULL) == ESP_ERR_INVALID_ARG);
-    for (unsigned fault = 0; fault < 5; ++fault) {
+    for (unsigned fault = 0; fault < 8; ++fault) {
         device_settings_t invalid = wanted;
         if (fault == 0) invalid.theme = (device_theme_t)99;
         if (fault == 1) invalid.host_modifier = (device_host_modifier_t)99;
         if (fault == 2) invalid.brightness_percent = 0;
         if (fault == 3) invalid.idle_timeout = (device_idle_timeout_t)2;
         if (fault == 4) invalid.preferred_transport = (device_transport_t)2;
+        if (fault == 5) invalid.bluetooth_name[0] = '\0';
+        if (fault == 6) strcpy(invalid.bluetooth_name, " Leading");
+        if (fault == 7) memset(invalid.bluetooth_name, 'X', sizeof invalid.bluetooth_name);
         assert(settings_store_request(&invalid) == ESP_ERR_INVALID_ARG);
         assert(settings_store_status().requested_revision == 1);
     }
@@ -612,32 +621,118 @@ static void revision_exhaustion_preserves_pending_value(void)
 
 static void legacy_record_migrates_only_after_explicit_transport_change(void)
 {
+    /* Frozen independent v1/v2 CRC fixtures include old 70% and custom fields. */
+    const uint8_t legacy[][16] = {
+        {0x44,0x53,0x45,0x54,1,16,1,0,1,70,5,0,0xfc,0x00,0x35,0x2f},
+        {0x44,0x53,0x45,0x54,2,16,1,0,1,70,5,0,0x1f,0x07,0xba,0xa1},
+        {0x44,0x53,0x45,0x54,0x02,0x10,0x00,0x01,0x00,0x1e,0x1e,0x01,0x6b,0x1e,0xa4,0x53}
+    };
+    for (size_t fixture = 0; fixture < sizeof legacy / sizeof legacy[0]; ++fixture) {
+        reset();
+        memcpy(hw.durable, legacy[fixture], sizeof legacy[fixture]);
+        hw.durable_length = sizeof legacy[fixture]; hw.exists = true;
+        device_settings_t loaded = alternative(), expected = defaults();
+        expected.brightness_percent = 70;
+        if (fixture == 2) {
+            expected.theme = DEVICE_THEME_LIGHT;
+            expected.host_modifier = DEVICE_HOST_COMMAND;
+            expected.haptics_enabled = false;
+            expected.brightness_percent = 30;
+            expected.idle_timeout = DEVICE_IDLE_30_MIN;
+            expected.preferred_transport = DEVICE_TRANSPORT_USB;
+        }
+        assert(settings_store_init(&loaded) == ESP_OK);
+        assert(device_settings_equal(&loaded, &expected) && settings_store_status().loaded);
+        device_settings_t transient = loaded;
+        transient.tap_to_click = false;
+        assert(settings_store_request(&transient) == ESP_OK);
+        assert(settings_store_request(&loaded) == ESP_OK);
+        worker_at(11000000); /* Return to the known logical value: no format-upgrade write. */
+        assert(hw.sets == 0 && hw.commits == 0);
+        for (int64_t i = 0; i < 1000; ++i) {
+            hw.now_us = 11000000 + i * 1000000;
+            assert(settings_store_request(&loaded) == ESP_OK);
+            worker_at(hw.now_us);
+        }
+        assert(hw.sets == 0 && hw.commits == 0 && hw.durable_length == 16);
+        assert(memcmp(hw.durable, legacy[fixture], sizeof legacy[fixture]) == 0);
+        loaded.preferred_transport = loaded.preferred_transport == DEVICE_TRANSPORT_USB ?
+            DEVICE_TRANSPORT_BLUETOOTH : DEVICE_TRANSPORT_USB;
+        assert(settings_store_request(&loaded) == ESP_OK);
+        const int64_t requested = hw.now_us;
+        worker_at(requested + 999999);
+        assert(hw.sets == 0);
+        worker_at(requested + 1000000);
+        assert(hw.sets == 1 && hw.commits == 1 && hw.durable_length == 56 && hw.durable[4] == 4);
+        reset_runtime();
+        device_settings_t reloaded = defaults();
+        assert(settings_store_init(&reloaded) == ESP_OK);
+        assert(device_settings_equal(&loaded, &reloaded));
+    }
+}
+
+static void tap_and_name_preferences_persist_without_repeated_writes(void)
+{
     reset();
-    /* Frozen schema-1 record retains its old 70% brightness and original CRC32. */
-    const uint8_t legacy[] = {0x44,0x53,0x45,0x54,0x01,0x10,0x01,0x00,
-        0x01,0x46,0x05,0x00,0xfc,0x00,0x35,0x2f};
-    memcpy(hw.durable, legacy, sizeof legacy);
-    hw.durable_length = sizeof legacy;
-    hw.exists = true;
-    device_settings_t loaded = alternative();
-    assert(settings_store_init(&loaded) == ESP_OK);
-    device_settings_t expected = defaults();
-    expected.brightness_percent = 70;
-    assert(device_settings_equal(&loaded, &expected));
-    assert(settings_store_status().loaded);
-    worker_at(20000000);
-    assert(hw.sets == 0 && hw.commits == 0 && memcmp(hw.durable, legacy, sizeof legacy) == 0);
-    loaded.preferred_transport = DEVICE_TRANSPORT_USB;
-    assert(settings_store_request(&loaded) == ESP_OK);
-    worker_at(20999999);
-    assert(hw.sets == 0);
-    worker_at(21000000);
-    assert(hw.sets == 1 && hw.commits == 1 && hw.durable[4] == 2 && hw.durable[11] == 1);
+    init_missing();
+    device_settings_t wanted = defaults();
+    wanted.tap_to_click = false;
+    assert(settings_store_request(&wanted) == ESP_OK);
+    worker_at(11000000);
+    assert_durable(&wanted);
+    assert(hw.sets == 1 && hw.commits == 1 && hw.durable[12] == 0);
+    strcpy(wanted.bluetooth_name, "Office Pad");
+    assert(settings_store_request(&wanted) == ESP_OK);
+    worker_at(12000000);
+    assert_durable(&wanted);
+    assert(hw.sets == 2 && hw.commits == 2);
+    for (int64_t i = 0; i < 1000; ++i) {
+        hw.now_us = 12000000 + i * 1000000;
+        assert(settings_store_request(&wanted) == ESP_OK);
+        worker_at(hw.now_us);
+    }
+    assert(hw.sets == 2 && hw.commits == 2 && !settings_store_status().pending);
     reset_runtime();
-    device_settings_t reloaded = defaults();
-    assert(settings_store_init(&reloaded) == ESP_OK);
-    assert(device_settings_equal(&loaded, &reloaded));
-    assert(reloaded.preferred_transport == DEVICE_TRANSPORT_USB);
+    device_settings_t loaded;
+    assert(settings_store_init(&loaded) == ESP_OK);
+    assert(device_settings_equal(&loaded, &wanted));
+    assert(!loaded.tap_to_click && strcmp(loaded.bluetooth_name, "Office Pad") == 0);
+}
+
+static const uint8_t v3_tap_off[40] = {
+    0x44,0x53,0x45,0x54,0x03,0x28,0x01,0x00,
+    0x01,0x32,0x05,0x00,0x00,0x0b,0x45,0x53,
+    0x50,0x33,0x32,0x2d,0x49,0x4e,0x50,0x55,
+    0x54,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x2b,0x9c,0x05,0x26
+};
+
+static void v3_migration_preserves_tap_and_motion_defaults_without_boot_write(void)
+{
+    reset();
+    memcpy(hw.durable, v3_tap_off, sizeof v3_tap_off);
+    hw.durable_length = sizeof v3_tap_off; hw.exists = true;
+    device_settings_t loaded;
+    assert(settings_store_init(&loaded) == ESP_OK);
+    assert(!loaded.tap_to_click && loaded.motion_gain_x_centi == 400 && loaded.motion_gain_y_centi == 400);
+    assert(settings_store_request(&loaded) == ESP_OK);
+    worker_at(10000000);
+    assert(hw.sets == 0 && hw.commits == 0 && hw.durable_length == 40);
+    device_settings_t changed = loaded;
+    changed.motion_gain_x_centi = 825;
+    assert(settings_store_request(&changed) == ESP_OK);
+    assert(settings_store_request(&loaded) == ESP_OK);
+    worker_at(12000000);
+    assert(hw.sets == 0 && hw.commits == 0);
+    changed.motion_invert_y = true;
+    changed.motion_freeze_ms = 0;
+    assert(settings_store_request(&changed) == ESP_OK);
+    worker_at(14000000);
+    assert(hw.sets == 1 && hw.commits == 1 && hw.durable_length == 56);
+    assert_durable(&changed);
+    reset_runtime();
+    assert(settings_store_init(&loaded) == ESP_OK);
+    assert(device_settings_equal(&loaded, &changed) && !loaded.tap_to_click);
 }
 
 int main(int argc, char **argv)
@@ -662,6 +757,8 @@ int main(int argc, char **argv)
     RUN(uncertain_failed_commit_cannot_dedupe_against_old_value);
     RUN(revision_exhaustion_preserves_pending_value);
     RUN(legacy_record_migrates_only_after_explicit_transport_change);
+    RUN(tap_and_name_preferences_persist_without_repeated_writes);
+    RUN(v3_migration_preserves_tap_and_motion_defaults_without_boot_write);
 #undef RUN
     assert(passed);
     if (argc == 2) printf("PASS: settings store case %s\n", argv[1]);
