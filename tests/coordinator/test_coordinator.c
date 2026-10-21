@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdarg.h>
 
 /* Include production helpers unchanged, preserving their actual static state.
  * Hardware interfaces are substituted only through the included public headers. */
@@ -57,6 +58,11 @@ static bool test_usb_enable_requests[32];
 static size_t test_usb_enable_trace[32], test_usb_enable_count;
 static input_link_t test_previous_link;
 static void (*test_ble_after_accept)(void), (*test_usb_after_accept)(void);
+static bool test_diagnostic_logs_enabled, test_heap_observation_enabled;
+static char test_diagnostic_logs[8][256];
+static size_t test_diagnostic_log_count, test_heap_observation_count;
+static size_t test_heap_free_internal, test_heap_largest_internal;
+static size_t test_heap_free_dma, test_heap_largest_dma;
 
 usb_hid_snapshot_t usb_hid_snapshot(void) { return test_usb; }
 void usb_hid_set_enabled(bool enabled)
@@ -223,8 +229,16 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
 
 void coordinator_test_log(const char *tag, const char *format, ...)
 {
-    (void)tag;
-    (void)format;
+    if (!test_diagnostic_logs_enabled) return;
+    assert(strcmp(tag, "input") == 0);
+    assert(test_diagnostic_log_count < sizeof test_diagnostic_logs / sizeof test_diagnostic_logs[0]);
+    va_list arguments;
+    va_start(arguments, format);
+    int length = vsnprintf(test_diagnostic_logs[test_diagnostic_log_count],
+                           sizeof test_diagnostic_logs[0], format, arguments);
+    va_end(arguments);
+    assert(length >= 0 && (size_t)length < sizeof test_diagnostic_logs[0]);
+    ++test_diagnostic_log_count;
 }
 
 static _Noreturn void unexpected_boot_boundary(void)
@@ -291,6 +305,7 @@ void app_ui_render(const app_view_t *view)
 }
 esp_err_t ble_hid_init(void) { unexpected_boot_boundary(); }
 ble_hid_snapshot_t ble_hid_snapshot(void) { return test_link; }
+ble_hid_failure_t ble_hid_failure(void) { unexpected_boot_boundary(); }
 bool ble_hid_disconnect_generation(uint64_t generation)
 {
     ++test_disconnects;
@@ -331,7 +346,11 @@ UBaseType_t uxTaskGetStackHighWaterMark(void *task)
 }
 size_t heap_caps_get_free_size(uint32_t capabilities)
 {
-    (void)capabilities;
+    if (test_heap_observation_enabled) {
+        ++test_heap_observation_count;
+        if (capabilities == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)) return test_heap_free_internal;
+        if (capabilities == (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)) return test_heap_free_dma;
+    }
     unexpected_boot_boundary();
 }
 size_t heap_caps_get_minimum_free_size(uint32_t capabilities)
@@ -341,7 +360,16 @@ size_t heap_caps_get_minimum_free_size(uint32_t capabilities)
 }
 size_t heap_caps_get_largest_free_block(uint32_t capabilities)
 {
-    (void)capabilities;
+    if (test_heap_observation_enabled) {
+        ++test_heap_observation_count;
+        if (capabilities == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)) return test_heap_largest_internal;
+        if (capabilities == (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)) return test_heap_largest_dma;
+    }
+    unexpected_boot_boundary();
+}
+esp_err_t heap_caps_register_failed_alloc_callback(esp_alloc_failed_hook_t callback)
+{
+    (void)callback;
     unexpected_boot_boundary();
 }
 
@@ -425,6 +453,17 @@ static void deliver(app_intent_t intent)
 
 static void setup(input_mode_t mode)
 {
+    test_diagnostic_logs_enabled = test_heap_observation_enabled = false;
+    test_diagnostic_log_count = test_heap_observation_count = 0;
+    memset(test_diagnostic_logs, 0, sizeof test_diagnostic_logs);
+    test_heap_free_internal = test_heap_largest_internal = 0;
+    test_heap_free_dma = test_heap_largest_dma = 0;
+    atomic_store(&s_allocation_failure_state, 0);
+    s_allocation_failure_size = 0;
+    s_allocation_failure_caps = 0;
+    s_allocation_failure_function = NULL;
+    memset(s_boot_memory, 0, sizeof s_boot_memory);
+    s_boot_memory_count = 0;
     s_intents = xQueueCreateStatic(INTENT_CAPACITY, sizeof(app_intent_t),
                                    s_intent_bytes, &s_intent_storage);
     s_priority_requests = 0;
@@ -3172,6 +3211,92 @@ static void pairing_replacement_after_acceptance_never_issues_another_disconnect
     }
 }
 
+static void allocation_diagnostics_retain_only_first_complete_failure(void)
+{
+    setup(INPUT_MOUSE);
+    test_diagnostic_logs_enabled = true;
+    report_memory_diagnostics();
+    assert(test_diagnostic_log_count == 0);
+    record_allocation_failure(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA, "synthetic_dma_alloc");
+    for (unsigned i = 0; i < 1000; ++i)
+        record_allocation_failure(8192, MALLOC_CAP_8BIT, "later_alloc");
+    /* The allocator callback neither logs nor queries the allocator again. */
+    assert(test_diagnostic_log_count == 0 && test_heap_observation_count == 0);
+    report_memory_diagnostics();
+    assert(test_diagnostic_log_count == 1);
+    assert(strstr(test_diagnostic_logs[0], "size=4096 caps=0x00000808 function=synthetic_dma_alloc"));
+    report_memory_diagnostics();
+    assert(test_diagnostic_log_count == 2);
+    assert(strcmp(test_diagnostic_logs[0], test_diagnostic_logs[1]) == 0);
+    assert(test_heap_observation_count == 0);
+
+    setup(INPUT_MOUSE);
+    test_diagnostic_logs_enabled = true;
+    record_allocation_failure(17, MALLOC_CAP_8BIT, NULL);
+    report_memory_diagnostics();
+    assert(test_diagnostic_log_count == 1);
+    assert(strstr(test_diagnostic_logs[0], "size=17 caps=0x00000004 function=unknown"));
+}
+
+static void allocation_diagnostics_ignore_an_unpublished_record(void)
+{
+    setup(INPUT_MOUSE);
+    test_diagnostic_logs_enabled = true;
+    /* Model a writer paused after reservation, with only some fields written.
+     * This exercises the reader gate, not real concurrent scheduling. */
+    s_allocation_failure_size = 123;
+    s_allocation_failure_function = "unpublished";
+    report_memory_diagnostics();
+    assert(test_diagnostic_log_count == 0);
+    atomic_store_explicit(&s_allocation_failure_state, 1, memory_order_relaxed);
+    record_allocation_failure(8192, MALLOC_CAP_DMA, "competing_alloc");
+    report_memory_diagnostics();
+    assert(test_diagnostic_log_count == 0);
+    assert(atomic_load(&s_allocation_failure_state) == 1);
+    assert(s_allocation_failure_size == 123 && s_allocation_failure_caps == 0);
+    assert(strcmp(s_allocation_failure_function, "unpublished") == 0);
+    assert(test_heap_observation_count == 0);
+}
+
+static void boot_memory_diagnostics_preserve_bounded_capability_history(void)
+{
+    static const char *const stages[] = {"entry", "usb", "board", "ui", "bluetooth", "wifi"};
+    setup(INPUT_MOUSE);
+    test_heap_observation_enabled = true;
+    for (size_t i = 0; i < 6; ++i) {
+        test_heap_free_internal = 80000 - i * 1000;
+        test_heap_largest_internal = 50000 - i * 1000;
+        test_heap_free_dma = 30000 - i * 1000;
+        test_heap_largest_dma = 10000 - i * 1000;
+        record_boot_memory(stages[i]);
+    }
+    assert(test_heap_observation_count == 24);
+    /* Extra stages must be discarded before even querying heap state. */
+    test_heap_observation_enabled = false;
+    for (unsigned i = 0; i < 1000; ++i) record_boot_memory("overflow");
+    assert(s_boot_memory_count == 6 && test_heap_observation_count == 24);
+    test_diagnostic_logs_enabled = true;
+    for (unsigned repeat = 0; repeat < 100; ++repeat) {
+        test_diagnostic_log_count = 0;
+        report_memory_diagnostics();
+        assert(test_diagnostic_log_count == 6);
+        for (size_t i = 0; i < 6; ++i) {
+            char expected[160];
+            int length = snprintf(expected, sizeof expected,
+                "stage=%s free_internal=%zu largest_internal=%zu free_dma=%zu largest_dma=%zu",
+                stages[i], 80000 - i * 1000, 50000 - i * 1000, 30000 - i * 1000, 10000 - i * 1000);
+            assert(length > 0 && (size_t)length < sizeof expected);
+            assert(strstr(test_diagnostic_logs[i], expected));
+        }
+        assert(s_boot_memory_count == 6 && test_heap_observation_count == 24);
+    }
+    record_allocation_failure(1024, MALLOC_CAP_DMA, "after_boot");
+    test_diagnostic_log_count = 0;
+    report_memory_diagnostics();
+    assert(test_diagnostic_log_count == 7);
+    assert(strstr(test_diagnostic_logs[6], "size=1024 caps=0x00000008 function=after_boot"));
+}
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -3255,10 +3380,13 @@ int main(int argc, char **argv)
     RUN(pairing_admission_generation_change_waits_for_actual_link_down);
     RUN(pairing_replacement_before_acceptance_aborts_all_operation_kinds);
     RUN(pairing_replacement_after_acceptance_never_issues_another_disconnect);
+    RUN(allocation_diagnostics_retain_only_first_complete_failure);
+    RUN(allocation_diagnostics_ignore_an_unpublished_record);
+    RUN(boot_memory_diagnostics_preserve_bounded_capability_history);
 #undef RUN
     assert(passed);
     if (argc == 2) printf("PASS: coordinator case %s\n", argv[1]);
     else printf("PASS: %u production coordinator cases covering safety, preview/send, touch/drag, "
-                "physical timing, motion, settings, display/wake, connectivity and views\n", passed);
+                "physical timing, motion, settings, display/wake, connectivity, views and diagnostics\n", passed);
     return 0;
 }

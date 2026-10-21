@@ -14,6 +14,11 @@ static unsigned sdk_calls, notify_calls, advertising_calls;
 static void (*notify_hook)(void);
 static uint8_t copied_payload[8];
 static TickType_t fake_tick;
+static int64_t fake_uptime_us = -1;
+static unsigned uptime_reads;
+static esp_err_t controller_init_result = ESP_OK;
+static bool task_create_fails;
+static void (*registration_hook)(void);
 static bool worker_step_mode;
 static unsigned worker_receive_count;
 static jmp_buf worker_exit;
@@ -105,6 +110,10 @@ esp_err_t esp_ble_get_bond_device_list(int *count, esp_ble_bond_dev_t *bonds) {
     return bond_result;
 }
 TickType_t xTaskGetTickCount(void) { return fake_tick; }
+int64_t esp_timer_get_time(void) {
+    ++uptime_reads;
+    return fake_uptime_us >= 0 ? fake_uptime_us : (int64_t)fake_tick * 1000;
+}
 
 QueueHandle_t xQueueCreate(unsigned int count, unsigned int size) {
     assert(count <= 16 && size <= sizeof(control_command_t));
@@ -135,7 +144,7 @@ int xQueueReceive(QueueHandle_t queue, void *item, unsigned int timeout) {
 }
 int xTaskCreate(void (*task)(void *), const char *name, unsigned int stack, void *argument, unsigned int priority, void *handle) {
     (void)task; (void)name; (void)stack; (void)argument; (void)priority; (void)handle;
-    return pdPASS;
+    return task_create_fails ? 0 : pdPASS;
 }
 TimerHandle_t xTimerCreate(const char *name, TickType_t period, int reload,
                           void *identifier, void (*callback)(TimerHandle_t)) {
@@ -151,7 +160,7 @@ void test_log(const char *tag, const char *format, ...) { (void)tag; (void)forma
 const char *esp_err_to_name(esp_err_t error) { (void)error; return "test error"; }
 esp_err_t nvs_flash_init(void) { return nvs_result; }
 esp_bt_controller_status_t esp_bt_controller_get_status(void) { return ESP_BT_CONTROLLER_STATUS_IDLE; }
-esp_err_t esp_bt_controller_init(esp_bt_controller_config_t *config) { (void)config; return ESP_OK; }
+esp_err_t esp_bt_controller_init(esp_bt_controller_config_t *config) { (void)config; return controller_init_result; }
 esp_err_t esp_bt_controller_enable(esp_bt_mode_t mode) { assert(mode == ESP_BT_MODE_BLE); return ESP_OK; }
 esp_bluedroid_status_t esp_bluedroid_get_status(void) { return ESP_BLUEDROID_STATUS_UNINITIALIZED; }
 esp_err_t esp_bluedroid_init(void) { return ESP_OK; }
@@ -178,6 +187,7 @@ esp_err_t esp_ble_gap_config_adv_data(esp_ble_adv_data_t *data) {
 esp_err_t esp_ble_gatts_app_register(uint16_t app_id) {
     assert(app_id == HID_APP_ID);
     ++app_registration_calls;
+    if (registration_hook) registration_hook();
     return ESP_OK;
 }
 esp_err_t esp_ble_gatts_create_attr_tab(const esp_gatts_attr_db_t *db, esp_gatt_if_t interface, uint16_t count, uint8_t instance) { assert(db && interface && count == ATTR_COUNT && instance == 0); ++sdk_calls; return ESP_OK; }
@@ -222,6 +232,12 @@ static void drain(void) { control_command_t command; while (xQueueReceive(contro
 static control_command_t pop(void) { control_command_t command; assert(xQueueReceive(control_queue, &command, 0)); return command; }
 static void reset(void) {
     memset(&state, 0, sizeof(state));
+    first_failure = (ble_hid_failure_t){.stage = "none", .error = ESP_OK};
+    fake_uptime_us = -1;
+    uptime_reads = 0;
+    controller_init_result = ESP_OK;
+    task_create_fails = false;
+    registration_hook = NULL;
     memset(&subscriptions, 0, sizeof(subscriptions));
     memset(&pending_subscriptions, 0, sizeof(pending_subscriptions));
     memset(fake_bonds, 0, sizeof(fake_bonds));
@@ -1628,8 +1644,203 @@ static void test_repeated_lifecycle(void) {
         gap_callback(ESP_GAP_BLE_ADV_START_COMPLETE_EVT, &p);
     }
     assert(notify_calls == 200000U && advertising_calls == 100000U);
+    assert(!ble_hid_failure().recorded && uptime_reads == 0);
 }
+
+static void assert_same_failure(ble_hid_failure_t expected) {
+    ble_hid_failure_t actual = ble_hid_failure();
+    assert(actual.recorded == expected.recorded && actual.stage == expected.stage);
+    assert(actual.error == expected.error && actual.sdk_status_known == expected.sdk_status_known);
+    assert(actual.sdk_status == expected.sdk_status && actual.uptime_ms == expected.uptime_ms);
+    assert(ble_hid_failure_stage_name() == expected.stage);
+}
+
+static void test_first_failure_initialization(void) {
+    reset_startup();
+    ble_hid_failure_t none = ble_hid_failure();
+    assert(!none.recorded && none.error == ESP_OK && strcmp(none.stage, "none") == 0);
+    assert(!none.sdk_status_known && none.sdk_status == 0 && none.uptime_ms == 0);
+    assert(uptime_reads == 0);
+    fake_uptime_us = 1234567;
+    nvs_result = ESP_ERR_NO_MEM;
+    assert(ble_hid_init() == ESP_ERR_NO_MEM);
+    ble_hid_failure_t first = ble_hid_failure();
+    assert(first.recorded && first.error == ESP_ERR_NO_MEM && first.uptime_ms == 1234);
+    assert(strcmp(first.stage, "NVS initialization (data preserved)") == 0);
+    assert(!first.sdk_status_known && !state.public.initialized && state.public.failed);
+    fake_uptime_us = 9000000;
+    assert(ble_hid_init() == ESP_ERR_INVALID_STATE);
+    fail_transport("Later failure", ESP_FAIL);
+    assert_same_failure(first);
+    assert(uptime_reads == 1);
+
+    reset_startup(); controller_init_result = ESP_ERR_NO_MEM;
+    assert(ble_hid_init() == ESP_ERR_NO_MEM);
+    first = ble_hid_failure();
+    assert(first.recorded && first.error == ESP_ERR_NO_MEM);
+    assert(strcmp(first.stage, "Controller initialization") == 0 && !first.sdk_status_known);
+
+    reset_startup(); task_create_fails = true;
+    assert(ble_hid_init() == ESP_ERR_NO_MEM);
+    assert(strcmp(ble_hid_failure().stage, "Control worker allocation") == 0);
+    assert(app_registration_calls == 0 && !state.public.initialized);
+
+    reset_startup(); /* Simulated reboot, the only supported clearing boundary. */
+    assert(!ble_hid_failure().recorded && ble_hid_init() == ESP_OK);
+    assert(!ble_hid_failure().recorded && state.public.initialized && !state.public.failed);
+    assert(ble_hid_init() == ESP_ERR_INVALID_STATE && !ble_hid_failure().recorded);
+}
+
+static void registration_failure_before_init_returns(void) {
+    esp_ble_gatts_cb_param_t p = {0};
+    p.reg.app_id = HID_APP_ID;
+    p.reg.status = ESP_GATT_ERROR;
+    callback_active = true;
+    gatts_callback(ESP_GATTS_REG_EVT, 7, &p);
+    callback_active = false;
+}
+
+static void test_first_failure_asynchronous_setup(void) {
+    reset_startup();
+    fake_uptime_us = 5001987;
+    registration_hook = registration_failure_before_init_returns;
+    assert(ble_hid_init() == ESP_OK);
+    assert(state.public.initialized && state.public.failed);
+    ble_hid_failure_t first = ble_hid_failure();
+    assert(first.recorded && first.error == ESP_FAIL && first.sdk_status_known);
+    assert(first.sdk_status == ESP_GATT_ERROR && first.uptime_ms == 5001);
+    assert(strcmp(first.stage, "GATT registration completion") == 0);
+    esp_ble_gap_cb_param_t gap = {0};
+    gap.adv_data_cmpl.status = 7;
+    fake_uptime_us = 8000000;
+    callback_active = true;
+    gap_callback(ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT, &gap);
+    callback_active = false;
+    assert_same_failure(first);
+    assert(uptime_reads == 1);
+
+    reset_startup(); assert(ble_hid_init() == ESP_OK);
+    esp_ble_gatts_cb_param_t p = {0};
+    p.reg.app_id = HID_APP_ID; p.reg.status = ESP_GATT_OK;
+    gatts_callback(ESP_GATTS_REG_EVT, 7, &p);
+    assert(!ble_hid_failure().recorded);
+    p.add_attr_tab.status = 0x11;
+    fake_uptime_us = 6789000;
+    callback_active = true;
+    gatts_callback(ESP_GATTS_CREAT_ATTR_TAB_EVT, 7, &p);
+    callback_active = false;
+    first = ble_hid_failure();
+    assert(state.public.failed && first.sdk_status_known && first.sdk_status == 0x11);
+    assert(first.uptime_ms == 6789 && strcmp(first.stage, "HID attribute table completion") == 0);
+
+    const esp_gap_ble_cb_event_t events[] = {ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT,
+        ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT, ESP_GAP_BLE_ADV_START_COMPLETE_EVT,
+        ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT};
+    const char *const names[] = {"Advertising data completion", "Scan response completion",
+        "Advertising start completion", "Advertising stop completion"};
+    for (unsigned i = 0; i < sizeof(events) / sizeof(events[0]); ++i) {
+        reset();
+        gap.adv_data_cmpl.status = (int)i + 5; /* Shared status field in the SDK union. */
+        callback_active = true;
+        gap_callback(events[i], &gap);
+        callback_active = false;
+        first = ble_hid_failure();
+        assert(first.recorded && first.sdk_status_known && first.sdk_status == i + 5);
+        assert(first.error == ESP_FAIL && strcmp(first.stage, names[i]) == 0 && state.public.failed);
+    }
+}
+
+static void test_first_failure_recovery_and_observation(void) {
+    reset(); connect_peer(); drain(); subscribe();
+    assert(!ble_hid_failure().recorded && state.public.ready);
+    unsigned char before[sizeof(state)];
+    memcpy(before, &state, sizeof(state));
+    unsigned calls = sdk_calls;
+    callback_active = true;
+    for (unsigned i = 0; i < 1000; ++i) {
+        assert(!ble_hid_failure().recorded);
+        assert(strcmp(ble_hid_failure_stage_name(), "none") == 0);
+    }
+    callback_active = false;
+    assert(memcmp(before, &state, sizeof(state)) == 0 && sdk_calls == calls && uptime_reads == 0);
+    uint8_t report[8] = {0};
+    notify_result = ESP_ERR_NO_MEM; fake_uptime_us = 22000999;
+    uint64_t generation = state.public.generation;
+    assert(!ble_hid_send(1, report, sizeof(report)));
+    ble_hid_failure_t first = ble_hid_failure();
+    assert(first.recorded && first.error == ESP_ERR_NO_MEM && !first.sdk_status_known);
+    assert(first.uptime_ms == 22000 && strcmp(first.stage, "Notification submission") == 0);
+    assert(state.public.ready && !state.public.congested && state.public.generation == generation);
+    notify_result = ESP_OK;
+    assert(ble_hid_send(1, report, sizeof(report))); complete_notification(ESP_GATT_OK);
+    assert(state.public.ready && !state.public.failed);
+    assert_same_failure(first);
+    fake_uptime_us = 33000000;
+    assert(ble_hid_send(1, report, sizeof(report))); complete_notification(ESP_GATT_ERROR);
+    assert(state.link_fault && !state.public.ready);
+    disconnect_peer();
+    assert(ble_hid_pairing_open(BLE_HID_PAIRING_DEFAULT_MS));
+    connect_peer(); drain(); subscribe();
+    assert(state.public.ready && !state.public.failed && !state.link_fault);
+    assert_same_failure(first);
+    assert(uptime_reads == 1);
+}
+
+static void test_first_failure_authentication_and_deadline(void) {
+    reset(); connect_peer(); drain();
+    esp_ble_gap_cb_param_t p = {0};
+    p.ble_security.auth_cmpl.bd_addr[0] = active_peer;
+    p.ble_security.auth_cmpl.success = false;
+    p.ble_security.auth_cmpl.fail_reason = 0x05;
+    fake_uptime_us = 4567000;
+    callback_active = true;
+    gap_callback(ESP_GAP_BLE_AUTH_CMPL_EVT, &p);
+    callback_active = false;
+    ble_hid_failure_t first = ble_hid_failure();
+    assert(first.sdk_status_known && first.sdk_status == 0x05 && first.error == ESP_FAIL);
+    assert(strcmp(first.stage, "Authentication completion") == 0 && first.uptime_ms == 4567);
+    assert(state.link_fault && !state.public.failed);
+    disconnect_peer(); worker_cycle();
+    connect_peer(); drain(); subscribe();
+    assert(state.public.ready && !state.public.failed);
+    assert_same_failure(first);
+
+    reset(); connect_peer(); drain(); subscribe();
+    uint8_t report[8] = {0};
+    assert(ble_hid_send(1, report, sizeof(report)));
+    fake_tick = NOTIFICATION_TIMEOUT_MS;
+    fake_uptime_us = INT64_C(4294968529) * 1000;
+    notification_watchdog(NULL);
+    first = ble_hid_failure();
+    assert(first.recorded && first.uptime_ms == UINT64_C(4294968529));
+    assert(first.error == ESP_ERR_TIMEOUT && !first.sdk_status_known);
+    assert(strcmp(first.stage, "Notification completion timeout") == 0 && state.public.failed);
+    fake_uptime_us += 1000000;
+    complete_notification(ESP_GATT_OK); disconnect_peer();
+    assert_same_failure(first);
+}
+
+static void test_first_failure_ignores_nonfaults_and_stale_jobs(void) {
+    reset();
+    uint8_t report[8] = {0};
+    assert(!ble_hid_send(0, report, sizeof(report)));
+    assert(!ble_hid_pairing_open(0) && !ble_hid_forget_bonds(1));
+    rssi_request_result = ESP_FAIL;
+    connect_peer(); drain(); subscribe();
+    assert(rssi_calls != 0 && !ble_hid_failure().recorded);
+    control_command_t old = {.conn_id = state.conn_id, .generation = state.connection_generation};
+    memcpy(old.address, state.address, sizeof(old.address));
+    assert(ble_hid_disconnect_generation(state.public.generation));
+    service_link_control(); disconnect_peer();
+    connect_peer(); drain();
+    fail_link_current(&old, 0, false, "Obsolete link error", ESP_ERR_NO_MEM);
+    assert(!state.public.failed && !ble_hid_failure().recorded && uptime_reads == 0);
+}
+
 int main(void) {
+    test_first_failure_initialization(); test_first_failure_asynchronous_setup();
+    test_first_failure_recovery_and_observation(); test_first_failure_authentication_and_deadline();
+    test_first_failure_ignores_nonfaults_and_stale_jobs();
     test_snapshot_peer_identity();
     test_gate_and_epoch(); test_malformed_writes(); test_send_race_and_backpressure();
     test_fail_closed(); test_advertising_prerequisites();
@@ -1654,5 +1865,5 @@ int main(void) {
     test_auth_disconnect_refreshes_durable_bonds(); test_auth_after_disconnect_and_refresh_failure();
     test_pairing_rechecks_actual_capacity(); test_auth_invalidates_an_inflight_cache_read();
     test_bond_list_cache_availability(); test_partial_forget_cached_list();
-    puts("BLE adapter: advertising initialization, gates, missed edges, malformed writes, reconnect submission race, backpressure, persistence, pairing, RSSI, saved-host cache, bond removal, failures and 100000 lifecycle cycles passed");
+    puts("BLE adapter: advertising initialization, gates, missed edges, malformed writes, reconnect submission race, backpressure, persistence, pairing, RSSI, saved-host cache, bond removal, first-failure diagnostics, failures and 100000 lifecycle cycles passed");
 }

@@ -7,6 +7,7 @@
 
 #include "bsp/esp_mosaico.h"
 #include "driver/i2c_master.h"
+#include "driver/spi_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -707,6 +708,16 @@ esp_err_t board_init(void (*lock_callback)(void))
     if (!s_caps.display || !s_caps.touch) {
         ESP_LOGE(TAG, "Required display/touch unavailable");
         return ESP_ERR_NOT_FOUND;
+    }
+    /* The pinned BSP CO5300 configuration uses queue depth 10. Query the
+     * driver's actual transfer limit rather than assuming its DMA rounding. */
+    size_t spi_max_bytes = 0;
+    const esp_err_t spi_limit_result = spi_bus_get_max_transaction_len(BSP_LCD_SPI_HOST, &spi_max_bytes);
+    if (spi_limit_result == ESP_OK) {
+        ESP_LOGI(TAG, "Display SPI max_transaction_bytes=%zu pinned_queue_depth=10", spi_max_bytes);
+    } else {
+        ESP_LOGW(TAG, "Display SPI transfer limit unavailable: %s (pinned_queue_depth=10)",
+                 esp_err_to_name(spi_limit_result));
     }
     if (!board_display_lock(1000)) {
         return ESP_ERR_TIMEOUT;

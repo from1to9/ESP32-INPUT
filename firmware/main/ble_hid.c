@@ -8,6 +8,7 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -139,6 +140,7 @@ typedef struct {
 } control_command_t;
 
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
+static ble_hid_failure_t first_failure = {.stage = "none", .error = ESP_OK};
 static QueueHandle_t control_queue;
 static struct {
     ble_hid_snapshot_t public;
@@ -339,9 +341,21 @@ static void advance_generation_locked(void)
     }
 }
 
+/* Called under state_lock with static string literals only. Record once with
+ * no allocation, logging or changes to admission, recovery or transport state. */
+static void record_failure_locked(const char *stage, esp_err_t error,
+                                  bool sdk_status_known, uint32_t sdk_status)
+{
+    if (first_failure.recorded) return;
+    first_failure = (ble_hid_failure_t){.recorded = true, .stage = stage,
+        .error = error, .sdk_status_known = sdk_status_known, .sdk_status = sdk_status,
+        .uptime_ms = (uint64_t)esp_timer_get_time() / 1000U};
+}
+
 static void fail_transport(const char *operation, esp_err_t error)
 {
     portENTER_CRITICAL(&state_lock);
+    record_failure_locked(operation, error, false, 0);
     if (!state.public.failed) {
         advance_generation_locked();
     }
@@ -349,6 +363,14 @@ static void fail_transport(const char *operation, esp_err_t error)
     refresh_locked();
     portEXIT_CRITICAL(&state_lock);
     ESP_LOGE(TAG, "%s failed: %s", operation, esp_err_to_name(error));
+}
+
+static void fail_transport_sdk(const char *operation, esp_err_t error, uint32_t sdk_status)
+{
+    portENTER_CRITICAL(&state_lock);
+    record_failure_locked(operation, error, true, sdk_status);
+    portEXIT_CRITICAL(&state_lock);
+    fail_transport(operation, error);
 }
 
 static void fail_link_current(const control_command_t *command, uint32_t revision,
@@ -360,6 +382,7 @@ static void fail_link_current(const control_command_t *command, uint32_t revisio
         memcmp(state.address, command->address, ESP_BD_ADDR_LEN) == 0 &&
         (!check_revision || state.auth_revision == revision);
     if (current) {
+        record_failure_locked(operation, error, false, 0);
         if (!state.public.failed) {
             advance_generation_locked();
         }
@@ -462,11 +485,13 @@ static void notification_watchdog(TimerHandle_t timer)
     }
     if (state.rejected_pending && !state.public.failed &&
         (TickType_t)(now - state.rejected_started) >= pdMS_TO_TICKS(REJECT_TIMEOUT_MS)) {
+        record_failure_locked("Rejected connection close timeout", ESP_ERR_TIMEOUT, false, 0);
         state.public.failed = true;
         advance_generation_locked();
     }
     if (state.public.connected && !state.auth_complete && !state.link_fault &&
         (TickType_t)(now - state.handshake_started) >= pdMS_TO_TICKS(PAIRING_HANDSHAKE_TIMEOUT_MS)) {
+        record_failure_locked("Authentication timeout", ESP_ERR_TIMEOUT, false, 0);
         state.link_fault = true;
         advance_generation_locked();
     }
@@ -489,6 +514,7 @@ static void notification_watchdog(TimerHandle_t timer)
     }
     if (state.public.bond_forget_state == BLE_HID_FORGET_RUNNING &&
         (TickType_t)(now - state.forget_started) >= pdMS_TO_TICKS(FORGET_TIMEOUT_MS)) {
+        record_failure_locked("Forget bonds timeout", ESP_ERR_TIMEOUT, false, 0);
         state.public.bond_forget_state = BLE_HID_FORGET_FAILED;
         state.public.bond_forget_error = ESP_ERR_TIMEOUT;
         bond_list_status_locked(false, false, ESP_ERR_TIMEOUT);
@@ -497,12 +523,14 @@ static void notification_watchdog(TimerHandle_t timer)
         state.public.failed = true;
     }
     if (timed_out) {
+        record_failure_locked("Notification completion timeout", ESP_ERR_TIMEOUT, false, 0);
         state.notification_timed_out = true;
         state.public.failed = true;
         advance_generation_locked();
         refresh_locked();
     }
     if (subscription_timeout) {
+        record_failure_locked("Subscription persistence timeout", ESP_ERR_TIMEOUT, false, 0);
         state.subscription_timed_out = true;
         state.public.failed = true;
         advance_generation_locked();
@@ -521,6 +549,7 @@ static void fail_forget(uint64_t operation, esp_err_t error)
     bool current = state.public.bond_forget_state == BLE_HID_FORGET_RUNNING &&
         state.forget_generation == operation;
     if (current) {
+        record_failure_locked("Forget bonds", error, false, 0);
         state.public.bond_forget_state = BLE_HID_FORGET_FAILED;
         state.public.bond_forget_error = error;
         bond_list_status_locked(false, false, error);
@@ -1051,7 +1080,8 @@ static void control_worker(void *argument)
             }
             if (error != ESP_OK) {
                 if (command.kind == COMMAND_CREATE_SERVICE || command.kind == COMMAND_START_SERVICE) {
-                    fail_transport("Bluetooth service operation", error);
+                    fail_transport(command.kind == COMMAND_CREATE_SERVICE ?
+                        "HID attribute table submission" : "HID service start submission", error);
                 } else {
                     fail_link_current(&command, revision, true, "Bluetooth link operation", error);
                 }
@@ -1205,21 +1235,29 @@ static void handle_write(const esp_ble_gatts_cb_param_t *parameter)
 static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *parameter)
 {
     bool failure = false;
+    const char *failure_stage = "Advertising configuration";
+    uint32_t failure_status = 0;
     TickType_t now = xTaskGetTickCount();
     portENTER_CRITICAL(&state_lock);
     switch (event) {
     case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
         state.adv_configured = parameter->adv_data_cmpl.status == ESP_BT_STATUS_SUCCESS;
         failure = !state.adv_configured;
+        failure_stage = "Advertising data completion";
+        failure_status = (uint32_t)parameter->adv_data_cmpl.status;
         break;
     case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
         state.scan_configured = parameter->scan_rsp_data_cmpl.status == ESP_BT_STATUS_SUCCESS;
         failure = !state.scan_configured;
+        failure_stage = "Scan response completion";
+        failure_status = (uint32_t)parameter->scan_rsp_data_cmpl.status;
         break;
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
         state.adv_pending = false;
         state.advertising = parameter->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS;
         failure = !state.advertising;
+        failure_stage = "Advertising start completion";
+        failure_status = (uint32_t)parameter->adv_start_cmpl.status;
         break;
     case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
         if (parameter->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS || state.adv_stopped_by_connect) {
@@ -1229,6 +1267,8 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
             state.adv_stopped_by_connect = false;
         } else {
             failure = true;
+            failure_stage = "Advertising stop completion";
+            failure_status = (uint32_t)parameter->adv_stop_cmpl.status;
         }
         break;
     case ESP_GAP_BLE_READ_RSSI_COMPLETE_EVT:
@@ -1255,6 +1295,10 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
                 parameter->remove_bond_dev_cmpl.bd_addr, ESP_BD_ADDR_LEN) == 0) {
             state.remove_result = parameter->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS ?
                 ESP_OK : ESP_FAIL;
+            if (state.remove_result != ESP_OK) {
+                record_failure_locked("Forget bond removal completion", ESP_FAIL, true,
+                    (uint32_t)parameter->remove_bond_dev_cmpl.status);
+            }
             state.remove_completed = true;
         }
         break;
@@ -1297,13 +1341,17 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
                      * Require SC's exported PENC for durable bond identity. */
                     state.link_fault = true;
                     state.auth_complete = false;
+                    record_failure_locked("Secure Connections required", ESP_ERR_NOT_SUPPORTED, false, 0);
                 }
                 ++state.auth_revision;
                 if (state.auth_revision == 0) {
+                    record_failure_locked("Authentication revision exhausted", ESP_ERR_INVALID_STATE, false, 0);
                     state.link_fault = true;
                     state.auth_complete = false;
                 }
             } else {
+                record_failure_locked("Authentication completion", ESP_FAIL, true,
+                    (uint32_t)parameter->ble_security.auth_cmpl.fail_reason);
                 state.public.encrypted = false;
                 state.link_fault = true;
             }
@@ -1316,6 +1364,7 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
     default:
         break;
     }
+    if (failure) record_failure_locked(failure_stage, ESP_FAIL, true, failure_status);
     refresh_locked();
     portEXIT_CRITICAL(&state_lock);
     if (failure) {
@@ -1345,7 +1394,7 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
             return;
         }
         if (parameter->reg.status != ESP_GATT_OK) {
-            fail_transport("GATT registration", ESP_FAIL);
+            fail_transport_sdk("GATT registration completion", ESP_FAIL, (uint32_t)parameter->reg.status);
             return;
         }
         portENTER_CRITICAL(&state_lock);
@@ -1366,7 +1415,8 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
             parameter->add_attr_tab.num_handle != ATTR_COUNT ||
             parameter->add_attr_tab.svc_inst_id != 0 ||
             !parameter->add_attr_tab.handles) {
-            fail_transport("HID attribute table", ESP_FAIL);
+            fail_transport_sdk("HID attribute table completion", ESP_FAIL,
+                (uint32_t)parameter->add_attr_tab.status);
             break;
         }
         portENTER_CRITICAL(&state_lock);
@@ -1379,7 +1429,7 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
         bool expected_service = parameter->start.service_handle == state.handles[ATTR_SERVICE];
         portEXIT_CRITICAL(&state_lock);
         if (parameter->start.status != ESP_GATT_OK || !expected_service) {
-            fail_transport("HID service start", ESP_FAIL);
+            fail_transport_sdk("HID service start completion", ESP_FAIL, (uint32_t)parameter->start.status);
             break;
         }
         portENTER_CRITICAL(&state_lock);
@@ -1460,6 +1510,8 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
             state.notification_handle == parameter->conf.handle) {
             if (parameter->conf.status != ESP_GATT_OK && state.public.connected &&
                 state.public.generation == state.notification_generation) {
+                record_failure_locked("Notification completion", ESP_FAIL, true,
+                    (uint32_t)parameter->conf.status);
                 state.link_fault = true;
                 advance_generation_locked();
             }
@@ -1516,6 +1568,19 @@ ble_hid_snapshot_t ble_hid_snapshot(void)
     }
     portEXIT_CRITICAL(&state_lock);
     return snapshot;
+}
+
+ble_hid_failure_t ble_hid_failure(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    ble_hid_failure_t failure = first_failure;
+    portEXIT_CRITICAL(&state_lock);
+    return failure;
+}
+
+const char *ble_hid_failure_stage_name(void)
+{
+    return ble_hid_failure().stage;
 }
 
 ble_hid_bond_list_t ble_hid_bond_list(void)
@@ -1647,6 +1712,9 @@ bool ble_hid_send_generation(uint64_t generation, uint8_t report_id,
     portENTER_CRITICAL(&state_lock);
     state.submitting = false;
     if (error != ESP_OK) {
+        if (state.public.connected && state.public.generation == generation) {
+            record_failure_locked("Notification submission", error, false, 0);
+        }
         state.notification_pending = false;
     } else if (state.public.connected && state.public.generation == generation) {
         memcpy(index == ATTR_KEYBOARD ? state.keyboard : state.mouse, data, length);
@@ -1710,20 +1778,26 @@ esp_err_t ble_hid_init(void)
         return ESP_ERR_NO_MEM;
     }
     esp_bt_controller_config_t configuration = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    const char *initialization_stage = "Controller initialization";
     error = esp_bt_controller_init(&configuration);
     if (error == ESP_OK) {
+        initialization_stage = "Controller enable";
         error = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     }
     if (error == ESP_OK) {
+        initialization_stage = "Bluedroid initialization";
         error = esp_bluedroid_init();
     }
     if (error == ESP_OK) {
+        initialization_stage = "Bluedroid enable";
         error = esp_bluedroid_enable();
     }
     if (error == ESP_OK) {
+        initialization_stage = "GAP callback registration";
         error = esp_ble_gap_register_callback(gap_callback);
     }
     if (error == ESP_OK) {
+        initialization_stage = "GATTS callback registration";
         error = esp_ble_gatts_register_callback(gatts_callback);
     }
     uint8_t authentication = ESP_LE_AUTH_REQ_SC_BOND;
@@ -1732,52 +1806,64 @@ esp_err_t ble_hid_init(void)
     uint8_t key_size = 16;
     uint8_t keys = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
     if (error == ESP_OK) {
+        initialization_stage = "Security authentication configuration";
         error = esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE,
                                               &authentication, sizeof(authentication));
     }
     if (error == ESP_OK) {
+        initialization_stage = "Security authentication restriction";
         error = esp_ble_gap_set_security_param(ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH,
             &specified_authentication, sizeof(specified_authentication));
     }
     if (error == ESP_OK) {
+        initialization_stage = "Security IO capability";
         error = esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE,
                                               &capability, sizeof(capability));
     }
     if (error == ESP_OK) {
+        initialization_stage = "Security key size";
         error = esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE,
                                               &key_size, sizeof(key_size));
     }
     if (error == ESP_OK) {
+        initialization_stage = "Security initiator key distribution";
         error = esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &keys, sizeof(keys));
     }
     if (error == ESP_OK) {
+        initialization_stage = "Security responder key distribution";
         error = esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &keys, sizeof(keys));
     }
     if (error == ESP_OK) {
+        initialization_stage = "Device name configuration";
         error = esp_ble_gap_set_device_name("ESP32-INPUT");
     }
     if (error == ESP_OK && xTaskCreate(control_worker, "ble_hid_control",
         CONTROL_TASK_STACK, NULL, CONTROL_TASK_PRIORITY, NULL) != pdPASS) {
+        initialization_stage = "Control worker allocation";
         error = ESP_ERR_NO_MEM;
     }
     if (error == ESP_OK) {
         TimerHandle_t timer = xTimerCreate("ble_hid_deadline",
             pdMS_TO_TICKS(CONTROL_POLL_MS), pdTRUE, NULL, notification_watchdog);
         if (!timer || xTimerStart(timer, 0) != pdPASS) {
+            initialization_stage = timer ? "Deadline timer start" : "Deadline timer allocation";
             error = ESP_ERR_NO_MEM;
         }
     }
     if (error == ESP_OK) {
+        initialization_stage = "Advertising data submission";
         error = esp_ble_gap_config_adv_data(&advertising_data);
     }
     if (error == ESP_OK) {
+        initialization_stage = "Scan response submission";
         error = esp_ble_gap_config_adv_data(&scan_data);
     }
     if (error == ESP_OK) {
+        initialization_stage = "GATT registration submission";
         error = esp_ble_gatts_app_register(HID_APP_ID);
     }
     if (error != ESP_OK) {
-        fail_transport("BLE initialization", error);
+        fail_transport(initialization_stage, error);
         return error;
     }
     portENTER_CRITICAL(&state_lock);

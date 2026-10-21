@@ -42,6 +42,29 @@ Build outputs are in `firmware/build/`. First-party source lives in `main/`, por
 
 The Mosaico configuration uses its documented 16 MiB flash and a 4 MiB factory application partition. There is no OTA update path in this build. Reproduce a clean configuration after deliberate defaults changes by preserving the existing ignored `firmware/sdkconfig` outside the firmware directory before rebuilding. Do not silently discard a contributor's custom configuration.
 
+### Display memory policy
+
+The Mosaico profile in `sdkconfig.defaults` prefers PSRAM for ordinary/UI
+allocations, dynamic Bluetooth host data and eligible Wi-Fi/LWIP data. It
+reserves 64 KiB of internal RAM for requests needing internal/DMA capabilities;
+task stacks remain internal. This reserve is shared, not a guaranteed contiguous
+LCD buffer. Ports without PSRAM need their own qualified resource profile.
+
+Keep the pinned BSP's TE synchronization and internal DMA bounce path. TE mode
+uses full-frame rendering; reducing LVGL buffer height does not reduce that
+mode's frame or transfer demand. The ten-entry LCD transfer queue can retain
+roughly 80 KiB of bounce buffers plus overhead, so total free heap or the reserve
+alone cannot prove that transfers fit. The earlier expanded device image failed
+despite abundant external memory; see the [failed device gate](../docs/validation.md#expanded-baseline-failed-device-gate).
+
+Runtime diagnostics retain six startup memory samples and the first allocation
+and Bluetooth failure until reboot, so late CDC attachment does not erase the
+cause. The allocation hook uses fixed storage and lock-free publication, with
+no logging or allocation inside the hook. Health reports include free and
+largest internal DMA blocks. These observations do not alter input admission,
+retry errors or restart the device. Check actual generated `sdkconfig` after
+changing defaults; an existing configuration keeps its previous values.
+
 ## Device procedure
 
 Device deployment is separate from compilation. Identify the actual chip and flash, retain a complete original-flash backup with its hash, and check recovery before writing. Backups may contain credentials and stay in ignored `.agent/local/` with private permissions. Never commit them. The adapter rejects unknown board eFuse revisions before configuring board peripherals.

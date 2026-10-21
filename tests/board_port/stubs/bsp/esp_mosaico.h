@@ -10,6 +10,7 @@
 #define CONFIG_BSP_MOTOR_ENABLE_PWM 1
 #define BSP_BATTERY_I2C_ADDR 0x55
 #define BSP_BATTERY_I2C_SPEED_HZ 400000
+#define BSP_LCD_SPI_HOST SPI2_HOST
 typedef enum { BSP_BOARD_VARIANT_V1_0, BSP_BOARD_VARIANT_V1_2 } bsp_board_variant_t;
 typedef void *button_handle_t;
 typedef void (*button_cb_t)(void *button, void *context);

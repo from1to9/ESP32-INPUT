@@ -51,6 +51,11 @@ static struct {
     uint64_t notification_interval_us;
     void (*on_power_wait)(void);
     bool display_lock_allowed, display_locked;
+    bool display_started;
+    esp_err_t spi_limit_error;
+    size_t spi_max_bytes;
+    unsigned spi_limit_queries, spi_limit_logs;
+    char spi_limit_log[192];
     esp_err_t brightness_error;
     unsigned brightness_writes;
     int brightness_actual;
@@ -72,8 +77,14 @@ const char *esp_err_to_name(esp_err_t error)
 void board_test_log(const char *tag, const char *format, ...)
 {
     (void)tag;
-    (void)format;
     assert(hw.critical_depth == 0);
+    if (strncmp(format, "Display SPI ", 12) == 0) {
+        va_list arguments;
+        va_start(arguments, format);
+        vsnprintf(hw.spi_limit_log, sizeof(hw.spi_limit_log), format, arguments);
+        va_end(arguments);
+        ++hw.spi_limit_logs;
+    }
 }
 
 void board_test_enter(portMUX_TYPE *mux)
@@ -187,7 +198,19 @@ esp_err_t bsp_power_init(void)
 lv_display_t *bsp_display_start_with_config(const bsp_display_config_t *config)
 {
     assert(config->enable_touch);
+    hw.display_started = true;
     return &display;
+}
+
+esp_err_t spi_bus_get_max_transaction_len(spi_host_device_t host_id, size_t *max_bytes)
+{
+    assert(hw.critical_depth == 0 && hw.display_started);
+    assert(host_id == BSP_LCD_SPI_HOST && max_bytes != NULL);
+    ++hw.spi_limit_queries;
+    /* Deliberately write a value even on failure: it must never be reported
+     * as a successful query result. */
+    *max_bytes = hw.spi_max_bytes;
+    return hw.spi_limit_error;
 }
 
 lv_indev_t *bsp_display_get_input_dev(void)
@@ -433,6 +456,7 @@ static void reset(void)
     hw.time_us = 1000;
     hw.read_delay_us = 10;
     hw.display_lock_allowed = true;
+    hw.spi_max_bytes = 7168;
     hw.brightness_actual = 100; /* Driver state is unknown until acknowledged. */
     hw.gauge_fail_command = -1;
     hw.gauge_read_delay_us = 10;
@@ -486,6 +510,29 @@ static void assert_read_fails_untouched(esp_err_t expected)
     memcpy(before, &sample, sizeof(sample));
     assert(board_imu_read(&sample) == expected);
     assert(memcmp(before, &sample, sizeof(sample)) == 0);
+}
+
+static void test_display_spi_diagnostic_is_observational(void)
+{
+    reset();
+    assert(board_init(legacy_hold) == ESP_OK);
+    assert(hw.spi_limit_queries == 1 && hw.spi_limit_logs == 1);
+    assert(strstr(hw.spi_limit_log, "7168") != NULL);
+    assert(board_init(legacy_hold) == ESP_ERR_INVALID_STATE);
+    assert(hw.spi_limit_queries == 1 && hw.spi_limit_logs == 1);
+
+    reset();
+    hw.spi_limit_error = ESP_ERR_INVALID_ARG;
+    assert(board_init(legacy_hold) == ESP_OK);
+    assert(hw.spi_limit_queries == 1 && hw.spi_limit_logs == 1);
+    assert(strstr(hw.spi_limit_log, "7168") == NULL);
+    assert(strstr(hw.spi_limit_log, esp_err_to_name(hw.spi_limit_error)) != NULL);
+    assert(board_capabilities().display && board_capabilities().touch);
+
+    reset();
+    hw.power_error = ESP_FAIL;
+    assert(board_init(legacy_hold) == ESP_FAIL);
+    assert(hw.spi_limit_queries == 0 && hw.spi_limit_logs == 0);
 }
 
 static void test_raw_button_authority_and_registration(void)
@@ -899,6 +946,7 @@ static void test_worker_rate_limits_battery_during_brightness_flood(void)
 
 int main(void)
 {
+    test_display_spi_diagnostic_is_observational();
     test_raw_button_authority_and_registration();
     test_imu_real_units_and_nonblocking_cache();
     test_optional_sensor_failures();

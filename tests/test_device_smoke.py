@@ -47,6 +47,48 @@ class HealthParserTests(unittest.TestCase):
         self.assertEqual(summary["capture_duration_seconds"], 35.0)
         self.assertEqual(bytes(capture.log), data)
 
+    def test_optional_dma_ranges_use_only_observed_samples(self):
+        capture = smoke.HealthCapture()
+        for uptime, extra in ((10, " free_dma=50000 largest_dma=16384"),
+                              (20, ""),
+                              (30, " free_dma=44000 largest_dma=24576")):
+            data = health(uptime, extra=extra)
+            for offset in range(0, len(data), 7):
+                self.assertTrue(feed(capture, data[offset:offset + 7], uptime))
+        summary = result(capture)
+        self.assertEqual(summary["status"], "passed")
+        self.assertEqual(summary["failure_codes"], [])
+        self.assertEqual(summary["health_samples"], 3)
+        self.assertEqual(summary["memory_bytes"], {
+            "heap": {"min": 200000, "max": 200000},
+            "min_heap": {"min": 190000, "max": 190000},
+            "free_dma": {"min": 44000, "max": 50000},
+            "largest_dma": {"min": 16384, "max": 24576},
+        })
+
+    def test_optional_dma_missing_partial_and_zero_are_distinct(self):
+        scenarios = [
+            ("", {}),
+            (" free_dma=1024", {"free_dma": {"min": 1024, "max": 1024}}),
+            (" largest_dma=512", {"largest_dma": {"min": 512, "max": 512}}),
+            (" free_dma=0 largest_dma=0", {
+                "free_dma": {"min": 0, "max": 0},
+                "largest_dma": {"min": 0, "max": 0},
+            }),
+        ]
+        for extra, expected in scenarios:
+            with self.subTest(extra=extra):
+                capture = smoke.HealthCapture()
+                for uptime in (10, 20, 30):
+                    feed(capture, health(uptime, extra=extra if uptime == 20 else ""), uptime)
+                summary = result(capture)
+                self.assertEqual(summary["status"], "passed")
+                observed = {key: value for key, value in summary["memory_bytes"].items()
+                            if key in ("free_dma", "largest_dma")}
+                self.assertEqual(observed, expected)
+                self.assertEqual(summary["failure_codes"], [])
+                self.assertEqual(summary["health_samples"], 3)
+
     def test_missing_or_insufficient_health_is_failure(self):
         for count in range(3):
             with self.subTest(count=count):

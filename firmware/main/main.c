@@ -14,6 +14,7 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
@@ -21,6 +22,7 @@
 #include "freertos/task.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdatomic.h>
 
 #define INTENT_CAPACITY 16
 #define COORDINATOR_PERIOD_MS 10
@@ -29,6 +31,60 @@
 #define PHYSICAL_LONG_PRESS 4U
 
 static const char *TAG = "input";
+/* Fixed boot observations survive late CDC attachment. They never allocate or
+ * change admission policy. The failure hook can run in a low-level allocator:
+ * publish once with lock-free atomics, without logging, locks or other calls. */
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "Allocation diagnostics require lock-free integers");
+static atomic_uint s_allocation_failure_state;
+static size_t s_allocation_failure_size;
+static uint32_t s_allocation_failure_caps;
+static const char *s_allocation_failure_function;
+typedef struct {
+    const char *stage;
+    size_t free_internal, largest_internal, free_dma, largest_dma;
+} boot_memory_t;
+static boot_memory_t s_boot_memory[6];
+static size_t s_boot_memory_count;
+
+static void IRAM_ATTR record_allocation_failure(size_t size, uint32_t caps, const char *function)
+{
+    unsigned expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&s_allocation_failure_state, &expected, 1,
+                                                 memory_order_relaxed, memory_order_relaxed)) return;
+    s_allocation_failure_size = size;
+    s_allocation_failure_caps = caps;
+    s_allocation_failure_function = function;
+    atomic_store_explicit(&s_allocation_failure_state, 2, memory_order_release);
+}
+
+static void record_boot_memory(const char *stage)
+{
+    if (s_boot_memory_count >= sizeof(s_boot_memory) / sizeof(s_boot_memory[0])) return;
+    s_boot_memory[s_boot_memory_count++] = (boot_memory_t){
+        .stage = stage,
+        .free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        .largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        .free_dma = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+        .largest_dma = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+    };
+}
+
+static void report_memory_diagnostics(void)
+{
+    /* Repeat the bounded boot history so a late serial reader can see it. */
+    for (size_t i = 0; i < s_boot_memory_count; ++i) {
+        const boot_memory_t *sample = &s_boot_memory[i];
+        ESP_LOGI(TAG, "Boot memory stage=%s free_internal=%u largest_internal=%u free_dma=%u largest_dma=%u",
+                 sample->stage, (unsigned)sample->free_internal, (unsigned)sample->largest_internal,
+                 (unsigned)sample->free_dma, (unsigned)sample->largest_dma);
+    }
+    if (atomic_load_explicit(&s_allocation_failure_state, memory_order_acquire) == 2) {
+        ESP_LOGE(TAG, "First allocation failure size=%u caps=0x%08x function=%s",
+                 (unsigned)s_allocation_failure_size, (unsigned)s_allocation_failure_caps,
+                 s_allocation_failure_function ? s_allocation_failure_function : "unknown");
+    }
+}
+
 static QueueHandle_t s_intents;
 static StaticQueue_t s_intent_storage;
 static uint8_t s_intent_bytes[INTENT_CAPACITY * sizeof(app_intent_t)];
@@ -1278,11 +1334,16 @@ static void observe_input_link(const input_link_t *link, input_link_t *previous)
 
 void app_main(void)
 {
+    esp_err_t diagnostic_error = heap_caps_register_failed_alloc_callback(record_allocation_failure);
+    if (diagnostic_error != ESP_OK)
+        ESP_LOGW(TAG, "Allocation diagnostics unavailable: %s", esp_err_to_name(diagnostic_error));
+    record_boot_memory("entry");
     esp_err_t usb_error = usb_console_start();
     if (usb_error != ESP_OK) {
         ESP_LOGE(TAG, "USB unavailable: %s", esp_err_to_name(usb_error));
         s_message = "USB unavailable; Bluetooth remains selectable.";
     }
+    record_boot_memory("usb");
     s_intents = xQueueCreateStatic(INTENT_CAPACITY, sizeof(app_intent_t),
                                     s_intent_bytes, &s_intent_storage);
     configASSERT(s_intents);
@@ -1302,6 +1363,7 @@ void app_main(void)
         report_boot_fault("board initialization", error);
         return;
     }
+    record_boot_memory("board");
     esp_err_t storage_error = nvs_flash_init();
     if (storage_error == ESP_OK) storage_error = settings_store_init(&s_settings);
     if (storage_error != ESP_OK) {
@@ -1330,14 +1392,17 @@ void app_main(void)
     }
     app_ui_create(board_display_get(), submit_intent);
     board_display_unlock();
+    record_boot_memory("ui");
     error = ble_hid_init();
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "Bluetooth initialization failed: %s", esp_err_to_name(error));
         s_message = "Bluetooth initialization failed. See device diagnostics.";
     }
+    record_boot_memory("bluetooth");
     esp_err_t wifi_error = app_wifi_init();
     if (wifi_error != ESP_OK)
         ESP_LOGW(TAG, "Wi-Fi unavailable: %s", esp_err_to_name(wifi_error));
+    record_boot_memory("wifi");
     input_link_t previous = {0};
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
     int64_t last_health_us = esp_timer_get_time();
@@ -1390,8 +1455,10 @@ void app_main(void)
         int64_t now = esp_timer_get_time();
         if (now - last_health_us >= 10000000) {
             last_health_us = now;
+            report_memory_diagnostics();
             ESP_LOGI(TAG, "Health uptime_s=%llu heap=%u min_heap=%u queue=%u locked=%d "
                      "free_internal=%u largest_internal=%u stack_bytes=%u "
+                     "free_dma=%u largest_dma=%u "
                      "ble_initialized=%d ble_connected=%d ble_ready=%d ble_failed=%d",
                      (unsigned long long)(now / 1000000),
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
@@ -1399,13 +1466,23 @@ void app_main(void)
                      (unsigned)s_engine.count, s_engine.state.locked,
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                     (unsigned)uxTaskGetStackHighWaterMark(NULL), bluetooth.initialized,
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+                     bluetooth.initialized,
                      bluetooth.connected, bluetooth.ready, bluetooth.failed);
             if (error != ESP_OK || bluetooth.failed) {
                 /* Initialization logs can precede USB attachment. Preserve a
                  * bounded periodic failure signal after enumeration. */
                 ESP_LOGE(TAG, "Bluetooth unavailable: init_error=%s transport_failed=%d",
                          esp_err_to_name(error), bluetooth.failed);
+                ble_hid_failure_t failure = ble_hid_failure();
+                if (failure.recorded) {
+                    ESP_LOGE(TAG, "First Bluetooth failure stage=%s error=%s sdk_status_known=%d "
+                             "sdk_status=%u uptime_ms=%llu", failure.stage,
+                             esp_err_to_name(failure.error), failure.sdk_status_known,
+                             (unsigned)failure.sdk_status, (unsigned long long)failure.uptime_ms);
+                }
             }
         }
         ESP_ERROR_CHECK(esp_task_wdt_reset());

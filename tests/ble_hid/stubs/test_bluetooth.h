@@ -147,7 +147,7 @@ typedef union {
     struct { int status; int8_t rssi; esp_bd_addr_t remote_addr; } read_rssi_cmpl;
     struct { int status; esp_bd_addr_t bd_addr; } remove_bond_dev_cmpl;
     union {
-        struct { esp_bd_addr_t bd_addr; bool success; uint8_t auth_mode; } auth_cmpl;
+        struct { esp_bd_addr_t bd_addr; bool success; uint8_t auth_mode; uint8_t fail_reason; } auth_cmpl;
         struct { esp_bd_addr_t bd_addr; } ble_req;
     } ble_security;
 } esp_ble_gap_cb_param_t;

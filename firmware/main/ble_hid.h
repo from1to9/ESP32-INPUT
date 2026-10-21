@@ -14,6 +14,18 @@ extern "C" {
 #define BLE_HID_PAIRING_MAX_MS 300000U
 #define BLE_HID_MAX_BONDS 32U
 
+typedef struct {
+    bool recorded;
+    /* Non-null static stage name; "none" before any failure. No identities,
+     * report content, keys, allocation or caller-owned string storage. */
+    const char *stage;
+    esp_err_t error;
+    bool sdk_status_known;
+    uint32_t sdk_status;
+    /* Monotonic esp_timer uptime in milliseconds, independent of tick wrap. */
+    uint64_t uptime_ms;
+} ble_hid_failure_t;
+
 typedef enum {
     BLE_HID_FORGET_IDLE,
     BLE_HID_FORGET_RUNNING,
@@ -100,11 +112,21 @@ typedef struct {
  * after partial initialization. Bonded CCCD writes commit before ATT success;
  * storage failures latch failed without erasing data. Initialization/CCCD
  * updates use one worker and at most 32 saved bonds. Build with bt, nvs_flash,
- * mbedtls and hid_engine. */
+ * mbedtls, esp_timer and hid_engine. */
 esp_err_t ble_hid_init(void);
 
 /* Thread-safe value copy. Call from tasks, not interrupt context. */
 ble_hid_snapshot_t ble_hid_snapshot(void);
+
+/* Thread-safe, allocation-free first-failure copy. Retained until reboot;
+ * disconnect, recovery, repeated initialization and later errors never clear
+ * or overwrite it. Historical evidence does not imply current failed/ready.
+ * Normal API rejection, explicit disconnect and optional RSSI do not consume
+ * it. sdk_status is meaningful only when sdk_status_known is true. */
+ble_hid_failure_t ble_hid_failure(void);
+/* Convenience static label for logging; use failure().stage for the label
+ * belonging to the same copied record. Returns "none" before a failure. */
+const char *ble_hid_failure_stage_name(void);
 
 /* Thread-safe cached copy; never reads NVS or invokes Bluetooth APIs. The
  * worker refreshes after initialization, authentication and bond management.
