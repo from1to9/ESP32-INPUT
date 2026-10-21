@@ -2,17 +2,17 @@
 
 ## Primary navigation
 
-Use a 480 x 480 logical display with three bottom entries: **Mouse**, **Keyboard**, **Audio**. Target and settings controls belong in the top bar. The UI and physical buttons use one authoritative state.
+The latest user instruction revises the 480 x 480 baseline: **Mouse**, **Keyboard** and **Audio** each use the display for core functions. Remove persistent bottom tabs and the bulky target/telemetry header. One consistent Menu button (at least 44 x 44 px) and AI double-click open the same quick panel with mode choices, actual input-target/connection summary, Status, Settings and Close. The UI and physical buttons use one authoritative state. The [focused prototype and geometry plan](../design/ui-plan.md) define the authorized layout; production delivery requires native rendering, safety and resource validation.
 
-Show foreground mode, HID target and link status separately. Once concurrency is qualified, add independent audio target/mute status. Paired, HID-connected and audio-active must not collapse into one green indicator.
+Show the foreground mode and a compact selected-input/target cue in its context. Keep full target/link, battery and Wi-Fi details in the quick panel or Status. Reserve a small area outside touchpad/grid/slider targets for critical remote ownership, active capture/recording and input error/release state, with a real Stop/takeover/details action. Lock remains a full-screen safety state. Paired, HID-connected and audio-active must not collapse into one green indicator. Do not expose private credentials or unrelated management data in global status.
 
 ### Mouse
 
-Provide a motion toggle, fine gain, large touchpad, separate scroll controls, clicks and explicit drag/release. Any touch suppresses motion; release starts a short freeze. Menus and mode changes cancel drag. Motion follows wrist rotation, not absolute device tilt.
+Provide a motion toggle, compact fine-gain chooser, much larger touchpad, separate scroll controls, clicks and explicit drag/release. No edge swipe or navigation gesture crosses the pad: pointer deltas must not be emitted before deciding to navigate. Any touch suppresses motion; release starts a short freeze. Menus and mode changes cancel drag. Motion follows wrist rotation, not absolute device tilt.
 
 ### Keyboard
 
-Submodes are **Motion**, **Touch**, **Spoken letters** and **Shortcuts**. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. The nine-cell layout is an explicit user revision of the original six-cell prototype. Motion moves local focus only; empty cells never receive focus or confirm input.
+One compact chooser opens **Motion**, **Touch**, **Spoken letters** and **Shortcuts**; four persistent submode tabs are unnecessary. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. The nine-cell layout is an explicit user revision of the original six-cell prototype. Motion moves local focus only; empty cells never receive focus or confirm input.
 
 Flow: choose group -> choose character -> confirm into preview -> send. Keep delete, space and send visible. Sending never includes Enter; expose stop and accepted-prefix progress. An Alpha sample yields an A candidate, which needs confirmation before entering preview. Prefer spelling words for easily confused letter sounds.
 
@@ -29,11 +29,11 @@ The official button factory currently exposes AI only. Its header also declares 
 | Action | Mouse | Keyboard | Audio |
 | --- | --- | --- | --- |
 | AI single-click | Toggle motion | Confirm selected group/character; on voice page start/stop listening or confirm candidate | Toggle microphone mute; speaker playback awaits AVRCP |
-| AI double-click | Open mode chooser | Open mode chooser | Open mode chooser |
+| AI double-click | Open shared quick panel | Open shared quick panel | Open shared quick panel |
 | AI long press, at least 0.9 s | Stop and lock globally | Stop and lock globally | Stop and lock globally |
 | Long press while locked | Unlock with motion off and microphone muted; never resume tasks | Same | Same |
 
-Single and double clicks are mutually exclusive, with an initial 280 ms decision window subject to hardware tuning. Do not emit a single-click first and undo it later. Button down freezes motion. Menus, dialogs and lock overlays own focus; AI input must not activate hidden controls.
+Single and double clicks are mutually exclusive, with an initial 280 ms decision window subject to hardware tuning. Do not emit a single-click first and undo it later. Button down freezes motion. Menus, dialogs and lock overlays own focus; AI input must not activate hidden controls. Double-click can return a noncritical detail page to the quick panel, but cannot confirm an operation or unlock. Opening the quick panel cancels drag/queued input and suppresses motion through the coordinator; closing it preserves the mode and unsent draft with motion off.
 
 During remote control, AI down immediately takes local ownership; consume that press. Continued holding may still lock. The first local touch similarly takes ownership without activating its underlying control.
 
@@ -52,23 +52,25 @@ Use short haptic feedback for mode changes, confirmations, locking and errors. F
 
 ## Usability
 
-Settings are not a fourth primary mode; closing them returns to the previous mode. Hidden pages cannot redefine the AI key. Defaults are mouse, motion off, audio off and remote control unauthorized. Show the selected target at all times. Plan high-contrast focus, light/dark appearance, left-handed scroll placement and roughly 44 px touch targets, then verify readability on the actual 2.16-inch display.
+Settings are not a fourth primary mode; closing them returns to the previous mode. Hidden pages cannot redefine the AI key. Defaults are mouse, motion off, audio off and remote control unauthorized. Keep a bounded selected transport/target cue in mode context and full details one Menu action away, including before Send. Use high-contrast focus, light/dark appearance and at least 44 px touch targets, then verify readability on the actual 2.16-inch display. Any future handedness option must use a qualified setting rather than a hidden swipe.
 
 ## Appearance and product acceptance
 
-Settings includes Light and Dark appearance. Dark uses a black background, near-white text and a light-blue accent for clearer selection and focus; Light retains the original green accent. Every page, focus indicator, disabled control and overlay follows the same theme. Appearance does not change input mode, target, draft or lock state. Dark is the default when no saved preference exists. Theme, brightness, idle timeout, haptics and the host shortcut modifier use validated persistent settings, with coalesced writes and visible save failures.
+Settings includes Light and Dark appearance. Dark uses a black background, near-white text and a light-blue accent for clearer selection and focus, with amber warnings and coral errors; Light retains the original green accent. Every page, focus indicator, disabled control and overlay follows the same theme. Appearance does not change input mode, target, draft or lock state. Dark is the default when no saved preference exists. Theme, brightness, idle timeout, haptics and the host shortcut modifier use validated persistent settings, with coalesced writes and visible save failures.
 
-The original prototype and requirements remain the UI baseline. Diagnostic buttons and sample text cannot replace the touchpad or preview-first keyboard flow. See [design conformance](design-conformance.md) for evidence levels and unresolved hardware acceptance.
+The user-authorized focused-workspace revision supersedes the original fixed-tab geometry; product workflows and requirements remain the acceptance baseline. Diagnostic buttons and sample text cannot replace the touchpad or preview-first keyboard flow. See [design conformance](design-conformance.md) for evidence levels and unresolved hardware acceptance.
 
 
 ## Status, connectivity and display
 
-The compact header keeps device/target status separate from actual battery,
-Wi-Fi signal and Bluetooth connection indicators. Bluetooth shows the current
-peer and saved pairings rather than signal bars. Detailed Wi-Fi values and network
-information belong in Connectivity; unknown measurements do not become zero
-or empty battery indicators. Settings has Home, Connectivity, Display, Input
-and About pages, with consistent Back and Done navigation.
+The shared quick panel and Status keep input-target/readiness separate from
+actual battery, Wi-Fi signal and Bluetooth connection indicators. Primary pages
+retain only core controls, compact target context and critical safety state.
+Bluetooth shows the current peer and saved pairings rather than signal bars.
+Detailed Wi-Fi values and network information belong in Connectivity; unknown
+measurements do not become zero or empty battery indicators. Settings has Home,
+Connectivity, Display, Input and About pages, entered from the shared panel.
+Back returns to its parent; Close returns to the prior foreground mode.
 
 Display provides Light/Dark, brightness in ten-percent steps, and Screen timeout:
 Off, 1, 5, 10 or 30 minutes. Defaults are Dark, 70 percent and 5 minutes. Blanking
@@ -95,3 +97,22 @@ Wi-Fi setup opens a temporary protected hotspot and displays its network name,
 passcode and local browser URL only on the setup page. Leaving setup, explicit
 Stop, expiry or locking closes setup. Saved network forgetting requires local
 confirmation. Failed setup never enables the future remote-control/MCP API.
+
+## Runtime and revision safety
+
+Keep the three primary mode pages and safety/navigation shell fixed, with at most
+one dynamically created panel or Settings category after a safe, coordinator-accepted
+transition. Retain a stable wake/lock surface. Do not delete
+a pressed object or binding inside its event callback. Preserve whole-gesture
+wake consumption, captured epoch/revision, local takeover and delayed-action
+rejection during any page replacement. Exact lifecycle changes require review
+and regression evidence before implementation.
+
+Stable snapshots and hidden-page changes must not allocate or invalidate the
+foreground. Use shared styles and value/revision-driven visible updates; rendering
+never writes preferences. The current TE_SYNC path uses FULL rendering, so
+validation must count actual flushes in FULL mode: after settling, unchanged
+snapshots and hidden-only updates produce zero additional flush callbacks.
+Measure object/allocation counts before and after; do not claim an arbitrary FPS
+improvement or partial refresh. The current display-memory fault remains a
+separate board/configuration repair, not justification for changing touch policy.

@@ -1,15 +1,15 @@
 :root {
   color-scheme:light dark;
-  --page:light-dark(#f3f4f1,#171a19);
-  --surface:light-dark(#fff,#202524);
-  --ink:light-dark(#182a25,#ecf4ee);
-  --muted:light-dark(#5c6c65,#b2c0b9);
-  --line:light-dark(#dae1db,#3c4941);
-  --soft:light-dark(#edf1eb,#2c3630);
-  --accent:light-dark(#225b44,#bce6b5);
-  --on-accent:light-dark(#fff,#183322);
+  --page:light-dark(#f3f4f1,#080b10);
+  --surface:light-dark(#fff,#080b10);
+  --ink:light-dark(#182a25,#ecf4fb);
+  --muted:light-dark(#5c6c65,#b6c4d2);
+  --line:light-dark(#dae1db,#394958);
+  --soft:light-dark(#edf1eb,#111a24);
+  --accent:light-dark(#225b44,#8dd8ff);
+  --on-accent:light-dark(#fff,#082b40);
   --warning:light-dark(#885018,#e7bd7c);
-  --focus:light-dark(#c5e5b5,#41643b)
+  --focus:light-dark(#c5e5b5,#244b63)
 }
 * {
   box-sizing:border-box

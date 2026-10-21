@@ -167,6 +167,65 @@ areas. Persistent mode tabs and detailed status give way to an accessible menu;
 core mouse, keyboard and audio workflows remain. The redesign must measure
 object/update overhead and preserve gesture, lock and target-state safeguards.
 
+## Checkpoint 9: internal-memory repair and retained diagnostics
+
+Status: independently reviewed and published at
+`41d6b42b65e432724c94af0f15caf2140c12bb99`; physical recovery remains unverified.
+
+- General/UI allocations, eligible Wi-Fi data and dynamic Bluetooth host data
+  prefer PSRAM, preserving internal memory for stacks and LCD DMA transfers.
+  The pinned BSP's TE synchronization and DMA path remain intact.
+- Fixed startup memory samples, runtime DMA headroom and first allocation/BLE
+  failure records remain observable after late USB diagnostic attachment.
+- The exact 21-file repair passed independent review, the complete host suite,
+  80 coordinator cases, 23 serial-parser cases and the pinned S31 linked build.
+  The compiled application hash is recorded in [validation](validation.md).
+- The 64 KiB internal reserve is shared and does not guarantee display queue
+  capacity. Successful real redraws, pairing and input must still be observed.
+
+The focused UI and its navigation/performance tests form a separate checkpoint.
+This repair is not proof that the user's reported touch/display problem has
+been resolved on the device.
+
+## Checkpoint 10: unified remote-control planning
+
+Status: independently reviewed and published at
+`25760ebff776562768dd1221f86b4e261ff58535`; implementation has not started.
+
+The eight-document plan maps all 48 existing UI actions and future capabilities
+to shared input, configuration, connection, audio and update owners. Device UI,
+Wi-Fi clients and MCP use the same validation and command semantics. Wi-Fi
+management remains independent from the selected Bluetooth/USB input route.
+The plan defines bounded authorization, cancellation, reconnect, recording and
+update lifecycles, including explicit unsupported operations.
+
+All eight cross-document review findings are closed. Machine-readable schemas,
+generated bindings and executable failure-path tests remain required before
+new interfaces are exposed. The 90 remote acceptance cases and candidate A/B
+partition layout are plans, not evidence of working control or OTA services.
+
+## Checkpoint 11: focused workspaces and bounded UI updates
+
+Status: implemented and locally validated; physical acceptance remains pending.
+
+- Each mode keeps its core controls. Menu and physical AI double-click open one
+  shared panel for mode switching, Status, Settings and Lock. The mouse surface
+  is 93% larger by area; the keyboard retains its nine-cell preview-first flow.
+- Three primary pages remain fixed and at most one secondary panel exists.
+  Native observations fell from 315 baseline objects to 102 core objects, with
+  a measured panel peak of 142. Unchanged and covered content no longer causes
+  periodic text allocation or full-screen invalidation.
+- The stable native run passed 174 rendered scenes and 50 resource cases in both
+  themes. Each theme completed 1,000 panel open/close cycles without retained
+  growth. New checks cover held-control expiry, stale gestures, confirmation
+  cancellation, simultaneous connection errors and setup-secret cache cleanup.
+- The complete host suite passed, including 91 coordinator cases. The final
+  pinned target build and image identity are recorded in [validation](validation.md).
+
+These results do not yet demonstrate physical touch response, LCD DMA headroom,
+radio compatibility or continuous powered operation. Audio and remote-control
+services remain unavailable/planned as described in their owning contracts.
+
 ## Next checkpoints
 
 | Stage | Publication gate | Current state |

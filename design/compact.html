@@ -1,0 +1,1514 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ESP32-INPUT · Core controls proposal</title>
+    <style>
+      :root {
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        color: #dbe5ef;
+        background: #151b23;
+        font-synthesis: none;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 32px;
+      }
+      main {
+        max-width: 1120px;
+        margin: auto;
+      }
+      h1 {
+        font-size: 32px;
+        letter-spacing: -0.7px;
+        margin: 6px 0 12px;
+      }
+      p {
+        line-height: 1.5;
+      }
+      a {
+        color: #8dd8ff;
+      }
+      .eyebrow {
+        color: #8dd8ff;
+        letter-spacing: 2px;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .intro {
+        max-width: 750px;
+        color: #aebdcb;
+      }
+      .workbench {
+        display: flex;
+        gap: 40px;
+        align-items: flex-start;
+        margin-top: 28px;
+      }
+      .device {
+        padding: 12px;
+        border-radius: 30px;
+        background: #030507;
+        border: 1px solid #34404c;
+        box-shadow: 0 20px 60px #0005;
+      }
+      .screen {
+        position: relative;
+        width: 480px;
+        height: 480px;
+        overflow: hidden;
+        border-radius: 19px;
+        background: var(--bg);
+        color: var(--fg);
+        --bg: #080b10;
+        --surface: #111a24;
+        --fg: #ecf4fb;
+        --muted: #b6c4d2;
+        --accent: #8dd8ff;
+        --on: #082b40;
+        --focus: #244b63;
+        --line: #394958;
+        --warning: #e7bd7c;
+        --error: #ffb4ab;
+      }
+      .screen.light {
+        --bg: #fff;
+        --surface: #edf2ef;
+        --fg: #172c22;
+        --muted: #536e60;
+        --accent: #215d47;
+        --on: #fff;
+        --focus: #c9e6bd;
+        --line: #cbd9d0;
+        --warning: #93571c;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:focus-visible {
+        outline: 3px solid var(--accent, #8dd8ff);
+        outline-offset: 2px;
+      }
+      .screen button {
+        border: 0;
+        border-radius: 12px;
+        background: var(--surface);
+        color: var(--fg);
+        font-size: 16px;
+        min-width: 44px;
+        min-height: 44px;
+        touch-action: manipulation;
+      }
+      .screen button:active {
+        background: var(--focus);
+      }
+      .screen button:disabled {
+        color: var(--muted);
+        opacity: 0.65;
+        cursor: default;
+      }
+      .screen button.selected,
+      .screen button.primary {
+        background: var(--accent);
+        color: var(--on);
+      }
+      .screen .at {
+        position: absolute;
+      }
+      .mode-title {
+        left: 12px;
+        top: 8px;
+        width: 120px;
+        height: 24px;
+        font-size: 22px;
+        font-weight: 650;
+        line-height: 24px;
+      }
+      .input-context {
+        left: 12px;
+        top: 36px;
+        width: 120px;
+        height: 18px;
+        font-size: 13px;
+        line-height: 18px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--muted);
+      }
+      .launcher {
+        left: 404px;
+        top: 8px;
+        width: 64px;
+        height: 48px;
+      }
+      .critical {
+        left: 280px;
+        top: 8px;
+        width: 116px;
+        height: 48px !important;
+        font-size: 13px !important;
+        line-height: 17px;
+        border: 1px solid var(--warning) !important;
+        color: var(--warning) !important;
+        padding: 4px;
+      }
+      .critical.error {
+        border-color: var(--error) !important;
+        color: var(--error) !important;
+      }
+      .critical strong {
+        display: block;
+        font-size: 15px;
+      }
+      .submode {
+        left: 140px;
+        top: 8px;
+        width: 132px;
+        height: 48px;
+      }
+      .pad {
+        left: 12px;
+        top: 64px;
+        width: 396px;
+        height: 292px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--surface);
+        touch-action: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 8px;
+        color: var(--muted);
+        user-select: none;
+      }
+      .pad strong {
+        color: var(--fg);
+        font-size: 22px;
+        font-weight: 500;
+      }
+      .pad .pad-marker {
+        width: 12px;
+        height: 12px;
+        border: 2px solid var(--accent);
+        border-radius: 50%;
+        margin-bottom: 8px;
+      }
+      .scroll {
+        left: 416px;
+        top: 64px;
+        width: 52px;
+        height: 292px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .scroll button {
+        flex: 1;
+        font-size: 26px;
+      }
+      .row {
+        position: absolute;
+        left: 12px;
+        width: 456px;
+        display: flex;
+        gap: 12px;
+      }
+      .row button {
+        flex: 1;
+        height: 48px;
+      }
+      .row.two {
+        gap: 8px;
+      }
+      .mouse-clicks {
+        top: 368px;
+      }
+      .mouse-options {
+        top: 424px;
+      }
+      .preview {
+        left: 12px;
+        top: 64px;
+        width: 456px;
+        height: 64px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 104px 8px 12px;
+        overflow: hidden;
+      }
+      .preview-text {
+        font-size: 20px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-height: 27px;
+      }
+      .preview-meta {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .preview button {
+        position: absolute;
+        right: 8px;
+        top: 8px;
+        width: 88px;
+        height: 48px;
+        border: 1px solid var(--line);
+        font-size: 14px;
+      }
+      .grid {
+        left: 12px;
+        top: 140px;
+        width: 352px;
+        height: 244px;
+        display: grid;
+        grid-template-columns: repeat(3, 112px);
+        grid-template-rows: repeat(3, 76px);
+        gap: 8px;
+      }
+      .grid button {
+        font-size: 22px;
+        border: 2px solid transparent;
+      }
+      .grid button.focused {
+        border-color: var(--accent);
+        background: var(--focus);
+        color: var(--fg);
+      }
+      .grid button.blank {
+        visibility: hidden;
+      }
+      .utilities {
+        left: 372px;
+        top: 140px;
+        width: 96px;
+        display: grid;
+        gap: 8px;
+      }
+      .utilities button {
+        height: 76px;
+        font-size: 16px;
+      }
+      .keyboard-status {
+        left: 12px;
+        top: 392px;
+        width: 456px;
+        height: 20px;
+        font-size: 14px;
+        line-height: 20px;
+        color: var(--muted);
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .keyboard-actions {
+        top: 424px;
+      }
+      .shortcuts {
+        left: 12px;
+        top: 140px;
+        width: 456px;
+        display: grid;
+        grid-template-columns: repeat(3, 144px);
+        grid-template-rows: repeat(2, 116px);
+        gap: 12px;
+      }
+      .shortcuts button {
+        font-size: 20px;
+      }
+      .empty-card {
+        left: 12px;
+        top: 140px;
+        width: 456px;
+        height: 244px;
+        background: var(--surface);
+        border-radius: 16px;
+        padding: 30px 24px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+        gap: 12px;
+      }
+      .empty-card h2 {
+        margin: 0;
+        font-size: 24px;
+      }
+      .empty-card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 16px;
+      }
+      .empty-card button {
+        width: 240px;
+        height: 48px;
+      }
+      .audio-state {
+        left: 12px;
+        top: 64px;
+        width: 456px;
+        height: 200px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: var(--surface);
+        border: 1px solid var(--line) !important;
+        gap: 10px;
+      }
+      .audio-state strong {
+        font-size: 38px;
+        font-weight: 600;
+      }
+      .audio-state span {
+        font-size: 16px;
+        color: var(--muted);
+      }
+      .audio-start {
+        left: 12px;
+        top: 280px;
+        width: 456px;
+        height: 56px;
+      }
+      .volume {
+        left: 12px;
+        top: 352px;
+        width: 456px;
+        height: 56px;
+        background: var(--surface);
+        border-radius: 12px;
+        padding: 10px 16px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+      .volume input {
+        flex: 1;
+        min-width: 0;
+        accent-color: var(--accent);
+      }
+      .audio-note {
+        left: 12px;
+        top: 424px;
+        width: 456px;
+        height: 48px;
+        color: var(--muted);
+        font-size: 15px;
+        text-align: center;
+        margin: 0;
+      }
+      .panel {
+        position: absolute;
+        inset: 0;
+        background: var(--bg);
+        z-index: 2;
+      }
+      .panel-title {
+        left: 12px;
+        top: 12px;
+        width: 256px;
+        height: 32px;
+        font-size: 22px;
+        font-weight: 650;
+        line-height: 32px;
+      }
+      .summary {
+        left: 12px;
+        top: 64px;
+        width: 456px;
+        height: 104px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 12px 16px;
+      }
+      .summary strong {
+        font-size: 21px;
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .summary p {
+        margin: 5px 0 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .mode-cards {
+        left: 12px;
+        top: 180px;
+        width: 456px;
+        display: flex;
+        gap: 12px;
+      }
+      .mode-cards button {
+        width: 144px;
+        height: 104px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 9px;
+        font-size: 18px;
+      }
+      .mode-cards small {
+        font-size: 13px;
+      }
+      .quick-links {
+        top: 296px;
+        gap: 8px;
+      }
+      .quick-links button {
+        height: 64px;
+      }
+      .lock-control {
+        left: 12px;
+        top: 372px;
+        width: 456px;
+        height: 64px;
+      }
+      .panel-note {
+        left: 12px;
+        top: 448px;
+        width: 456px;
+        margin: 0;
+        font-size: 13px;
+        text-align: center;
+        color: var(--muted);
+      }
+      .detail-list {
+        left: 12px;
+        top: 64px;
+        width: 456px;
+        height: 344px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .detail-list > button,
+      .detail-list > .detail {
+        width: 456px;
+        min-height: 56px;
+        background: var(--surface);
+        border-radius: 12px;
+        padding: 10px 16px;
+        text-align: left;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .detail-list strong {
+        font-size: 16px;
+      }
+      .detail-list span,
+      .detail-list small {
+        font-size: 14px;
+        color: var(--muted);
+        text-align: right;
+      }
+      .detail-list p {
+        font-size: 14px;
+        color: var(--muted);
+        margin: 4px 0;
+      }
+      .panel-back {
+        left: 12px;
+        top: 424px;
+        width: 456px;
+        height: 48px;
+      }
+      .choice-list {
+        left: 12px;
+        top: 64px;
+        width: 456px;
+        display: grid;
+        gap: 12px;
+      }
+      .choice-list button {
+        height: 76px;
+        text-align: left;
+        padding: 12px 18px;
+      }
+      .choice-list small {
+        display: block;
+        font-size: 14px;
+        margin-top: 4px;
+      }
+      .lock-screen,
+      .sleep-screen {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        background: var(--bg);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 40px;
+      }
+      .lock-screen h2 {
+        font-size: 30px;
+        margin: 12px 0;
+      }
+      .lock-screen p {
+        color: var(--muted);
+      }
+      .sleep-screen {
+        background: #000;
+        color: #9caab9;
+      }
+      .sleep-screen p {
+        font-size: 14px;
+      }
+      .simulator {
+        flex: 1;
+        min-width: 260px;
+        max-width: 480px;
+        background: #1d2631;
+        border: 1px solid #354251;
+        border-radius: 18px;
+        padding: 24px;
+      }
+      .simulator h2 {
+        font-size: 21px;
+        margin: 0 0 12px;
+      }
+      .simulator h3 {
+        font-size: 15px;
+        margin: 24px 0 10px;
+      }
+      .simulator p {
+        font-size: 14px;
+        color: #b7c5d2;
+      }
+      .simulator button,
+      .simulator select {
+        background: #2c3b4c;
+        color: #e4eef8;
+        border: 1px solid #4b6074;
+        border-radius: 9px;
+        min-height: 44px;
+        padding: 8px 12px;
+      }
+      .simulator .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .simulator select {
+        width: 100%;
+      }
+      .event {
+        background: #121a23;
+        border-radius: 8px;
+        padding: 12px;
+        min-height: 62px;
+        font:
+          13px/1.5 ui-monospace,
+          monospace;
+        color: #bce2ff !important;
+      }
+      .caption {
+        text-align: center;
+        color: #9eafbd;
+        font-size: 13px;
+      }
+      .metrics {
+        display: flex;
+        gap: 24px;
+        flex-wrap: wrap;
+        margin-top: 24px;
+      }
+      .metric {
+        background: #1d2631;
+        border: 1px solid #354251;
+        border-radius: 12px;
+        padding: 18px;
+        flex: 1;
+        min-width: 230px;
+      }
+      .metric strong {
+        font-size: 24px;
+        display: block;
+        color: #c6ebff;
+      }
+      .metric p {
+        font-size: 14px;
+        color: #b7c5d2;
+        margin: 8px 0 0;
+      }
+      @media (max-width: 960px) {
+        .workbench {
+          flex-direction: column;
+          align-items: center;
+        }
+        .simulator {
+          max-width: 504px;
+          width: 100%;
+        }
+        body {
+          padding: 20px;
+        }
+        .intro {
+          max-width: 504px;
+        }
+      }
+      @media (max-width: 540px) {
+        body {
+          padding: 10px;
+        }
+        .device {
+          transform-origin: top center;
+          transform: scale(0.75);
+          margin-bottom: -126px;
+        }
+        .device-column {
+          width: 100%;
+          overflow: hidden;
+        }
+        .metrics {
+          gap: 12px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">ESP32-INPUT / UI REVISION 02</p>
+      <h1>More space for the task in hand.</h1>
+      <p class="intro">
+        A proposed 480 × 480 interface with one Menu launcher, large core
+        controls and a shared quick panel. This browser prototype uses synthetic
+        state: it sends no HID, opens no microphone and does not change the
+        device.
+      </p>
+      <div class="workbench">
+        <div class="device-column">
+          <div class="device">
+            <section
+              id="screen"
+              class="screen"
+              aria-label="480 by 480 proposed device interface"
+            ></section>
+          </div>
+          <p class="caption">
+            Fixed 480 × 480 canvas · no edge-swipe navigation
+          </p>
+        </div>
+        <aside class="simulator">
+          <h2>Review the interaction</h2>
+          <p>
+            Use the on-screen Menu or the physical-button simulator. Connections
+            and alerts below are labeled fixtures, never device telemetry.
+          </p>
+          <h3>Physical AI button</h3>
+          <div class="controls">
+            <button id="ai-single">Single</button
+            ><button id="ai-double">Double</button
+            ><button id="ai-hold">Hold 0.9 s</button>
+          </div>
+          <p>
+            Single is contextual. Double opens the same quick panel. Hold locks
+            or unlocks; a wake gesture is consumed first.
+          </p>
+          <h3>Appearance and wake</h3>
+          <div class="controls">
+            <button id="theme">Light theme</button
+            ><button id="sleep">Screen off</button
+            ><button id="reset">Reset preview</button>
+          </div>
+          <h3>Fixture state</h3>
+          <select id="fixture" aria-label="Fixture state">
+            <option value="ready">Synthetic input ready</option>
+            <option value="offline">Input disconnected</option>
+            <option value="remote">Remote owns input</option>
+            <option value="recording">Future recording indicator only</option>
+            <option value="error">Input error / release pending</option>
+          </select>
+          <p>
+            Audio and spoken-letter controls remain unavailable. The recording
+            fixture reviews the indicator and Stop affordance only.
+          </p>
+          <h3>Motion-selection focus</h3>
+          <div class="controls">
+            <button id="focus-prev">Previous cell</button
+            ><button id="focus-next">Next cell</button>
+          </div>
+          <p id="event" class="event" role="status">
+            Preview ready. Mouse / motion off.
+          </p>
+          <p>
+            <a href="ui-plan.md">Geometry and performance plan</a> ·
+            <a href="index.html">Earlier prototype</a>
+          </p>
+        </aside>
+      </div>
+      <div class="metrics">
+        <article class="metric">
+          <strong>396 × 292</strong>
+          <p>
+            Mouse pad: 115,632 square pixels, 93% more than the current 384 ×
+            156 pad.
+          </p>
+        </article>
+        <article class="metric">
+          <strong>112 × 76</strong>
+          <p>
+            Nine equal character cells. Preview, Delete, Space and explicit Send
+            stay visible.
+          </p>
+        </article>
+        <article class="metric">
+          <strong>One quick panel</strong>
+          <p>
+            Mode, actual target summary, Status and Settings. Production
+            integration waits for review.
+          </p>
+        </article>
+      </div>
+    </main>
+    <script>
+      "use strict";
+      const screen = document.getElementById("screen");
+      const eventLog = document.getElementById("event");
+      const initial = () => ({
+        mode: "mouse",
+        panel: null,
+        submode: "touch",
+        audioKind: "voice",
+        theme: "dark",
+        motion: false,
+        drag: false,
+        gain: 1,
+        preview: "",
+        group: -1,
+        focus: 0,
+        lower: false,
+        symbols: false,
+        locked: false,
+        asleep: false,
+        fixture: "ready",
+        sending: false,
+      });
+      let state = initial();
+      let wakeGesture = false;
+      let capturedGesture = false;
+      const groups = [
+        "ABCD",
+        "EFGH",
+        "IJKL",
+        "MNOP",
+        "QRST",
+        "UVWX",
+        "YZ01",
+        "2345",
+        "6789",
+      ];
+      const symbols = [
+        ".,?!",
+        ":;'\"",
+        "+-*/",
+        "=<>%",
+        "()[]",
+        "{}\\_",
+        "@#$&",
+        "^~`|",
+        "0123",
+      ];
+      const escapeText = (value) =>
+        String(value).replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      function log(message) {
+        eventLog.textContent = message;
+      }
+      function html(parts, ...values) {
+        return parts.reduce(
+          (output, part, index) =>
+            output + (index ? values[index - 1] : "") + part,
+          "",
+        );
+      }
+      function button(label, action, cls = "", disabled = false, extra = "") {
+        return html`<button
+          class="${cls}"
+          data-action="${action}"
+          ${disabled ? "disabled" : ""}
+          ${extra}
+        >
+          ${label}
+        </button>`;
+      }
+      function critical() {
+        const f = state.fixture;
+        if (f === "ready") return "";
+        if (f === "recording")
+          return button("● REC<strong>Stop</strong>", "stop", "at critical");
+        if (f === "remote")
+          return button(
+            "Remote<strong>Take over</strong>",
+            "takeover",
+            "at critical",
+          );
+        if (f === "error")
+          return button(
+            "Input error<strong>Details</strong>",
+            "status",
+            "at critical error",
+          );
+        return button(
+          "Input blocked<strong>No host</strong>",
+          "status",
+          "at critical",
+        );
+      }
+      function top(title) {
+        return html`<div class="at mode-title">${title}</div>
+          <div class="at input-context" title="Bluetooth / Synthetic HID host">
+            BT · Synthetic host
+          </div>
+          ${critical()}${button("Menu", "menu", "at launcher")}`;
+      }
+      function mouse() {
+        return html`${top("Mouse")}
+          <div class="at pad" data-pad="true">
+            <div class="pad-marker"></div>
+            <strong>Touch to move</strong
+            ><span
+              >Bluetooth · Synthetic host ·
+              ${state.gain === 1 ? "1" : `1/${state.gain}`}×</span
+            >
+          </div>
+          <div class="at scroll">
+            ${button(
+              "↑",
+              "scroll-up",
+              "",
+              state.fixture === "offline",
+            )}${button("↓", "scroll-down", "", state.fixture === "offline")}
+          </div>
+          <div class="row mouse-clicks">
+            ${button(
+              "Left click",
+              "left",
+              "",
+              state.fixture === "offline",
+            )}${button(
+              "Right click",
+              "right",
+              "",
+              state.fixture === "offline",
+            )}${button(
+              state.drag ? "Release" : "Drag",
+              "drag",
+              state.drag ? "selected" : "",
+              state.fixture === "offline" && !state.drag,
+            )}
+          </div>
+          <div class="row two mouse-options">
+            ${button(
+              `Motion · ${state.motion ? "On" : "Off"}`,
+              "motion",
+              state.motion ? "selected" : "",
+              state.fixture === "offline",
+            )}${button(
+              `Fine gain · ${state.gain === 1 ? "1" : `1/${state.gain}`}×`,
+              "gain",
+            )}
+          </div>`;
+      }
+      function keyboard() {
+        const names = state.symbols ? symbols : groups;
+        const cells = state.group < 0 ? names : names[state.group].split("");
+        const preview = state.preview || "Ready for input…";
+        let body = "";
+        if (state.submode === "shortcuts") {
+          body = html`<div class="at shortcuts">
+            ${["Copy", "Paste", "Undo", "Tab", "Escape", "Enter"]
+              .map((n) =>
+                button(n, `shortcut:${n}`, "", state.fixture === "offline"),
+              )
+              .join("")}
+          </div>`;
+        } else if (state.submode === "spoken") {
+          body =
+            '<div class="at empty-card"><h2>Spoken letters unavailable</h2><p>No qualified recognizer is active.<br>Typed preview remains available.</p>' +
+            button("Start listening", "voice", "", true) +
+            "</div>";
+        } else {
+          body = html`<div class="at grid">
+              ${Array.from({ length: 9 }, (_, i) =>
+                button(
+                  cells[i]
+                    ? escapeText(
+                        state.lower ? cells[i].toLowerCase() : cells[i],
+                      )
+                    : "",
+                  `cell:${i}`,
+                  `${!cells[i] ? "blank" : ""} ${state.submode === "motion" && i === state.focus && cells[i] ? "focused" : ""}`,
+                  !cells[i] || state.sending,
+                  `aria-label="${cells[i] ? `Character cell ${i + 1}: ${escapeText(cells[i])}` : "Empty character cell"}"`,
+                ),
+              ).join("")}
+            </div>
+            <div class="at utilities">
+              ${button(
+                "Groups",
+                "groups",
+                "",
+                state.group < 0 || state.sending,
+              )}${button(
+                state.lower ? "abc" : "ABC",
+                "case",
+                state.lower ? "selected" : "",
+                state.sending,
+              )}${button(
+                "Symbols",
+                "symbols",
+                state.symbols ? "selected" : "",
+                state.sending,
+              )}
+            </div>`;
+        }
+        return html`${top("Keyboard")}${button(
+            `${state.submode[0].toUpperCase() + state.submode.slice(1)} ▾`,
+            "submodes",
+            "at submode",
+          )}
+          <div class="at preview">
+            <div class="preview-text">${escapeText(preview)}</div>
+            <div class="preview-meta">
+              ${state.preview.length} / 64 · Bluetooth · Synthetic host
+            </div>
+            ${button("Clear", "clear", "", !state.preview || state.sending)}
+          </div>
+          ${body}
+          <div class="at keyboard-status">
+            ${state.sending
+              ? "Synthetic send paused · accepted 0 / " + state.preview.length
+              : state.group < 0
+                ? "Choose a group; Send never adds Enter."
+                : "Choose a character to add to preview."}
+          </div>
+          <div class="row keyboard-actions">
+            ${button(
+              "Delete",
+              "delete",
+              "",
+              !state.preview || state.sending,
+            )}${button("Space", "space", "", state.sending)}${button(
+              state.sending ? "Stop" : "Send",
+              state.sending ? "stop-send" : "send",
+              "primary",
+              !state.sending && (!state.preview || state.fixture === "offline"),
+            )}
+          </div>`;
+      }
+      function audio() {
+        return html`${top("Audio")}${button(
+            `${state.audioKind === "voice" ? "Voice" : "Speaker"} ▾`,
+            "audio-kinds",
+            "at submode",
+          )}${button(
+            `<strong>${state.audioKind === "voice" ? "Muted" : "Speaker off"}</strong><span>Audio unavailable on this device</span>`,
+            "mute",
+            "at audio-state",
+            true,
+          )}${button(
+            state.audioKind === "voice" ? "Start microphone" : "Start speaker",
+            "audio-start",
+            "at audio-start",
+            true,
+          )}
+          <div class="at volume">
+            <span>Volume</span
+            ><input
+              type="range"
+              min="0"
+              max="100"
+              value="0"
+              disabled
+              aria-label="Volume unavailable"
+            /><span>—</span>
+          </div>
+          <p class="at audio-note">
+            ${state.audioKind === "voice"
+              ? "Capture starts only with actual capability and consent."
+              : "Speaker playback does not upload microphone audio."}
+          </p>`;
+      }
+      function panelHeader(title) {
+        return html`<div class="at panel-title">${title}</div>
+          ${critical()}${button("Close", "close", "at launcher")}`;
+      }
+      function quick() {
+        return html`<div class="panel">
+          ${panelHeader("Quick controls")}
+          <div class="at summary">
+            <strong>Synthetic HID host</strong>
+            <p>
+              Bluetooth input ·
+              ${state.fixture === "offline"
+                ? "Disconnected"
+                : state.fixture === "error"
+                  ? "Release pending"
+                  : "Ready"}
+              · ${state.fixture === "remote" ? "Remote owner" : "Local control"}
+            </p>
+            <p>Wi-Fi connected · management service unavailable</p>
+          </div>
+          <div class="at mode-cards">
+            ${[
+              ["mouse", "Mouse", "Move and click"],
+              ["keyboard", "Keyboard", "Preview and send"],
+              ["audio", "Audio", "Voice / speaker"],
+            ]
+              .map(([id, name, sub]) =>
+                button(
+                  `${name}<small>${sub}</small>`,
+                  `mode:${id}`,
+                  state.mode === id ? "selected" : "",
+                ),
+              )
+              .join("")}
+          </div>
+          <div class="row two quick-links">
+            ${button("Status", "status")}${button("Settings", "settings")}
+          </div>
+          ${button("Lock device", "lock", "at lock-control")}
+          <p class="at panel-note">AI double-click opens this same panel.</p>
+        </div>`;
+      }
+      function detail(title, rows) {
+        return html`<div class="panel">
+          ${panelHeader(title)}
+          <div class="at detail-list">${rows}</div>
+          ${button("Back to quick panel", "quick", "at panel-back")}
+        </div>`;
+      }
+      function panels() {
+        if (state.panel === "quick") return quick();
+        if (state.panel === "status")
+          return detail(
+            "Status",
+            html`<div class="detail">
+                <strong>Input target</strong
+                ><span
+                  >Synthetic HID host<br />Bluetooth ·
+                  ${state.fixture === "offline"
+                    ? "Disconnected"
+                    : "Connected"}</span
+                >
+              </div>
+              <div class="detail">
+                <strong>Owner / readiness</strong
+                ><span
+                  >${state.fixture === "remote"
+                    ? "Remote owner"
+                    : state.fixture === "error"
+                      ? "Release pending"
+                      : state.fixture === "offline"
+                        ? "Input unavailable"
+                        : "Local / ready"}</span
+                >
+              </div>
+              <div class="detail">
+                <strong>Battery / Wi-Fi</strong
+                ><span>73% · gauge fixture<br />Connected · −52 dBm</span>
+              </div>
+              <div class="detail">
+                <strong>Audio / recording</strong
+                ><span
+                  >${state.fixture === "recording"
+                    ? "Synthetic recording state"
+                    : "Unavailable / stopped"}</span
+                >
+              </div>
+              <p>
+                Fixture data only. No real device is connected to this preview.
+              </p>`,
+          );
+        if (state.panel === "settings")
+          return detail(
+            "Settings",
+            `${button("Connectivity <small>Bluetooth / USB · Wi-Fi</small>", "connectivity")}${button("Display <small>Theme · brightness · timeout</small>", "display")}${button("Input <small>Fine gain · modifier · haptics</small>", "input")}${button("About <small>Firmware · board · capabilities</small>", "about")}`,
+          );
+        if (state.panel === "display")
+          return detail(
+            "Display",
+            `${button("Appearance <small>" + state.theme + "</small>", "theme")}<div class="detail"><strong>Brightness</strong><span>70% · metadata fixture</span></div><div class="detail"><strong>Screen timeout</strong><span>5 minutes · fixture</span></div><p>Production forms consume shared setting metadata. This preview stores nothing.</p>`,
+          );
+        if (state.panel === "connectivity")
+          return detail(
+            "Connectivity",
+            '<div class="detail"><strong>Input transport</strong><span>Bluetooth selected<br>USB unavailable</span></div><div class="detail"><strong>Bluetooth hosts</strong><span>1 / 15 saved · fixture</span></div><div class="detail"><strong>Wi-Fi</strong><span>Separate management channel</span></div><p>Transport selection, pairing and credentials remain coordinator-owned.</p>',
+          );
+        if (state.panel === "input")
+          return detail(
+            "Input",
+            '<div class="detail"><strong>Host modifier</strong><span>Ctrl · fixture</span></div><div class="detail"><strong>Haptics</strong><span>On · fixture</span></div><div class="detail"><strong>Motion calibration</strong><span>Requires device capability</span></div>',
+          );
+        if (state.panel === "about")
+          return detail(
+            "About",
+            '<div class="detail"><strong>Interface</strong><span>Proposal 02</span></div><div class="detail"><strong>Evidence</strong><span>Browser interaction only</span></div><p>Native LVGL, hardware allocation and physical readability need separate validation.</p>',
+          );
+        if (state.panel === "submodes" || state.panel === "audio-kinds") {
+          const audio = state.panel === "audio-kinds";
+          const items = audio
+            ? [
+                ["voice", "Voice", "Microphone / mute"],
+                ["speaker", "Speaker", "Playback / volume"],
+              ]
+            : [
+                ["motion", "Motion", "Local focus; AI confirms"],
+                ["touch", "Touch", "Tap group, then character"],
+                ["spoken", "Spoken", "Unavailable until qualified"],
+                ["shortcuts", "Shortcuts", "Explicit host key actions"],
+              ];
+          return html`<div class="panel">
+            ${panelHeader(audio ? "Audio kind" : "Keyboard entry")}
+            <div class="at choice-list">
+              ${items
+                .map(([id, name, desc]) =>
+                  button(
+                    `${name}<small>${desc}</small>`,
+                    `${audio ? "audio-kind" : "submode"}:${id}`,
+                  ),
+                )
+                .join("")}
+            </div>
+          </div>`;
+        }
+        return "";
+      }
+      function render() {
+        screen.className = "screen" + (state.theme === "light" ? " light" : "");
+        screen.innerHTML = { mouse, keyboard, audio }[state.mode]() + panels();
+        if (state.locked)
+          screen.insertAdjacentHTML(
+            "beforeend",
+            '<div class="lock-screen"><span>INPUT STOPPED</span><h2>Device locked</h2><p>Hold the physical AI button to unlock.<br>Motion and capture stay off afterward.</p></div>',
+          );
+        if (state.asleep)
+          screen.insertAdjacentHTML(
+            "beforeend",
+            '<div class="sleep-screen"><p>Screen off fixture<br>First whole gesture wakes only.</p></div>',
+          );
+        document.getElementById("theme").textContent =
+          state.theme === "dark" ? "Light theme" : "Dark theme";
+      }
+      function openQuick() {
+        state.motion = false;
+        state.drag = false;
+        state.sending = false;
+        state.panel = "quick";
+        log(
+          "Quick panel opened. Input cancelled; no navigation gesture crosses the pad.",
+        );
+      }
+      function chooseCell(index) {
+        const list = state.symbols ? symbols : groups;
+        const values = state.group < 0 ? list : list[state.group].split("");
+        if (!values[index]) return;
+        if (state.group < 0) {
+          state.group = index;
+          state.focus = 0;
+          log("Group selected locally. Nothing sent.");
+        } else if (state.preview.length < 64) {
+          state.preview += state.lower
+            ? values[index].toLowerCase()
+            : values[index];
+          state.group = -1;
+          state.focus = 0;
+          log("Character added to preview. Send remains explicit.");
+        }
+      }
+      function stopCaptureFixture() {
+        if (state.fixture !== "recording") return;
+        state.fixture = "ready";
+        document.getElementById("fixture").value = "ready";
+      }
+      function action(name) {
+        if (wakeGesture || capturedGesture) {
+          wakeGesture = false;
+          capturedGesture = false;
+          log("Gesture consumed. A fresh gesture can act.");
+          render();
+          return;
+        }
+        if (state.locked) return;
+        if (name === "menu") {
+          openQuick();
+        } else if (name === "close") {
+          state.panel = null;
+        } else if (name === "quick") {
+          openQuick();
+        } else if (name === "lock") {
+          state.locked = true;
+          stopCaptureFixture();
+          state.motion = state.drag = state.sending = false;
+          state.panel = null;
+          log("Locked. Input stopped; physical hold required to unlock.");
+        } else if (
+          [
+            "status",
+            "settings",
+            "display",
+            "input",
+            "about",
+            "connectivity",
+            "submodes",
+            "audio-kinds",
+          ].includes(name)
+        ) {
+          state.panel = name;
+        } else if (name.startsWith("mode:")) {
+          state.mode = name.split(":")[1];
+          state.panel = null;
+          state.motion = state.drag = state.sending = false;
+          log("Mode changed. Previous input cancelled; preview preserved.");
+        } else if (name.startsWith("submode:")) {
+          state.submode = name.split(":")[1];
+          state.panel = null;
+          state.group = -1;
+          state.focus = 0;
+        } else if (name.startsWith("audio-kind:")) {
+          state.audioKind = name.split(":")[1];
+          state.panel = null;
+        } else if (name === "theme") {
+          state.theme = state.theme === "dark" ? "light" : "dark";
+        } else if (name === "motion") {
+          state.motion = !state.motion;
+          log(
+            "Synthetic motion " + (state.motion ? "enabled" : "disabled") + ".",
+          );
+        } else if (name === "drag") {
+          state.drag = !state.drag;
+          log(
+            state.drag
+              ? "Synthetic drag active; Release stays visible."
+              : "Synthetic buttons released.",
+          );
+        } else if (name === "gain") {
+          state.gain = state.gain === 1 ? 4 : state.gain === 4 ? 8 : 1;
+        } else if (name.startsWith("cell:")) {
+          chooseCell(Number(name.split(":")[1]));
+        } else if (name === "groups") {
+          state.group = -1;
+          state.focus = 0;
+        } else if (name === "case") {
+          state.lower = !state.lower;
+        } else if (name === "symbols") {
+          state.symbols = !state.symbols;
+          state.group = -1;
+          state.focus = 0;
+        } else if (name === "clear") {
+          state.preview = "";
+        } else if (name === "delete") {
+          state.preview = state.preview.slice(0, -1);
+        } else if (name === "space") {
+          if (state.preview.length < 64) state.preview += " ";
+        } else if (name === "send") {
+          state.sending = true;
+          log(
+            "Synthetic send requested without Enter. No real HID is emitted.",
+          );
+        } else if (name === "stop-send") {
+          state.sending = false;
+          log("Synthetic send stopped; unsent preview retained.");
+        } else if (name === "takeover" || name === "stop") {
+          state.fixture = "ready";
+          state.motion = state.drag = state.sending = false;
+          document.getElementById("fixture").value = "ready";
+          log(
+            name === "stop"
+              ? "Synthetic capture stopped."
+              : "Local takeover consumed; next gesture can act.",
+          );
+        } else {
+          log("Synthetic action: " + name + ". No device output.");
+        }
+        render();
+      }
+      screen.addEventListener("pointerdown", (event) => {
+        wakeGesture = capturedGesture = false;
+        if (state.asleep) {
+          state.asleep = false;
+          wakeGesture = true;
+          screen.setPointerCapture(event.pointerId);
+          log("Waking; this whole gesture is consumed.");
+          return;
+        }
+        if (state.fixture === "remote") {
+          state.fixture = "ready";
+          state.motion = state.drag = state.sending = false;
+          capturedGesture = true;
+          screen.setPointerCapture(event.pointerId);
+          document.getElementById("fixture").value = "ready";
+          log("Local takeover: current gesture consumed.");
+        }
+      });
+      screen.addEventListener("pointerup", () => {
+        if (wakeGesture || capturedGesture) render();
+      });
+      screen.addEventListener("pointercancel", () => {
+        if (wakeGesture || capturedGesture) {
+          wakeGesture = capturedGesture = false;
+          render();
+        }
+      });
+      screen.addEventListener("click", (event) => {
+        const target = event.target.closest("[data-action]");
+        if (target && !target.disabled) action(target.dataset.action);
+        else if (wakeGesture || capturedGesture) {
+          wakeGesture = false;
+          capturedGesture = false;
+          render();
+        }
+      });
+      screen.addEventListener("pointermove", (event) => {
+        if (
+          event.buttons &&
+          event.target.closest("[data-pad]") &&
+          !state.locked &&
+          !state.asleep &&
+          !state.panel &&
+          !capturedGesture &&
+          !wakeGesture
+        )
+          log(
+            "Touchpad movement fixture. No edge-swipe navigation and no real pointer output.",
+          );
+      });
+      function ai(kind) {
+        if (state.asleep) {
+          state.asleep = false;
+          wakeGesture = false;
+          log(
+            "Physical wake gesture consumed, including a hold or rapid double-click.",
+          );
+          render();
+          return;
+        }
+        if (state.fixture === "remote") {
+          state.fixture = "ready";
+          state.motion = state.drag = state.sending = false;
+          document.getElementById("fixture").value = "ready";
+          if (kind === "hold") state.locked = true;
+          log(
+            "AI local takeover consumes the gesture; continued hold may lock.",
+          );
+          render();
+          return;
+        }
+        if (kind === "hold") {
+          state.locked = !state.locked;
+          if (state.locked) stopCaptureFixture();
+          state.motion = state.drag = state.sending = false;
+          state.panel = null;
+          log(
+            state.locked
+              ? "Locked by physical hold."
+              : "Unlocked with motion and audio off.",
+          );
+        } else if (!state.locked && kind === "double") {
+          if (state.panel === "quick") {
+            state.panel = null;
+            log("Quick panel closed; motion remains off.");
+          } else openQuick();
+        } else if (!state.locked && !state.panel) {
+          if (state.mode === "mouse" && state.fixture !== "offline") {
+            state.motion = !state.motion;
+            log("AI single toggles motion.");
+          } else if (
+            state.mode === "keyboard" &&
+            ["touch", "motion"].includes(state.submode)
+          ) {
+            chooseCell(state.focus);
+          } else
+            log(
+              "Contextual action unavailable; no invented audio or recognition.",
+            );
+        } else log("No hidden-page action.");
+        render();
+      }
+      document.getElementById("ai-single").onclick = () => ai("single");
+      document.getElementById("ai-double").onclick = () => ai("double");
+      document.getElementById("ai-hold").onclick = () => ai("hold");
+      document.getElementById("theme").onclick = () => action("theme");
+      document.getElementById("sleep").onclick = () => {
+        if (state.fixture === "recording") {
+          log(
+            "Screen stays on while capture is active; no hardware indicator is qualified.",
+          );
+          return;
+        }
+        state.asleep = true;
+        state.panel = null;
+        log("Screen off fixture; input state is retained.");
+        render();
+      };
+      document.getElementById("reset").onclick = () => {
+        state = initial();
+        document.getElementById("fixture").value = "ready";
+        wakeGesture = capturedGesture = false;
+        log("Preview reset.");
+        render();
+      };
+      document.getElementById("fixture").onchange = (event) => {
+        if (state.locked && event.target.value === "recording") {
+          event.target.value = state.fixture;
+          log("Capture cannot start while locked.");
+          return;
+        }
+        state.fixture = event.target.value;
+        log("Synthetic fixture selected: " + state.fixture);
+        render();
+      };
+      for (const [id, delta] of [
+        ["focus-prev", -1],
+        ["focus-next", 1],
+      ])
+        document.getElementById(id).onclick = () => {
+          if (
+            state.mode !== "keyboard" ||
+            !["motion", "touch"].includes(state.submode) ||
+            state.locked ||
+            state.asleep ||
+            state.panel
+          )
+            return;
+          const count = state.group < 0 ? 9 : 4;
+          state.focus = (state.focus + delta + count) % count;
+          log("Local focus changed only.");
+          render();
+        };
+      render();
+    </script>
+  </body>
+</html>

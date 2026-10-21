@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
+#include "ui_memory.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -153,13 +154,59 @@ static bool has_visible_label(lv_obj_t *object, const char *value)
     return find_visible_label(object, value) != NULL;
 }
 
+static lv_obj_t *find_control(lv_obj_t *object, const char *caption)
+{
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return NULL;
+    if (lv_obj_check_type(object, &lv_button_class)) {
+        for (uint32_t i = 0; i < lv_obj_get_child_count(object); ++i) {
+            lv_obj_t *child = lv_obj_get_child(object, (int32_t)i);
+            if (lv_obj_check_type(child, &lv_label_class) &&
+                strcmp(lv_label_get_text(child), caption) == 0) return object;
+        }
+    }
+    /* Frontmost controls win; a noninteractive mode title is not a button. */
+    for (uint32_t i = lv_obj_get_child_count(object); i; --i) {
+        lv_obj_t *found = find_control(lv_obj_get_child(object, (int32_t)(i - 1)), caption);
+        if (found) return found;
+    }
+    return NULL;
+}
+
 static lv_obj_t *control(const char *caption)
 {
-    lv_obj_t *found = find_visible_label(lv_screen_active(), caption);
+    lv_obj_t *found = find_control(lv_screen_active(), caption);
+    if (!found) fprintf(stderr, "Missing visible control: %s\n", caption);
     assert(found);
-    lv_obj_t *parent = lv_obj_get_parent(found);
-    assert(lv_obj_check_type(parent, &lv_button_class));
-    return parent;
+    return found;
+}
+
+static lv_obj_t *find_widget(lv_obj_t *object, const lv_obj_class_t *kind)
+{
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return NULL;
+    if (lv_obj_check_type(object, kind)) return object;
+    for (uint32_t i = lv_obj_get_child_count(object); i; --i) {
+        lv_obj_t *found = find_widget(lv_obj_get_child(object, (int32_t)(i - 1)), kind);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static void tap_widget(const lv_obj_class_t *kind)
+{
+    lv_obj_t *object = find_widget(lv_screen_active(), kind);
+    assert(object);
+    lv_area_t area;
+    lv_obj_get_coords(object, &area);
+    tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
+}
+
+static void assert_rect(lv_obj_t *object, int x, int y, int width, int height)
+{
+    assert(object);
+    lv_area_t area;
+    lv_obj_get_coords(object, &area);
+    assert(area.x1 == x && area.y1 == y);
+    assert(area.x2 - area.x1 + 1 == width && area.y2 - area.y1 + 1 == height);
 }
 
 static void tap_control(const char *caption)
@@ -200,19 +247,18 @@ static void geometry_checks(void)
     grid_groups();
     s_state.sending = false;
     render();
-    const char *tabs[] = {"Motion", "Touch", "Spoken", "Shortcuts"};
     const char *grid1[] = {"ABCD", "EFGH", "IJKL"};
     const char *grid2[] = {"MNOP", "QRST", "UVWX"};
     const char *grid3[] = {"YZ01", "2345", "6789"};
     const char *actions[] = {"Delete", "Space", "Send"};
-    const char *nav[] = {"Mouse", "Keyboard", "Audio"};
     const char *utilities[] = {"Groups", "ABC", "Symbols"};
-    row_geometry(tabs, 4);
     row_geometry(grid1, 3);
     row_geometry(grid2, 3);
     row_geometry(grid3, 3);
     row_geometry(actions, 3);
-    row_geometry(nav, 3);
+    assert_rect(control("Menu"), 404, 8, 64, 48);
+    assert_rect(control("Touch"), 140, 8, 132, 48);
+    assert_rect(control("Clear"), 372, 72, 88, 48);
     for (unsigned i = 0; i < 3; ++i) {
         lv_area_t a, b, c, utility, row;
         lv_obj_get_coords(control(grid1[i]), &a);
@@ -222,21 +268,28 @@ static void geometry_checks(void)
         const char *row_names[] = {"ABCD", "MNOP", "YZ01"};
         lv_obj_get_coords(control(row_names[i]), &row);
         lv_obj_get_coords(control(utilities[i]), &utility);
-        assert(utility.x1 == 376 && utility.y1 == row.y1 && utility.y2 == row.y2);
+        assert(utility.x1 == 372 && utility.y1 == row.y1 && utility.y2 == row.y2);
+        assert_rect(control(grid1[i]), 12 + (int)i * 120, 140, 112, 76);
+        assert_rect(control(grid2[i]), 12 + (int)i * 120, 224, 112, 76);
+        assert_rect(control(grid3[i]), 12 + (int)i * 120, 308, 112, 76);
+        assert_rect(control(utilities[i]), 372, 140 + (int)i * 84, 96, 76);
+        assert_rect(control(actions[i]), 12 + (int)i * 156, 424, 144, 48);
     }
     for (unsigned i = 0; i < APP_UI_GRID_CELLS; ++i) {
         clear_intents();
-        tap(72 + (int)(i % 3) * 120, 206 + (int)(i / 3) * 52);
+        tap(68 + (int)(i % 3) * 120, 178 + (int)(i / 3) * 84);
         assert(action_count(APP_GRID) == 1 && last_action(APP_GRID)->x == (int)i);
         assert(action_count(APP_TEXT) == 0 && action_count(APP_SEND) == 0);
     }
-    lv_area_t target, status;
-    lv_obj_get_coords(find_visible_label(lv_screen_active(), "HID test peer"), &target);
-    lv_obj_get_coords(find_visible_label(lv_screen_active(), "Input ready"), &status);
-    assert(target.y2 < status.y1 && status.y2 < 72);
+    lv_obj_t *context = find_visible_label(lv_screen_active(), "BT /");
+    assert(context);
+    lv_area_t context_area;
+    lv_obj_get_coords(context, &context_area);
+    assert(context_area.x1 == 12 && context_area.y1 == 36 && context_area.x2 <= 131 && context_area.y2 < 64);
+    assert(!find_control(lv_screen_active(), "Mouse") && !find_control(lv_screen_active(), "Audio"));
     s_state = original;
     render();
-    puts("PASS: keyboard rows share columns, button sizes and text baselines; header name/status do not overlap");
+    puts("PASS: focused keyboard grid, utility rail, draft actions, menu and compact input context geometry");
 }
 
 static bool contains_text(lv_obj_t *object, const char *value)
@@ -269,14 +322,19 @@ static void device_settings_checks(void)
         assert(s_state.idle_timeout_seconds == 300);
     }
     clear_intents();
-    pointer(32, 254, true);
-    pointer(448, 254, true);
+    lv_obj_t *brightness = find_widget(lv_screen_active(), &lv_slider_class);
+    assert(brightness);
+    lv_area_t slider_area;
+    lv_obj_get_coords(brightness, &slider_area);
+    int slider_y = (slider_area.y1 + slider_area.y2) / 2;
+    pointer(slider_area.x1, slider_y, true);
+    pointer(slider_area.x2, slider_y, true);
     assert(action_count(APP_BRIGHTNESS) == 0);
-    pointer(448, 254, false);
+    pointer(slider_area.x2, slider_y, false);
     assert(action_count(APP_BRIGHTNESS) == 1 && last_action(APP_BRIGHTNESS)->x == 100);
     assert(s_state.brightness_percent == 70);
     clear_intents();
-    tap(32, 254);
+    tap(slider_area.x1, slider_y);
     assert(action_count(APP_BRIGHTNESS) == 1 && last_action(APP_BRIGHTNESS)->x == 10);
     s_state.settings_save_state = APP_SAVE_DEFAULTS;
     screenshot("settings-defaults");
@@ -316,6 +374,10 @@ static void device_settings_checks(void)
         const char *names[] = {"", "confirm-pair-open", "confirm-pair-close", "confirm-pair-forget", "confirm-wifi-forget", "confirm-disconnect"};
         s_state.confirmation = (app_confirmation_t)confirmation;
         screenshot(names[confirmation]);
+        clear_intents();
+        tap(436, 32);
+        assert(action_count(APP_CONFIRM) == 1 && last_action(APP_CONFIRM)->x == 0);
+        assert(action_count(APP_CLOSE) == 0);
         clear_intents();
         tap(348, 448);
         assert(action_count(APP_CONFIRM) == 1 && last_action(APP_CONFIRM)->x == 1);
@@ -386,7 +448,7 @@ static void device_settings_checks(void)
     s_state.settings_page = APP_SETTINGS_BLUETOOTH;
     render();
     clear_intents();
-    tap(88, 354);
+    tap_control("Count unknown");
     s_state.settings_page = APP_SETTINGS_WIFI;
     render();
     tap_control("Set up Wi-Fi");
@@ -455,7 +517,7 @@ static void device_settings_checks(void)
     tap_control("Previous");
     assert(last_action(APP_BLUETOOTH_PAGE)->x == 0);
     clear_intents();
-    tap(38, 94);
+    tap_control("Back");
     assert(action_count(APP_SETTINGS_PAGE) == 1 && last_action(APP_SETTINGS_PAGE)->x == APP_SETTINGS_CONNECTIVITY);
     s_state.bluetooth_host_count = APP_UI_BOND_CAPACITY;
     s_state.paired_host_count = APP_UI_BOND_CAPACITY;
@@ -487,15 +549,15 @@ static void device_settings_checks(void)
     screenshot("screen-off");
     for (unsigned i = 0; i < sizeof(s_frame); ++i) assert(s_frame[i] == 0);
     clear_intents();
-    pointer(80, 366, true);
+    pointer(84, 392, true);
     assert(action_count(APP_TOUCH_BEGIN) == 1);
     s_state.screen_off = false;
     ++s_state.ui_revision;
     render();
-    pointer(80, 366, false);
+    pointer(84, 392, false);
     assert(action_count(APP_CLICK) == 0);
     assert(action_count(APP_TOUCH_END) + action_count(APP_TOUCH_CANCEL) == 1);
-    tap(80, 366);
+    tap_control("Left click");
     assert(action_count(APP_CLICK) == 1);
     s_state = original;
     render();
@@ -539,14 +601,14 @@ static void pairing_capacity_checks(void)
     s_state.paired_host_capacity = 0;
     screenshot("bluetooth-capacity-unknown");
     clear_intents();
-    tap(88, 354);
+    tap_control("Limit unknown");
     assert(action_count(APP_PAIRING_REQUEST) == 0);
     assert(!has_visible_label(lv_screen_active(), "Pairings full"));
     s_state.paired_host_capacity = 15;
     s_state.paired_host_count = -1;
     screenshot("bluetooth-count-unknown");
     clear_intents();
-    tap(88, 354);
+    tap_control("Count unknown");
     assert(action_count(APP_PAIRING_REQUEST) == 0);
     assert(!has_visible_label(lv_screen_active(), "Pairings full"));
     s_state.pairing_state = APP_PAIRING_OPEN;
@@ -577,7 +639,7 @@ static void transport_and_grid_checks(void)
     screenshot("keyboard-four-characters");
     for (unsigned i = 0; i < APP_UI_GRID_CELLS; ++i) {
         clear_intents();
-        tap(72 + (int)(i % 3) * 120, 206 + (int)(i / 3) * 52);
+        tap(68 + (int)(i % 3) * 120, 178 + (int)(i / 3) * 84);
         assert(action_count(APP_GRID) == (i < 4 ? 1U : 0U));
         if (i < 4) assert(last_action(APP_GRID)->x == (int)i);
         assert(action_count(APP_SEND) == 0 && action_count(APP_TEXT) == 0);
@@ -586,7 +648,7 @@ static void transport_and_grid_checks(void)
     s_state.keyboard_cells[2][0] = '\0';
     render();
     clear_intents();
-    tap(312, 206);
+    tap(308, 178);
     assert(action_count(APP_GRID) == 0);
     s_state = original;
     s_state.overlay = APP_OVERLAY_SETTINGS;
@@ -685,11 +747,12 @@ static void transport_and_grid_checks(void)
     s_state.transport_error = true;
     strcpy(s_state.transport_message, "USB connection failed. Reconnect the host.");
     screenshot("transport-usb-error");
-    assert(has_visible_label(lv_screen_active(), "Input connection error"));
+    assert(has_visible_label(lv_screen_active(), "USB connection failed. Reconnect the host."));
+    assert(control("Input error\nDetails"));
     s_state.transport_error = false;
     s_state.usb_available = false;
     screenshot("transport-selected-unavailable");
-    assert(has_visible_label(lv_screen_active(), "Input unavailable"));
+    assert(control("Unavailable\nDetails"));
     s_state = original;
     render();
     clear_intents();
@@ -723,19 +786,19 @@ static void text_boundary_checks(void)
     assert(lv_obj_get_height(preview) <= lv_font_get_line_height(font));
     assert(strstr(lv_label_get_text(preview), "..."));
     clear_intents();
-    tap(370, 366);
+    tap_control(s_state.sending ? "Stop sending" : "Send");
     assert(action_count(APP_SEND) == 1 && action_count(APP_KEY) == 0);
     assert(strlen(s_state.preview) == APP_UI_DRAFT_CAPACITY);
 
     s_state.message = "Host stalled; pending input expired. Releases have priority.";
     screenshot("keyboard-stalled-footer");
     lv_obj_t *footer = find_visible_label(lv_screen_active(), "Host stalled");
-    lv_obj_t *mouse_tab = find_visible_label(lv_screen_active(), "Mouse");
-    assert(footer && mouse_tab);
-    lv_area_t footer_area, nav_area;
+    assert(footer);
+    lv_area_t footer_area, action_area;
     lv_obj_get_coords(footer, &footer_area);
-    lv_obj_get_coords(lv_obj_get_parent(mouse_tab), &nav_area);
-    assert(footer_area.y2 < nav_area.y1);
+    lv_obj_get_coords(control("Delete"), &action_area);
+    assert(footer_area.x1 == 12 && footer_area.y1 == 392 && footer_area.x2 <= 467);
+    assert(footer_area.y2 < action_area.y1 && action_area.y1 == 424);
     font = lv_obj_get_style_text_font(footer, LV_PART_MAIN);
     assert(lv_obj_get_height(footer) <= lv_font_get_line_height(font));
     /* The smaller metadata font may fit this exact status without truncation;
@@ -772,12 +835,12 @@ static void text_boundary_checks(void)
     assert(status_area.x2 < switch_area.x1);
     assert(status_area.y1 >= switch_area.y1 && status_area.y2 <= switch_area.y2);
     clear_intents();
-    tap(420, 234);
+    tap_widget(&lv_switch_class);
     assert(action_count(APP_HAPTICS) == 0);
     s_state = original;
     render();
     clear_intents();
-    puts("PASS: 64 wide characters stay above the counter; footer stays above navigation; unavailable haptics fits fully");
+    puts("PASS: 64 wide characters stay above the counter; status stays above draft actions; unavailable haptics fits fully");
 }
 
 static void congestion_checks(void)
@@ -789,14 +852,18 @@ static void congestion_checks(void)
     s_state.motion_enabled = true;
     render();
     clear_intents();
-    tap(80, 366);
+    tap_control("Left click");
     assert(action_count(APP_CLICK) == 1 && last_action(APP_CLICK)->x == 1);
     assert(action_count(APP_TOUCH_BEGIN) == 1 && action_count(APP_TOUCH_END) == 1);
     assert(s_intents[0].action == APP_TOUCH_BEGIN);
     assert(last_action(APP_CLICK)->gesture == last_action(APP_TOUCH_BEGIN)->gesture);
+    s_state.overlay = APP_OVERLAY_TARGET;
+    render();
     assert(has_visible_label(lv_screen_active(), "Host busy"));
+    s_state.overlay = APP_OVERLAY_NONE;
+    render();
     clear_intents();
-    tap(390, 86);
+    tap_control("Motion / on");
     assert(action_count(APP_MOTION) == 1 && last_action(APP_MOTION)->x == 0);
     assert(has_visible_label(lv_screen_active(), "Motion / on"));
     clear_intents();
@@ -806,10 +873,10 @@ static void congestion_checks(void)
     /* Busy can clear between down and up. The first press still owns the
      * click; the UI must not require a second tap after transport drains. */
     clear_intents();
-    pointer(380, 366, true);
+    pointer(240, 392, true);
     s_state.congested = false;
     render();
-    pointer(380, 366, false);
+    pointer(240, 392, false);
     assert(action_count(APP_CLICK) == 1 && last_action(APP_CLICK)->x == 2);
 
     /* Active cancellation controls remain operable even when normal input
@@ -822,17 +889,20 @@ static void congestion_checks(void)
     s_state.dragging = true;
     render();
     clear_intents();
-    tap(80, 366);
+    tap_control("Left click");
     assert(action_count(APP_CLICK) == 0);
-    tap(240, 366);
+    tap_control(s_state.dragging ? "Release" : "Drag");
     assert(action_count(APP_DRAG) == 1 && last_action(APP_DRAG)->x == 0);
     assert(has_visible_label(lv_screen_active(), "Release"));
+    s_state.overlay = APP_OVERLAY_TARGET;
+    screenshot("congestion-release-error-status");
     assert(has_visible_label(lv_screen_active(), "Input connection error"));
+    s_state.overlay = APP_OVERLAY_NONE;
     s_state.mode = INPUT_KEYBOARD;
     s_state.sending = true;
     render();
     clear_intents();
-    tap(370, 366);
+    tap_control(s_state.sending ? "Stop sending" : "Send");
     assert(action_count(APP_STOP) == 1 && action_count(APP_SEND) == 0);
     assert(has_visible_label(lv_screen_active(), "Stop sending"));
     s_state = original;
@@ -849,10 +919,11 @@ static void interaction_checks(void)
     s_state.overlay = APP_OVERLAY_NONE;
     render();
     clear_intents();
-    tap(80, 450);
-    assert(action_count(APP_MODE) == 1 && last_action(APP_MODE)->x == INPUT_MOUSE);
+    tap_control("Menu");
+    assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_MODES);
     assert(action_count(APP_TOUCH_BEGIN) == 1 && action_count(APP_TOUCH_END) == 1);
-    assert(last_action(APP_MODE)->gesture == last_action(APP_TOUCH_BEGIN)->gesture);
+    assert(last_action(APP_MENU)->gesture == last_action(APP_TOUCH_BEGIN)->gesture);
+    assert(s_state.overlay == APP_OVERLAY_NONE);
     clear_intents();
     uint32_t object_count = lv_obj_get_child_count(lv_screen_active());
     pointer(80, 200, true);
@@ -873,19 +944,19 @@ static void interaction_checks(void)
     assert(action_count(APP_CLICK) == 0);
     clear_intents();
     /* Blank spacing between pad and scroll must not route to either. */
-    tap(404, 220);
+    tap(412, 220);
     assert(action_count(APP_SCROLL) == 0 && action_count(APP_TOUCH_MOVE) == 0);
     clear_intents();
     tap(440, 190);
     assert(action_count(APP_SCROLL) == 1 && last_action(APP_SCROLL)->x == 1);
     clear_intents();
-    tap(240, 366);
+    tap_control(s_state.dragging ? "Release" : "Drag");
     assert(action_count(APP_DRAG) == 1 && last_action(APP_DRAG)->x == 1);
     assert(!s_state.dragging); /* Only a coordinator update changes the view. */
     s_state.dragging = true;
     render();
     clear_intents();
-    tap(240, 366);
+    tap_control(s_state.dragging ? "Release" : "Drag");
     assert(action_count(APP_DRAG) == 1 && last_action(APP_DRAG)->x == 0);
     s_state.dragging = false;
     clear_intents();
@@ -901,31 +972,31 @@ static void interaction_checks(void)
     s_state.mode = INPUT_KEYBOARD;
     render();
     clear_intents();
-    tap(80, 206);
+    tap(68, 178);
     assert(action_count(APP_GRID) == 1 && last_action(APP_GRID)->x == 0);
     assert(action_count(APP_MOVE) == 0 && action_count(APP_TEXT) == 0);
     assert(last_action(APP_GRID)->ui_revision == s_state.ui_revision);
     /* A render between pointer down and release must preserve the press-time
      * context, allowing the coordinator to reject the stale character. */
     clear_intents();
-    pointer(230, 240, true);
+    pointer(188, 262, true);
     uint64_t old_revision = s_state.ui_revision;
     ++s_state.ui_revision;
     render();
-    pointer(230, 240, false);
+    pointer(188, 262, false);
     assert(action_count(APP_GRID) == 1);
     assert(last_action(APP_GRID)->ui_revision == old_revision);
     s_state.keyboard_submode = APP_KEYBOARD_SHORTCUTS;
     render();
     clear_intents();
-    tap(390, 310);
+    tap_control("Enter");
     assert(action_count(APP_SHORTCUT) == 1 && last_action(APP_SHORTCUT)->x == APP_SHORTCUT_ENTER);
     assert(action_count(APP_SEND) == 0);
     strcpy(s_state.preview, "Example");
     s_state.sending = true;
     render();
     clear_intents();
-    tap(370, 366);
+    tap_control(s_state.sending ? "Stop sending" : "Send");
     assert(action_count(APP_STOP) == 1 && action_count(APP_SEND) == 0);
     s_state.sending = false;
     s_state.keyboard_submode = APP_KEYBOARD_SPOKEN;
@@ -936,26 +1007,27 @@ static void interaction_checks(void)
     s_state.overlay = APP_OVERLAY_MODES;
     render();
     clear_intents();
-    tap(80, 450); /* Bottom nav is covered by the modal. */
+    tap(80, 448); /* The underlying motion control is covered by the panel. */
     assert(action_count(APP_MODE) == 0);
+    assert(action_count(APP_MOTION) == 0);
     tap(240, 264);
     assert(action_count(APP_MODE) == 1 && last_action(APP_MODE)->x == INPUT_KEYBOARD);
     s_state.overlay = APP_OVERLAY_SETTINGS;
     s_state.settings_page = APP_SETTINGS_DISPLAY;
     render();
     clear_intents();
-    tap(350, 174);
+    tap_control("Dark");
     assert(action_count(APP_THEME) == 1 && last_action(APP_THEME)->x == 1);
     assert(s_state.dark_theme == original_theme);
     clear_intents();
-    tap(100, 174);
+    tap_control("Light");
     assert(action_count(APP_THEME) == 1 && last_action(APP_THEME)->x == 0);
     s_state.settings_page = APP_SETTINGS_INPUT;
     render();
     clear_intents();
-    tap(420, 234);
+    tap_widget(&lv_switch_class);
     assert(action_count(APP_HAPTICS) == 1 && last_action(APP_HAPTICS)->x == 0);
-    tap(350, 174);
+    tap_control("Command / Apple");
     assert(action_count(APP_HOST_OS) == 1 && last_action(APP_HOST_OS)->x == APP_HOST_COMMAND);
     s_state.locked = true;
     render();
@@ -969,23 +1041,284 @@ static void interaction_checks(void)
     s_state.mode = INPUT_AUDIO;
     render();
     clear_intents();
-    tap(140, 280);
-    tap(350, 280);
+    tap_control("Start audio");
+    tap(240, 164);
     assert(action_count(APP_AUDIO_POWER) == 0 && action_count(APP_AUDIO_MUTE) == 0);
     clear_intents();
     s_state.mode = INPUT_MOUSE;
     s_state.connected = false;
     s_state.ready = false;
     render();
-    tap(80, 366);
+    tap_control("Left click");
     assert(action_count(APP_CLICK) == 0);
     puts("PASS: real LVGL pointer boundaries, relative pad deltas, modal/lock focus, stale press revision, in-place theme changes, explicit Enter/Stop and unavailable capability gates");
+}
+
+static void quick_panel_and_chooser_checks(void)
+{
+    app_view_t original = s_state;
+    s_state.connected = s_state.ready = true;
+    s_state.transport_error = s_state.release_pending = s_state.sending = false;
+    s_state.mode = INPUT_MOUSE;
+    s_state.overlay = APP_OVERLAY_NONE;
+    s_state.dragging = false;
+    render();
+    assert_rect(lv_obj_get_parent(find_visible_label(lv_screen_active(), "Touchpad")), 12, 64, 396, 292);
+    assert_rect(control(LV_SYMBOL_UP), 416, 64, 52, 142);
+    assert_rect(control(LV_SYMBOL_DOWN), 416, 214, 52, 142);
+    assert_rect(control("Left click"), 12, 368, 144, 48);
+    assert_rect(control("Right click"), 168, 368, 144, 48);
+    assert_rect(control("Drag"), 324, 368, 144, 48);
+    const unsigned gains[] = {1, 4, 8};
+    const unsigned requested[] = {4, 8, 1};
+    const char *gain_labels[] = {"Fine gain / 1x", "Fine gain / 1/4x", "Fine gain / 1/8x"};
+    for (unsigned i = 0; i < 3; ++i) {
+        s_state.gain_divisor = gains[i];
+        render();
+        assert_rect(control(gain_labels[i]), 244, 424, 224, 48);
+        clear_intents();
+        tap_control(gain_labels[i]);
+        assert(action_count(APP_GAIN) == 1 && last_action(APP_GAIN)->x == (int)requested[i]);
+        assert(s_state.gain_divisor == gains[i] && action_count(APP_MENU) == 0);
+    }
+    for (int mode = INPUT_MOUSE; mode <= INPUT_AUDIO; ++mode) {
+        s_state.mode = (input_mode_t)mode;
+        s_state.overlay = APP_OVERLAY_NONE;
+        ++s_state.ui_revision;
+        render();
+        clear_intents();
+        tap_control("Menu");
+        assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_MODES);
+        assert(action_count(APP_MODE) == 0 && s_state.overlay == APP_OVERLAY_NONE);
+        s_state.overlay = APP_OVERLAY_MODES; /* Independent coordinator acknowledgement. */
+        ++s_state.ui_revision;
+        render();
+        const char *names[] = {"Mouse", "Keyboard", "Audio"};
+        for (unsigned i = 0; i < 3; ++i) {
+            assert_rect(control(names[i]), 12 + (int)i * 156, 180, 144, 104);
+            clear_intents();
+            tap_control(names[i]);
+            assert(action_count(APP_MODE) == 1 && last_action(APP_MODE)->x == (int)i);
+            assert(s_state.mode == (input_mode_t)mode && s_state.overlay == APP_OVERLAY_MODES);
+            assert(action_count(APP_CLICK) == 0 && action_count(APP_SEND) == 0);
+        }
+        assert_rect(control("Status"), 12, 296, 224, 64);
+        assert_rect(control("Settings"), 244, 296, 224, 64);
+        clear_intents();
+        tap_control("Status");
+        assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_TARGET);
+        s_state.overlay = APP_OVERLAY_TARGET;
+        ++s_state.ui_revision;
+        render();
+        clear_intents();
+        tap_control("Back to Menu");
+        assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_MODES);
+        assert(action_count(APP_CLOSE) == 0);
+        s_state.overlay = APP_OVERLAY_MODES;
+        ++s_state.ui_revision;
+        render();
+        clear_intents();
+        tap_control("Settings");
+        assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_SETTINGS);
+        s_state.overlay = APP_OVERLAY_SETTINGS;
+        s_state.settings_page = APP_SETTINGS_HOME;
+        ++s_state.ui_revision;
+        render();
+        clear_intents();
+        tap_control("Back");
+        assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_MODES);
+        assert(action_count(APP_SETTINGS_PAGE) == 0);
+    }
+    s_state.mode = INPUT_KEYBOARD;
+    s_state.keyboard_submode = APP_KEYBOARD_TOUCH;
+    s_state.overlay = APP_OVERLAY_NONE;
+    ++s_state.ui_revision;
+    render();
+    clear_intents();
+    tap_control("Touch");
+    assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_KEYBOARD);
+    s_state.overlay = APP_OVERLAY_KEYBOARD;
+    ++s_state.ui_revision;
+    screenshot("keyboard-entry-chooser");
+    const char *choices[] = {"Motion", "Touch", "Spoken letters", "Shortcuts"};
+    for (unsigned i = 0; i < 4; ++i) {
+        assert_rect(control(choices[i]), 12, 64 + (int)i * 88, 456, 76);
+        clear_intents();
+        tap_control(choices[i]);
+        assert(action_count(APP_KEYBOARD_SUBMODE) == 1 && last_action(APP_KEYBOARD_SUBMODE)->x == (int)i);
+        assert(s_state.keyboard_submode == APP_KEYBOARD_TOUCH && s_state.overlay == APP_OVERLAY_KEYBOARD);
+        assert(action_count(APP_GRID) == 0 && action_count(APP_SEND) == 0);
+    }
+    s_state.mode = INPUT_AUDIO;
+    s_state.audio_kind = APP_AUDIO_VOICE;
+    s_state.overlay = APP_OVERLAY_NONE;
+    ++s_state.ui_revision;
+    render();
+    assert_rect(control("Start audio"), 12, 280, 456, 56);
+    clear_intents();
+    tap_control("Voice");
+    assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_AUDIO);
+    s_state.overlay = APP_OVERLAY_AUDIO;
+    ++s_state.ui_revision;
+    screenshot("audio-kind-chooser");
+    const char *audio[] = {"Voice / meeting", "Speaker"};
+    for (unsigned i = 0; i < 2; ++i) {
+        clear_intents();
+        tap_control(audio[i]);
+        assert(action_count(APP_AUDIO_KIND) == 1 && last_action(APP_AUDIO_KIND)->x == (int)i);
+        assert(s_state.audio_kind == APP_AUDIO_VOICE && action_count(APP_AUDIO_POWER) == 0);
+    }
+    s_state.overlay = APP_OVERLAY_NONE;
+    s_state.mode = INPUT_MOUSE;
+    s_state.listening = true; /* Visual fixture, not a supported microphone claim. */
+    screenshot("mouse-capture-alert");
+    clear_intents();
+    tap(338, 32);
+    assert(action_count(APP_LOCK) == 1 && action_count(APP_MENU) == 0);
+    s_state.listening = false;
+    s_state.mode = INPUT_KEYBOARD;
+    s_state.remote_owned = true;
+    screenshot("keyboard-remote-alert");
+    assert(has_visible_label(lv_screen_active(), "Remote"));
+    s_state = original;
+    render();
+    clear_intents();
+    puts("PASS: quick panel, Status/Settings back, mode/submode/audio intent routing, gain cycle and capture stop");
+}
+
+static void deferred_panel_press_checks(void)
+{
+    app_view_t original = s_state;
+    s_state.mode = INPUT_KEYBOARD;
+    s_state.overlay = APP_OVERLAY_MODES;
+    ++s_state.ui_revision;
+    render();
+    clear_intents();
+    lv_obj_t *pressed = control("Status");
+    pointer(124, 328, true);
+    uint64_t press_revision = s_state.ui_revision;
+    uint32_t gesture = last_action(APP_TOUCH_BEGIN)->gesture;
+    s_state.overlay = APP_OVERLAY_SETTINGS;
+    s_state.settings_page = APP_SETTINGS_HOME;
+    ++s_state.ui_revision;
+    render();
+    assert(lv_obj_is_valid(pressed)); /* No deletion inside a live dispatch/press. */
+    pointer(124, 328, false);
+    assert(action_count(APP_TOUCH_END) + action_count(APP_TOUCH_CANCEL) == 1);
+    assert(action_count(APP_SETTINGS_PAGE) == 0 && action_count(APP_THEME) == 0);
+    assert(action_count(APP_MENU) <= 1);
+    if (action_count(APP_MENU)) {
+        const app_intent_t *intent = last_action(APP_MENU);
+        assert(intent->x == APP_OVERLAY_TARGET && intent->ui_revision == press_revision && intent->gesture == gesture);
+    }
+    render();
+    clear_intents();
+    tap_control("Connectivity");
+    assert(action_count(APP_SETTINGS_PAGE) == 1 && last_action(APP_SETTINGS_PAGE)->x == APP_SETTINGS_CONNECTIVITY);
+    assert(last_action(APP_SETTINGS_PAGE)->ui_revision == s_state.ui_revision);
+
+    s_state.settings_page = APP_SETTINGS_DISPLAY;
+    ++s_state.ui_revision;
+    render();
+    lv_obj_t *slider = find_widget(lv_screen_active(), &lv_slider_class);
+    lv_area_t area;
+    assert(slider);
+    lv_obj_get_coords(slider, &area);
+    clear_intents();
+    pointer(area.x1, area.y1, true);
+    s_state.overlay = APP_OVERLAY_KEYBOARD;
+    ++s_state.ui_revision;
+    render();
+    assert(lv_obj_is_valid(slider));
+    pointer(area.x1, area.y1, false);
+    assert(action_count(APP_BRIGHTNESS) == 0 && action_count(APP_KEYBOARD_SUBMODE) == 0);
+    assert(action_count(APP_TOUCH_END) + action_count(APP_TOUCH_CANCEL) == 1);
+    render();
+    clear_intents();
+    tap_control("Motion");
+    assert(action_count(APP_KEYBOARD_SUBMODE) == 1 && last_action(APP_KEYBOARD_SUBMODE)->x == APP_KEYBOARD_MOTION);
+
+    s_state.overlay = APP_OVERLAY_NONE;
+    s_state.screen_off = true;
+    ++s_state.ui_revision;
+    render();
+    clear_intents();
+    pointer(436, 32, true);
+    s_state.screen_off = false;
+    ++s_state.ui_revision;
+    render();
+    pointer(436, 32, false);
+    assert(action_count(APP_MENU) == 0);
+    assert(action_count(APP_TOUCH_END) + action_count(APP_TOUCH_CANCEL) == 1);
+    render();
+    tap_control("Menu");
+    assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_MODES);
+    s_state = original;
+    render();
+    clear_intents();
+    puts("PASS: held panel controls survive deferred replacement; old gestures cannot retarget or open Menu while waking");
+}
+
+static void setup_cache_lifetime_checks(void)
+{
+    app_view_t original = s_state;
+    const char *tail = "Q7M4R8S2T9V6W3";
+    for (unsigned exit = 0; exit < 4; ++exit) {
+        s_state = original;
+        s_state.overlay = APP_OVERLAY_WIFI_SETUP;
+        s_state.wifi_setup_active = true;
+        s_state.wifi_operation_pending = false;
+        strcpy(s_state.wifi_setup_ssid, "TEST-SETUP-ONLY");
+        strcpy(s_state.wifi_setup_passcode, "TESTONLY-Q7M4R8S2T9V6W3");
+        strcpy(s_state.wifi_setup_url, "http://192.0.2.1/");
+        ++s_state.ui_revision;
+        render();
+        assert(ui_memory_contains(tail));
+        clear_intents();
+        /* Keep the setup page alive while its protected content is cleared. */
+        pointer(240, 448, true);
+        assert(action_count(APP_TOUCH_BEGIN) == 1);
+        app_intent_t begin = *last_action(APP_TOUCH_BEGIN);
+        if (exit == 0) s_state.locked = true;
+        else if (exit == 1) s_state.screen_off = true;
+        else if (exit == 2) s_state.overlay = APP_OVERLAY_MODES;
+        else s_state.wifi_setup_active = false;
+        ++s_state.ui_revision;
+        render();
+        assert(!ui_memory_contains(tail));
+        assert(!contains_text(lv_screen_active(), tail));
+        pointer(240, 448, false);
+        if (action_count(APP_TOUCH_END) + action_count(APP_TOUCH_CANCEL) != 1) {
+            fprintf(stderr, "Setup exit=%u begin=%zu end=%zu cancel=%zu total=%zu\n", exit,
+                action_count(APP_TOUCH_BEGIN), action_count(APP_TOUCH_END),
+                action_count(APP_TOUCH_CANCEL), s_intent_count);
+            for (size_t i = 0; i < s_intent_count; ++i)
+                fprintf(stderr, "  action=%d gesture=%u revision=%llu\n", (int)s_intents[i].action,
+                    s_intents[i].gesture, (unsigned long long)s_intents[i].ui_revision);
+        }
+        assert(action_count(APP_TOUCH_END) + action_count(APP_TOUCH_CANCEL) == 1);
+        const app_intent_t *end = last_action(action_count(APP_TOUCH_END) ? APP_TOUCH_END : APP_TOUCH_CANCEL);
+        assert(end->gesture == begin.gesture && end->ui_revision == begin.ui_revision && end->epoch == begin.epoch);
+        if (exit == 3) assert(action_count(APP_WIFI_SETUP) == 0);
+        render();
+        assert(!ui_memory_contains(tail));
+        s_state.locked = s_state.screen_off = s_state.wifi_setup_active = false;
+        s_state.overlay = APP_OVERLAY_NONE;
+        ++s_state.ui_revision;
+        render();
+        assert(!ui_memory_contains(tail));
+    }
+    s_state = original;
+    render();
+    clear_intents();
+    puts("PASS: setup secrets clear from live allocator bytes, including cache tails, through deferred lock/sleep/close/expiry");
 }
 
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     s_output = argv[1];
+    ui_memory_check_observer();
     lv_init();
     lv_display_t *display = lv_display_create(WIDTH, HEIGHT);
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
@@ -1100,7 +1433,12 @@ int main(int argc, char **argv)
         text_boundary_checks();
         congestion_checks();
         interaction_checks();
+        quick_panel_and_chooser_checks();
+        deferred_panel_press_checks();
+        setup_cache_lifetime_checks();
     }
     lv_deinit();
+    ui_memory_stats_t final = ui_memory_stats();
+    assert(final.live_blocks == 0 && final.live_bytes == 0);
     return 0;
 }

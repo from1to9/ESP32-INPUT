@@ -2112,7 +2112,7 @@ static void physical_modal_exit_stops_wifi_setup(void)
     button_edge(false, 1030);
     button_edge(true, 1100);
     button_edge(false, 1120);
-    assert(s_overlay == APP_OVERLAY_NONE);
+    assert(s_overlay == APP_OVERLAY_MODES);
     assert(test_wifi_stops == 1); /* Leaving setup must close its AP on every navigation path. */
     release_barrier();
     render_view(&test_link, ESP_OK);
@@ -3297,6 +3297,406 @@ static void boot_memory_diagnostics_preserve_bounded_capability_history(void)
     assert(strstr(test_diagnostic_logs[6], "size=1024 caps=0x00000008 function=after_boot"));
 }
 
+static void expect_neutral_navigation_trace(void)
+{
+    for (size_t i = 0; i < trace_count; ++i)
+        for (size_t byte = 0; byte < trace[i].length; ++byte)
+            assert(trace[i].bytes[byte] == 0);
+    assert(test_storage_requests == 0 && test_pair_opens == 0 &&
+        test_pair_forgets == 0 && test_disconnects == 0 && test_wifi_forgets == 0);
+}
+
+static void navigation_with_draft(input_mode_t mode)
+{
+    setup(INPUT_KEYBOARD);
+    fill_preview(4);
+    assert(strcmp(s_interaction.view.preview, "ABAB") == 0);
+    if (mode != INPUT_KEYBOARD) {
+        action(APP_MODE, (int)mode);
+        release_barrier();
+        sync_interaction();
+    }
+    assert(s_engine.state.mode == mode);
+}
+
+static void physical_double_click(void)
+{
+    const uint64_t start = s_now_ms + 10;
+    button_edge(true, start);
+    button_edge(false, start + 20);
+    button_edge(true, start + 100);
+    button_edge(false, start + 120);
+    buttons_at(start + 500); /* A later poll must not produce a delayed single. */
+}
+
+static void quick_status_settings_back_preserves_primary_context(void)
+{
+    navigation_with_draft(INPUT_KEYBOARD);
+    action(APP_KEYBOARD_SUBMODE, APP_KEYBOARD_TOUCH);
+    release_barrier();
+    sync_interaction();
+    action(APP_MENU, APP_OVERLAY_MODES);
+    release_barrier();
+    sync_interaction();
+    assert(s_overlay == APP_OVERLAY_MODES && s_interaction.view.menu_open);
+    action(APP_MENU, APP_OVERLAY_TARGET);
+    release_barrier();
+    sync_interaction();
+    render_view(&test_link, ESP_OK);
+    assert(test_view.overlay == APP_OVERLAY_TARGET);
+    app_intent_t stale_back = make_intent(APP_MENU, APP_OVERLAY_MODES, 0, NULL);
+    action(APP_MENU, APP_OVERLAY_MODES);
+    release_barrier();
+    sync_interaction();
+    assert(s_overlay == APP_OVERLAY_MODES);
+    action(APP_MENU, APP_OVERLAY_SETTINGS);
+    release_barrier();
+    sync_interaction();
+    assert(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_HOME);
+    deliver(stale_back);
+    assert(s_overlay == APP_OVERLAY_SETTINGS);
+    settings_page(APP_SETTINGS_INPUT);
+    settings_page(APP_SETTINGS_HOME);
+    action(APP_MENU, APP_OVERLAY_MODES);
+    release_barrier();
+    sync_interaction();
+    assert(s_overlay == APP_OVERLAY_MODES);
+    action(APP_CLOSE, 0);
+    assert(s_overlay == APP_OVERLAY_NONE && !s_interaction.view.menu_open);
+    assert(s_engine.state.mode == INPUT_KEYBOARD && s_keyboard_submode == APP_KEYBOARD_TOUCH);
+    assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+    expect_idle();
+    expect_neutral_navigation_trace();
+}
+
+static void chooser_entry_rejects_wrong_mode_and_invalid_payload_without_cancelling_send(void)
+{
+    const int invalid[] = {-1, APP_OVERLAY_NONE, APP_OVERLAY_WIFI_SETUP, APP_OVERLAY_CONFIRM, 999};
+    for (int mode = INPUT_MOUSE; mode <= INPUT_AUDIO; ++mode) {
+        setup((input_mode_t)mode);
+        const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+        for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; ++i)
+            action(APP_MENU, invalid[i]);
+        if (mode != INPUT_KEYBOARD) action(APP_MENU, APP_OVERLAY_KEYBOARD);
+        if (mode != INPUT_AUDIO) action(APP_MENU, APP_OVERLAY_AUDIO);
+        assert(s_overlay == APP_OVERLAY_NONE && s_engine.state.mode == (input_mode_t)mode);
+        assert(s_engine.state.epoch == epoch && s_ui_revision == revision);
+        expect_idle();
+        assert(trace_count == 0);
+    }
+    navigation_with_draft(INPUT_KEYBOARD);
+    action(APP_SEND, 0);
+    const uint64_t token = s_send_token, epoch = s_engine.state.epoch, revision = s_ui_revision;
+    assert(token && s_engine.count != 0);
+    action(APP_MENU, APP_OVERLAY_AUDIO);
+    for (size_t i = 0; i < sizeof invalid / sizeof invalid[0]; ++i)
+        action(APP_MENU, invalid[i]);
+    assert(s_send_token == token && s_interaction.view.sending && s_engine.count != 0);
+    assert(s_engine.state.epoch == epoch && s_ui_revision == revision && trace_count == 0);
+    static const uint8_t a_down[8] = {2, 0, 4, 0, 0, 0, 0, 0};
+    expect_report(1, a_down, sizeof a_down);
+}
+
+static void chooser_entry_cannot_nest_behind_another_panel(void)
+{
+    const input_mode_t modes[] = {INPUT_KEYBOARD, INPUT_AUDIO};
+    for (size_t mode = 0; mode < sizeof modes / sizeof modes[0]; ++mode) {
+        const app_overlay_t chooser = modes[mode] == INPUT_KEYBOARD ?
+            APP_OVERLAY_KEYBOARD : APP_OVERLAY_AUDIO;
+        const app_overlay_t panels[] = {APP_OVERLAY_MODES, APP_OVERLAY_TARGET,
+            APP_OVERLAY_SETTINGS, chooser, APP_OVERLAY_WIFI_SETUP};
+        for (size_t panel = 0; panel < sizeof panels / sizeof panels[0]; ++panel) {
+            navigation_with_draft(modes[mode]);
+            if (panels[panel] == APP_OVERLAY_WIFI_SETUP) {
+                settings_page(APP_SETTINGS_WIFI);
+                test_wifi.initialized = true;
+                test_wifi_start_error = ESP_OK;
+                action(APP_WIFI_SETUP, 1);
+            } else {
+                action(APP_MENU, (int)panels[panel]);
+            }
+            release_barrier();
+            sync_interaction();
+            const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+            action(APP_MENU, APP_OVERLAY_KEYBOARD);
+            action(APP_MENU, APP_OVERLAY_AUDIO);
+            assert(s_overlay == panels[panel] && s_engine.state.mode == modes[mode]);
+            assert(s_engine.state.epoch == epoch && s_ui_revision == revision);
+            assert(strcmp(s_interaction.view.preview, "ABAB") == 0);
+            assert(test_wifi_stops == 0);
+            expect_idle();
+            expect_neutral_navigation_trace();
+        }
+    }
+}
+
+static void choice_panels_reject_hidden_actions_without_reports_or_writes(void)
+{
+    const input_mode_t modes[] = {INPUT_KEYBOARD, INPUT_AUDIO};
+    const struct { app_action_t kind; int x; } hidden[] = {
+        {APP_GRID, 0}, {APP_SPACE, 0}, {APP_SEND, 0}, {APP_CLEAR, 0},
+        {APP_DELETE, 0}, {APP_KEY, 4}, {APP_CLICK, 1}, {APP_MOVE, 5},
+        {APP_SCROLL, 1}, {APP_MODE, INPUT_MOUSE}, {APP_MOTION, 0}, {APP_DRAG, 0},
+        {APP_THEME, 0}, {APP_HAPTICS, 0}, {APP_HOST_OS, APP_HOST_COMMAND},
+        {APP_SETTINGS_PAGE, APP_SETTINGS_INPUT}, {APP_WIFI_SETUP, 1},
+        {APP_WIFI_FORGET_REQUEST, 0}, {APP_PAIRING_REQUEST, APP_PAIR_OPEN},
+        {APP_CONFIRM, 1}, {APP_SHORTCUT, APP_SHORTCUT_ENTER}, {APP_VOICE_START, 0},
+        {APP_VOICE_CONFIRM, 0}, {APP_AUDIO_POWER, 1}, {APP_AUDIO_MUTE, 0},
+        {APP_AUDIO_VOLUME, 100}, {APP_RECOVER, 0}, {APP_BRIGHTNESS, 10},
+        {APP_IDLE_TIMEOUT, 0}, {APP_CALIBRATE, 0}, {APP_CASE, 0}, {APP_SYMBOLS, 0}
+    };
+    for (size_t mode = 0; mode < sizeof modes / sizeof modes[0]; ++mode) {
+        navigation_with_draft(modes[mode]);
+        const app_overlay_t chooser = modes[mode] == INPUT_KEYBOARD ?
+            APP_OVERLAY_KEYBOARD : APP_OVERLAY_AUDIO;
+        action(APP_MENU, (int)chooser);
+        release_barrier();
+        sync_interaction();
+        const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+        const size_t reports = trace_count;
+        for (size_t i = 0; i < sizeof hidden / sizeof hidden[0]; ++i)
+            action(hidden[i].kind, hidden[i].x);
+        deliver(make_intent(APP_TEXT, 0, 0, "X"));
+        if (modes[mode] == INPUT_KEYBOARD) action(APP_AUDIO_KIND, APP_AUDIO_SPEAKER);
+        else action(APP_KEYBOARD_SUBMODE, APP_KEYBOARD_TOUCH);
+        assert(s_overlay == chooser && s_engine.state.mode == modes[mode]);
+        assert(s_engine.state.epoch == epoch && s_ui_revision == revision);
+        assert(s_keyboard_submode == APP_KEYBOARD_MOTION && s_audio_kind == APP_AUDIO_VOICE);
+        assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+        assert(s_dark_theme && s_settings.haptics_enabled && s_host_os == APP_HOST_CTRL);
+        assert(test_wifi_starts == 0 && test_wifi_stops == 0 && trace_count == reports);
+        expect_idle();
+        expect_neutral_navigation_trace();
+    }
+}
+
+static void keyboard_choice_closes_preserves_draft_and_acknowledges_context(void)
+{
+    for (int choice = APP_KEYBOARD_MOTION; choice <= APP_KEYBOARD_SHORTCUTS; ++choice) {
+        navigation_with_draft(INPUT_KEYBOARD);
+        action(APP_GRID, 0);
+        action(APP_MENU, APP_OVERLAY_KEYBOARD);
+        release_barrier();
+        sync_interaction();
+        assert(s_overlay == APP_OVERLAY_KEYBOARD && s_interaction.view.menu_open);
+        const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+        app_intent_t stale = make_intent(APP_KEYBOARD_SUBMODE,
+            choice == APP_KEYBOARD_TOUCH ? APP_KEYBOARD_MOTION : APP_KEYBOARD_TOUCH, 0, NULL);
+        action(APP_KEYBOARD_SUBMODE, -1);
+        action(APP_KEYBOARD_SUBMODE, 999);
+        assert(s_overlay == APP_OVERLAY_KEYBOARD && s_ui_revision == revision);
+        action(APP_KEYBOARD_SUBMODE, choice);
+        assert(s_overlay == APP_OVERLAY_NONE && s_keyboard_submode == (app_keyboard_submode_t)choice);
+        assert(s_engine.state.epoch > epoch && s_ui_revision > revision);
+        assert(!s_interaction.view.menu_open && s_interaction.view.group == -1);
+        assert(s_interaction.view.keyboard_motion == (choice == APP_KEYBOARD_MOTION));
+        assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+        release_barrier();
+        sync_interaction();
+        deliver(stale);
+        assert(s_keyboard_submode == (app_keyboard_submode_t)choice && s_overlay == APP_OVERLAY_NONE);
+        render_view(&test_link, ESP_OK);
+        assert(test_view.overlay == APP_OVERLAY_NONE && test_view.keyboard_submode == s_keyboard_submode);
+        expect_idle();
+        expect_neutral_navigation_trace();
+    }
+}
+
+static void audio_choice_closes_and_stale_revision_cannot_select_or_navigate(void)
+{
+    for (int choice = APP_AUDIO_VOICE; choice <= APP_AUDIO_SPEAKER; ++choice) {
+        navigation_with_draft(INPUT_AUDIO);
+        action(APP_MENU, APP_OVERLAY_AUDIO);
+        release_barrier();
+        sync_interaction();
+        const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+        const int other = choice == APP_AUDIO_VOICE ? APP_AUDIO_SPEAKER : APP_AUDIO_VOICE;
+        app_intent_t stale_choice = make_intent(APP_AUDIO_KIND, other, 0, NULL);
+        app_intent_t stale_navigation = make_intent(APP_MENU, APP_OVERLAY_SETTINGS, 0, NULL);
+        action(APP_AUDIO_KIND, -1);
+        action(APP_AUDIO_KIND, 999);
+        assert(s_overlay == APP_OVERLAY_AUDIO && s_ui_revision == revision);
+        action(APP_AUDIO_KIND, choice);
+        assert(s_overlay == APP_OVERLAY_NONE && s_audio_kind == (app_audio_kind_t)choice);
+        assert(s_engine.state.epoch == epoch && s_ui_revision > revision);
+        assert(!s_interaction.view.menu_open && strcmp(s_interaction.view.preview, "ABAB") == 0);
+        deliver(stale_choice); /* Same HID epoch isolates stale UI revision handling. */
+        deliver(stale_navigation);
+        assert(s_overlay == APP_OVERLAY_NONE && s_audio_kind == (app_audio_kind_t)choice);
+        render_view(&test_link, ESP_OK);
+        assert(test_view.overlay == APP_OVERLAY_NONE && test_view.audio_kind == s_audio_kind);
+        expect_idle();
+        expect_neutral_navigation_trace();
+    }
+}
+
+static void choice_panels_allow_safe_quick_status_settings_and_close(void)
+{
+    const input_mode_t modes[] = {INPUT_KEYBOARD, INPUT_AUDIO};
+    const app_overlay_t destinations[] = {APP_OVERLAY_MODES, APP_OVERLAY_TARGET, APP_OVERLAY_SETTINGS};
+    for (size_t mode = 0; mode < sizeof modes / sizeof modes[0]; ++mode) {
+        for (size_t destination = 0;
+             destination < sizeof destinations / sizeof destinations[0]; ++destination) {
+            navigation_with_draft(modes[mode]);
+            action(APP_MENU, modes[mode] == INPUT_KEYBOARD ? APP_OVERLAY_KEYBOARD : APP_OVERLAY_AUDIO);
+            release_barrier();
+            sync_interaction();
+            const uint64_t revision = s_ui_revision;
+            action(APP_MENU, (int)destinations[destination]);
+            release_barrier();
+            sync_interaction();
+            assert(s_overlay == destinations[destination] && s_ui_revision > revision);
+            if (s_overlay == APP_OVERLAY_SETTINGS) assert(s_settings_page == APP_SETTINGS_HOME);
+            assert(s_engine.state.mode == modes[mode] && s_keyboard_submode == APP_KEYBOARD_MOTION);
+            assert(s_audio_kind == APP_AUDIO_VOICE && strcmp(s_interaction.view.preview, "ABAB") == 0);
+            action(APP_CLOSE, 0);
+            assert(s_overlay == APP_OVERLAY_NONE && !s_interaction.view.menu_open);
+            expect_idle();
+            expect_neutral_navigation_trace();
+        }
+        navigation_with_draft(modes[mode]);
+        action(APP_MENU, modes[mode] == INPUT_KEYBOARD ? APP_OVERLAY_KEYBOARD : APP_OVERLAY_AUDIO);
+        release_barrier();
+        sync_interaction();
+        action(APP_CLOSE, 0);
+        assert(s_overlay == APP_OVERLAY_NONE && !s_interaction.view.menu_open);
+        assert(strcmp(s_interaction.view.preview, "ABAB") == 0);
+        expect_idle();
+        expect_neutral_navigation_trace();
+    }
+}
+
+static void physical_double_click_toggles_shared_quick_panel_in_every_mode(void)
+{
+    for (int mode = INPUT_MOUSE; mode <= INPUT_AUDIO; ++mode) {
+        navigation_with_draft((input_mode_t)mode);
+        physical_double_click();
+        assert(s_overlay == APP_OVERLAY_MODES && !s_engine.state.gyro_enabled);
+        release_barrier();
+        sync_interaction();
+        physical_double_click();
+        assert(s_overlay == APP_OVERLAY_NONE && !s_interaction.view.menu_open);
+        release_barrier();
+        sync_interaction();
+        assert(s_engine.state.mode == (input_mode_t)mode && !s_engine.state.locked);
+        assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+        expect_idle();
+        expect_neutral_navigation_trace();
+    }
+}
+
+static void physical_double_click_returns_status_settings_and_choices_to_quick(void)
+{
+    const input_mode_t modes[] = {INPUT_KEYBOARD, INPUT_AUDIO};
+    for (size_t mode = 0; mode < sizeof modes / sizeof modes[0]; ++mode) {
+        const app_overlay_t panels[] = {APP_OVERLAY_TARGET, APP_OVERLAY_SETTINGS,
+            modes[mode] == INPUT_KEYBOARD ? APP_OVERLAY_KEYBOARD : APP_OVERLAY_AUDIO};
+        for (size_t panel = 0; panel < sizeof panels / sizeof panels[0]; ++panel) {
+            navigation_with_draft(modes[mode]);
+            action(APP_MENU, (int)panels[panel]);
+            release_barrier();
+            sync_interaction();
+            const uint64_t revision = s_ui_revision;
+            physical_double_click();
+            assert(s_overlay == APP_OVERLAY_MODES && s_ui_revision > revision);
+            assert(s_engine.state.mode == modes[mode] && !s_engine.state.locked);
+            assert(s_keyboard_submode == APP_KEYBOARD_MOTION && s_audio_kind == APP_AUDIO_VOICE);
+            assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+            release_barrier();
+            sync_interaction();
+            expect_idle();
+            expect_neutral_navigation_trace();
+        }
+    }
+}
+
+static void confirmation_owns_navigation_choices_and_physical_double_click(void)
+{
+    const app_overlay_t destinations[] = {APP_OVERLAY_MODES, APP_OVERLAY_TARGET,
+        APP_OVERLAY_SETTINGS, APP_OVERLAY_KEYBOARD, APP_OVERLAY_AUDIO};
+    for (unsigned network = 0; network < 2; ++network) {
+        navigation_with_draft(INPUT_KEYBOARD);
+        if (network) {
+            settings_page(APP_SETTINGS_WIFI);
+            test_wifi = (app_wifi_snapshot_t){.initialized = true, .configured = true,
+                .state = APP_WIFI_IDLE, .ssid = "CONFIRM-NETWORK"};
+            action(APP_WIFI_FORGET_REQUEST, 0);
+        } else {
+            action(APP_MENU, APP_OVERLAY_TARGET);
+            release_barrier();
+            sync_interaction();
+            action(APP_PAIRING_REQUEST, APP_PAIR_OPEN);
+        }
+        release_barrier();
+        sync_interaction();
+        const app_confirmation_t confirmation = s_confirmation;
+        const uint64_t epoch = s_engine.state.epoch, revision = s_ui_revision;
+        app_intent_t stale_confirm = make_intent(APP_CONFIRM, 1, 0, NULL);
+        assert(s_overlay == APP_OVERLAY_CONFIRM && confirmation != APP_CONFIRM_NONE);
+        for (size_t i = 0; i < sizeof destinations / sizeof destinations[0]; ++i)
+            action(APP_MENU, (int)destinations[i]);
+        action(APP_CLOSE, 0);
+        action(APP_SETTINGS_PAGE, APP_SETTINGS_DISPLAY);
+        action(APP_MODE, INPUT_AUDIO);
+        action(APP_KEYBOARD_SUBMODE, APP_KEYBOARD_TOUCH);
+        action(APP_AUDIO_KIND, APP_AUDIO_SPEAKER);
+        action(APP_GRID, 0);
+        action(APP_SEND, 0);
+        action(APP_KEY, 4);
+        physical_double_click();
+        assert(s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == confirmation);
+        assert(s_engine.state.epoch == epoch && s_ui_revision == revision);
+        assert(s_engine.state.mode == INPUT_KEYBOARD && strcmp(s_interaction.view.preview, "ABAB") == 0);
+        expect_idle();
+        expect_neutral_navigation_trace();
+        action(APP_CONFIRM, 0);
+        assert(s_overlay == APP_OVERLAY_SETTINGS && s_confirmation == APP_CONFIRM_NONE);
+        assert(s_settings_page == (network ? APP_SETTINGS_WIFI : APP_SETTINGS_BLUETOOTH));
+        release_barrier();
+        sync_interaction();
+        deliver(stale_confirm);
+        assert(s_pair_operation == APP_CONFIRM_NONE && !s_send_token);
+        assert(test_wifi_starts == 0 && test_wifi_forgets == 0 && test_pair_opens == 0);
+        expect_idle();
+        expect_neutral_navigation_trace();
+    }
+}
+
+static void wifi_setup_safe_menu_exits_clear_credentials_and_reject_stale_restart(void)
+{
+    const app_overlay_t destinations[] = {APP_OVERLAY_MODES, APP_OVERLAY_TARGET, APP_OVERLAY_SETTINGS};
+    for (size_t destination = 0;
+         destination < sizeof destinations / sizeof destinations[0]; ++destination) {
+        navigation_with_draft(INPUT_KEYBOARD);
+        settings_page(APP_SETTINGS_WIFI);
+        test_wifi_start_error = ESP_OK;
+        action(APP_WIFI_SETUP, 1);
+        release_barrier();
+        sync_interaction();
+        test_wifi = (app_wifi_snapshot_t){.initialized = true, .setup_active = true,
+            .state = APP_WIFI_IDLE, .setup_remaining_ms = 600000};
+        test_wifi_info = (app_wifi_setup_info_t){.generation = 5,
+            .ssid = "NAV-SETUP", .password = "synthetic-password", .ip = "192.0.2.2"};
+        test_wifi_info_error = ESP_OK;
+        render_view(&test_link, ESP_OK);
+        assert(test_view.wifi_setup_passcode[0] && test_wifi_starts == 1);
+        app_intent_t stale_restart = make_intent(APP_WIFI_SETUP, 1, 0, NULL);
+        action(APP_MENU, (int)destinations[destination]);
+        assert(s_overlay == destinations[destination] && test_wifi_stops == 1);
+        release_barrier();
+        sync_interaction();
+        const unsigned reads = test_wifi_info_reads;
+        render_view(&test_link, ESP_OK);
+        assert(test_wifi_info_reads == reads && !test_view.wifi_setup_passcode[0]);
+        assert(!test_view.wifi_setup_ssid[0] && !test_view.wifi_setup_url[0]);
+        deliver(stale_restart);
+        assert(s_overlay == destinations[destination] && test_wifi_starts == 1 && test_wifi_stops == 1);
+        assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+        expect_idle();
+        expect_neutral_navigation_trace();
+    }
+}
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -3383,6 +3783,17 @@ int main(int argc, char **argv)
     RUN(allocation_diagnostics_retain_only_first_complete_failure);
     RUN(allocation_diagnostics_ignore_an_unpublished_record);
     RUN(boot_memory_diagnostics_preserve_bounded_capability_history);
+    RUN(quick_status_settings_back_preserves_primary_context);
+    RUN(chooser_entry_rejects_wrong_mode_and_invalid_payload_without_cancelling_send);
+    RUN(chooser_entry_cannot_nest_behind_another_panel);
+    RUN(choice_panels_reject_hidden_actions_without_reports_or_writes);
+    RUN(keyboard_choice_closes_preserves_draft_and_acknowledges_context);
+    RUN(audio_choice_closes_and_stale_revision_cannot_select_or_navigate);
+    RUN(choice_panels_allow_safe_quick_status_settings_and_close);
+    RUN(physical_double_click_toggles_shared_quick_panel_in_every_mode);
+    RUN(physical_double_click_returns_status_settings_and_choices_to_quick);
+    RUN(confirmation_owns_navigation_choices_and_physical_double_click);
+    RUN(wifi_setup_safe_menu_exits_clear_credentials_and_reject_stale_restart);
 #undef RUN
     assert(passed);
     if (argc == 2) printf("PASS: coordinator case %s\n", argv[1]);

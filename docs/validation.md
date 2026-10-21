@@ -133,6 +133,69 @@ startup allocation stages, and retest real display transitions and Bluetooth
 readiness before attributing success to a layout change. Native render tests
 cannot establish target memory sufficiency or display transfer completion.
 
+### Memory-repair source and build
+
+The scoped repair at `41d6b42b65e432724c94af0f15caf2140c12bb99` passed
+independent review of 21 changed files. Its approved-file inventory digest is
+`530fe4621ed8b5529a369f32283b3b02d8ccb3d5bea6ba4bdaa9733c2c10bb97`.
+The complete host suite passed, including 80 coordinator and 23 serial-parser
+cases; independent BLE checks covered both 15/32-bond capacities and first-failure
+retention. The final linked ESP32-S31 application is 2,423,824 bytes (`0x24fc10`),
+SHA-256 `899841a8a4496d52bba8fb537003b8cc2871f78f8264d2083a8f782a8f741e91`.
+All first-party firmware source hashes stayed unchanged during that build.
+The later focused-UI edits are excluded from this image and source seal.
+
+Generated configuration confirms the intended PSRAM/internal allocation policy.
+The target ELF places the fixed allocation-failure record in internal BSS and
+its hook in IRAM, using inline lock-free atomic operations without logging or
+allocator calls. The original BSP TE/full-frame/internal-bounce path is retained.
+These are source/build observations; this repair image has not yet passed
+physical display/input or long-duration acceptance.
+
+### Unified API planning review
+
+The eight planning documents published at
+`25760ebff776562768dd1221f86b4e261ff58535` passed independent consistency review.
+The approved inventory digest is
+`964525d29c526bbe84d1154ddc765f2937b30c47f414c2b1d21b34ea4f8d4fbc`.
+All 48 current `app_action_t` values have one matrix row, with no omissions or
+duplicates; the reviewer checked activation effects and cross-document names,
+scopes, units and lifecycles. All eight recorded planning findings are closed.
+
+Repository text/local-link checks and the pinned SDK's candidate partition-table
+validation passed. These checks do not implement or qualify authenticated remote
+control, recording, policy storage or OTA. Machine-readable schemas, generated
+bindings, actual partition migration and device validation remain open gates.
+
+### Focused UI source, native rendering and build
+
+The final compact UI production source hash is
+`6b2963cbd567dcf9f58cfbf37891f5580f89dc6230e7c4827384819b91bf098a`.
+The stable native validation manifest digest is
+`5c5741e38219615ab7eb76822d5e34eb59c2ab04eee838b06c6bda6d815b3468`.
+Both visual and resource executables passed under ASan/UBSan; the source/test
+inventory stayed unchanged throughout the run. A later interaction-document
+correction clarifies the already tested three-fixed-pages/one-panel architecture;
+it does not change executable behavior or invalidate that run.
+
+The suite retained all 164 prior scenes and added ten, producing 174 native
+480 x 480 PNGs. Representative Mouse, Keyboard, Menu, settings, confirmation,
+long-text and error-state renders were visually inspected. All 50 FULL-render
+resource cases recorded zero new flushes and zero allocator activity for idle or
+hidden-only changes over 100 snapshots / 10 simulated seconds. A real visible
+change produced a flush, so zero work is not a disabled-rendering result.
+Both themes completed 1,000 panel open/close cycles across 17 variants, with 102
+core objects, a peak of 142, and unchanged warmed live bytes/blocks. Teardown
+returned all observed allocations. These are host measurements, not target heap
+or elapsed powered-time evidence.
+
+The complete host suite passed with 91 coordinator cases and 23 serial-parser
+cases. The final pinned ESP32-S31 application is 2,423,488 bytes, SHA-256
+`df5f803e04c5ae08ef8c834e4b8464cb140f96b5edf32565f78507ecf080c920`.
+The UI/header/coordinator source hashes remained unchanged during the final
+build. Earlier compact-UI images are superseded. Device deployment, physical
+redraw/touch and host interoperability remain separate acceptance gates.
+
 ### Long-term power gate
 
 The test plan requires 24 hours of powered operation followed by 72 hours after failure cases pass. Cover host sleep/reconnect storms, no USB reader, queue pressure, motor cancellation, storage wear, power interruptions, watchdog recovery and comparable memory checkpoints. Record temperature and power conditions. A short smoke run and 100,000 simulated host cycles are useful evidence but do not satisfy this gate; periodic reboot is not an acceptable substitute for fixing resource growth.

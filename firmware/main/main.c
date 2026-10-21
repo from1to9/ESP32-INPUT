@@ -445,7 +445,13 @@ static bool allowed_in_overlay(app_action_t action)
     if (s_overlay == APP_OVERLAY_NONE) return true;
     if (s_overlay == APP_OVERLAY_CONFIRM) return action == APP_CONFIRM;
     if (action == APP_CLOSE) return true;
+    if (action == APP_MENU)
+        return s_overlay == APP_OVERLAY_MODES || s_overlay == APP_OVERLAY_TARGET ||
+            s_overlay == APP_OVERLAY_SETTINGS || s_overlay == APP_OVERLAY_WIFI_SETUP ||
+            s_overlay == APP_OVERLAY_KEYBOARD || s_overlay == APP_OVERLAY_AUDIO;
     if (s_overlay == APP_OVERLAY_MODES) return action == APP_MODE;
+    if (s_overlay == APP_OVERLAY_KEYBOARD) return action == APP_KEYBOARD_SUBMODE;
+    if (s_overlay == APP_OVERLAY_AUDIO) return action == APP_AUDIO_KIND;
     if (s_overlay == APP_OVERLAY_WIFI_SETUP)
         return action == APP_WIFI_SETUP || action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_TARGET)
@@ -597,7 +603,7 @@ static void handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *
     case APP_MODE:
         if (intent->x < INPUT_MOUSE || intent->x > INPUT_AUDIO) return;
         if ((input_mode_t)intent->x == s_engine.state.mode) {
-            /* Re-selecting the current tab is not a send cancellation. A
+            /* Re-selecting the current mode is not a send cancellation. A
              * chooser already cancelled input when it was opened. */
             if (s_overlay != APP_OVERLAY_NONE) {
                 s_overlay = APP_OVERLAY_NONE;
@@ -618,7 +624,11 @@ static void handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *
         }
         return;
     case APP_MENU:
-        if (intent->x >= APP_OVERLAY_MODES && intent->x <= APP_OVERLAY_SETTINGS) {
+        if ((intent->x >= APP_OVERLAY_MODES && intent->x <= APP_OVERLAY_SETTINGS) ||
+            (intent->x == APP_OVERLAY_KEYBOARD && s_overlay == APP_OVERLAY_NONE &&
+             s_engine.state.mode == INPUT_KEYBOARD) ||
+            (intent->x == APP_OVERLAY_AUDIO && s_overlay == APP_OVERLAY_NONE &&
+             s_engine.state.mode == INPUT_AUDIO)) {
             if (intent->x == APP_OVERLAY_SETTINGS) s_settings_page = APP_SETTINGS_HOME;
             open_overlay((app_overlay_t)intent->x);
         }
@@ -842,6 +852,10 @@ static void handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *
         interaction_back(&s_interaction);
         interaction_set_keyboard_motion(&s_interaction,
             s_keyboard_submode == APP_KEYBOARD_MOTION);
+        if (s_overlay == APP_OVERLAY_KEYBOARD) {
+            s_overlay = APP_OVERLAY_NONE;
+            sync_interaction();
+        }
         return;
     case APP_GRID:
         if (s_engine.state.mode == INPUT_KEYBOARD &&
@@ -891,8 +905,18 @@ static void handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *
     }
     case APP_AUDIO_KIND:
         if (s_engine.state.mode == INPUT_AUDIO &&
-            (intent->x == APP_AUDIO_VOICE || intent->x == APP_AUDIO_SPEAKER))
+            (intent->x == APP_AUDIO_VOICE || intent->x == APP_AUDIO_SPEAKER)) {
+            bool changed = s_audio_kind != (app_audio_kind_t)intent->x;
             s_audio_kind = (app_audio_kind_t)intent->x;
+            if (s_overlay == APP_OVERLAY_AUDIO) {
+                s_overlay = APP_OVERLAY_NONE;
+                changed = true;
+            }
+            if (changed) {
+                ++s_ui_revision;
+                sync_interaction();
+            }
+        }
         return;
     case APP_VOICE_START: case APP_VOICE_CONFIRM:
         s_message = "Spoken letter recognition is not available yet.";
@@ -1041,7 +1065,10 @@ static void handle_button_events(unsigned events)
     }
     if (s_engine.state.locked) return;
     if (events & INTERACTION_EVENT_DOUBLE) {
-        open_overlay(s_overlay == APP_OVERLAY_NONE ? APP_OVERLAY_MODES : APP_OVERLAY_NONE);
+        /* A physical shortcut navigates ordinary panels, never confirms or
+         * dismisses a pending privileged operation on the user's behalf. */
+        if (s_overlay == APP_OVERLAY_CONFIRM) return;
+        open_overlay(s_overlay == APP_OVERLAY_MODES ? APP_OVERLAY_NONE : APP_OVERLAY_MODES);
         return;
     }
     if (!(events & INTERACTION_EVENT_SINGLE) || !same_context ||

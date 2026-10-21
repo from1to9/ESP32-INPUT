@@ -25,7 +25,8 @@ typedef enum {
 
 typedef enum {
     APP_OVERLAY_NONE, APP_OVERLAY_MODES, APP_OVERLAY_TARGET, APP_OVERLAY_SETTINGS,
-    APP_OVERLAY_WIFI_SETUP, APP_OVERLAY_CONFIRM
+    APP_OVERLAY_WIFI_SETUP, APP_OVERLAY_CONFIRM,
+    APP_OVERLAY_KEYBOARD, APP_OVERLAY_AUDIO
 } app_overlay_t;
 typedef enum {
     APP_KEYBOARD_MOTION, APP_KEYBOARD_TOUCH, APP_KEYBOARD_SPOKEN, APP_KEYBOARD_SHORTCUTS
@@ -104,8 +105,12 @@ typedef struct {
  * ui_revision captures the visible context at press time; reject stale grid or
  * menu actions after a context change. Safety touch boundaries remain valid.
  * Menus and physical double-click are coordinator state, not local navigation.
+ * APP_MENU opens the shared quick panel (MODES), Status (TARGET), Settings,
+ * or the KEYBOARD/AUDIO choice panel. Choices emit KEYBOARD_SUBMODE/AUDIO_KIND;
+ * the coordinator acknowledges the selection and closes that panel.
  * SETTINGS_PAGE x selects app_settings_page_t and opens Settings. APP_CLOSE
- * returns to the primary mode. Back uses SETTINGS_PAGE (HOME/CONNECTIVITY);
+ * returns to the primary mode. Settings Home Back emits MENU MODES; nested
+ * Back uses SETTINGS_PAGE (HOME/CONNECTIVITY);
  * leaving Wi-Fi setup stops its AP and clears credentials in the coordinator.
  * BLUETOOTH_PAGE x requests a zero-based page of four saved hosts, clamped by
  * the coordinator. No list row sends an outbound connect request.

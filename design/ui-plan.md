@@ -1,69 +1,151 @@
-# Device UI refinement and settings contract
+# Focused mode workspace and unified quick panel
 
-Status: implemented in the native UI, 2026-10-21. This refinement follows the user's request to improve all screens and device settings. It preserves the original Mouse / Keyboard / Audio navigation and input workflows from the [prototype](index.html) and [interaction contract](../docs/interaction.md). Hardware, network services, persistent state and asynchronous operations remain coordinator-owned.
+Status: authorized focused-layout implementation, 2026-10-21; native and independent integration review in progress. The latest user instruction explicitly replaces the previous fixed bottom tabs and persistent target/telemetry header with core-only mode workspaces and an on-demand shared panel. It preserves Mouse, Keyboard and Audio workflows, the real nine-cell character model and all input safety semantics. This is an authorized design revision, not a layout downgrade to disguise the current display-memory fault.
 
-## Grid, typography and colors
+Open the [interactive focused preview](compact.html). The [earlier prototype](index.html) remains linked for workflow history. [Requirements](../docs/requirements.md) and the revised [interaction contract](../docs/interaction.md) govern behavior. Browser fixtures use synthetic state and neither send HID nor request audio/network/device access. They do not establish native rendering, allocation, hardware capabilities or real gesture timing.
 
-Use a 480 x 480 canvas, 16 px side margins, 8 px minimum gaps, 12 px control radii, Montserrat 16 body text, 14 metadata and 22 titles. Button targets are at least 44 x 44 px; primary actions and navigation are 48 px high. Controls in a row share dimensions and centered text baselines. Single-line fields have explicit font-line height and ellipsis; wrapping content has a measured fixed region.
+## 1. Shared frame and navigation
 
-| Region | Geometry | Content |
+Use a 480 x 480 logical canvas, 12 px side margins, minimum 8 px gaps, 12 px control radii, 16 px body text, 14 px metadata and 22 px mode titles. All actionable hit areas are at least 44 x 44. Main controls finish at y 472, leaving an 8 px bottom inset. No permanent bottom navigation or general telemetry strip remains.
+
+| Shared element | Geometry | Rule |
 | --- | --- | --- |
-| Header | x16, y8, w448, h48 | Actual target name and input readiness; battery; Wi-Fi signal bars and Bluetooth connection icon; Settings |
-| Main page | x16, y72, w448, h320 | Mode-specific controls |
-| Status | x16, y400, w448 | One metadata line, truncated before navigation |
-| Primary navigation | y424, h48 | Three equal 144 px buttons at x16, x168, x320 |
+| Mode title | x 12/y 8/w 120/h 24 | Mouse, Keyboard or Audio; not a navigation target |
+| Current input context | x 12/y 36/w 120/h 18 | Ellipsized BT/USB plus actual safe target label, or explicit unknown/disconnected; full identity in the quick panel |
+| Compact entry/kind selector | x 140/y 8/w 132/h 48 | Keyboard submode or audio kind only; Mouse needs none |
+| Critical-state action | x 280/y 8/w 116/h 48 | Visible only for remote ownership, capture/recording, input errors or readiness blockers; bounded text/icon plus safe Stop/takeover/details action |
+| Menu launcher | x 404/y 8/w 64/h 48 | Always in the same position; opens the shared quick panel |
+| Core workspace | x 12/y 64/w 456/h 408 | Mode functions only; coordinates below include this area's controls |
 
-The target touch area is 260 x 48 px. A separate 128 x 48 px telemetry target opens Connectivity. Settings occupies the rightmost 44 x 44 px target. Wi-Fi RSSI bars represent actual measurements: four bars at -55 dBm or better, three at -67 or better, two at -78 or better, one below. Disconnected radios show a cross; Wi-Fi with unknown connected signal shows a question mark. Bluetooth shows a check when connected and never displays RSSI or signal bars. Exact Wi-Fi dBm is available in Connectivity. Battery percentage and charging indication come only from the actual gauge snapshot. USB attachment is explicitly unavailable rather than inferred from current or charge state.
+The current input cue stays directly under the mode title; supplementary context can appear in the mouse pad's noninteractive caption, keyboard preview metadata and audio profile description. Show the real selected transport and a bounded safe target label, or Unknown/Disconnected, without restoring a large header. Full identity, gauge percentage, Wi-Fi values and settings belong in the quick panel or Status. Keep the intended target discoverable before Send; do not display passwords, private draft text, addresses or unrelated management detail in global alerts.
 
-Light retains the approved green/neutral palette. Dark uses background `#080B10`, surface `#111A24`, text `#ECF4FB`, secondary text `#B6C4D2`, accent `#8DD8FF` and selected text `#082B40`. Focus also has a visible border and fill. Theme changes restyle existing objects without rebuilding the screen or changing gesture ownership.
+Critical state never floats over a touchpad, grid cell or slider. The reserved action area is outside every core input target. Capture/recording uses a visible Stop action; remote ownership uses Take over/Stop. If several critical conditions coexist, use compact icons/short labels in the same area and route Stop through all relevant safety cancellations, with remaining conditions available in Status. Never silently hide active capture behind a lower-priority notice. Lock is a full-screen safety state, not an ordinary dismissible panel. A single error chip opens real error/recovery detail; it cannot imply recovery merely because it was tapped.
 
-## Primary pages
+Opening Menu or the same panel through AI double-click suppresses motion, cancels drag/queued input through the coordinator and preserves unsent preview. No edge-swipe, hidden gesture zone or pad navigation is used: pointer deltas must not escape before a navigation gesture is recognized. Closing the panel returns to the prior mode with motion off. Ordinary touch navigation cannot unlock.
 
-Mouse keeps the motion toggle, relative touchpad, independent scroll, three touch gains and explicit click/drag/release. Gains have equal 72 x 44 px targets. The touchpad is 384 x 156 px; the scroll column is 56 px wide. The three 144 x 48 px actions align with navigation. Brief transport congestion does not disable controls; active Release remains available.
+## 2. Mouse geometry
 
-Keyboard uses the following coordinates relative to the main page. The character grid is genuinely three columns by three rows, with 112 x 44 px targets at x0, x120 and x240. The 88 px utility rail at x360 is separate, leaving every character and utility control at least 44 px high.
+| Element | Geometry | Behavior |
+| --- | --- | --- |
+| Relative touchpad | x 12/y 64/w 396/h 292 | Fine pointer movement; entire surface remains an input area |
+| Separate scroll column | x 416/y 64/w 52/h 292 | Two equal 52 x 142 up/down targets with 8 px gap; can preserve the production scroll intent semantics |
+| Left click / Right click / Drag or Release | x 12/x 168/x 324, y 368, w 144/h 48 | Explicit buttons; active Release remains admitted independently of ordinary ready state |
+| Motion toggle / Fine gain chooser | x 12/x 244, y 424, w 224/h 48 | Motion Off/On and the current approved gain; choose among actual supported gains |
 
-| Row or region | Geometry |
+The touchpad grows from 384 x 156 = 59, 904 px to 396 x 292 = 115, 632 px: **93% more touch area**. This is geometric area, not a claim about pointer precision or latency. A tiny local marker/caption is noninteractive and does not shrink hit testing. Gain remains easy to change; a compact chooser or deliberate cycle displays the selected value and never changes on passive rendering.
+
+Touch start and physical AI down suppress motion. Existing click freeze, relative deltas, fractional carry, congestion handling and release recovery stay coordinator-owned. Disabled input needs an actual reason in the critical-state area. The browser's synthetic ready fixture is explicitly distinct from an offline production boot.
+
+## 3. Keyboard geometry and workflow
+
+| Element | Geometry | Behavior |
+| --- | --- | --- |
+| Compact submode chooser | x 140/y 8/w 132/h 48 | Opens Motion, Touch, Spoken letters and Shortcuts choices |
+| Preview | x 12/y 64/w 456/h 64 | Bounded preview, count/target metadata and Clear |
+| Clear | x 372/y 72/w 88/h 48 | Disabled while sending or empty; no appended host action |
+| Nine character cells | x 12/x 132/x 252; y 140/y 224/y 308; each 112 x 76 | Exactly three columns by three rows; fixed row-major engine indices |
+| Groups / case / symbols rail | x 372; matching three rows; w 96/h 76 | Separate from character cells; no loss of nine-cell capacity |
+| Send/progress metadata | x 12/y 392/w 456/h 20 | Accepted prefix and explicit no-Enter semantics; bounded text |
+| Delete / Space / Send or Stop | x 12/x 168/x 324, y 424, w 144/h 48 | Visible for draft-based entry; Stop replaces Send during a send |
+
+The real groups remain ABCD / EFGH / IJKL / MNOP / QRST / UVWX / YZ 01 / 2345 / 6789. A second-stage group has four valid characters in the engine's row-major cells; empty cells are hidden/non-actionable and excluded from motion focus. The UI must not invent a second character mapping or reorder indices for visual symmetry. Group -> character -> preview -> explicit Send remains unchanged. Sending never appends Enter and never replays the accepted prefix after interruption.
+
+The chooser is an on-demand panel with four 456 x 76 rows at y 64/y 152/y 240/y 328, plus Close at the shared top-right position. The focused preview currently uses 12 px row gaps and the same bounded region. Motion and Touch use the same grid. Shortcuts uses six 144 x 116 controls at x 12/x 168/x 324 and y 140/y 268, including explicit Enter. Spoken letters preserves preview/actions but displays its real unavailable state until qualified; no sample word masquerades as recognition.
+
+Each cell grows from 112 x 44 to 112 x 76, with 44 px minimum targets retained everywhere. The local/remote draft revision, focus, accepted prefix, consent and send cancellation remain shared state. An AI single on a hidden keyboard page does not confirm a character.
+
+## 4. Audio geometry
+
+| Element | Geometry | Behavior |
+| --- | --- | --- |
+| Voice / Speaker chooser | x 140/y 8/w 132/h 48 | One compact kind selector |
+| Prominent mute/state control | x 12/y 64/w 456/h 200 | Large mute affordance when supported; truthful unavailable/off state otherwise |
+| Start / Stop | x 12/y 280/w 456/h 56 | Actual admitted capture/playback action only |
+| Volume | x 12/y 352/w 456/h 56 | Large horizontal control; actual value/capability or unavailable |
+| Capability / privacy note | x 12/y 424/w 456/h 48 | At most two lines; no fabricated stream state |
+
+Audio remains off/muted and unavailable where the actual driver/profile is absent. A future recording indicator is not evidence of recording support; the prototype's explicit fixture only exercises its visual Stop affordance. Supported capture must remain visible on the device and stoppable locally, including in another foreground mode. Speaker playback does not imply microphone upload. POWER and physical lock behavior are unchanged.
+
+## 5. Shared quick panel, Status and Settings
+
+Menu and AI double-click open the same coordinator-owned quick panel. It covers the workspace completely with an opaque themed background; no hidden mode control remains interactive. The launcher becomes Close in the same 64 x 48 position.
+
+| Quick-panel element | Geometry |
 | --- | --- |
-| Motion / Touch / Spoken / Shortcuts | y0, h44; four 106 px columns at 114 px intervals |
-| Preview | y52, h52; separate preview/count lines and Clear 72 x44 |
-| Nine-cell character grid | y112, y164 and y216; three equal 112 x44 cells per row |
-| Groups / case / symbols rail | x360, matching each grid row; 88 x44 targets |
-| Delete / Space / Send or Stop | y272, h48; equal 144 px columns at x0, x152, x304 |
+| Title | x 12/y 12/w 256/h 32 |
+| Input target/connection summary | x 12/y 64/w 456/h 104 |
+| Mouse / Keyboard / Audio cards | x 12/x 168/x 324, y 180, w 144/h 104 |
+| Status / Settings | x 12/x 244, y 296, w 224/h 64 |
+| Lock | x 12/y 372/w 456/h 64 |
+| Optional help line | x 12/y 448/w 456/h 24 |
 
-The initial nine groups are ABCD / EFGH / IJKL / MNOP / QRST / UVWX / YZ01 / 2345 / 6789, supplied by the input engine. Selecting a group retains the second-stage preview-first workflow with four valid characters. Empty cells are hidden and non-actionable. The UI does not duplicate the engine's character model. Motion focus may address any of the nine valid first-stage cells. Utilities retain Groups, case and symbol access without reducing touch targets.
+The summary reports selected input transport, actual target/readiness/owner and separate Wi-Fi management state. Unavailable/unknown remains explicit. It does not combine battery, Bluetooth, Wi-Fi, remote access and audio into one Connected badge. Select a mode once, close the panel, release/cancel prior output and preserve unsent draft. Re-selecting the existing mode does not fabricate a new send.
 
-The Spoken tab is one line for consistent alignment; its page title remains "Spoken letters". Shortcuts retain an explicit Enter action; Send never appends Enter. Draft capacity, accepted-prefix progress and cancellation are coordinator state. Voice and audio capability remain truthfully unavailable until supported.
+Status and Settings use the same single content slot, title/Close, content at x 12/y 64/w 456/h 344, and Back to quick panel at x 12/y 424/w 456/h 48. Use bounded/paged rows rather than compressed text. Status covers actual input target, readiness/error/release state, ownership, battery/Wi-Fi and audio/capture state. Settings keeps Connectivity, Display, Input and About plus future capability-gated pages. Detailed forms follow their shared setting metadata and existing action/confirmation boundaries; they never write on read/render.
 
-Audio uses two equal tabs, a centered state card, equal power/mute targets and a volume row. It never invents an active microphone or stream.
+Connectivity continues to select Bluetooth/USB for input while Wi-Fi remains independent. The [next-phase connection design](connection-management.md) is entered through Quick panel -> Settings or Status and must reuse this shared shell. Temporary setup secrets remain restricted to their explicit local setup page and are cleared on dismissal, expiry, lock and screen-off. Setup, confirmations and privileged management do not become general navigation shortcuts that bypass authorization.
 
-## Settings and local confirmation
+## 6. Physical AI mapping
 
-Settings is an overlay on the selected mode. Its page header has a 44 px Back target and aligned title. Content begins at y128; save status is at y400; Done is full-width at y424. Home has four equal cards:
+| Gesture | Mapping |
+| --- | --- |
+| Single in Mouse | Toggle motion when admitted |
+| Single in Keyboard | Confirm the selected group/character; qualified Spoken behavior stays contextual |
+| Single in Audio | Toggle microphone mute when supported; speaker playback control remains unavailable until qualified |
+| Double in any ordinary mode | Open the same quick panel as Menu; when a noncritical panel is open, return to the quick panel without activating its hidden mode |
+| Hold at least 0.9 s | Global stop/lock; a fresh physical hold while locked unlocks with motion/capture off |
+| First whole gesture while screen-off | Wake only, including a hold or rapid AI double sequence |
 
-- Connectivity: one Bluetooth/USB input transport selector shared across Mouse, Keyboard and Audio mode, followed by Bluetooth hosts and Wi-Fi settings cards. Bluetooth is the default; only the coordinator can acknowledge a switch. Available, disconnected, connected, ready, switching and error states are explicit. During switching the current path and requested path remain distinguishable, and selector/input controls cannot claim an early successful transition. Choosing a transport neither changes the mode nor duplicates input; audio support remains an independent capability.
-- Bluetooth hosts: up to 32 actual saved identities, four per page, with optional host-reported names and explicit Connected/Saved status. Missing names use Host plus a short real identity; the full identity stays visible beneath it. Add host (or Close pairing while open), Disconnect and Forget all request local confirmation. The saved count is shown against the actual provider capacity, such as 3/15. Full or over-capacity storage disables Add with a full message; unknown count or capacity also disables Add without claiming a free slot. No pairings are automatically evicted. The UI cache limit of 32 is not the pairing-storage capacity. This page always reports Bluetooth state even when USB is the selected input path. Rows do not claim to actively connect a BLE peripheral to a host.
-- Wi-Fi settings: actual SSID/state/signal/IP, setup and forget controls. Saved network reconnection remains service-owned. Back returns to Connectivity; Wi-Fi setup remains a separate protected overlay.
-- Display: Light/Dark, brightness 10 to 100 percent in steps of 10 (default 70), and Screen timeout Off / 1 / 5 / 10 / 30 minutes (default 5). Timeout applies in all power states. Only the backlight turns off; Bluetooth and Wi-Fi continue.
-- Input: Ctrl/Command, haptic availability/switch, motion calibration and physical-button guidance.
-- About: actual firmware/build, board/device identity, battery state and uptime. Unavailable values remain explicit. Long identity values are bounded independently.
+The existing 280 ms single/double exclusion window remains subject to hardware qualification. Do not emit single first and undo it on double. Modal confirmations retain ownership; double-click cannot approve a pending operation or unlock. Physical AI down and the first local touch take over from a remote owner, consuming that gesture; continued AI hold may still lock. POWER retains hardware semantics. Do not assume BOOT is a runtime input.
 
-Open/Close/Forget Bluetooth, Disconnect and Forget Wi-Fi each require a coordinator-owned local confirmation. Cancel and Confirm have equal large targets. Request buttons only enqueue a request to open confirmation; they do not perform or acknowledge the operation themselves.
+## 7. Runtime lifecycle and allocation plan
 
-Wi-Fi setup shows the protected temporary AP's actual SSID, passcode, local browser address and countdown. Back returns to Connectivity and stops setup through the coordinator. Stop setup is explicit. Closing, expiry, lock or screen-off clears the UI's credential copy and credential labels. Synthetic setup fixtures in native tests contain no real secrets.
+The current production construction was measured at **315 objects, 84 action bindings and 663 color bindings**. The linked UI's static internal SRAM footprint is 19, 016 bytes, including 14, 336 bytes for the fixed color registry. These are baseline source/native object and target-map observations, not the dynamic target heap total. Exact run artifacts stay in `.agent/local/`; they must not be confused with a performance result for this proposal.
 
-## State and event boundary
+Keep the three primary pages and safety/navigation shell fixed, with at most one dynamically constructed panel or Settings category. This avoids destroying a primary input surface during a gesture while removing all eagerly constructed hidden settings and overlays. Domain state, drafts, mode, confirmation identity and settings remain in the coordinator. The measured fixed core contains **102 objects**, replacing the earlier only-current-page proposal of at most 100. The architectural resource ceilings are **102 with no panel** and **160 with one panel**; independent panel-peak and repeated-navigation measurements must confirm them before acceptance. Required controls are not removed to meet the obsolete proposal.
 
-[app_ui.h](../firmware/main/app_ui.h) is the authoritative interface for view fields, enum values, units and intent payloads. The UI uses independent plain Wi-Fi values rather than importing the service's driver enum. All callbacks only enqueue bounded intents; they never perform hardware/network writes or persist settings.
+Object lifetime changes require a dedicated reviewed lifecycle, not a touch workaround:
 
-Theme, haptics, host modifier, brightness and timeout persist in the coordinator. Defaults active, saving, saved, error and unavailable storage are separate states. Saved is displayed only after actual persistence acknowledgement. Pairing's pending transition says "Updating pairing" because it may include opening, closing or clearing.
+1. A navigation intent captures the existing gesture, epoch and UI revision; only the coordinator can accept the transition and cancel/release affected output.
+2. During the current LVGL input dispatch, callbacks only enqueue intent. Never delete a pressed object, its binding or its page from that callback.
+3. Apply accepted page replacement under the LVGL lock at a safe post-dispatch boundary. Wait for pointer release/cancel or explicitly end the old gesture through the existing coordinator contract before destroying its page. Reject its delayed callbacks by revision; a held finger cannot press the new page.
+4. Keep a stable top-level safety/wake surface and generation-scoped binding storage. No pointer to a deleted binding survives. A remote/physical mode change during touch must cancel the old gesture before rebinding.
+5. Allocate bounded page/binding resources on deliberate transitions, release them on close and prove repeated mode/panel changes do not accumulate memory. Allocation failures remain failures under the LVGL allocator/assertion contract; this change does not claim a separately qualified graceful out-of-memory UI. Target memory and recovery qualification remain necessary.
 
-Existing touch BEGIN/MOVE/END/CANCEL, epoch, revision and gesture IDs remain the sole activity contract. The first whole touch or AI gesture wakes the screen and is consumed by the coordinator. The UI shield emits touch boundaries while screen-off and suppresses button actions for a touch that started asleep, including if a wake snapshot arrives before release. A new gesture can act. Lock remains separate and physical-only.
+Use semantic color tokens for surface, text, selection, focus, disabled, warning and error roles. The bounded color registry is reduced from 896 to 512 entries; action bindings from 112 to 64. An unchanged color binding does not call LVGL style setters; theme changes restyle live objects while preserving gesture identity. Each label retains its exact source text because LVGL DOT mode mutates its display buffer. Source text is compared before changing the label, allocated only on construction or actual content growth, and freed with its owner. This preserves ellipsis while preventing repeated label allocation/invalidation.
 
-The source uses bounded action/color registries and fixed-size snapshot strings. Repeated renders keep existing object identity, including while a slider or touchpad gesture is active.
+Compare incoming state by relevant revision/value and update only visible affected widgets. Do not call formatted label setters, style/position/visibility setters, slider setters or page builders when their effective value is unchanged. Hidden About uptime, Bluetooth pages, Wi-Fi setup data and unrelated audio state must not allocate or invalidate the foreground. Keep required security cleanup and state ingestion independent of widget updates: hidden setup credentials still clear immediately. Use bounded stack buffers or cached strings for changed text. No per-tick allocation, rendering-triggered persistence, periodic flash heartbeat or per-frame haptic action is permitted.
 
-## Validation boundary
+Internal/DMA allocation and the current panel flush OOM are managed separately by the board/config owner. Moving suitable UI metadata to PSRAM may be evaluated through the owning allocation contract, with actual memory capability measurements. Do not shrink the pad/grid, disable checks, remove workflows or change touch admission to hide that failure.
 
-The [native test runner](../tests/ui/README.md) compiles production UI against pinned LVGL, drives real hit testing and checks actual geometry. It renders 164 images across both themes and covers core input regressions, settings, 32-entry Bluetooth pagination and connection state, nine-cell/four-character hit maps, Bluetooth/USB selection and unavailable/pending transport states, confirmations, persistence failures, unavailable/unknown telemetry, Wi-Fi setup lifecycle, credential clearing and screen-off wake consumption. All native images are inspected before integration handoff.
+## 8. Measurement and review gate
 
-Host checks establish source rendering and intent behavior. Integrated target compilation, physical display readability, gauge/radio measurements, persistent device state and wake timing require separate evidence from their owners. Earlier screenshots from `.agent/local/ui-visual/` and `.agent/local/ui-refresh/` do not validate this layout; current output is `.agent/local/ui-nine-transport/`.
+The pinned board's TE_SYNC adapter selects **FULL render mode**, so any invalidation can trigger a complete 480 x 480 transfer. This proposal makes no partial-dirty-rectangle bandwidth claim. Native tests must exercise both the existing hit-testing path and a target-equivalent FULL rendering fixture. Hardware testing remains necessary for SPI/DMA/TE scheduling and touch behavior.
+
+Before/after measurements must use the same source/configuration assumptions and record LVGL version, target/render mode, object/binding/style count, allocation count/live bytes/peak, target internal free/largest block and PSRAM separately. Preserve the original 315/84/663 baseline as history; establish a repaired-hardware baseline before attributing target improvements to the UI revision.
+
+| Check | Required evidence |
+| --- | --- |
+| Idle identical snapshot | After construction/layout/initial refresh and animations settle, replay identical snapshots for a fixed 10 s interval; **zero new flush callbacks** and zero UI allocation/free operations |
+| Hidden-page changes | Change only hidden About uptime and unrelated settings/connection detail; zero foreground flushes or UI allocations unless a required visible critical state changes |
+| Actual visible change | Only changed text/state is updated; in FULL mode count the actual full-frame flushes/bytes instead of claiming a partial transfer |
+| Navigation/resource lifetime | Cycle all modes, quick panel, Status, Settings and confirmations; bounded live objects and no retained allocations, stale bindings, lost release or use-after-free |
+| Geometry/interaction | Real LVGL 480 x 480 render in both themes; hit-test every target, nine cells/four valid characters, preview/send/cancel, separate scroll and no pad navigation |
+| Safety | Whole wake gesture, remote takeover, physical hold lock, stale revision, press across panel change, unavailable audio, error/release state and credential cleanup |
+| Device integration | Same repaired board/config; measure target heap/largest blocks, actual flush errors/lock waits and gesture delivery. Host/browser success does not establish this gate |
+
+The geometry and context-cue adjustment have been reviewed and implementation is authorized. Browser visual inspection is unavailable in this run and is not claimed as evidence; actual native LVGL renders and hit tests are the acceptance evidence. The UI owner maintains `app_ui.c/h` and design documents, the coordinator owner maintains navigation admission, and the test owner maintains native regressions. Complete API/configuration planning still precedes new service/interface implementation. Review the final production change and exact validation evidence before delivery; no arbitrary FPS claim or unmeasured after-count is acceptable.
+
+## 9. Theme and navigation implementation notes
+
+Dark uses background `#080b10`, surface `#111a24`, text `#ecf4fb`, muted text `#b6c4d2`, light-blue accent `#8dd8ff`, focus `#244b63`, amber warning `#e7bd7c` and coral error `#ffb4ab`. Selected controls pair the blue fill with dark `#082b40` text; motion focus also has an explicit border. Light retains the original green palette. This follows the user request to make the dark-theme accent easier to distinguish; color alone does not encode availability or a failure.
+
+The shared panel reuses `APP_OVERLAY_MODES`; Status reuses `APP_OVERLAY_TARGET`. `APP_OVERLAY_KEYBOARD` and `APP_OVERLAY_AUDIO` are appended without changing prior enum values. Menu, Status, Settings and Back use coordinator-admitted `APP_MENU`; chooser selections use the existing `APP_KEYBOARD_SUBMODE`/`APP_AUDIO_KIND` actions and close only after acknowledgement. Gain cycles the existing 1, 4 and 8 denominators. AI double closes an already open quick panel, returns other ordinary panels to it, and cannot dismiss/approve a privileged confirmation. Critical capture/readiness cues remain visible in panel headers as well as primary pages; current capture Stop explicitly locks and mutes through `APP_LOCK`.
+
+The first FULL-render resource pass reproduced 100 flushes per 100 identical snapshots due to comparison against LVGL-mutated ellipsis text. After preserving original label text, all 12 combinations of three modes, two themes and identical/hidden-only changes measured zero new flushes, allocations, reallocations and frees over 100 snapshots / 10 simulated seconds. Object counts and live allocation sizes stayed stable. This is host evidence; the full independent navigation/resource suite and repaired target checks remain separate gates.
+
+A source-including host observation pass measured 102 objects / 36 action bindings / 261 color bindings for the fixed core, with maxima of 142 objects, 46 action bindings and 338 color bindings across every panel and Settings category. All 15 panel/core samples had zero allocation, reallocation, free or FULL flush activity during 100 identical snapshots each. After warming bounded label capacities, 50 full panel cycles returned to exactly the same core object count, live block count and live bytes. LVGL teardown released every observed block. This uses the host CLIB allocator observer and ASan/UBSan, not target heap accounting. Independent native regressions remain the delivery gate.
+
+Status detail lists connection error, pending input release and disconnection together when they coexist. The bounded primary alert may prioritize release or capture, but the detail page never replaces an actual transport fault with a generic waiting-for-host message.
+
+A held control that becomes disabled enters LVGL wait-for-release before disabling: the actual pointer release produces one `PRESS_LOST` / `APP_TOUCH_CANCEL`, while the old object and binding remain alive. This addresses the pinned LVGL rule that ordinary `RELEASED` is suppressed for disabled objects; it does not synthesize an early release or permit stale clicks. An opaque panel or safety surface also suppresses every covered core presentation update, including the mode header, target cue and selectors. Snapshot ingestion and immediate credential clearing remain independent.
