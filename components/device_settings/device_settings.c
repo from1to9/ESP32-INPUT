@@ -19,7 +19,7 @@ void device_settings_defaults(device_settings_t *settings)
 {
     *settings = (device_settings_t){
         .theme = DEVICE_THEME_DARK, .host_modifier = DEVICE_HOST_CTRL,
-        .haptics_enabled = true, .brightness_percent = 70,
+        .haptics_enabled = true, .brightness_percent = 50,
         .idle_timeout = DEVICE_IDLE_5_MIN, .preferred_transport = DEVICE_TRANSPORT_BLUETOOTH
     };
 }

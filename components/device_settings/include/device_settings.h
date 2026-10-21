@@ -44,7 +44,7 @@ typedef enum {
     DEVICE_SETTINGS_APPLY_CHANGED
 } device_settings_apply_t;
 
-/* Defaults: Dark, Ctrl, haptics enabled, brightness 70%, timeout five minutes,
+/* Defaults: Dark, Ctrl, haptics enabled, brightness 50%, timeout five minutes,
  * preferred transport Bluetooth. Actual switching belongs to the coordinator.
  * Brightness is 10..100 inclusive, in steps of ten percentage points.
  * No hardware availability, persistence state or credentials are inferred. */

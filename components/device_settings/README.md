@@ -4,7 +4,7 @@ This fixed-storage C11 component validates device preferences, encodes a version
 
 ## Settings record
 
-Defaults are Dark theme, Ctrl host modifier, haptics enabled, brightness 70%, a five-minute screen timeout and Bluetooth as the preferred input transport. Light/Dark, Ctrl/Command and Bluetooth/USB are the only enum values for those preferences. Brightness accepts 10..100% in ten-point steps. Timeout accepts Off or exactly 1/5/10/30 minutes. The haptic preference is independent of whether a motor is present or working; hardware capability is reported by the adapter. Preferred transport is a saved choice, not proof that the transport is available or active; the coordinator releases old input before a successful switch and only then updates this preference.
+Defaults are Dark theme, Ctrl host modifier, haptics enabled, brightness 50%, a five-minute screen timeout and Bluetooth as the preferred input transport. The brightness default is a fallback only: valid stored brightness values, including an earlier 70% preference, remain unchanged. Changing this default requires no record-version migration or boot-time write. Light/Dark, Ctrl/Command and Bluetooth/USB are the only enum values for those preferences. Brightness accepts 10..100% in ten-point steps. Timeout accepts Off or exactly 1/5/10/30 minutes. The haptic preference is independent of whether a motor is present or working; hardware capability is reported by the adapter. Preferred transport is a saved choice, not proof that the transport is available or active; the coordinator releases old input before a successful switch and only then updates this preference.
 
 `device_settings_encode` and `device_settings_decode` use exactly 16 bytes, independent of C layout, padding or endianness:
 

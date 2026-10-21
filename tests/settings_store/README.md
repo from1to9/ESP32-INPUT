@@ -13,8 +13,9 @@ admission, coalescing or revision decisions. All storage and clock operations
 assert that they occur outside critical sections. No device, network, actual
 NVS partition, firmware build or serial port is accessed.
 
-Cases check missing-record defaults without automatic writes; successful loads
-and unchanged requests; preserved invalid lengths, version, magic and CRC; startup/open/read/task
+Cases check the 50% missing-record brightness fallback without automatic writes;
+successful loads retaining chosen 10% and 70% brightness with no rewrite for
+unchanged requests; preserved invalid lengths, version, magic and CRC; startup/open/read/task
 failures; invalid request rejection; the 999999/1000000 microsecond quiet boundary;
 latest-value coalescing; A-to-B-to-A deduplication; requests arriving during
 successful/failed commit; saved versus requested revisions; explicit retry after
@@ -27,7 +28,8 @@ request before replacing the damaged record.
 
 The 16 cases include schema-2 Bluetooth/USB preference round trips and invalid
 transport rejection. A frozen schema-1 record loads with Bluetooth selected and
-remains byte-for-byte unchanged through worker polls; an explicit USB change
+its original 70% brightness, retaining those bytes through worker polls despite
+the new 50% fallback; an explicit USB change
 writes schema 2 after the quiet interval and survives simulated restart. This
 proves store migration/durability decisions, not the coordinator startup path.
 

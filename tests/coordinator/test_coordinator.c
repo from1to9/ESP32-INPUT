@@ -537,7 +537,7 @@ static void setup(input_mode_t mode)
     };
     test_power = (board_power_status_t){0};
     test_power_error = ESP_FAIL;
-    test_brightness = (board_brightness_status_t){.applied_known = true, .applied_percent = 70};
+    test_brightness = (board_brightness_status_t){.applied_known = true, .applied_percent = 50};
     test_brightness_error = ESP_OK;
     test_brightness_count = 0;
     test_storage = (settings_store_status_t){.available = true};
@@ -1508,7 +1508,7 @@ static void settings_pages_validate_and_persist_changes(void)
     settings_page(APP_SETTINGS_DISPLAY);
     const uint64_t revision = s_ui_revision;
     action(APP_THEME, 1);
-    action(APP_BRIGHTNESS, 70);
+    action(APP_BRIGHTNESS, 50);
     action(APP_IDLE_TIMEOUT, 300);
     assert(test_storage_requests == 0 && s_ui_revision == revision);
     action(APP_BRIGHTNESS, 0);
@@ -1517,7 +1517,7 @@ static void settings_pages_validate_and_persist_changes(void)
     action(APP_IDLE_TIMEOUT, 120);
     action(APP_IDLE_TIMEOUT, -60);
     action(APP_IDLE_TIMEOUT, 61);
-    assert(test_storage_requests == 0 && s_settings.brightness_percent == 70);
+    assert(test_storage_requests == 0 && s_settings.brightness_percent == 50);
     app_intent_t stale = make_intent(APP_BRIGHTNESS, 20, 0, NULL);
     action(APP_BRIGHTNESS, 30);
     deliver(stale);
@@ -1551,10 +1551,13 @@ static void idle_deadlines_ignore_passive_status_updates(void)
         setup(INPUT_MOUSE);
         assert(s_settings.idle_timeout == DEVICE_IDLE_5_MIN);
         settings_page(APP_SETTINGS_DISPLAY);
+        const int brightness = choice % 2U ? 70 : 50;
+        if (brightness == 70) action(APP_BRIGHTNESS, brightness); /* Explicit choice overrides the fallback. */
         action(APP_IDLE_TIMEOUT, seconds[choice]);
         action(APP_CLOSE, 0);
         service_display();
-        assert(test_brightness_count == 1 && test_brightness_requests[0] == 70);
+        assert(test_brightness_count == 1 && test_brightness_requests[0] == brightness);
+        brightness_applied((uint8_t)brightness);
         const uint64_t epoch = s_engine.state.epoch;
         const unsigned writes = test_storage_requests;
         const uint64_t deadline = 1000U + (uint64_t)seconds[choice] * 1000U;
@@ -1623,7 +1626,7 @@ static void display_sleep_preserves_hid_work_and_draft(void)
     buttons_at(302000);
     assert(!s_engine.state.locked && s_drag_requested);
     button_edge(false, 302010);
-    brightness_applied(70);
+    brightness_applied(50);
     buttons_at(302290);
     button_edge(true, 302300);
     buttons_at(303200);
@@ -1651,7 +1654,7 @@ static void touch_wake_consumes_entire_gesture_until_driver_ack(void)
         touch(APP_TOUCH_BEGIN, 501, 0, 0);
         assert(!s_idle.asleep && s_idle.wake_capture);
         service_display();
-        assert(test_brightness_requests[test_brightness_count - 1] == 70);
+        assert(test_brightness_requests[test_brightness_count - 1] == 50);
         touch(APP_TOUCH_MOVE, 501, 20, 30);
         touch(APP_TOUCH_END, 501, 0, 0);
         touch(APP_KEY, 501, 4, 0);
@@ -1661,7 +1664,7 @@ static void touch_wake_consumes_entire_gesture_until_driver_ack(void)
         expect_idle();
         /* Fresh contacts before illumination is acknowledged are also consumed. */
         touch(APP_TOUCH_BEGIN, 502, 0, 0);
-        brightness_applied(70);
+        brightness_applied(50);
         touch(APP_TOUCH_END, 502, 0, 0);
         touch(APP_KEY, 502, 5, 0);
         expect_idle();
@@ -1687,7 +1690,7 @@ static void ai_wake_double_and_hold_are_consumed(void)
     brightness_applied(0);
     button_edge(true, 301010);
     button_edge(false, 301030);
-    brightness_applied(70);
+    brightness_applied(50);
     button_edge(true, 301100);
     buttons_at(302000);
     assert(s_engine.state.locked && s_overlay == APP_OVERLAY_NONE);
@@ -1761,7 +1764,7 @@ static void timeout_changes_start_a_full_new_interval(void)
     assert(s_idle.asleep && s_settings.idle_timeout == DEVICE_IDLE_1_MIN);
     touch(APP_TOUCH_BEGIN, 801, 0, 0);
     touch(APP_TOUCH_END, 801, 0, 0);
-    brightness_applied(70);
+    brightness_applied(50);
     display_at(160010);
     action(APP_IDLE_TIMEOUT, 1800);
     assert(!s_idle.asleep);
@@ -1771,7 +1774,7 @@ static void timeout_changes_start_a_full_new_interval(void)
     assert(s_idle.asleep);
     touch(APP_TOUCH_BEGIN, 802, 0, 0);
     touch(APP_TOUCH_END, 802, 0, 0);
-    brightness_applied(70);
+    brightness_applied(50);
     action(APP_IDLE_TIMEOUT, 0);
     display_at(UINT64_C(5000000000));
     assert(!s_idle.asleep && s_settings.idle_timeout == DEVICE_IDLE_OFF);
@@ -1807,7 +1810,7 @@ static void failed_wake_is_blocked_until_a_fresh_acknowledged_gesture(void)
     test_brightness_error = ESP_OK;
     touch(APP_TOUCH_BEGIN, 903, 0, 0);
     assert(test_brightness_count == attempts + 2);
-    brightness_applied(70);
+    brightness_applied(50);
     touch(APP_TOUCH_END, 903, 0, 0);
     touch(APP_CLICK, 903, 1, 0);
     expect_idle();
@@ -2015,7 +2018,7 @@ static void extended_status_views_do_not_invent_evidence_or_writes(void)
     assert(test_view.wifi_state == APP_UI_WIFI_UNAVAILABLE && test_view.paired_host_count == -1);
     assert(test_view.paired_host_capacity == 0);
     assert(test_view.settings_save_state == APP_SAVE_DEFAULTS);
-    assert(test_view.brightness_percent == 70 && test_view.idle_timeout_seconds == 300);
+    assert(test_view.brightness_percent == 50 && test_view.idle_timeout_seconds == 300);
     assert(!test_view.audio_available && test_view.microphone_muted);
     test_power_error = ESP_OK;
     test_power = (board_power_status_t){.gauge_available = true,
@@ -2127,7 +2130,7 @@ static void wake_gesture_cannot_enter_the_priority_lock_path(void)
         display_at(301000);
         brightness_applied(0);
         touch(APP_TOUCH_BEGIN, 1001, 0, 0);
-        brightness_applied(70);
+        brightness_applied(50);
         touch(APP_TOUCH_END, 1001, 0, 0);
         service_display();
         const uint64_t epoch = s_engine.state.epoch;
@@ -2182,7 +2185,7 @@ static void overflow_reconciles_a_captured_wake_touch_release(void)
     display_at(301000);
     brightness_applied(0);
     touch(APP_TOUCH_BEGIN, 1201, 0, 0);
-    brightness_applied(70);
+    brightness_applied(50);
     assert(s_idle.wake_capture);
     fill_intents();
     s_now_ms = 301010;
@@ -2216,7 +2219,7 @@ static void fresh_touch_safety_during_ai_guard(app_action_t control)
     brightness_applied(0);
     button_edge(true, 301010);
     button_edge(false, 301030);
-    brightness_applied(70);
+    brightness_applied(50);
     assert(s_idle.wake_capture && !s_screen_accepts_input);
     s_now_ms = 301040;
     touch(APP_TOUCH_BEGIN, 1301, 0, 0);
@@ -2413,7 +2416,7 @@ static void saturated_queue_rejects_consumed_wake_emergencies(void)
     brightness_applied(0);
     touch(APP_TOUCH_BEGIN, 1501, 0, 0);
     touch(APP_TOUCH_END, 1501, 0, 0);
-    brightness_applied(70);
+    brightness_applied(50);
     fill_intents();
     const uint64_t epoch = s_engine.state.epoch;
     app_intent_t control = make_intent(APP_LOCK, 0, 0, NULL);
@@ -2456,7 +2459,7 @@ static void saturated_emergency_waits_for_its_queued_begin(void)
         } else {
             assert(!process_priority() && !s_engine.state.locked);
             while (s_intents->count) consume_one();
-            brightness_applied(70);
+            brightness_applied(50);
             assert(!s_idle.wake_capture && !s_idle.down[DEVICE_INPUT_TOUCH]);
             assert(!process_priority());
         }

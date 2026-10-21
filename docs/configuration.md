@@ -43,7 +43,7 @@ choices remain proposals until their owning algorithm/driver and tests exist.
 
 | Group | Fields and current values | Apply and persistence plan |
 | --- | --- | --- |
-| Display | Theme Dark/Light, default Dark; brightness 10..100 percent in steps of 10, default 70; timeout Off/1/5/10/30 minutes, default 5 | Existing durable preferences; brightness requires driver acknowledgement; timeout starts a new interval |
+| Display | Theme Dark/Light, default Dark; brightness 10..100 percent in steps of 10, default 50; timeout Off/1/5/10/30 minutes, default 5 | Existing durable preferences; brightness requires driver acknowledgement; timeout starts a new interval |
 | Input routing | Preferred Bluetooth/USB, default Bluetooth; cold boot Mouse with motion off | Transport preference saves only after safe switch; current link/readiness and motion-on are volatile |
 | Keyboard | Ctrl/Command, default Ctrl; US ANSI layout; nine-cell groups; compiled preview capacity 64 | Modifier is durable today; a proposed effective preview limit may be 1..64 with default 64, distinct from the immutable compiled capacity. Layout/group profiles require capability/schema validation and release-before-apply; reducing the limit below the current draft rejects without truncation. Draft/send progress stays volatile |
 | Pointer | Gain currently 4 HID units/degree; deadzone 0.5 degrees/second; filter constant 0.03 seconds; board axis transform | Proposed validated profiles; clear fractional/filter state and release/cancel before apply; no remote raw axis-register writes |

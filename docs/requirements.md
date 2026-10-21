@@ -127,7 +127,7 @@ credential clearing. Compare actual LVGL object counts and idle drawing before
 and after the change, and measure target internal/DMA memory separately. A
 sparser layout alone does not prove the existing display failure is repaired.
 
-Display brightness defaults to 70 percent, with ten-percent steps from 10 to 100.
+Display brightness defaults to 50 percent, with ten-percent steps from 10 to 100.
 Physical touch/button activity resets inactivity; routine sensor, radio and
 status updates do not keep the screen awake. Screen Off is not a lock, system
 sleep or HID cancellation. An AI hold used to wake cannot also unlock. Changing

@@ -7,6 +7,10 @@
 /* CRC fixtures were independently calculated with Python zlib.crc32. */
 static const uint8_t default_record[16] = {
     0x44, 0x53, 0x45, 0x54, 0x02, 0x10, 0x01, 0x00,
+    0x01, 0x32, 0x05, 0x00, 0x93, 0xc7, 0x42, 0xf2
+};
+static const uint8_t stored_record_70[16] = {
+    0x44, 0x53, 0x45, 0x54, 0x02, 0x10, 0x01, 0x00,
     0x01, 0x46, 0x05, 0x00, 0x1f, 0x07, 0xba, 0xa1
 };
 static const uint8_t legacy_record[16] = {
@@ -20,7 +24,7 @@ static void settings_codec_and_changes(void)
     device_settings_defaults(&settings);
     assert(device_settings_validate(&settings));
     assert(settings.theme == DEVICE_THEME_DARK && settings.host_modifier == DEVICE_HOST_CTRL);
-    assert(settings.haptics_enabled && settings.brightness_percent == 70);
+    assert(settings.haptics_enabled && settings.brightness_percent == 50);
     assert(settings.idle_timeout == DEVICE_IDLE_5_MIN);
     assert(settings.preferred_transport == DEVICE_TRANSPORT_BLUETOOTH);
     uint8_t record[16];
@@ -29,12 +33,18 @@ static void settings_codec_and_changes(void)
     device_settings_t decoded;
     assert(device_settings_decode(default_record, sizeof default_record, &decoded) == DEVICE_SETTINGS_OK);
     assert(device_settings_equal(&settings, &decoded));
+    device_settings_t stored_settings = settings;
+    stored_settings.brightness_percent = 70;
+    assert(device_settings_decode(stored_record_70, sizeof stored_record_70, &decoded) == DEVICE_SETTINGS_OK);
+    assert(device_settings_equal(&stored_settings, &decoded));
     decoded.preferred_transport = DEVICE_TRANSPORT_USB;
     assert(device_settings_decode(legacy_record, sizeof legacy_record, &decoded) == DEVICE_SETTINGS_OK);
-    assert(device_settings_equal(&settings, &decoded));
+    assert(device_settings_equal(&stored_settings, &decoded));
     assert(device_settings_encode(&decoded, record, sizeof record) == DEVICE_SETTINGS_OK);
-    assert(memcmp(record, default_record, sizeof record) == 0); /* Accepted v1 migrates to explicit v2 Bluetooth. */
-    assert(device_settings_apply(&settings, &decoded) == DEVICE_SETTINGS_APPLY_UNCHANGED);
+    /* Accepted v1 maps to v2 Bluetooth while preserving its stored brightness. */
+    assert(memcmp(record, stored_record_70, sizeof record) == 0);
+    assert(device_settings_apply(&stored_settings, &decoded) == DEVICE_SETTINGS_APPLY_UNCHANGED);
+    assert(settings.brightness_percent == 50);
     static const uint8_t usb_record[16] = {
         0x44,0x53,0x45,0x54,2,16,1,0,1,70,5,1,0x89,0x37,0xbd,0xd6
     };

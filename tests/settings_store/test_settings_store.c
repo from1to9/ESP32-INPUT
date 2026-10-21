@@ -170,7 +170,7 @@ static void assert_defaults(const device_settings_t *settings)
 {
     assert(settings->theme == DEVICE_THEME_DARK);
     assert(settings->host_modifier == DEVICE_HOST_CTRL && settings->haptics_enabled);
-    assert(settings->brightness_percent == 70 && settings->idle_timeout == DEVICE_IDLE_5_MIN);
+    assert(settings->brightness_percent == 50 && settings->idle_timeout == DEVICE_IDLE_5_MIN);
     assert(settings->preferred_transport == DEVICE_TRANSPORT_BLUETOOTH);
 }
 
@@ -240,24 +240,28 @@ static void missing_defaults_do_not_write(void)
 
 static void valid_load_and_unchanged_requests_do_not_write(void)
 {
-    reset();
-    device_settings_t expected = alternative();
-    seed(&expected);
-    device_settings_t loaded;
-    assert(settings_store_init(&loaded) == ESP_OK);
-    assert(loaded.theme == DEVICE_THEME_LIGHT && loaded.host_modifier == DEVICE_HOST_COMMAND);
-    assert(!loaded.haptics_enabled && loaded.brightness_percent == 10);
-    assert(loaded.idle_timeout == DEVICE_IDLE_OFF && settings_store_status().loaded);
-    for (int64_t i = 0; i < 1000; ++i) {
-        hw.now_us = 10000000 + i * 1000000;
-        assert(settings_store_request(&loaded) == ESP_OK);
-        worker_at(hw.now_us);
+    const uint8_t chosen_brightness[] = {10, 70};
+    for (size_t choice = 0; choice < sizeof chosen_brightness / sizeof chosen_brightness[0]; ++choice) {
+        reset();
+        device_settings_t expected = alternative();
+        expected.brightness_percent = chosen_brightness[choice];
+        seed(&expected);
+        device_settings_t loaded;
+        assert(settings_store_init(&loaded) == ESP_OK);
+        assert(loaded.theme == DEVICE_THEME_LIGHT && loaded.host_modifier == DEVICE_HOST_COMMAND);
+        assert(!loaded.haptics_enabled && loaded.brightness_percent == chosen_brightness[choice]);
+        assert(loaded.idle_timeout == DEVICE_IDLE_OFF && settings_store_status().loaded);
+        for (int64_t i = 0; i < 1000; ++i) {
+            hw.now_us = 10000000 + i * 1000000;
+            assert(settings_store_request(&loaded) == ESP_OK);
+            worker_at(hw.now_us);
+        }
+        settings_store_status_t status = settings_store_status();
+        assert(!status.pending && status.error == ESP_OK);
+        assert(status.requested_revision == 0 && status.saved_revision == 0);
+        assert(hw.sets == 0 && hw.commits == 0 && hw.gets == 1);
+        assert_durable(&expected);
     }
-    settings_store_status_t status = settings_store_status();
-    assert(!status.pending && status.error == ESP_OK);
-    assert(status.requested_revision == 0 && status.saved_revision == 0);
-    assert(hw.sets == 0 && hw.commits == 0 && hw.gets == 1);
-    assert_durable(&expected);
 }
 
 static void bad_record_lengths_are_preserved(void)
@@ -609,7 +613,7 @@ static void revision_exhaustion_preserves_pending_value(void)
 static void legacy_record_migrates_only_after_explicit_transport_change(void)
 {
     reset();
-    /* Frozen schema-1 defaults, with its original little-endian CRC32. */
+    /* Frozen schema-1 record retains its old 70% brightness and original CRC32. */
     const uint8_t legacy[] = {0x44,0x53,0x45,0x54,0x01,0x10,0x01,0x00,
         0x01,0x46,0x05,0x00,0xfc,0x00,0x35,0x2f};
     memcpy(hw.durable, legacy, sizeof legacy);
@@ -617,7 +621,9 @@ static void legacy_record_migrates_only_after_explicit_transport_change(void)
     hw.exists = true;
     device_settings_t loaded = alternative();
     assert(settings_store_init(&loaded) == ESP_OK);
-    assert_defaults(&loaded);
+    device_settings_t expected = defaults();
+    expected.brightness_percent = 70;
+    assert(device_settings_equal(&loaded, &expected));
     assert(settings_store_status().loaded);
     worker_at(20000000);
     assert(hw.sets == 0 && hw.commits == 0 && memcmp(hw.durable, legacy, sizeof legacy) == 0);

@@ -73,7 +73,7 @@ Connectivity, Display, Input and About pages, entered from the shared panel.
 Back returns to its parent; Close returns to the prior foreground mode.
 
 Display provides Light/Dark, brightness in ten-percent steps, and Screen timeout:
-Off, 1, 5, 10 or 30 minutes. Defaults are Dark, 70 percent and 5 minutes. Blanking
+Off, 1, 5, 10 or 30 minutes. Defaults are Dark, 50 percent and 5 minutes. Blanking
 leaves radios and enabled mouse control running, while hidden keyboard focus
 pauses. The first complete touch/AI gesture wakes only; the AI wake sequence also
 consumes a rapid second click. A later fresh hold may unlock normally. Changes
