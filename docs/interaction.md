@@ -1,59 +1,55 @@
-# 界面、实体按键与状态
+# UI, buttons and state transitions
 
-## 主界面
+## Primary navigation
 
-480×480 显示逻辑；底部三个主入口：**鼠标、键盘、音频**。连接目标位于顶栏；设置通过顶栏入口。屏幕和实体按键共享状态，不分别维护“实际模式”和“显示模式”。
+Use a 480 x 480 logical display with three bottom entries: **Mouse**, **Keyboard**, **Audio**. Target and settings controls belong in the top bar. The UI and physical buttons use one authoritative state.
 
-状态栏同时显示：主模式、HID 目标、连接状态。并行验证通过后才增加独立音频目标/静音标识；不能把“已配对”“HID 已连接”“音频已建立”合并为一个绿点。
+Show foreground mode, HID target and link status separately. Once concurrency is qualified, add independent audio target/mute status. Paired, HID-connected and audio-active must not collapse into one green indicator.
 
-### 鼠标
+### Mouse
 
-体感开关、精调倍率、大触控板、单独滚动区、点击/拖动/右键。任何触屏操作都抑制体感，抬手后冻结一小段时间。拖动是显式状态，必须有“释放”反馈。进入菜单或其他模式时取消拖动。
+Provide a motion toggle, fine gain, large touchpad, separate scroll controls, clicks and explicit drag/release. Any touch suppresses motion; release starts a short freeze. Menus and mode changes cancel drag. Motion follows wrist rotation, not absolute device tilt.
 
-### 键盘
+### Keyboard
 
-上方选择“体感选字 / 触屏选字 / 语音字母 / 快捷键”。体感和触屏选字共享同一两级网格、预览缓冲、大小写和符号页。体感只选择本机控件；禁止向目标发送鼠标报告。
+Submodes are **Motion**, **Touch**, **Spoken letters** and **Shortcuts**. Motion and touch share a two-level character grid, preview, case and symbol pages. Motion moves local focus only.
 
-文字工作流：选组→选字→进入预览→发送。发送不包含 Enter。底部保留删除、空格、发送；发送中允许停止，记录已发送前缀。开口说 Alpha 后显示 `A` 候选，确认后才加入缓冲。字母发音容易混淆的 B/D/P/T 等优先使用拼读词。
+Flow: choose group -> choose character -> confirm into preview -> send. Keep delete, space and send visible. Sending never includes Enter; expose stop and accepted-prefix progress. An Alpha sample yields an A candidate, which needs confirmation before entering preview. Prefer spelling words for easily confused letter sounds.
 
-“语音字母”与“任意句子听写”分开命名。原型只演示候选流程，不调用麦克风、不伪装真实识别结果。
+Spoken letters and arbitrary dictation are distinct features. The browser prototype labels its samples and never requests microphone access or pretends to run recognition.
 
-### 麦克风／音响
+### Microphone / speaker
 
-选择“语音/会议”或“音响”，大静音按钮和音量控制。音响不上传麦克风。第一版切入独立音频模式时不产生体感鼠标或字符输出。后续若并行能力通过验收，允许鼠标/键盘主模式后台使用麦克风；主模式与音频服务是两个维度。
+Offer **Voice / meeting** and **Speaker**, a prominent mute control and volume. Speaker mode never uploads microphone audio. Independent audio mode produces no motion or character output. Background audio becomes available in mouse/keyboard mode only after its concurrency capability is qualified.
 
-## 按键分工
+## Physical controls
 
-主机官方接口目前只有 AI 按键；BSP 头文件还定义了 BOOT GPIO61，但按键工厂未暴露 BOOT。第一版不依赖 BOOT 的运行时复用。POWER 是硬件电源控制，保留开关机。
+The official button factory currently exposes AI only. Its header also declares BOOT GPIO61, but runtime BOOT access is not a first-release dependency. POWER retains hardware power control.
 
-| 按键动作 | 鼠标 | 键盘 | 音频 |
+| Action | Mouse | Keyboard | Audio |
 | --- | --- | --- | --- |
-| AI 单击 | 切换体感开关 | 确认当前选组/字符；语音页开始/结束监听或确认候选 | 切换麦克风静音；音响页播放/暂停，待 AVRCP 适配 |
-| AI 双击 | 打开三模式选择 | 打开三模式选择 | 打开三模式选择 |
-| AI 长按 ≥0.9 s | 全局停止并锁定 | 全局停止并锁定 | 全局停止并锁定 |
-| 锁定后 AI 长按 | 解锁，体感关闭、麦克风静音、任务不自动续跑 | 同左 | 同左 |
+| AI single-click | Toggle motion | Confirm selected group/character; on voice page start/stop listening or confirm candidate | Toggle microphone mute; speaker playback awaits AVRCP |
+| AI double-click | Open mode chooser | Open mode chooser | Open mode chooser |
+| AI long press, at least 0.9 s | Stop and lock globally | Stop and lock globally | Stop and lock globally |
+| Long press while locked | Unlock with motion off and microphone muted; never resume tasks | Same | Same |
 
-短按与双击互斥，使用约 280 ms 判定窗口，待真机手感调校；不先执行单击再撤销。按下时先冻结体感。任何菜单、弹窗、锁定层拥有输入焦点时，AI 单击不能穿透为鼠标开关或字符确认。
+Single and double clicks are mutually exclusive, with an initial 280 ms decision window subject to hardware tuning. Do not emit a single-click first and undo it later. Button down freezes motion. Menus, dialogs and lock overlays own focus; AI input must not activate hidden controls.
 
-远程控制中按下 AI 即接管，不等待单击/双击判定；该次按压被消费，若继续长按则锁定。任何本地触摸同样只完成接管，不点击底层控件。
+During remote control, AI down immediately takes local ownership; consume that press. Continued holding may still lock. The first local touch similarly takes ownership without activating its underlying control.
 
-振动只做短反馈；振动期间冻结 IMU 输出，避免电机震动变成鼠标位移。仅在进入模式、确认字符、锁定/错误时反馈，不能每帧振动。
+Use short haptic feedback for mode changes, confirmations, locking and errors. Freeze IMU output during vibration; never vibrate every frame.
 
-## 状态边界
+## Boundaries
 
-| 事件 | 必须发生 | 禁止发生 |
+| Event | Required behavior | Forbidden behavior |
 | --- | --- | --- |
-| 鼠标→键盘 | 释放拖动、清运动余量、重置本机焦点中心 | 把选字运动发给主机 |
-| 主模式切换 | 释放 HID、取消在途字符、递增输入 epoch | 自动重发被中断文本 |
-| 断线/换目标 | 清队列、静音、停止输入、保留未发送草稿 | 在重连后补发旧 key-down |
-| 手动接管 | 暂停远程、释放远程按键 | 自动恢复脚本 |
-| 全局锁定 | 暂停一切输入源、停止识别窗口、静音 | 单击或触摸解锁 |
-| 解锁 | 保留主模式，输出仍关闭 | 恢复麦克风采集或体感移动 |
+| Mouse -> keyboard | Release drag, reset motion remainder and local focus | Forward selection motion to the host |
+| Primary mode change | Release HID, cancel queued text, increment epoch | Resend interrupted text automatically |
+| Disconnect/target change | Cancel queue, mute, stop input, retain unsent draft | Replay old key-down after reconnect |
+| Local takeover | Stop remote queue and release its keys | Resume the script automatically |
+| Global lock | Pause producers, stop recognition and mute | Unlock through touch or a short click |
+| Unlock | Preserve foreground mode, keep motion off and microphone muted | Restore old capture/motion/tasks |
 
-## 设计优化
+## Usability
 
-- 普通页面跳转不被误认为主模式改变；设置关闭后回到原模式。
-- 只有主模式控制实体键上下文；不得让隐藏页面影响 AI 按键。
-- 首版低风险默认值：鼠标模式、体感关闭、音频关闭、远程未授权。
-- 用户可以看见所选目标；优先保存单个 HID 目标，多个配对记忆与多设备同时连接分开设计。
-- 深色/浅色、高对比焦点、左右手滚动条布局、触控目标约 44 px；最终按 2.16 英寸实机可读性复核。
+Settings are not a fourth primary mode; closing them returns to the previous mode. Hidden pages cannot redefine the AI key. Defaults are mouse, motion off, audio off and remote control unauthorized. Show the selected target at all times. Plan high-contrast focus, light/dark appearance, left-handed scroll placement and roughly 44 px touch targets, then verify readability on the actual 2.16-inch display.

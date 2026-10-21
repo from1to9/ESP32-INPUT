@@ -1,76 +1,76 @@
-# 开发需求 v0.1
+# Product requirements v0.1
 
-基线日期：2026-10-21。产品名：ESP32-INPUT。用户确认的优先级优先于本文中的建议值。
+Baseline: 2026-10-21. Product: ESP32-INPUT. Current user decisions take precedence over proposed defaults.
 
-## 目标与使用范围
+## Goal and scope
 
-使用一台 Mosaico 控制一台已解锁的 iPhone、iPad 或电脑。无 Mac、无网络时，鼠标与键盘必须独立工作。Mac 可提供远程命令、屏幕识别和较重的语音转写，但不是基础输入的必要设备。
+Use one Mosaico to control one unlocked iPhone, iPad or computer. Basic mouse and keyboard operation must work without a Mac or network. A Mac may later provide remote commands, screen recognition and heavier transcription, but is optional for local input.
 
-已有目标：iPad Pro 2018；Mosaico 主板版本未确认，可能 v1.2。设备长期插电。第一版不假设取得 iOS 屏幕内容、不实现锁屏解锁、不执行企业微信审批或打卡业务逻辑。
+The initial tablet is an iPad Pro 2018. The Mosaico board revision is unconfirmed, possibly v1.2. Long-term external power is expected. The first release does not capture iOS screens, unlock devices or implement business approval, attendance or account-switching workflows.
 
-## 确认的产品原则
+## Confirmed decisions
 
-1. 三种主模式：鼠标、键盘、麦克风／音响；每次冷启动进入鼠标模式。
-2. 鼠标模式下，点击切换体感开关。开启后持续跟随手腕旋转，不需要一直按住按键。
-3. 键盘模式包含体感选字、触屏选字、英语字母口令；体感选字不属于鼠标模式。
-4. 优先连接 iPhone / iPad / Windows / macOS。基础 HID 不装专用客户端，但系统配对、输入法和辅助功能设置仍可能需要用户操作。
-5. 希望支持鼠标与麦克风同时工作。无法稳定并行时，先实现独立模式。
-6. “多蓝牙连接”分开验证：同一主机的 HID + HFP/A2DP；不同主机分别承担 HID 与音频；多个 HID 目标。第一项优先，后两项暂不承诺。
+1. Three primary modes: mouse, keyboard and microphone/speaker. Cold boot enters mouse mode with motion disabled.
+2. A click toggles mouse motion. Once enabled, wrist rotation continuously controls relative movement without holding a button.
+3. Motion character selection, touch selection and spoken English letters belong to keyboard mode.
+4. Prioritize iPhone, iPad, Windows and macOS. No proprietary target client is required for basic HID, but pairing, input layout and accessibility settings may still be necessary.
+5. Prefer concurrent mouse and microphone operation. Deliver independent modes first if concurrency cannot be made stable.
+6. Qualify three different connection cases separately: HID plus HFP/A2DP on one host; HID and audio on different hosts; multiple HID targets. The first case has priority. Remembering multiple bonds does not imply simultaneous control.
 
-## P0：先完成输入闭环
+## P0: complete the input loop
 
-| ID | 功能 | 可验收结果 |
+| ID | Feature | Acceptance |
 | --- | --- | --- |
-| M01 | 体感鼠标 | 校准后静止不持续漂移；旋转产生相对移动；切换时无积压跳跃 |
-| M02 | 触屏精调 | 单指相对移动；¼×、⅛×；触屏优先，抬手后有短暂防抖 |
-| M03 | 鼠标按键 | 左键、右键、显式拖动开关、独立滚动区；中断时释放拖动 |
-| K01 | 组合 HID | 同一 HID 服务具有独立鼠标、键盘 Report ID；切换鼠标/键盘不重新配对 |
-| K02 | 体感选字 | 转动选择字母组→字符→确认到预览；只移动本机焦点 |
-| K03 | 字符输入 | A–Z / a–z、0–9、空格、删除、常用 ASCII 标点；可清空预览 |
-| K04 | 显式发送 | 显示目标、预览内容、发送进度；不自动追加 Enter；可取消剩余队列 |
-| K05 | 快捷键 | 根据目标系统配置 Ctrl / Command 等修饰键；不硬编码一套跨平台快捷键 |
-| S01 | 锁定 | 释放所有 HID 按键、取消输入队列、暂停远程、静音；再次长按解锁 |
-| S02 | 连接恢复 | 重连不重放旧点击、按键和文本；体感保持关闭；远程不自动续跑 |
+| M01 | Motion mouse | No continuous stationary drift after calibration; rotation gives relative movement; no stale movement burst |
+| M02 | Touch fine control | Relative single-finger movement; quarter/eighth gain; touch priority and a short release freeze |
+| M03 | Mouse buttons | Left/right click, explicit drag and separate scroll; interruptions release drag |
+| K01 | Composite HID | One stable HID service with separate mouse/keyboard report IDs; no re-pairing when changing modes |
+| K02 | Motion character selection | Group -> character -> explicit confirmation into preview; local focus only |
+| K03 | Character entry | A-Z/a-z, digits, space, delete, common ASCII punctuation and clear-preview action |
+| K04 | Explicit send | Visible target, preview and progress; no appended Enter; remaining queue can be cancelled |
+| K05 | Shortcuts | Host-specific Ctrl/Command configuration rather than one hardcoded mapping |
+| S01 | Lock | Release HID, cancel queued input, suspend remote control and mute; long press again to unlock |
+| S02 | Reconnect | No replay of old clicks, keys or text; motion stays off and remote tasks stay stopped |
 
-### 鼠标细节
+### Mouse behavior
 
-角速度转换为相对 HID 位移，使用真实采样间隔，保留小数余量。轴向、灵敏度、死区、滤波与点击后冻结时间为可调参数。初始冻结值 150 ms、精调倍率 ¼×，属于待实机调校值。HID 位移单位不等于屏幕像素，不承诺逐像素定位。
+Convert calibrated angular velocity to relative HID movement using actual monotonic sample intervals and fractional carry. Axis orientation, gain, deadzone, filtering and click freeze are tunable. Initial proposals are a 150 ms freeze and quarter-speed fine control; actual values need hardware tuning. HID units are not screen pixels.
 
-触屏开始、实体键按下、模式菜单、校准、键盘选字会暂停指针输出。进入键盘/音频模式关闭体感意图；返回鼠标需要重新启用，以免突然移动。精调属于鼠标子状态，退出精调可恢复原体感开关意图。
+Touch start, physical button down, menus, calibration and keyboard selection suppress host pointer output. Entering keyboard/audio clears the motion intent; returning to mouse requires explicit re-enabling. Leaving fine control may restore the previous motion intent. Haptic feedback must also suppress IMU output during vibration.
 
-### 键盘细节
+### Keyboard behavior
 
-- 本机显示两级字符网格，视线保持在 Mosaico；目标设备不显示专用输入法。
-- 体感移动焦点，单击 AI 确认。触屏可以直接选择；两者共用同一字符缓冲。
-- 选组与选字符使用相对角度积分；确认后重置中心；边界有滞回，禁止靠连续抖动重复确认。
-- 字符先进入预览，触屏“发送”后依次产生 key-down / key-up。默认保留预览至发送完成后再清空；失败显示已发送前缀，不自动重发。
-- 英文模式要求目标输入法切到英文，并匹配物理键盘布局。首版只保证 US ANSI 映射；中文和其他布局另做适配。
-- 发送按键只意味着报告已提交/确认，不意味着字符一定出现在预期输入框；用户负责目标焦点，后续视觉闭环另做。
+- The device displays a two-level character grid; the host needs no custom input method.
+- Motion changes local focus; AI single-click confirms. Touch uses the same grid and buffer.
+- Integrate relative angular movement, reset the center after confirmation, apply boundary hysteresis and never auto-confirm from dwell or jitter.
+- Characters enter preview first. Send emits key-down/key-up pairs without Enter. Track the accepted prefix and preserve only unsent text after interruption; never automatically replay a partial send.
+- Initial encoding is US ANSI. The host must use a matching physical layout and English input mode. Other layouts require explicit support.
+- Transport acceptance does not prove text reached the intended field. Focus is user-controlled until a separate visual feedback loop exists.
 
-## P1：语音字母与独立音频
+## P1: spoken letters and independent audio
 
-| ID | 功能 | 设计 |
+| ID | Feature | Design |
 | --- | --- | --- |
-| V01 | 英语字母口令 | 首选 Alpha–Zulu；可选数字 zero–nine；26 字母直接发音作为实验别名 |
-| V02 | 识别流程 | 键盘页显式开启→短窗口监听→候选→确认入预览；默认不常开、不自动发送 |
-| V03 | 本地实现 | 优先 ESP-SR mn7_en；置信度、拒识阈值和发音混淆实测后确定 |
-| A01 | 麦克风/会议 | HFP HF + 板上 ES8311；先验证 Windows 和 Mac 录音、回放、静音 |
-| A02 | 音响 | A2DP Sink，基础 SBC；单扬声器做适当混音，不宣称立体声扬声器 |
-| A03 | 音频控件 | 本地麦克风静音、播放音量、连接/音频占用状态 |
-| A04 | 回声控制 | 同时播放与采集需要 AEC 及声学实测；未完成时限制为耳机/分离输出或半双工实验 |
+| V01 | English letter commands | Prefer Alpha-Zulu; optional zero-nine; direct single-letter pronunciations remain experimental aliases |
+| V02 | Recognition flow | Explicit short listening window -> candidate -> confirm into preview; no automatic sending |
+| V03 | Local recognition | Prefer ESP-SR mn7_en; choose confidence/rejection thresholds from measurements |
+| A01 | Voice microphone | HFP HF with ES8311; first validate Windows/macOS capture, playback and mute |
+| A02 | Speaker | A2DP Sink with SBC; appropriate mono mix, no stereo-speaker claim |
+| A03 | Audio controls | Local microphone mute, playback volume, link and resource ownership status |
+| A04 | Echo handling | Duplex playback/capture requires AEC and acoustic tests; otherwise limit experiments to separated output or half duplex |
 
-不依赖 HFP 传输来实现“板上语音字母→HID 键盘”；本地识别直接消费板上音频。麦克风由一个采集管理器持有，避免识别与 HFP 各自重复打开 codec。
+On-device letter recognition consumes local microphone frames; it does not require HFP transport. One audio manager owns capture/codec resources. Recognition and HFP must not independently reopen the codec.
 
-## P2：并行与远程扩展
+## P2: concurrency and remote extensions
 
-- 同主机 HID + HFP 首先做能力实验；HID + A2DP 另测。稳定后可在鼠标/键盘模式中后台保留音频。
-- 不同主机分别接 HID 与音频，需要两个独立目标、连接状态和断线策略；不放入首版默认设置。
-- USB UAC / HID / 控制串口复合设备另做资源和跨系统验证。
-- Mac / Codex 控制必须通过统一动作仲裁层；本地动作立即夺回控制，接管的第一次动作不透传。
-- 完整英语离线转写、空中手写字母识别、多个 HID 目标同时连接、LE Audio 不阻塞 P0。
+- Qualify same-host HID + HFP first and HID + A2DP separately. Enable background audio in mouse/keyboard mode only after qualification.
+- Different-host HID/audio requires independent peers, link states and failure rules. It is not a first-release default.
+- USB UAC/HID/control-serial composition needs separate resource and OS validation.
+- Mac/Codex actions must pass through one coordinator. Local activity takes ownership immediately, consuming the first takeover action rather than forwarding it.
+- Full offline English transcription, air handwriting, multiple simultaneous HID targets and LE Audio do not block P0.
 
-## 资源与失败处理
+## Resources and failures
 
-按键释放和 HID 调度优先于动画、语音识别、音频 UI。过载时降低 UI 刷新或停止实验识别，不能悄悄丢弃 key-up。断线立即取消队列；旧连接的异步识别结果不得发送到新目标。
+Prioritize key release and HID scheduling over animation, recognition and audio UI. On overload, reduce UI refresh or stop experimental recognition; never silently discard key-up. Disconnect cancels the queue. Recognition results from an old session must not reach a new target.
 
-录音数据默认只保留于短期内存，不保存或上传；调试采样需显式开启并提示。独立模式关闭 Wi-Fi。音频功能默认关闭，麦克风默认静音。
+Audio defaults off and the microphone muted. Keep samples in short-lived memory, with no recording persistence or upload by default. Diagnostic capture requires explicit activation and indication. Standalone operation does not require Wi-Fi.

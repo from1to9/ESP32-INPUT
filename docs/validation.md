@@ -1,50 +1,60 @@
-# 兼容矩阵与验收
+# Compatibility and acceptance
 
-## 当前证据
+## Current evidence
 
-截至 2026-10-21：只有方案研究、浏览器原型与主机端逻辑验证。当前工作环境未发现 ESP-IDF 工具链；未运行 S31 交叉编译，也未烧录或配对任何实际设备。所有硬件测试项均为待测。
+Baseline date: 2026-10-21. Evidence currently covers source research, a browser prototype and host-side logic. SDK source preparation has begun, but no S31 target build, device flash or real pairing is recorded. All hardware acceptance items remain pending.
 
-| 目标 | 鼠标接入 | 键盘接入 | 语音/音频 | 状态 |
+| Host | Mouse path | Keyboard checks | Voice/audio | Status |
 | --- | --- | --- | --- | --- |
-| iPhone | AssistiveTouch 指针设备路径 | BLE 键盘；英文输入法/布局验证 | HFP/A2DP 在实际 App 验证 | 待测 |
-| iPad Pro 2018 | 原生鼠标与可选 AssistiveTouch 分开测 | BLE 键盘；虚拟键盘显示行为验证 | HFP/A2DP 与键鼠共存验证 | 待测 |
-| Windows 11 | 系统蓝牙鼠标 | US ANSI；Ctrl 快捷键 | HFP 输入/输出；A2DP 播放 | 待测 |
-| Windows 10 | 如有实际设备则追加 | 同上 | 注意 Hands-Free / Stereo 端点 | 待测 |
-| macOS | 系统蓝牙鼠标 | US ANSI；Command 快捷键 | HFP 输入/输出；A2DP 播放 | 待测 |
+| iPhone | AssistiveTouch pointer devices | BLE keyboard; English layout/input mode | HFP/A2DP in actual apps | Pending |
+| iPad Pro 2018 | Native pointer and optional AssistiveTouch tested separately | BLE keyboard; software keyboard visibility | HFP/A2DP and HID coexistence | Pending |
+| Windows 11 | System Bluetooth mouse | US ANSI and Ctrl shortcuts | HFP input/output and A2DP playback | Pending |
+| Windows 10 | Add if an actual test host is available | Same layout checks | Hands-Free/Stereo endpoint behavior | Pending |
+| macOS | System Bluetooth mouse | US ANSI and Command shortcuts | HFP input/output and A2DP playback | Pending |
 
-iPhone 配对需检查“设置→辅助功能→触控→AssistiveTouch→设备→蓝牙设备”，并开启 AssistiveTouch。该系统设置不同于专用程序安装。[Apple 官方说明](https://support.apple.com/en-us/111775)
+For iPhone, check Settings -> Accessibility -> Touch -> AssistiveTouch -> Devices -> Bluetooth Devices, and enable AssistiveTouch. This is system configuration, not a proprietary client installation. See [Apple's pointer-device instructions](https://support.apple.com/en-us/111775).
 
-## 主机逻辑测试
+## Host checks
 
-`python3 tools/check.py` 编译并运行 C 测试，覆盖默认模式、切换/断线/锁定的输出门禁、epoch 失效、体感积分的采样率一致性与非法样本处理、ASCII modifier、键盘模式选字不输出主机鼠标等。此测试不证明 BLE 描述符或芯片兼容。
+`python3 tools/check.py` compiles and runs portable C tests for default state, mode/disconnect/lock gates, stale epochs, release acknowledgement, sampling-rate-independent motion, invalid samples and US ANSI encoding. Keyboard mode rejects mouse output. These tests do not validate a BLE descriptor or radio stack.
 
-### 2026-10-21 开发基线记录
+### Baseline record: 2026-10-21
 
-- 主机 C11 检查通过：Clang 严格警告、AddressSanitizer、UndefinedBehaviorSanitizer；所有状态/运动/ASCII 测试通过。
-- 原型 JavaScript 语法检查通过；使用实际浏览器检查默认鼠标、体感开关、体感选择 `G`、语音样例 `Alpha → A` 的候选与确认、显式发送与锁定中断、独立音频退出、并行演示、本地接管。
-- 所有浏览器连接、音频、语音及发送状态均为模拟；没有请求蓝牙或麦克风权限。
-- 实际发送队列、按键短/双/长按识别、LVGL 产品界面与 BLE transport 尚未实现。C 核心提供 epoch 和释放屏障，硬件适配层仍需实际执行释放及队列取消。
-- 未进行 S31 编译、刷机、蓝牙配对或声学测试。下一阶段先固定 SDK 并完成 BSP 启动和最小组合 HID。
+- C11 tests passed under Clang with strict warnings, AddressSanitizer and UndefinedBehaviorSanitizer.
+- Prototype JavaScript syntax passed. Browser checks covered default mouse mode, motion toggle, motion selection of G, the Alpha -> A candidate/confirmation flow, explicit send interrupted by lock, independent audio exit, concurrency simulation and local takeover.
+- Browser connections, audio, speech and sending are simulated. No Bluetooth or microphone permission was requested.
+- The portable core provides epochs and release gates. The real transport, queue, button timing and product LVGL UI remain unimplemented.
+- No S31 build, flashing, pairing, latency or acoustic result is claimed. Next: pin the SDK and build minimum composite HID.
 
-## 必须通过的实机阶段
+### Standards and English-language migration: 2026-10-21
 
-1. **板卡识别**：记录丝印/eFuse/BSP SHA/IDF SHA；错误版本不继续初始化。验证屏幕、触摸、AI 键、IMU、USB 供电与温升。
-2. **HID 最小连接**：分别配对手机/平板/两类电脑，确认鼠标与键盘 Report ID、加密/绑定、重连、休眠唤醒。实际键入 `aAzZ09 !?@`，验证 modifier 释放。
-3. **鼠标**：静置 60 s、不同握姿、快慢旋转、触屏抬手、精调、点击抖动、拖动中锁定/断线。记录原始与过滤后数据，无隐藏漂移补丁。
-4. **键盘**：两级选字、删除/空格/大小写、模式切换、100 字符发送、发送中断线/取消/换目标。旧结果不得进入新目标。
-5. **语音字母**：26 字母、数字、拼读词，每人多轮，记录混淆矩阵与拒识率；不同口音/距离/背景声分开。置信度阈值依据测量制定。
-6. **独立音频**：分别录音、播放、会议回声、静音、音量、HFP 编解码协商；不以已配对代替音频链路验证。
-7. **并行**：同主机 HID+HFP、HID+A2DP 分开；连续 30 min 交互，记录输入延迟、音频欠载、断线和 heap；再做 8 h 长期供电测试。
+- General working rules, engineering standards, knowledge boundaries and contribution guidance are defined separately from product requirements.
+- First-party documentation and prototype copy are English. Upstream BSP contents and licenses are unchanged.
+- First-party text hygiene, local Markdown links, diff whitespace and prototype JavaScript syntax checks passed.
+- The English keyboard and spoken-letter screens were visually reviewed in the browser; group/character confirmation and the sample candidate flow were exercised.
+- No portable C behavior changed in this documentation/copy update. Previous host results remain historical evidence, not a new hardware result.
 
-以上时长是验收计划，不是已完成结果。鼠标端到端延迟需要主机侧测量，不能把 IMU 100 Hz 或 HID 发送频率直接称为 10 ms 延迟。
+## Hardware qualification stages
 
-## 每次实测记录格式
+1. **Board identity:** record revision, BSP/SDK commits, power and configuration. Abort unsupported eFuse values. Check display, touch, AI, IMU, USB power and temperature.
+2. **Minimum HID:** pair each host family; check report IDs, encryption/bonding, reconnect and sleep/wake. Type `aAzZ09 !?@` and confirm modifier release.
+3. **Mouse:** 60 s stationary, different grips, fast/slow rotation, touch release, fine control, click vibration and interruption during drag. Retain raw/filtered evidence without concealing drift.
+4. **Keyboard:** two-level selection, deletion, space, case, mode changes, 100-character sending and cancellation/disconnect/target changes. Old results must not reach a new target.
+5. **Spoken letters:** repeated 26-letter/digit/spelling-word trials, confusion matrix and rejection rate, with separate accents/distances/noise conditions. Set thresholds from evidence.
+6. **Independent audio:** capture, playback, meeting echo, mute, gain and HFP codec negotiation. Pairing alone is not an audio result.
+7. **Concurrency:** same-host HID + HFP and HID + A2DP separately, proposed 30-minute interaction runs, then 8-hour powered soak. Record latency, underruns, disconnects and memory.
+
+These durations are acceptance plans, not completed runs. IMU sample rate or report frequency is not end-to-end latency.
+
+## Device evidence template
 
 ```text
-日期 / 固件 commit / BSP commit / IDF commit:
-板卡版本 / 电源方式 / 是否启用 Wi-Fi:
-目标型号 / OS 完整版本 / 蓝牙适配器:
-模式 / 活跃 profiles / 布局 / AssistiveTouch:
-步骤 / 预期 / 实际 / 日志与录像位置:
-通过项 / 失败项 / 下一步:
+Date / firmware commit / BSP commit / IDF commit:
+Board revision / power / Wi-Fi state:
+Host model / full OS version / Bluetooth adapter:
+Mode / active profiles / layout / accessibility settings:
+Steps / expected / observed / local evidence location:
+Passes / failures / next action:
 ```
+
+Keep raw logs and private host details local. Promote only reviewed, portable conclusions under the knowledge contract.

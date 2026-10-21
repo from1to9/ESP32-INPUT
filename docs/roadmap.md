@@ -1,40 +1,43 @@
-# 开发顺序与开放项
+# Roadmap and open decisions
 
-## 里程碑
+## Milestones
 
-| 阶段 | 交付 | 完成条件 | 当前状态 |
+| Stage | Deliverable | Acceptance | Status |
 | --- | --- | --- | --- |
-| D0 | 需求、设计、原型、固定 BSP、主机逻辑基础 | 文档一致、原型可操作、主机测试通过 | 本轮建立 |
-| D1 | 板卡启动与最小 BLE 组合 HID | 四类目标分别鼠标移动/键入字符 | 待工具链与实机验证 |
-| D2 | 体感鼠标、触屏精调、键盘选字的 LVGL UI | 模式互斥、按键释放、断线恢复通过 | 待实现硬件连接 |
-| D3 | 本地语音字母 | 拼读词识别→候选→确认→HID | 待实现/评测 |
-| D4 | 独立 HFP / A2DP | 录音、扬声器、静音、回声控制验证 | 待实现 |
-| D5 | 同主机鼠标/键盘 + 音频 | 各 OS 组合压力测试通过 | 待能力实验 |
-| D6 | 多主机、Mac 控制服务、USB 复合设备 | 独立协议和目标路由验证 | 后续 |
+| D0 | Requirements, standards, prototype, pinned BSP, portable core | Consistent design, interactive prototype, passing host tests | Baseline established |
+| D1 | Board bring-up and minimal BLE composite HID | Target build plus separate mouse/text qualification on four host families | SDK preparation started; implementation and device qualification pending |
+| D2 | Motion mouse, touch fine control and LVGL character selection | Mode gates, releases and reconnection behavior validated | Pending hardware integration |
+| D3 | Local spoken letters | Spelling word -> candidate -> confirm -> HID | Pending implementation and evaluation |
+| D4 | Independent HFP/A2DP | Capture, playback, mute and echo handling qualified | Pending |
+| D5 | Same-host HID plus audio | Per-OS combination and stress checks pass | Capability experiment pending |
+| D6 | Multi-host, Mac controller and USB composition | Independent routing/protocol qualification | Later |
 
-音频共存研究可与 D1 的 SDK 验证并行，但不能让它阻塞独立键鼠交付。SDK 暂不支持或组合不稳定时，以独立三模式发布并明确标示能力。
+Audio coexistence research may accompany SDK validation without blocking independent HID. If a combination is unsupported or unstable, release independent modes with explicit capabilities.
 
-## 已决定
+## Decisions already made
 
-- 项目名 ESP32-INPUT；本地仓库位于当前工作目录；GitHub 私有仓库为默认。
-- 默认鼠标，显式启用体感；键盘模式含体感选字和语音字母。
-- 音频共享底层资源，但保持独立模式；已验证并行能力才向用户开放组合开关。
-- 优先一个 HID 目标；多配对记忆不等于同时多目标控制。
-- 第一版使用现有 AI 键和触屏；不额外采购扩展模块。
-- 字母拼读首选 Alpha–Zulu；任意英语听写不属于 D3。
-- M5 只作行为参考；不复制未声明许可的源码。
+- Project name ESP32-INPUT; private GitHub repository by default.
+- First-party repository content is English. General working rules are separate from product requirements.
+- Cold boot selects mouse with motion off. Keyboard owns motion selection and spoken letters.
+- Audio shares managed resources but starts as an independent mode. Expose concurrency only after qualification.
+- Begin with one HID target. Multiple remembered bonds do not mean simultaneous output to multiple hosts.
+- Use the existing AI button and touch surface; no extra hardware is required for the initial scope.
+- Prefer Alpha-Zulu commands. Full dictation is outside D3.
+- M5 is behavioral reference material; do not copy unlicensed implementation.
 
-## 待实测决定，不阻塞设计
+## Decisions requiring evidence
 
-1. Mosaico 主板版本、USB 数据端口、恢复流程。
-2. 固定哪一个 ESP-IDF 6.2+ commit，与 BSP 依赖一起完成交叉编译。
-3. iPhone AssistiveTouch 对组合 BLE HID 描述符的实际行为。
-4. IMU 轴向、死区、灵敏度、握持时的选字滞回值。
-5. BOOT GPIO61 的运行时读取是否稳定、是否适合外壳操作；确认前不分配业务功能。
-6. HFP 与 BLE HID 是否可对同一主机并行，是否需要两个配对入口。
-7. ESP-SR 二进制、模型、Bluedroid、LVGL 共存的堆内存和 CPU 预算。
-8. 小字母直接发音的混淆率，是否只保留拼读词。
+1. Actual board revision, USB data port and recovery procedure.
+2. Exact ESP-IDF 6.2+ commit and resolved component lockfile after a successful target build.
+3. iPhone AssistiveTouch behavior with the composite descriptor.
+4. IMU orientation, drift, deadzone, gain and selection hysteresis.
+5. Runtime BOOT accessibility; no product function is assigned until verified.
+6. Same-host HFP/BLE HID coexistence and pairing behavior.
+7. Memory/CPU budget with ESP-SR, Bluedroid and LVGL together.
+8. Single-letter pronunciation confusion rates and whether only spelling words should be enabled.
 
-## 首轮不做
+## Outside the initial release
 
-iPad 画面经过 Mosaico 转发、无画面业务审批/打卡、自动切换企业账号、整句离线 ASR 作为必达项、空中手写作为默认输入、默认多目标广播键盘、LE Audio 优先兼容路径。
+iPad video relay through Mosaico; blind business approvals/attendance; automatic account switching; mandatory full-sentence offline ASR; handwriting as default input; keyboard broadcast to multiple targets; LE Audio as the primary compatibility path.
+
+The current authorized implementation work is SDK setup and minimum composite HID with build/host tests and GitHub synchronization. Device flashing is explicitly excluded. Project standards are defined first, as requested.
