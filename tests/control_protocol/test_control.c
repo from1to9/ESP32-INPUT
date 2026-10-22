@@ -699,8 +699,30 @@ static void test_transport_and_media(void)
     h.sequence = 0;
     assert(!cp_media_encode(&h, pcm, packet, sizeof(packet), &length));
 }
+static void test_context_storage_contract(void)
+{
+    const size_t alignment = cp_context_alignment(), bytes = cp_context_size();
+    assert(alignment >= 8 && !(alignment & (alignment - 1U)));
+    uint8_t *raw = malloc(bytes + alignment + 8), *before = malloc(bytes);
+    assert(raw && before);
+    uintptr_t address = ((uintptr_t)raw + alignment - 1U) & ~(uintptr_t)(alignment - 1U);
+    uint8_t *aligned = (uint8_t *)address, *weak = aligned + 4;
+    assert((uintptr_t)weak % 4U == 0 && (uintptr_t)weak % alignment != 0);
+    memset(weak, 0xa5, bytes);
+    memcpy(before, weak, bytes);
+    cp_callbacks_t callbacks = {.random = random_source};
+    cp_context_t *created = (cp_context_t *)aligned;
+    assert(cp_initialize(weak, bytes, &callbacks, &created) == CP_INVALID && !created);
+    assert(!memcmp(weak, before, bytes)); /* Reject before touching misaligned storage. */
+    created = (cp_context_t *)aligned;
+    assert(cp_initialize(aligned, bytes - 1, &callbacks, &created) == CP_INVALID && !created);
+    assert(cp_initialize(aligned, bytes, &callbacks, &created) == CP_OK && created == (void *)aligned);
+    free(before);
+    free(raw);
+}
 int main(void)
 {
+    test_context_storage_contract();
     test_json_sha();
     test_exact_decimal_configuration();
     test_transport_and_media();

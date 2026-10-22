@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "app_network_task.h"
 
 #define CERT_BYTES 2048U
 #define KEY_BYTES 1024U
@@ -318,9 +319,11 @@ static esp_err_t initialize(server_t *s)
         return ESP_ERR_NO_MEM;
     }
     s->protocol_memory =
-        heap_caps_calloc(1, cp_context_size(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        heap_caps_aligned_calloc(cp_context_alignment(), 1, cp_context_size(),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s->protocol_memory) {
-        s->protocol_memory = heap_caps_calloc(1, cp_context_size(), MALLOC_CAP_8BIT);
+        s->protocol_memory =
+            heap_caps_aligned_calloc(cp_context_alignment(), 1, cp_context_size(), MALLOC_CAP_8BIT);
     }
     if (!s->protocol_memory) {
         return ESP_ERR_NO_MEM;
@@ -354,6 +357,9 @@ static esp_err_t initialize(server_t *s)
     config.httpd.max_uri_handlers = 4;
     config.httpd.backlog_conn = 2;
     config.httpd.stack_size = 12288;
+#if APP_NETWORK_EXTERNAL_STACK
+    config.httpd.task_caps = APP_NETWORK_STACK_CAPS;
+#endif
     config.httpd.task_priority = 1;
     config.httpd.recv_wait_timeout = 2;
     config.httpd.send_wait_timeout = 2;
@@ -495,7 +501,7 @@ static void worker(void *argument)
             clear(s, sizeof(*s));
             heap_caps_free(s);
             publish(failed ? APP_CONTROL_ERROR : APP_CONTROL_STOPPED, failed ? error : ESP_OK);
-            vTaskDelete(NULL);
+            app_network_task_delete_self();
             return;
         }
         vTaskDelay(pdMS_TO_TICKS(has_completion ? 1 : 20));
@@ -525,9 +531,10 @@ esp_err_t app_control_server_start(const app_control_server_config_t *config)
     if (busy) {
         return ESP_ERR_INVALID_STATE;
     }
-    server_t *s = heap_caps_calloc(1, sizeof(*s), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    server_t *s = heap_caps_aligned_calloc(_Alignof(server_t), 1, sizeof(*s),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s) {
-        s = heap_caps_calloc(1, sizeof(*s), MALLOC_CAP_8BIT);
+        s = heap_caps_aligned_calloc(_Alignof(server_t), 1, sizeof(*s), MALLOC_CAP_8BIT);
     }
     if (!s) {
         publish(APP_CONTROL_ERROR, ESP_ERR_NO_MEM);
@@ -549,7 +556,7 @@ esp_err_t app_control_server_start(const app_control_server_config_t *config)
     portENTER_CRITICAL(&s_lock);
     s_server = s;
     portEXIT_CRITICAL(&s_lock);
-    if (xTaskCreate(worker, "control_server", 4096, s, 1, NULL) != pdPASS) {
+    if (app_network_task_create(worker, "control_server", 4096, s, 1, NULL) != pdPASS) {
         portENTER_CRITICAL(&s_lock);
         s_server = NULL;
         portEXIT_CRITICAL(&s_lock);

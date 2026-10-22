@@ -46,6 +46,13 @@ typedef struct {
     uint64_t timestamp_us;
 } board_imu_sample_t;
 
+typedef enum {
+    BOARD_IMU_UNINITIALIZED,
+    BOARD_IMU_ACTIVE,
+    BOARD_IMU_RECOVERING,
+    BOARD_IMU_FATAL,
+} board_imu_phase_t;
+
 typedef struct {
     uint64_t timestamp_us;
     bool initialization_attempted;
@@ -56,9 +63,17 @@ typedef struct {
     bool available;
     bool sample_valid;
     bool sample_fresh;
+    board_imu_phase_t phase;
     esp_err_t error;
     uint64_t sample_count;
     bool sample_count_saturated;
+    uint64_t late_batch_count; /* Finite monotonic batches rejected for exceeding 20 ms. */
+    bool late_batch_count_saturated;
+    uint32_t failure_streak, retry_delay_ms;
+    uint64_t recovery_count;
+    bool recovery_count_saturated;
+    bool batch_time_known;
+    uint64_t last_batch_us, max_batch_us, last_schedule_late_us, max_schedule_late_us;
     uint64_t last_sample_us;
     bool sample_age_known;
     uint64_t sample_age_us;
@@ -132,21 +147,38 @@ board_capabilities_t board_capabilities(void);
  * follows the right-hand rule. This is source-grounded; physical sign and
  * installed display orientation qualification remain pending. The acquisition
  * cache and hardware diagnostics retain raw BSP coordinates.
- * Gyro and acceleration use separate official BSP reads in one acquisition
- * batch; they are not an atomic six-axis sensor frame. Acceleration is in g.
+ * One official corrected Bosch full-frame read supplies gyro/acceleration and
+ * its data-ready status. The adapter explicitly configures 4 g/2000 dps and
+ * applies the same range scales as the BSP. This burst is not proof of an
+ * atomic ODR snapshot. Acceleration is in g.
  * Acquisition batches over 20 ms are rejected rather than timestamped fresh.
+ * A finite, monotonic late batch may be discarded while a prior accepted
+ * sample remains within 50 ms; the sampler keeps its normal periodic schedule.
+ * Discards never refresh the cached timestamp or accepted-sample count. Startup
+ * still requires a coherent first sample. A stale cache disables output but
+ * retains bounded recovery acquisition. Communication failures are unavailable
+ * and use capped backoff; clock/nonfinite/handle/config/order faults are fatal.
+ * A consumer loss invalidates the in-flight generation once. Only a subsequent
+ * newly acquired fresh frame can restore capability, never user Motion intent.
  * timestamp_us is the monotonic acquisition-completion time, not wall time.
  * The same timestamp may repeat: consumers must skip duplicates and use actual
  * timestamp intervals. Samples older than 50 ms fail closed. On failure output
  * is untouched; unavailable/faulted streams return an error and drop imu. */
 esp_err_t board_imu_read(board_imu_sample_t *sample);
 /* Nonmutating cached diagnostics: no sensor I/O, freshness latch or recovery.
- * Counts include accepted samples only. Age is meaningful only when known;
+ * sample_count includes accepted samples only; late_batch_count separately
+ * counts discarded finite monotonic batches over 20 ms. Both saturate. Age is
+ * meaningful only when known;
  * sample_valid/available/error describe current adapter state; sample_fresh
  * additionally evaluates the unchanged 50 ms age gate without latching it.
  * Initialization, start and worker-created flags retain boot milestones, not current
  * hardware qualification. Stage strings are static English literals. The first
- * fault survives cleanup/later errors; last_read covers non-null cache reads. */
+ * fault survives recovery/cleanup/later errors and is historical, not current
+ * fatal state. phase describes current state; worker_running covers the shared
+ * sensor owner, which also polls battery even if the IMU has a fatal fault.
+ * failure_streak/retry_delay_ms bound communication recovery attempts; timing
+ * fields observe complete read spans and skipped/woken scheduling lateness.
+ * last_read covers non-null cache reads. */
 board_imu_status_t board_imu_status(void);
 
 /* Nonblocking cache, polled once per second; stale after five seconds. Always

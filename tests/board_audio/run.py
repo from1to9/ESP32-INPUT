@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 
+os.environ.setdefault("UBSAN_OPTIONS", "halt_on_error=1:print_stacktrace=1")
 root = Path(__file__).resolve().parents[2]
 suite = Path(__file__).resolve().parent
 codec = root / "firmware/managed_components/espressif__esp_codec_dev"
@@ -55,5 +56,27 @@ with tempfile.TemporaryDirectory(prefix="esp32-board-audio-") as temp:
     subprocess.run(common + ["-pedantic", "-c", str(suite / "test_audio_startup.c"), "-o", startup_object], check=True)
     startup_binary = str(Path(temp) / "audio_startup")
     subprocess.run(common + [startup_object] + engine_objects[1:] + objects[1:] + ["-lm", "-o", startup_binary], check=True)
-    for ordering in ("probe_first", "stop_first", "probe_failure", "control_failure"):
+    orderings = ("probe_first", "stop_first", "probe_failure", "control_failure", "dma_tx_failure", "dma_rx_failure")
+    for ordering in orderings:
         subprocess.run([startup_binary, ordering], check=True)
+    # The expected placement is explicit for each SDK capability/configuration.
+    # Exercise the same production adapter and actual engine/codec under each.
+    for name, dma_capable, psram, iram_safe, i2c_iram_safe, allow_stack, expected_dma, expected_stack in (
+        ("psram_dma", 1, 1, 0, 0, 1, 1, 1),
+        ("no_psram", 1, 0, 0, 0, 1, 0, 0),
+        ("no_psram_dma", 0, 1, 0, 0, 1, 0, 1),
+        ("iram_safe", 1, 1, 1, 0, 1, 0, 0),
+        ("i2c_iram_safe", 1, 1, 0, 1, 1, 1, 0),
+        ("external_stack_disabled", 1, 1, 0, 0, 0, 1, 0),
+    ):
+        flags = [f"-DSOC_PSRAM_DMA_CAPABLE={dma_capable}", f"-DCONFIG_SPIRAM={psram}",
+                 f"-DCONFIG_I2S_ISR_IRAM_SAFE={iram_safe}", f"-DTEST_EXPECT_PSRAM_DMA={expected_dma}",
+                 f"-DCONFIG_I2C_ISR_IRAM_SAFE={i2c_iram_safe}",
+                 f"-DCONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM={allow_stack}",
+                 f"-DTEST_EXPECT_EXTERNAL_STACK={expected_stack}"]
+        for source_name, support in (("test_board_audio.c", objects[1:]),
+                                     ("test_audio_startup.c", engine_objects[1:] + objects[1:])):
+            variant = str(Path(temp) / f"{name}-{source_name}")
+            subprocess.run(common + flags + ["-pedantic", str(suite / source_name)] + support + ["-lm", "-o", variant], check=True)
+            for args in ([[]] if source_name == "test_board_audio.c" else [[value] for value in orderings]):
+                subprocess.run([variant] + args, check=True)

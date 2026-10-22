@@ -130,7 +130,16 @@ typedef struct {
 } app_remote_device_port_t;
 
 typedef struct app_remote_device app_remote_device_t;
+/* Includes bounded per-instance parsing/execution scratch; execute allocates no
+ * heap storage. The coordinator must serialize all calls on an instance. This
+ * is not a thread-safe API. Same-instance execute reentry from a port callback
+ * returns CP_BUSY without changing the active request; other instances remain
+ * independent. Callback inputs are borrowed only for the duration of that
+ * callback. Retained work must copy them, as this adapter does for jobs/stages.
+ * Every owning execute return wipes its transient document and workspace. */
 size_t app_remote_device_bytes(void);
+/* Caller storage must satisfy both this alignment and the byte requirement. */
+size_t app_remote_device_alignment(void);
 bool app_remote_device_owns(cp_operation_id_t);
 cp_error_t app_remote_device_init(void *memory, size_t bytes,
     const app_remote_device_port_t *, app_remote_device_t **);

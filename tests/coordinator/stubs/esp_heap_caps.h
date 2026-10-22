@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #define MALLOC_CAP_SPIRAM (1U << 10)
 void *heap_caps_calloc(size_t, size_t, uint32_t);
+void *heap_caps_aligned_calloc(size_t, size_t, size_t, uint32_t);
 void heap_caps_free(void *);
 #define MALLOC_CAP_8BIT (1U << 2)
 #define MALLOC_CAP_DMA (1U << 3)

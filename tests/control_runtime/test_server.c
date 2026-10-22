@@ -8,6 +8,8 @@
 #include "control_json.h"
 #include "../../firmware/main/app_control_server.h"
 #include "../../firmware/main/app_remote_media_runtime_port.h"
+#include "../../firmware/main/app_network_task.h"
+#include "weak_heap.h"
 typedef struct server {
     cp_context_t *protocol;
     SemaphoreHandle_t mutex;
@@ -106,6 +108,8 @@ static struct {
     void *arg;
 } queued[8];
 static unsigned queued_count;
+static bool fail_task_create;
+static unsigned legacy_creates, caps_creates, legacy_deletes, caps_deletes;
 static bool http_owner, capture_permission = true, fail_send, reject_queue, deny_read_after_copy,
                         expire_after_copy, revoke_after_copy;
 static unsigned channel_losses;
@@ -126,8 +130,15 @@ void test_leave(void)
 int64_t esp_timer_get_time(void) { return (int64_t)clock_ms * 1000; }
 void *heap_caps_calloc(size_t count, size_t n, unsigned caps)
 {
-    (void)caps;
-    void *p = calloc(count, n);
+    void *p = test_heap_calloc(4, count, n, caps);
+    if (p) {
+        ++allocations;
+    }
+    return p;
+}
+void *heap_caps_aligned_calloc(size_t alignment, size_t count, size_t n, unsigned caps)
+{
+    void *p = test_heap_calloc(alignment, count, n, caps);
     if (p) {
         ++allocations;
     }
@@ -137,7 +148,7 @@ void heap_caps_free(void *p)
 {
     assert(p && allocations);
     --allocations;
-    free(p);
+    test_heap_free(p);
 }
 int xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t ticks)
 {
@@ -153,16 +164,40 @@ void vTaskDelay(TickType_t ticks)
 }
 void vTaskDelete(void *task)
 {
-    assert(!task && !critical);
+    assert(!APP_NETWORK_EXTERNAL_STACK && !task && !critical);
     ++delete_calls;
+    ++legacy_deletes;
+}
+void vTaskDeleteWithCaps(void *task)
+{
+    assert(APP_NETWORK_EXTERNAL_STACK && !task && !critical);
+    ++delete_calls;
+    ++caps_deletes;
+}
+static int create_download(void (*task)(void *), const char *name, unsigned stack, void *argument,
+                           unsigned priority, void *out)
+{
+    assert(!critical && !strcmp(name, "record_download") && stack == 8192 && priority == 1 && !out);
+    if (fail_task_create) {
+        return 0;
+    }
+    download_task = task;
+    download_argument = argument;
+    return pdPASS;
 }
 int xTaskCreate(void (*task)(void *), const char *name, unsigned stack, void *argument,
                 unsigned priority, void *out)
 {
-    assert(!critical && !strcmp(name, "record_download") && stack == 8192 && priority == 1 && !out);
-    download_task = task;
-    download_argument = argument;
-    return pdPASS;
+    assert(!APP_NETWORK_EXTERNAL_STACK);
+    ++legacy_creates;
+    return create_download(task, name, stack, argument, priority, out);
+}
+int xTaskCreateWithCaps(void (*task)(void *), const char *name, unsigned stack, void *argument,
+                        unsigned priority, void *out, unsigned caps)
+{
+    assert(APP_NETWORK_EXTERNAL_STACK && caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    ++caps_creates;
+    return create_download(task, name, stack, argument, priority, out);
 }
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 {
@@ -392,6 +427,10 @@ static void setup_server(bool browser)
     channel_losses = 0;
     lost_channel = 0;
     reject_queue = false;
+    fail_task_create = false;
+    download_task = NULL;
+    download_argument = NULL;
+    legacy_creates = caps_creates = legacy_deletes = caps_deletes = delete_calls = 0;
     sem_available = true;
     safety_calls = dispatch_calls = 0;
     capture_permission = true;
@@ -526,6 +565,29 @@ static void download(httpd_req_t *request, const char *range, const char *etag)
     assert(download_task);
     download_task(download_argument);
     assert(!server.download_active && request->completed);
+}
+static void test_download_stack_allocation_failure(void)
+{
+    setup_server(false);
+    httpd_req_t request = {.fd = 4,
+                           .uri = "/api/v1/recordings/33333333333333333333333333333333/content",
+                           .user_ctx = &server};
+    cp_http_security_t security = native_security();
+    test_heap_fail_next = 1;
+    assert(begin_recording_download(&request, &server, &security) == ESP_FAIL);
+    assert(request.status == 503 && !server.download_active && !download_task &&
+           !allocations && !test_heap_live);
+    fail_task_create = true;
+    assert(begin_recording_download(&request, &server, &security) == ESP_FAIL);
+    assert(request.completed && request.status == 503 && !server.download_active &&
+           !download_task && !allocations);
+    assert((APP_NETWORK_EXTERNAL_STACK ? caps_creates : legacy_creates) == 1 &&
+           (APP_NETWORK_EXTERNAL_STACK ? legacy_creates : caps_creates) == 0 && !delete_calls);
+    fail_task_create = false;
+    download(&request, NULL, NULL);
+    assert(request.terminated && delete_calls == 1 && !server.download_active && !allocations);
+    assert((APP_NETWORK_EXTERNAL_STACK ? caps_deletes : legacy_deletes) == 1 &&
+           (APP_NETWORK_EXTERNAL_STACK ? legacy_deletes : caps_deletes) == 0);
 }
 static void test_auth_before_upgrade(void)
 {
@@ -685,7 +747,7 @@ static void test_channel_loss_revokes_exact_logical_owner(void)
                CP_FORBIDDEN &&
            dispatch_calls == before);
     apply_acquire(&owner, lease);
-    channel_t *late = heap_caps_calloc(1, sizeof(*late), MALLOC_CAP_8BIT);
+    channel_t *late = heap_caps_aligned_calloc(_Alignof(channel_t), 1, sizeof(*late), MALLOC_CAP_8BIT);
     *late = original;
     websocket_free(late);
     assert(server.channels[0].used &&
@@ -693,7 +755,7 @@ static void test_channel_loss_revokes_exact_logical_owner(void)
     /* Pressure queues only scoped loss; HTTP authentication remains alive.
      * Reconnect drains the previous generation before a new lease admission. */
     sem_available = false;
-    late = heap_caps_calloc(1, sizeof(*late), MALLOC_CAP_8BIT);
+    late = heap_caps_aligned_calloc(_Alignof(channel_t), 1, sizeof(*late), MALLOC_CAP_8BIT);
     *late = original;
     websocket_free(late);
     assert(!server.channel_closure_count);
@@ -719,6 +781,9 @@ static void test_channel_loss_revokes_exact_logical_owner(void)
 static void test_capture_queue_and_owner_thread_send(void)
 {
     setup_server(false);
+    test_heap_fail_next = 1;
+    handshake();
+    assert(!upgrade_101 && !ws_request.sess_ctx && !allocations && !test_heap_live);
     handshake();
     assert(upgrade_101 == 1);
     assert(websocket_data(&ws_request) == ESP_FAIL);
@@ -735,6 +800,11 @@ static void test_capture_queue_and_owner_thread_send(void)
     memset(pcm, 0x5a, sizeof(pcm));
     size_t length;
     assert(cp_media_encode(&h, pcm, packet, sizeof(packet), &length));
+    test_heap_fail_next = 1;
+    assert(app_control_server_capture_send(&identity, h.job_id, 8,
+                                           app_control_server_channel_generation(&identity), packet,
+                                           length) == ESP_ERR_NO_MEM &&
+           !server.media_pending_count && !queued_count && allocations == 1 && test_heap_live == 1);
     assert(app_control_server_capture_send(&identity, h.job_id, 8,
                                            app_control_server_channel_generation(&identity), packet,
                                            length) == ESP_OK);
@@ -794,7 +864,7 @@ static void test_channel_media_binding_and_send_failures(void)
     size_t n;
     assert(cp_media_encode(&h, pcm, packet, sizeof(packet), &n));
     assert(app_control_server_capture_send(&identity, h.job_id, 8, first, packet, n) == ESP_OK);
-    channel_t *old = heap_caps_calloc(1, sizeof(*old), MALLOC_CAP_8BIT);
+    channel_t *old = heap_caps_aligned_calloc(_Alignof(channel_t), 1, sizeof(*old), MALLOC_CAP_8BIT);
     *old = *(channel_t *)ws_request.sess_ctx;
     websocket_free(ws_request.sess_ctx);
     ws_request.sess_ctx = NULL;
@@ -870,6 +940,7 @@ static void test_ranges_and_async_revalidation(void)
 }
 int main(void)
 {
+    test_download_stack_allocation_failure();
     test_auth_before_upgrade();
     test_channel_loss_revokes_exact_logical_owner();
     test_capture_queue_and_owner_thread_send();
@@ -881,7 +952,7 @@ int main(void)
     }
     free(server.protocol);
     server.protocol = NULL;
-    assert(!allocations && !critical && !queued_count);
+    assert(!allocations && !test_heap_live && !critical && !queued_count);
     puts("PASS: production WSS pre-upgrade auth/CSRF, HTTP-owner direct send, bounded media "
          "queue/lifetime/cancel, async binary Range/If-Match and post-read revocation/deadline");
     return 0;

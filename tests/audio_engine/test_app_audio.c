@@ -11,16 +11,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "heap_caps_model.h"
 
 struct test_task { pthread_t thread; pthread_mutex_t lock; pthread_cond_t changed; unsigned notifications; TaskFunction_t fn; void *argument; };
 static struct test_task task;
 static atomic_uint allocations, writes, receipts;
 static atomic_bool hold_worker, worker_held;
+static atomic_bool hold_task_handle, task_handle_held;
 static size_t allocated_bytes;
+static unsigned allocation_attempt, fail_allocation;
+static bool reject_engine_arena, fail_task_create;
+static atomic_int stop_result;
+static atomic_uint stops;
 static ae_format_t pcm = {48000, 1, 10, AE_PCM_S16_LE};
 static ae_route_token_t route_token = {.peer_id = {{1}}, .stream_id = {{2}}, .link_generation = 1};
 static void (*notify_done)(void *);
 static void *notify_context;
+static void (*retired_notify)(void *);
+static void *retired_context;
 static unsigned pending;
 static uint64_t codec_generation;
 static bool mic, speaker;
@@ -29,17 +37,37 @@ static int64_t micros(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, 
 int64_t esp_timer_get_time(void) { return micros(); }
 static void pause_ms(unsigned ms) { struct timespec t = {.tv_sec = ms / 1000, .tv_nsec = (long)(ms % 1000) * 1000000}; nanosleep(&t, NULL); }
 void *heap_caps_calloc(size_t n, size_t bytes, unsigned caps)
-{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); void *p = calloc(n, bytes); if (p) { atomic_fetch_add(&allocations, 1); allocated_bytes += n * bytes; } return p; }
-void heap_caps_free(void *p) { if (p) { atomic_fetch_sub(&allocations, 1); free(p); } }
+{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); return test_heap_allocate(4, n, bytes); }
+void *heap_caps_aligned_calloc(size_t alignment, size_t n, size_t bytes, unsigned caps)
+{
+    assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    assert(alignment >= _Alignof(uint64_t));
+    if (++allocation_attempt == fail_allocation) return NULL;
+    if (bytes == ae_engine_bytes()) {
+        assert(alignment == ae_engine_alignment());
+        if (reject_engine_arena) alignment = 4;
+    }
+    void *p = test_heap_allocate(alignment, n, bytes);
+    if (p) { atomic_fetch_add(&allocations, 1); allocated_bytes += n * bytes; }
+    return p;
+}
+void heap_caps_free(void *p) { if (p) { atomic_fetch_sub(&allocations, 1); test_heap_free(p); } }
 void esp_fill_random(void *p, size_t bytes) { static uint64_t id; memset(p, 0, bytes); ++id; memcpy(p, &id, bytes < 8 ? bytes : 8); }
 static void *thread_main(void *p) { struct test_task *t = p; t->fn(t->argument); return NULL; }
 BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t bytes, void *argument, unsigned priority, TaskHandle_t *out)
 {
-    (void)name; assert(bytes == 8192 && priority == 4); task.fn = fn; task.argument = argument;
+    (void)name; assert(bytes == 8192 && priority == 4);
+    if (fail_task_create) return 0;
+    task.fn = fn; task.argument = argument; task.notifications = 0;
     assert(!pthread_mutex_init(&task.lock, NULL)); assert(!pthread_cond_init(&task.changed, NULL));
     assert(!pthread_create(&task.thread, NULL, thread_main, &task)); if (out) *out = &task; return pdPASS;
 }
-TaskHandle_t xTaskGetCurrentTaskHandle(void) { return &task; }
+TaskHandle_t xTaskGetCurrentTaskHandle(void)
+{
+    while (atomic_load(&hold_task_handle)) { atomic_store(&task_handle_held, true); pause_ms(1); }
+    atomic_store(&task_handle_held, false);
+    return &task;
+}
 void xTaskNotifyGive(TaskHandle_t t)
 { pthread_mutex_lock(&t->lock); ++t->notifications; pthread_cond_signal(&t->changed); pthread_mutex_unlock(&t->lock); }
 unsigned ulTaskNotifyTake(BaseType_t clear, TickType_t ticks)
@@ -59,7 +87,12 @@ unsigned ulTaskNotifyTake(BaseType_t clear, TickType_t ticks)
 void vTaskDelay(TickType_t ticks) { pause_ms(ticks * 10); }
 void vTaskDelete(TaskHandle_t t) { assert(!t); pthread_exit(NULL); }
 static void completed(void) { if (notify_done) notify_done(notify_context); }
-static void completion(void *c, void (*fn)(void *), void *context) { (void)c; notify_done = fn; notify_context = context; }
+static void completion(void *c, void (*fn)(void *), void *context)
+{
+    (void)c;
+    if (fn) { retired_notify = fn; retired_context = context; }
+    notify_done = fn; notify_context = context;
+}
 static ae_result_t exchange(unsigned operation)
 {
     if (!pending) { pending = operation; completed(); return AE_AGAIN; }
@@ -80,7 +113,12 @@ static ae_result_t mute_codec(void *c, ae_role_t role, bool muted, uint64_t gene
 static ae_result_t level(void *c, uint8_t value, uint64_t generation)
 { (void)c; (void)value; assert(generation == codec_generation); return exchange(4); }
 static ae_result_t stop_codec(void *c, uint64_t generation)
-{ (void)c; (void)generation; pending = 0; mic = speaker = false; return AE_OK; }
+{
+    (void)c; (void)generation; atomic_fetch_add(&stops, 1);
+    ae_result_t result = (ae_result_t)atomic_load(&stop_result);
+    if (result == AE_OK) { pending = 0; mic = speaker = false; }
+    return result;
+}
 static ae_result_t write_codec(void *c, uint64_t generation, const void *data, size_t bytes, size_t *actual)
 {
     (void)c; assert(speaker && generation == codec_generation && bytes == 960); *actual = 0;

@@ -10,6 +10,10 @@ contains_local_runtime_facts: false
 
 # Knowledge and evidence contract
 
+The [engineering lessons](ENGINEERING_LESSONS.md) index retained defects,
+regression protections and unresolved questions. Image-specific results remain
+in the [validation record](../../docs/validation.md).
+
 ## Storage
 
 Tracked documentation contains portable requirements, decisions, procedures and reviewed lessons. `.agent/local/` contains resolved paths, logs and machine-specific investigation notes. Tool caches and build directories remain local. Do not copy raw sessions, personal memory or local run directories into Git.

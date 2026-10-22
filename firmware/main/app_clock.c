@@ -5,6 +5,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "app_network_task.h"
 
 /* The callback proves a network synchronization event. It does not prove the
  * cryptographic authenticity of an unauthenticated NTP server. All wall-time
@@ -160,7 +161,7 @@ esp_err_t app_clock_init(const app_clock_config_t *config)
     ++state.config_generation;
     ++state.view.revision;
     portEXIT_CRITICAL(&clock_lock);
-    if (start && xTaskCreate(worker, "network_clock", 4096, NULL, 1, NULL) != pdPASS) {
+    if (start && app_network_task_create(worker, "network_clock", 4096, NULL, 1, NULL) != pdPASS) {
         portENTER_CRITICAL(&clock_lock);
         state.worker_started = false;
         state.view.initialized = false;

@@ -19,15 +19,18 @@ static esp_err_t link_result = ESP_OK;
 static uint64_t next_link_token = 100;
 static ae_result_t submit_result = AE_OK;
 static bool snapshot_available = true;
+static bool store_snapshot_available = true;
+static ae_result_t records_copy_result = AE_OK;
 static ae_record_metadata_t listed[APP_MEDIA_ROWS];
 static app_media_controls_context_t context;
 static app_view_t view;
 
 bool app_media_runtime_snapshot(app_media_snapshot_t *out) { if (snapshot_available) *out = owner; return snapshot_available; }
-bool app_recording_store_snapshot(app_recording_store_snapshot_t *out) { *out = disk; return true; }
+bool app_recording_store_snapshot(app_recording_store_snapshot_t *out)
+{ if (store_snapshot_available) *out = disk; return store_snapshot_available; }
 board_recording_flash_status_t board_recording_flash_status(void) { return physical; }
 bt_audio_snapshot_t bt_audio_snapshot(void) { return bluetooth; }
-bt_audio_bond_list_t bt_audio_bond_list(void) { return bonds; }
+void bt_audio_copy_bond_list(bt_audio_bond_list_t *out) { assert(out); *out = bonds; }
 esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t revision, bt_audio_command_t command,
                                const uint8_t peer[6], uint64_t *token)
 {
@@ -47,7 +50,7 @@ ae_result_t app_media_runtime_route(ae_route_t selected, ae_route_capabilities_t
 ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *request)
 { ++submissions; submitted = *request; return submit_result; }
 ae_result_t app_media_runtime_copy_records(uint64_t token, ae_record_metadata_t *out, size_t capacity)
-{ assert(token == owner.request_token && owner.result_ready && capacity == APP_MEDIA_ROWS); memcpy(out, listed, sizeof(listed)); return AE_OK; }
+{ assert(token == owner.request_token && owner.result_ready && capacity == APP_MEDIA_ROWS); memcpy(out, listed, sizeof(listed)); return records_copy_result; }
 bool app_media_runtime_take_result(uint64_t *token, ae_result_t *result)
 { if (!owner.result_ready) return false; *token = owner.request_token; *result = owner.result; owner.result_ready = false; return true; }
 ae_result_t app_media_runtime_confirm(uint64_t token, uint64_t epoch, uint64_t revision, char *candidate)
@@ -56,7 +59,12 @@ ae_result_t app_media_runtime_reject(uint64_t token, uint64_t epoch, uint64_t re
 { assert(token == owner.speech.token && epoch == context.epoch && revision == context.ui_revision); ++rejections; owner.speech.state = SL_REJECTED; return AE_OK; }
 
 static void poll_at(uint64_t now)
-{ app_media_controls_effect_t effect; app_media_controls_context(&context); app_media_controls_poll(now, &effect); app_media_controls_fill(&view); }
+{
+    app_media_controls_effect_t effect; app_media_controls_context(&context); app_media_controls_poll(now, &effect);
+    const unsigned char *bytes = (const unsigned char *)&poll_scratch;
+    for (size_t i = 0; i < sizeof(poll_scratch); ++i) assert(bytes[i] == 0);
+    app_media_controls_fill(&view);
+}
 static void setup(void)
 {
     owner = (app_media_snapshot_t){.initialized = true, .audio_known = true, .speech_known = true,
@@ -355,10 +363,44 @@ static void test_capture_and_mute_evidence(void)
     owner.audio.hardware_off_confirmed = true; ++owner.audio.revision; poll_at(1060);
     assert(!view.capture_indicator_required && view.capture_state == APP_CAPTURE_OFF_CONFIRMED);
 }
+static void test_snapshot_reuse(void)
+{
+    setup();
+    uint64_t revision = view.media.resource_revision;
+    uint64_t storage_revision = view.recording_storage.revision;
+    poll_at(1010); assert(view.media.resource_revision == revision && view.recording_storage.revision == storage_revision);
+    ++disk.capabilities.reserved_bytes; ++owner.audio.revision;
+    owner.speech.token = 91; owner.speech.state = SL_CANDIDATE; owner.speech.candidate = 'Q';
+    bonds.known = true; bonds.revision = 92; bonds.count = BT_AUDIO_CLASSIC_BONDS_MAX;
+    for (unsigned i = 0; i < bonds.count; ++i) bonds.bonds[i].address[5] = (uint8_t)(i + 1);
+    poll_at(1020);
+    assert(view.media.resource_revision > revision && view.recording_storage.revision > storage_revision);
+    assert(controls.runtime.speech.candidate == 'Q' && controls.bonds.bonds[BT_AUDIO_CLASSIC_BONDS_MAX - 1].address[5] == BT_AUDIO_CLASSIC_BONDS_MAX);
+    revision = view.media.resource_revision; storage_revision = view.recording_storage.revision;
+    uint64_t speech_revision = view.media.speech.revision;
+    poll_at(1030); assert(view.media.resource_revision == revision && view.recording_storage.revision == storage_revision && view.media.speech.revision == speech_revision);
+    snapshot_available = store_snapshot_available = false; poll_at(1040);
+    assert(!controls.runtime_known && !controls.store_known && !controls.runtime.speech.candidate && !controls.store.capabilities.quota_bytes);
+    assert(!view.audio_available && !view.recording_storage.capacity_known);
+    snapshot_available = store_snapshot_available = true; poll_at(1050);
+    assert(controls.runtime.speech.candidate == 'Q' && view.recording_storage.capacity_known && view.media.speech.revision > speech_revision);
+}
+static void test_record_copy_failure(void)
+{
+    setup(); context.overlay = APP_OVERLAY_RECORDINGS; ++context.ui_revision; poll_at(1010);
+    listed[0] = (ae_record_metadata_t){.object_id = {{31}}, .revision = 41};
+    owner.result_detail.count = 1; owner.result_detail.next_cursor = 0;
+    records_copy_result = AE_UNCERTAIN; complete(AE_OK);
+    assert(!controls.pending && !view.media.recordings.known && !controls.records[0].revision);
+    assert(!owner.result_ready && strstr(view.media.recordings.reason, "unconfirmed"));
+    unsigned prior = submissions; poll_at(controls.now_ms + 10); assert(submissions == prior);
+    records_copy_result = AE_OK; controls.list_requested = true; poll_at(controls.now_ms + 10);
+    complete(AE_OK); assert(view.media.recordings.known && view.media.recordings.row_count == 1 && controls.records[0].revision == 41);
+}
 int main(int argc, char **argv)
 {
-    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected"};
-    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected};
+    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure"};
+    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: media controls %s\n", names[i]); return 0; }

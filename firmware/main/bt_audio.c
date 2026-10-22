@@ -791,22 +791,32 @@ esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t bond_revision,
     return error;
 }
 
-bt_audio_bond_list_t bt_audio_bond_list(void)
+void bt_audio_copy_bond_list(bt_audio_bond_list_t *out)
 {
+    if (!out) return;
     portENTER_CRITICAL(&audio_lock);
-    bt_audio_bond_list_t list = {.known = audio.public.classic_bonds_known,
-        .refreshing = audio.bond_refresh_pending, .revision = audio.classic_list_revision,
-        .error = !AUDIO_PROFILES_SUPPORTED ? ESP_ERR_NOT_SUPPORTED :
-            (audio.public.classic_bonds_known ? ESP_OK : (audio.classic_list_error ? audio.classic_list_error : ESP_ERR_INVALID_STATE)),
-        .count = audio.public.classic_bond_count, .capacity = audio.public.classic_bond_capacity};
-    for (unsigned int i = 0; i < list.count; ++i) {
-        memcpy(list.bonds[i].address, audio.classic_bonds[i], 6);
-        list.bonds[i].hfp_current = list.known && audio.public.hfp_connected && audio.public.hfp_peer_known &&
-            peer_matches(list.bonds[i].address, audio.public.hfp_peer);
-        list.bonds[i].a2dp_current = list.known && audio.public.a2dp_connected && audio.public.a2dp_peer_known &&
-            peer_matches(list.bonds[i].address, audio.public.a2dp_peer);
+    memset(out, 0, sizeof(*out));
+    out->known = audio.public.classic_bonds_known;
+    out->refreshing = audio.bond_refresh_pending;
+    out->revision = audio.classic_list_revision;
+    out->error = !AUDIO_PROFILES_SUPPORTED ? ESP_ERR_NOT_SUPPORTED :
+        (audio.public.classic_bonds_known ? ESP_OK : (audio.classic_list_error ? audio.classic_list_error : ESP_ERR_INVALID_STATE));
+    out->count = audio.public.classic_bond_count;
+    out->capacity = audio.public.classic_bond_capacity;
+    for (unsigned int i = 0; i < out->count; ++i) {
+        memcpy(out->bonds[i].address, audio.classic_bonds[i], 6);
+        out->bonds[i].hfp_current = out->known && audio.public.hfp_connected && audio.public.hfp_peer_known &&
+            peer_matches(out->bonds[i].address, audio.public.hfp_peer);
+        out->bonds[i].a2dp_current = out->known && audio.public.a2dp_connected && audio.public.a2dp_peer_known &&
+            peer_matches(out->bonds[i].address, audio.public.a2dp_peer);
     }
     portEXIT_CRITICAL(&audio_lock);
+}
+
+bt_audio_bond_list_t bt_audio_bond_list(void)
+{
+    bt_audio_bond_list_t list;
+    bt_audio_copy_bond_list(&list);
     return list;
 }
 

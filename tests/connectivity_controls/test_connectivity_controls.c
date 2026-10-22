@@ -23,7 +23,7 @@ static ble_hid_target_preferences_request_t submitted_target;
 void app_wifi_get_snapshot(app_wifi_snapshot_t *out) { *out = wifi; }
 void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out) { *out = profiles; }
 ble_hid_snapshot_t ble_hid_snapshot(void) { return bluetooth; }
-ble_hid_bond_list_t ble_hid_bond_list(void) { return bonds; }
+void ble_hid_copy_bond_list(ble_hid_bond_list_t *out) { assert(out); *out = bonds; }
 ble_hid_target_snapshot_t ble_hid_target_snapshot(void) { return preference; }
 void app_control_runtime_snapshot(app_control_runtime_snapshot_t *out) { *out = api; }
 void app_control_trust_snapshot(app_control_trust_snapshot_t *out) { *out = api.trust; }
@@ -79,7 +79,10 @@ static app_intent_t api_intent(app_api_operation_t operation)
 }
 static app_connectivity_controls_effect_t handle(app_intent_t intent)
 {
-    app_connectivity_controls_effect_t effect; assert(app_connectivity_controls_handle(&intent, &effect)); assert(effect.handled); return effect;
+    app_connectivity_controls_effect_t effect; assert(app_connectivity_controls_handle(&intent, &effect)); assert(effect.handled);
+    const unsigned char *bytes = (const unsigned char *)&bluetooth_request;
+    for (size_t i = 0; i < sizeof(bluetooth_request); ++i) assert(bytes[i] == 0);
+    return effect;
 }
 static void apply_overlay(app_connectivity_controls_effect_t effect)
 {
@@ -155,6 +158,31 @@ static void bluetooth_targets(void)
     handle(bluetooth_intent(APP_BLUETOOTH_TARGET_PREFER, 1)); assert(target_requests == 2 && submitted_target.order[0].address[0] == 0xc3 && submitted_target.order[1].address[0] == 0xc2);
     preference.request_id = controls.ble_request_id; preference.request_status = BLE_HID_TARGET_UNCERTAIN; poll_at(1060);
     assert(controls.pending == P_NONE && view.bluetooth_target.uncertain && !view.bluetooth_target.can_select);
+}
+static void bluetooth_request_reuse(void)
+{
+    setup(); bonds.count = BLE_HID_MAX_BONDS; ++bonds.revision;
+    for (unsigned i = 0; i < bonds.count; ++i) {
+        bonds.bonds[i] = bonds.bonds[0]; bonds.bonds[i].address[5] = (uint8_t)i;
+        memset(bonds.bonds[i].bond_id, (int)(i + 1U), BLE_HID_BOND_ID_BYTES);
+    }
+    context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH; poll_at(1010);
+    apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, BLE_HID_MAX_BONDS - 1)));
+    submit_error = ESP_ERR_NO_MEM; handle(bluetooth_intent(APP_BLUETOOTH_TARGET_PREFER, BLE_HID_MAX_BONDS - 1));
+    assert(target_requests == 1 && controls.pending == P_NONE && submitted_target.count == BLE_HID_MAX_BONDS);
+    assert(submitted_target.expected_bond_revision == bonds.revision && submitted_target.expected_revision == preference.revision);
+    for (unsigned i = 0; i < bonds.count; ++i) {
+        unsigned index = i ? i - 1U : BLE_HID_MAX_BONDS - 1U;
+        assert(!memcmp(submitted_target.order[i].address, bonds.bonds[index].address, 6));
+        assert(!memcmp(submitted_target.order[i].bond_id, bonds.bonds[index].bond_id, BLE_HID_BOND_ID_BYTES));
+    }
+    bonds.count = 1; ++bonds.revision; poll_at(1020);
+    apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, 0)));
+    submit_error = ESP_OK; handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 0));
+    assert(target_requests == 2 && submitted_target.count == 1 && submitted_target.selected);
+    assert(!memcmp(submitted_target.target.bond_id, bonds.bonds[0].bond_id, BLE_HID_BOND_ID_BYTES));
+    const unsigned char *tail = (const unsigned char *)&submitted_target.order[1];
+    for (size_t i = 0; i < sizeof(submitted_target.order) - sizeof(submitted_target.order[0]); ++i) assert(tail[i] == 0);
 }
 static void bluetooth_current_evidence(void)
 {
@@ -305,7 +333,7 @@ int main(int argc, char **argv)
         {"routing", routing}, {"wifi-order", wifi_order}, {"wifi-join", wifi_join}, {"wifi-forget", wifi_forget},
         {"bluetooth", bluetooth_targets}, {"bluetooth-current", bluetooth_current_evidence}, {"api-window", api_window}, {"api-review", api_review}, {"clock-timeout", clock_and_timeout},
         {"api-review-authority", api_review_authority}, {"api-review-missing", api_review_missing}, {"api-review-capacity", api_review_capacity},
-        {"api-review-package", api_review_package}};
+        {"api-review-package", api_review_package}, {"bluetooth-request-reuse", bluetooth_request_reuse}};
     if (!strcmp(argv[1], "--list")) { for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) puts(cases[i].name); return 0; }
     for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) if (!strcmp(argv[1], cases[i].name)) {
         cases[i].run(); printf("Connectivity controls: %s passed\n", cases[i].name); return 0;

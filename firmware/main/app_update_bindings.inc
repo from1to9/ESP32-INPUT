@@ -106,7 +106,8 @@ static void remote_update_health_service(void)
     app_presenter_status_t ui = app_presenter_status();
     app_presenter_indicator_status_t renderer = app_presenter_indicator_status();
     settings_store_status_t settings = settings_store_status();
-    app_media_snapshot_t media = {0};
+    static EXT_RAM_BSS_ATTR app_media_snapshot_t media;
+    memset(&media, 0, sizeof(media));
     bool media_known = app_media_runtime_snapshot(&media);
     ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
     usb_hid_snapshot_t usb = usb_hid_snapshot();
@@ -133,13 +134,16 @@ static void remote_update_health_service(void)
         (void)app_update_confirm_health(true);
     }
 }
-static void remote_update_service(void)
+/* Keep maintenance-only temporaries out of the loop's permanent frame. */
+static void __attribute__((noinline)) remote_update_service(void)
 {
     app_update_snapshot_t update;
     app_update_snapshot(&update);
     portENTER_CRITICAL(&s_update_gate_lock);
     bool active = s_update_gate.active, pending = s_update_gate.pending;
-    cp_command_t command = s_update_gate.command;
+    /* Coordinator-owned copy, separate from the management-thread mailbox. */
+    static EXT_RAM_BSS_ATTR cp_command_t command;
+    command = s_update_gate.command;
     s_update_gate.pending = false;
     portEXIT_CRITICAL(&s_update_gate_lock);
     bool terminal = update.state == APP_UPDATE_STAGED || update.state == APP_UPDATE_CANCELLED ||
@@ -173,7 +177,8 @@ static void remote_update_service(void)
     if (active && requested) {
         app_update_authority_t authority = {0};
         cp_error_t allowed = app_control_runtime_update_authority(&command, &authority);
-        app_media_snapshot_t media = {0};
+        static EXT_RAM_BSS_ATTR app_media_snapshot_t media;
+        memset(&media, 0, sizeof(media));
         bool media_known = app_media_runtime_snapshot(&media);
         ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
         input_link_t link = input_link_snapshot(&bluetooth);
@@ -184,7 +189,8 @@ static void remote_update_service(void)
         app_wifi_scan_snapshot_t scan;
         app_wifi_get_scan_snapshot(&scan);
         ble_hid_name_snapshot_t name = ble_hid_name_snapshot();
-        ble_hid_bond_list_t bonds = ble_hid_bond_list();
+        static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+        ble_hid_copy_bond_list(&bonds);
         ble_hid_target_snapshot_t target = ble_hid_target_snapshot();
         bool neutral =
             !s_engine.count && !s_engine.mouse_buttons &&
@@ -210,5 +216,6 @@ static void remote_update_service(void)
     s_update_gate.cached_ms = s_now_ms;
     s_update_gate.maintenance_ready = ready && s_update_gate.active;
     portEXIT_CRITICAL(&s_update_gate_lock);
+    clear_private(&command, sizeof(command));
     remote_update_health_service();
 }

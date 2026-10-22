@@ -21,6 +21,12 @@ access. Every synthetic file stays in the selected local evidence directory.
   codec completion notifications, 100 Hz fallback tick, sustained 10 ms PCM,
   live setting serialization, consumer binding, bounded ingress credits and
   safety shutdown with retained query payload invalidation.
+- `test_app_audio_startup.c`: target-like four-byte generic heap alignment,
+  explicit owner/engine alignment, allocation/task failures, rejected arena
+  cleanup and retry, and valid pending/faulted codec initialization. Unknown
+  snapshots remain unavailable; no poisoned stack view becomes known. A copied
+  completion callback remains safe after owner teardown and task deletion,
+  including replacement startup before and after task-handle publication.
 - `test_app_recording_store.c`: actual firmware storage composition and real
   encrypted backend; explicit byte ownership, control-NVS custody, key/nonce
   atomicity, unknown commit handling and reboot. Only platform boundaries are

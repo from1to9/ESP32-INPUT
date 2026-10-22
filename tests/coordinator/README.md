@@ -1,5 +1,11 @@
 # Production coordinator host regressions
 
+The production queue-consumption boundary is exercised directly. Its copied
+event workspace is cleared after normal text admission, stale contact rejection
+and priority interruption; clearing must preserve the admitted HID reports.
+Target frame and nested callback budgets are checked separately with
+`python3 tools/check_stack_budget.py` using the configured firmware compiler.
+
 Run `python3 tests/coordinator/run.py` from the repository root. The runner builds with strict C11 diagnostics, conversion/shadow warnings and address/undefined-behavior sanitizers, using a temporary output directory. It includes the actual [production coordinator](../../firmware/main/main.c) and links production `interaction`, `hid_engine`, `input_core` and `device_settings`; no coordinator decisions, gesture classification, idle policy or safety transitions are reimplemented in the harness. To diagnose one case, use `python3 tests/coordinator/run.py --case touch_release_has_one_freeze_interval`. The default always runs every case.
 
 The tests invoke production `submit_intent`, `process_priority`, `physical_button`, `process_buttons`, `handle_intent`, `sync_interaction`, `process_motion`, `update_send`, `render_view` and the report sender. A fixed-storage FreeRTOS queue substitute preserves nonblocking admission, capacity, FIFO copying and reset semantics. A BLE boundary records report payloads and rejects obsolete/unready generations. Controlled time, raw button edges and synthetic IMU samples enter through the actual board/clock contracts. Value snapshots are copied at the presentation-publication boundary; acceptance does not render or acknowledge display completion. Runtime display-lock acquisition or synchronous UI rendering fails immediately. The actual handoff is exercised separately by the [presenter harness](../presenter/README.md). Other boot-only operations, including presenter initialization, fail immediately if unexpectedly invoked. No USB or Bluetooth stack, serial port, board or radio is accessed.

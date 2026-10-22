@@ -4,10 +4,16 @@
 
 The current combined source includes HID, motion/touch, spoken letters, audio,
 recording, authenticated LAN control/MCP, native connection management and signed
-OTA staging. This source-only checkpoint follows the
-[combined checklist](delivery-checklist.md). Hardware testing and installation are
-explicitly deferred. The historical observations below belong to their named
-images and must not be used as evidence for this combined image.
+OTA staging. The source checkpoint follows the
+[combined checklist](delivery-checklist.md). Its separately authorized device
+attempt is recorded below. Historical observations belong to their named images
+and must not be used as evidence for a different combined image.
+
+The latest reviewed source incorporates the repairs recorded below. Source
+synchronization is authorized separately from device acceptance: the retained
+startup IMU fault remains unresolved and the latest device gate remains failed.
+This checkpoint is not a qualified release. Reusable findings are indexed in
+the [engineering lessons](../.agent/shared/ENGINEERING_LESSONS.md).
 
 ### Combined source checkpoint: 2026-10-21
 
@@ -51,6 +57,291 @@ quality, physical motion/touch behavior, partition migration, power-loss recover
 and long powered operation remain separate qualification gates. The v3 layout
 needs a separately authorized migration on an earlier-layout device; ordinary
 OTA cannot perform that migration.
+
+### Cabled v3 migration and failed startup: 2026-10-22
+
+The user authorized flashing and explicitly waived a new backup. The existing
+recovery image was retained. The connected target identified as ESP32-S31 rev0
+with 16 MiB NOR, secure boot disabled and flash encryption disabled. Its installed
+table contained NVS at `0x9000`, PHY at `0xf000` and a four-MiB factory slot at
+`0x10000`. The entire new 64-KiB control region was verified erased before boot.
+
+The five frozen artifacts from source commit
+`1b36bc0811cee117612952998f871427b2ac4cb6` were written and individually verified,
+with the partition table last. Readback confirmed NVS/PHY and control unchanged
+before reset. No whole-chip erase, external NAND access or eFuse write occurred.
+The first bootstrap marks OTA_0 valid directly; this is not application health
+probation or proof of a working fallback image.
+
+On macOS 27.0.1 (26A434), the device enumerated as USB HID plus one-channel USB
+audio input/output at 48 kHz. This proves enumeration only. The user observed
+the application boot screen at `Loading preferences`, followed by repeated
+restarts. The first serial capture failed
+after 2.273 seconds with an I/O error, zero bytes and no health samples. A later
+bounded reconnect attempt observed no runtime CDC interface. Input, acoustic
+audio, connectivity, UI behavior and powered endurance have not passed this gate.
+
+Exact target compilation identified an independent stack-budget defect:
+`app_main` reserves 5,472 bytes and its `render_view` child reserves 2,720 bytes,
+exhausting the configured 8,192-byte main stack before caller or deeper callee
+frames. No panic trace was captured, so this evidence does not alone attribute
+the observed reset. Preserve this failed image and evidence when validating the
+repair; a later source or build pass cannot replace a successful device run.
+
+### Startup and coordinator stack repair: 2026-10-22
+
+The repair separates startup from the non-returning coordinator loop and moves
+large copied observations and requests into bounded owner workspaces. BLE and
+Classic bond readers provide direct copy-out APIs. Media and connection polling
+keep incoming observations separate from retained state, and transient private
+payloads are cleared after consumption. Remote device execution uses a
+per-instance workspace with callback-reentry rejection; accepted jobs and staged
+transactions retain independent copies. BLE target submission validates the
+complete request before replacing the worker-owned candidate under its lock.
+
+Independent review found a second real overflow in remote BLE target selection:
+the previous known nested frames exceeded 8,192 bytes before SDK overhead.
+The repair also removes the large target-request and candidate stack copies.
+The stack-budget checker covers the named callback chains, compiler split bodies
+and nested helper paths, with a separate 2-KiB SDK/library/interrupt reserve.
+Its declared-path result is not an exhaustive whole-program or runtime bound.
+The configured main stack remains 8,192 bytes; increasing it is not the repair.
+
+The final candidate passed the complete host regression, including 147 coordinator
+cases and the added request-lifetime, callback-reentry, copy-out, stale-state and
+failure-preservation cases under sanitizers. The 748 native UI renders remained
+pixel-identical to the approved reference. The expanded target budget passed
+28 declared paths: remote BLE target submission uses 4,000 known bytes, and the
+largest declared path uses 5,024 plus the 2,048-byte reserve, leaving 1,120 bytes
+beyond that reserve. The startup frame is 320 bytes. These are compiler results,
+not observed device watermarks.
+
+The full pinned ESP32-S31 build and size check passed with no drift across the
+417 captured firmware/component/test files. The application is 4,654,752 bytes,
+SHA-256 `662df63b385ed62bdabab7224965724bd91e4f093b633663daa0ddba15856d99`.
+The SDK, BSP, reviewed pairing patch and configuration match the checkpoint
+above. Static DIRAM use is 302,722 of 503,744 bytes, leaving 201,022 before runtime
+allocations; linked coordinator and UI observation workspaces reside in external
+RAM. Repository text/link and diff-whitespace checks passed.
+
+The app-only repair procedure verifies the frozen application and installed v3
+table before writing OTA_0, then verifies the application and unchanged NVS/PHY
+and table before reset. It does not perform a new backup. The separately retained
+failed-image evidence above remains part of the device acceptance record.
+
+The application-only candidate was written and verified against that hash;
+NVS/PHY and the installed table remained unchanged. A completed 90.005-second
+capture contained eight health samples with increasing uptime from 12 to 83
+seconds and a minimum observed main-stack watermark of 4,172 bytes. No reset was
+observed in that capture. The health gate nevertheless **failed**: display SPI
+transfers reported `ESP_ERR_NO_MEM`, Wi-Fi worker startup failed, and I2S DMA
+allocation and media initialization failed. Runtime internal free memory was
+4,083 bytes; DMA-capable free memory was 167 bytes with a largest block of 40.
+The first recorded allocation failure requested 8,190 internal DMA bytes.
+The user saw the product interface with the boot logo still over it. USB audio
+input/output enumeration at 48 kHz did not establish working acoustic audio.
+
+An IMU `batch_time` timeout stopped the stream after 16 samples and prevented
+calibration. Its cause is not established by the memory failure and requires
+separate verification. This candidate is not device-qualified; publication is
+held while the physical refresh and resource failures are investigated.
+
+### Display and combined resource repair candidate: 2026-10-22
+
+The resource repair bounds the board display queue without changing its full
+viewport, TE synchronization or completion callback. Audited task-only UI,
+coordinator, subscription and audio scratch buffers move to fixed external BSS.
+Supported I2S payloads and TLS allocations use PSRAM, while selected flash-free
+network/clock tasks use external stacks. Flash/NVS/OTA owners, locks, TCBs and
+interrupt data retain internal memory. The [runtime memory plan](../design/runtime-memory.md)
+records capacities, cleanup costs and the remaining coexistence qualifications.
+
+A separate IMU correction discards only finite, monotonically timed batches
+that exceed 20 ms while the prior accepted sample still meets the original
+50 ms freshness limit. It never retimestamps or publishes the discarded batch.
+Bus errors, clock rollback, expired samples and raced consumer faults still
+stop the stream. Duplicate timestamps do not advance calibration or emit HID.
+Rejected-batch counts remain observable.
+
+Fresh configuration from tracked defaults and the full pinned build passed.
+The 4,649,952-byte application SHA-256 is
+`7cbe4c5a013dd82112a7b76a3caa9a929e57e27e0de2c43776e6f6bb407cc2b5`;
+configuration SHA-256 is
+`f927e2539734a1b8e969efb45bab19328cd5e63b6695792a42cbac40bfef51bc`.
+The installed partition table and model image are unchanged. The full host
+regression passed without drift across 459 captured firmware, component, test
+and tool inputs. All 748 UI images match the approved baseline.
+
+Final linked static DIRAM use is 236,324 of 503,744 bytes, down 66,398 from the
+preceding stack-repair image. External BSS is 285,688 bytes. The optional Wi-Fi
+speed sections are no longer in internal IRAM, and the audited buffer symbols
+are in external BSS; queue control and locks remain internal. These figures do
+not establish measured heap/DMA headroom. The initial target link correctly
+failed because the wrapper was not extracted from its static archive; an
+explicit symbol anchor fixed that integration issue before this successful
+build.
+
+The exact application was subsequently written and verified; the installed
+table and NVS/PHY remained unchanged, and no new backup was performed. The
+90.010-second capture contained nine health samples with uptime increasing from
+23 to 103 seconds, and a minimum main-stack watermark of 4,176 bytes. Bluetooth
+was initialized, connected and ready. IMU samples increased from 1,824 to 9,101
+with completed 64-sample calibration and two retained late batches. No reset,
+display allocation error or I2S error was observed in that captured window.
+The user confirmed that the boot logo disappears completely, Menu and mode
+switching and touch work, and no restart is observed. This establishes those
+physical display/navigation observations, not host pointer or audio behavior.
+
+The device gate nevertheless **failed**. Intermittent battery telemetry
+`ESP_ERR_TIMEOUT` warnings remain, and the new runtime diagnostics expose invalid
+audio state/error values (`0xa5a5a5a5`) and an invalid off-confirmed value (`0xa5`)
+despite the snapshot reporting known audio state. Audio readiness cannot be
+inferred from initialization or USB enumeration. Wi-Fi initialized in idle
+station mode; no LAN join or server session was tested. Steady internal free
+memory was 20,847 bytes with a largest block of 10,752, and DMA free memory was
+11,415 bytes with the same largest block. This remains below the existing Wi-Fi
+scan admission limits. The user also observed a failed Wi-Fi scan. The memory
+gate is consistent with that result, although a scan-specific driver error was
+not captured. These observations require further owning-layer repair
+and coexistence validation; this image is not device-qualified and publication
+remains held.
+
+### Audio, battery and scan-resource follow-up: 2026-10-22
+
+The audio repair checks initialization before publishing any engine snapshot.
+Explicit alignment queries and aligned allocations correct a source-proven
+contract mismatch: the pinned generic PSRAM allocator can return four-byte
+alignment, whereas the linked audio engine requires eight. This explains a
+possible rejected initialization, followed by the previously observed stack
+poison publication; the original device allocation address was not captured.
+Matching engine/store, remote adapter/bridge and network object allocations
+are corrected at their owning boundaries. Weak-alignment regressions exercise
+rejection, correct allocation, failure cleanup and retry. Late completion
+notifications no longer borrow released audio state, and task-handle publication
+uses the same owner lock as readers. Valid hardware wait/fault recovery remains.
+
+Battery reads now follow the BQ27220 documented incremental-read and timing
+requirements, with three bounded packets instead of six. The original 20-ms
+whole-batch limit, 1-Hz polling and five-second freshness remain. Read, batch and
+clock failures retain truthful diagnostics; no automatic retry or hidden stale
+success is added. Native regressions cover legal clock stretching, partial
+failure, overdue batches and recovery. Physical timeout recovery remains open.
+
+The audited board audio and media control tasks use two external 6-KiB stacks
+on the supported profile. The Wi-Fi static TX pool is reduced from eight to
+four; existing scan admission limits and transport backpressure are unchanged.
+The [memory plan](../design/runtime-memory.md) records the projected benefit and
+the remaining combined-operation peaks. A projection is not device headroom.
+
+Fresh configuration, full target build and host regression passed without drift
+across 467 captured source/test/tool inputs. The regression includes 149
+coordinator cases and 35 serial-parser tests, which independently reject the
+observed poisoned runtime fields while retaining earlier error detection.
+The target stack budget passed all 31 declared paths with a maximum of 5,024
+known bytes plus the existing 2,048-byte reserve against an 8,192-byte stack.
+Linked static DIRAM use is 236,332 of 503,744 bytes; this excludes runtime costs.
+
+The application is 4,650,416 bytes, SHA-256
+`bda4e94e0203b44f7d5e006a30a445b01ff37c4ccae9fc57d56ae33431d24641`;
+configuration SHA-256 is
+`39b6b39f809b5ad47714a5e159086f1c405481d847b02c94ac09642793d4377c`.
+The partition table and model image remain byte-identical. Independent review
+approved the exact 139-file source inventory and application-only device test.
+The application was written and verified, preserving NVS/PHY and the installed
+table without a new backup.
+
+The completed 90.002-second capture contained nine health samples with uptime
+increasing from 23 to 103 seconds and a main-stack watermark of 4,176 bytes.
+All nine media observations were valid: audio OFF/OK with hardware-off confirmed,
+and speech IDLE/OK. USB audio input/output enumerated at 48 kHz. These results
+resolve the invalid snapshot observation; they do not establish acoustic audio
+or recognition. The user confirmed that Wi-Fi scanning lists networks and that
+the device successfully joins an existing LAN. The final two Wi-Fi observations
+also reported CONNECTED with LAN ready. The control service remained stopped
+with no provisioned trust; LAN connectivity does not imply API readiness.
+
+The device gate nevertheless **failed**. All nine Motion observations retained
+only 20 accepted samples, with no new samples throughout the capture and no
+calibration progress. The repeated first-fault record identifies one earlier
+`batch_time` timeout at uptime 3,148,860 microseconds, not nine separate faults.
+Source inspection shows that a late batch with an expired cache permanently
+stops and cleans up the sampler. The user independently reported Motion
+unavailable. Two battery warnings were whole-batch timeouts of 38,553 and
+23,694 microseconds after successful packets, not packet-read timeout errors.
+The source of those scheduling or bus delays remains under investigation.
+
+Observed free internal memory ranged from 37,407 to 43,423 bytes, with a largest
+block of 25,600; DMA free memory ranged from 11,719 to 17,735, with largest blocks
+of 8,192 to 16,384. Because the IMU worker had stopped, these measurements cannot
+qualify simultaneous healthy sensor, radio and audio operation. Publication is
+held for sampler recovery and timing repair. Physical pointer behavior, active
+acoustic paths, authenticated services and powered endurance remain unverified.
+
+### Sensor recovery and unified keyboard candidate: 2026-10-22
+
+The next candidate replaces permanent sampler shutdown on transient acquisition
+or freshness failure with bounded recovery. IMU and battery reads share one
+worker, with IMU first and missed periods skipped. A single Bosch frame supplies
+readiness and both sensor vectors. Clock rollback, invalid configuration and
+other structural faults remain terminal. The 20-ms batch and 50-ms freshness
+limits are unchanged; stale or rejected frames never advance accepted samples.
+Recovery requires fresh data, resets the motion reference and does not silently
+re-enable the user's Motion switch.
+
+Keyboard now exposes a persistent Keys entry in every submode. Its aligned panel
+provides Copy, Paste, Undo, Backspace, forward Delete, Enter, Esc, Tab, Home, End
+and four arrows. Copy/Paste/Undo use the selected Ctrl or Command host convention
+and send complete key-down/release pairs without changing the local draft.
+Submode, Keys and Menu captions share the same 16-pixel font and baseline in both themes.
+
+The full host logic/protocol run passed, including 151 coordinator cases and
+54 health-parser cases. The native LVGL run passed 768 renders,
+retained all 174 original scenes, and checked 100 resource cases. Each theme
+completed 1,000 panel cycles without retained growth; core/peak object counts
+were 106/148 under the unchanged 160-object ceiling. Unchanged frames caused no
+extra refreshes, and final teardown retained no tracked allocations.
+
+The target application is 4,651,040 bytes with SHA-256
+`04a8ec591cb24b4373047ed2beb93ae445736095b34d3e3497700e97a35a2007`.
+The complete build, size and coordinator stack-budget checks passed with 148
+unchanged target inputs. The sensor retains a 4-KiB internal stack; its measured
+944-byte call chain plus engineering reserve is a source budget, not a complete
+SDK bound or measured sensor-stack watermark. See the
+[runtime memory plan](../design/runtime-memory.md#persistent-sensor-worker).
+
+Independent review approved the exact 149-file inventory and application for
+app-only device testing. The application was flashed and its digest verified;
+NVS/PHY and the installed partition table were preserved, with no new backup.
+The runtime USB device re-enumerated.
+
+The completed 90.001-second capture still **failed**, retaining one startup IMU
+fault at uptime 3,103,083 microseconds. The maximum acquisition batch was
+69,358 microseconds. The capture began later, so it cannot identify which startup
+operation caused that delay. The sticky fault must not be cleared or treated as
+a passing gate merely because sampling recovered.
+
+Recovery was observed: all nine Motion records reported an active, live worker,
+available IMU and `ESP_OK`; accepted samples increased from 2,070 to 10,072 with
+no stall or regression. Sample ages were 1,950..9,469 microseconds and calibration
+had completed 64 samples. The recovery count remained one and late-batch count
+two throughout the window. Current batches were 1,162..1,223 microseconds, with
+zero reported schedule lateness. No new battery warning was captured; this does
+not establish that battery reads never fail.
+
+All nine Wi-Fi records reported CONNECTED/LAN ready. Bluetooth remained connected
+and ready; audio remained OFF/OK and speech IDLE/OK. Internal free memory was
+38,791 bytes with a 25,600-byte largest block while the sampler was alive; DMA
+free memory was 12,971 with a 9,216-byte largest block. The coordinator stack
+watermark was 4,112 bytes; sensor stack watermark remains unmeasured. Main uptime
+increased from 23 to 103 seconds. These observations do not qualify connected
+scanning, physical pointer/host keys or active audio.
+
+Device acceptance remains failed because of the retained startup fault, with
+physical checks still outstanding. Source publication does not change that
+result. Qualification explicitly requires Motion records, a live worker,
+increasing samples and sample ages within 50 ms. Legacy logs without Motion
+records remain readable but cannot satisfy this candidate's device gate.
+Previous failed captures remain failed.
 
 ## Historical evidence
 

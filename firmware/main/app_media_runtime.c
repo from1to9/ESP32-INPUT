@@ -12,6 +12,10 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
+#if CONFIG_SPIRAM && CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+#include "freertos/idf_additions.h"
+#endif
 #include <limits.h>
 #include <stdio.h>
 #include <inttypes.h>
@@ -70,6 +74,10 @@ typedef struct {
     uint8_t network_capture[CP_MEDIA_FRAME_BYTES];
     ae_frame_t network_playback;
     bool network_playback_busy;
+    /* Remote submitters can run on different tasks. Only the claimant may
+     * access this fixed PSRAM scratch; Bluetooth callbacks run outside our lock. */
+    bt_audio_bond_list_t remote_bonds;
+    bool remote_bonds_busy;
 } media_state_t;
 static portMUX_TYPE media_lock = portMUX_INITIALIZER_UNLOCKED;
 static media_state_t *media;
@@ -780,7 +788,7 @@ ae_result_t app_media_runtime_init(const app_media_services_t *services)
     if (media_attempted) { portEXIT_CRITICAL(&media_lock); return AE_BUSY; }
     media_attempted = true;
     portEXIT_CRITICAL(&media_lock);
-    media_state_t *state = heap_caps_calloc(1, sizeof(*state), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    media_state_t *state = heap_caps_aligned_calloc(_Alignof(media_state_t), 1, sizeof(*state), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!state) return AE_EXHAUSTED;
     state->services = *services;
     ae_result_t result = random_id(NULL, &state->boot_session);
@@ -797,7 +805,17 @@ ae_result_t app_media_runtime_init(const app_media_services_t *services)
     result = app_audio_init(&dependencies);
     if (result != AE_OK) { heap_caps_free(state); return result; }
     portENTER_CRITICAL(&media_lock); media = state; portEXIT_CRITICAL(&media_lock);
-    if (xTaskCreate(worker, "media_control", 6144, state, 3, NULL) != pdPASS) {
+    /* This resident worker uses cached policy and asynchronous owner APIs.
+     * NVS/storage and model execution stay on their separate internal tasks.
+     * WithCaps keeps its TCB internal and unwinds partial creation; it must
+     * never retry with an internal stack after external allocation fails. */
+#if CONFIG_SPIRAM && CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    BaseType_t created = xTaskCreateWithCaps(worker, "media_control", 6144, state, 3, NULL,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    BaseType_t created = xTaskCreate(worker, "media_control", 6144, state, 3, NULL);
+#endif
+    if (created != pdPASS) {
         /* The audio owner can still reference policy_context. Retain fixed
          * memory, close gates and expose failure instead of freeing it early. */
         app_audio_request_safety_stop(AE_STOP_IO);
@@ -999,6 +1017,40 @@ static bool remote_job_owned_locked(const app_remote_media_request_t *request)
     }
     return false;
 }
+static ae_result_t remote_link_bond(app_media_local_request_t *command, const char *peer_id)
+{
+    portENTER_CRITICAL(&media_lock);
+    media_state_t *state=media;
+    ae_result_t result=!state || !state->view.initialized ? AE_UNAVAILABLE :
+        state->remote_bonds_busy ? AE_BUSY : AE_OK;
+    if (result==AE_OK) state->remote_bonds_busy=true;
+    portEXIT_CRITICAL(&media_lock);
+    if (result!=AE_OK) return result;
+
+    /* The runtime retains its state for the audio owner's lifetime. Claiming
+     * this buffer does not hold media_lock while acquiring the Bluetooth lock. */
+    bt_audio_bond_list_t *bonds=&state->remote_bonds;
+    bt_audio_copy_bond_list(bonds);
+    if (!bonds->known || bonds->refreshing || !bonds->revision) result=AE_UNAVAILABLE;
+    else {
+        unsigned bytes[6]; char tail;
+        if (sscanf(peer_id,"%2x:%2x:%2x:%2x:%2x:%2x%c",&bytes[0],&bytes[1],&bytes[2],&bytes[3],&bytes[4],&bytes[5],&tail)!=6)
+            result=AE_INVALID;
+        else {
+            for (unsigned i=0;i<6;++i) command->bluetooth_peer[i]=(uint8_t)bytes[i];
+            bool found=false;
+            for (unsigned i=0;i<bonds->count && i<BT_AUDIO_CLASSIC_BONDS_MAX;++i)
+                found|=!memcmp(bonds->bonds[i].address,command->bluetooth_peer,6);
+            if (!found) result=AE_STALE;
+            else command->bluetooth_bond_revision=bonds->revision;
+        }
+    }
+    ae_secure_zero(bonds,sizeof(*bonds));
+    portENTER_CRITICAL(&media_lock);
+    state->remote_bonds_busy=false;
+    portEXIT_CRITICAL(&media_lock);
+    return result;
+}
 ae_result_t app_media_runtime_submit_remote(const app_remote_media_request_t *request)
 {
     if (!request || !request->token || !request->command_key) return AE_INVALID;
@@ -1067,17 +1119,8 @@ ae_result_t app_media_runtime_submit_remote(const app_remote_media_request_t *re
         command.action=APP_MEDIA_LINK_CONTROL;
         bt_audio_snapshot_t bt=bt_audio_snapshot(); command.bluetooth_generation=bt.generation;
         if (request->value) {
-            bt_audio_bond_list_t bonds=bt_audio_bond_list();
-            if (!bonds.known || bonds.refreshing || !bonds.revision) return AE_UNAVAILABLE;
-            unsigned bytes[6]; char tail;
-            if (sscanf(request->peer_id,"%2x:%2x:%2x:%2x:%2x:%2x%c",&bytes[0],&bytes[1],&bytes[2],&bytes[3],&bytes[4],&bytes[5],&tail)!=6)
-                return AE_INVALID;
-            for (unsigned i=0;i<6;++i) command.bluetooth_peer[i]=(uint8_t)bytes[i];
-            bool found=false;
-            for (unsigned i=0;i<bonds.count && i<BT_AUDIO_CLASSIC_BONDS_MAX;++i)
-                found|=!memcmp(bonds.bonds[i].address,command.bluetooth_peer,6);
-            if (!found) return AE_STALE;
-            command.bluetooth_bond_revision=bonds.revision;
+            ae_result_t linked=remote_link_bond(&command,request->peer_id);
+            if (linked!=AE_OK) return linked;
         }
         break;
     }

@@ -271,6 +271,7 @@ static ae_result_t hash_step(ae_store_t *s, const entry_t *e, uint16_t slot, uin
 }
 
 size_t ae_store_bytes(void) { return sizeof(ae_store_t); }
+size_t ae_store_alignment(void) { return _Alignof(ae_store_t); }
 void ae_store_deinit(ae_store_t *s)
 {
     if (!s) return;

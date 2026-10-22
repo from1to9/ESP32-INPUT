@@ -10,6 +10,7 @@ typedef struct {
     int dev_addr_length;
     uint16_t device_address;
     uint32_t scl_speed_hz;
+    uint32_t scl_wait_us;
 } i2c_device_config_t;
 esp_err_t i2c_master_bus_add_device(i2c_master_bus_handle_t bus,
     const i2c_device_config_t *config, i2c_master_dev_handle_t *device);

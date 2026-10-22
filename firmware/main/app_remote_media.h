@@ -97,6 +97,8 @@ typedef struct {
 
 typedef struct app_remote_media app_remote_media_t;
 size_t app_remote_media_bytes(void);
+/* Caller storage must satisfy both this alignment and the byte requirement. */
+size_t app_remote_media_alignment(void);
 cp_error_t app_remote_media_init(void *memory, size_t bytes,
     const app_remote_media_port_t *, app_remote_media_t **);
 /* Static operation ownership is independent of current hardware readiness. */

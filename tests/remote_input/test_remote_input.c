@@ -94,6 +94,24 @@ static void setup(fixture_t *f, input_mode_t mode)
     step(f);step(f); assert(!f->engine.state.release_pending);
 }
 static void finish(fixture_t *f) { free(f->memory); }
+static void storage_alignment_rejects_without_mutation_and_recovers(void)
+{
+    fixture_t f; setup(&f, INPUT_MOUSE);
+    size_t bytes = app_remote_input_bytes(), alignment = app_remote_input_alignment();
+    assert(alignment > 4 && !(alignment & (alignment - 1)));
+    unsigned char *storage = malloc(bytes + alignment); assert(storage);
+    memset(storage, 0xa5, bytes + alignment);
+    void *aligned = (void *)(((uintptr_t)storage + alignment - 1) & ~(uintptr_t)(alignment - 1));
+    void *weak = (unsigned char *)aligned + 4;
+    app_remote_input_t *out = f.remote;
+    const app_remote_input_port_t port = {.engine = &f.engine, .interaction = &f.model, .user = &f,
+        .observe = observe, .changed = changed, .complete = complete,
+        .delegate_available = available, .delegate = delegate};
+    assert(app_remote_input_init(weak, bytes, &port, &out) == CP_INVALID && out == f.remote);
+    for (size_t i = 0; i < bytes + alignment; ++i) assert(storage[i] == 0xa5);
+    assert(app_remote_input_init(aligned, bytes, &port, &out) == CP_OK && out == aligned);
+    free(storage); finish(&f);
+}
 static cp_command_t command(fixture_t *f, cp_operation_id_t op, const char *args)
 {
     app_remote_input_view_t view; app_remote_input_snapshot(f->remote,&view);
@@ -514,6 +532,7 @@ static void rejected_virtual_end_is_consumed_without_contact_or_click_replay(voi
 
 int main(void)
 {
+    storage_alignment_rejects_without_mutation_and_recovers();
     lease_barrier_renewal_and_safety();
     mouse_keyboard_admission_sent_and_deadman();
     preview_shared_selection_atomic_edits_and_batched_send();

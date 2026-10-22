@@ -5,6 +5,7 @@
  * callback. NVS stores fingerprints and real subscription bits, never keys. */
 #include "nvs.h"
 #include "psa/crypto.h"
+#include "esp_attr.h"
 
 #define SUBSCRIPTION_CAPACITY BLE_HID_MAX_BONDS
 #define SUBSCRIPTION_DIGEST_LENGTH 32U
@@ -16,6 +17,8 @@ typedef struct {
     uint8_t mask;
 } subscription_record_t;
 
+/* Task-owned data, never a DMA buffer or an ISR dependency. Keep the worker
+ * stack internal for NVS; raw exported bond keys are still cleared after use. */
 static struct {
     bool loaded;
     uint8_t count;
@@ -26,7 +29,7 @@ static struct {
     uint8_t live_fingerprints[SUBSCRIPTION_CAPACITY][SUBSCRIPTION_DIGEST_LENGTH];
     bool live_valid[SUBSCRIPTION_CAPACITY];
     int live_count;
-} subscriptions;
+} subscriptions EXT_RAM_BSS_ATTR;
 
 static void subscription_clear_bonds(void)
 {

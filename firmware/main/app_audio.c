@@ -42,13 +42,24 @@ static struct {
     portMUX_TYPE lock;
     app_state_t *state;
     bool initializing;
+    ae_result_t unavailable_result;
     atomic_uint safety_sequence;
     atomic_uint handled_sequence;
     atomic_int safety_reason;
     atomic_bool shutting_down;
-} app = {.lock = portMUX_INITIALIZER_UNLOCKED};
+} app = {.lock = portMUX_INITIALIZER_UNLOCKED, .unavailable_result = AE_UNAVAILABLE};
 
 static void wake(void *context) { app_state_t *state = context; if (state->task) xTaskNotifyGive(state->task); }
+static void completion_wake(void *context)
+{
+    (void)context;
+    /* Drivers can retain a copied callback across unregister. A completion is
+     * only a wake hint, so resolve the current owner under its lifetime lock
+     * instead of borrowing freed state or a deleted task handle. */
+    portENTER_CRITICAL(&app.lock);
+    if (app.state) wake(app.state);
+    portEXIT_CRITICAL(&app.lock);
+}
 static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000U; }
 static uint64_t policy_clock(void *context) { (void)context; return now_ms(); }
 static bool safety_pending(void)
@@ -153,14 +164,35 @@ static ae_result_t dispatch(app_state_t *state, const app_audio_command_t *comma
     return AE_INVALID;
 }
 
+static void release_worker(app_state_t *state, ae_result_t unavailable_result)
+{
+    if (state->original.codec.completion_notify)
+        state->original.codec.completion_notify(state->original.codec.context, NULL, NULL);
+    if (state->original.store.completion_notify)
+        state->original.store.completion_notify(state->original.store.context, NULL, NULL);
+    portENTER_CRITICAL(&app.lock);
+    app.state = NULL;
+    app.initializing = false;
+    app.unavailable_result = unavailable_result;
+    portEXIT_CRITICAL(&app.lock);
+    ae_secure_zero(state->engine_memory, ae_engine_bytes());
+    heap_caps_free(state->engine_memory);
+    ae_secure_zero(state, sizeof(*state));
+    heap_caps_free(state);
+    vTaskDelete(NULL);
+}
+
 static void worker(void *context)
 {
     app_state_t *state = context;
-    state->task = xTaskGetCurrentTaskHandle();
+    TaskHandle_t task = xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&app.lock);
+    state->task = task;
+    portEXIT_CRITICAL(&app.lock);
     if (state->original.codec.completion_notify)
-        state->original.codec.completion_notify(state->original.codec.context, wake, state);
+        state->original.codec.completion_notify(state->original.codec.context, completion_wake, NULL);
     if (state->original.store.completion_notify)
-        state->original.store.completion_notify(state->original.store.context, wake, state);
+        state->original.store.completion_notify(state->original.store.context, completion_wake, NULL);
     ae_dependencies_t dependencies = state->original;
     dependencies.policy_context = state;
     dependencies.authority = policy_authority;
@@ -170,7 +202,14 @@ static void worker(void *context)
     dependencies.safety_stop_requested = policy_stop;
     dependencies.capture_sink = state->original.capture_sink ? policy_sink : NULL;
     dependencies.capture_cancel = state->original.capture_cancel ? policy_cancel : NULL;
-    (void)ae_init(state->engine_memory, ae_engine_bytes(), &dependencies, now_ms(), &state->engine);
+    ae_result_t initialized = ae_init(state->engine_memory, ae_engine_bytes(), &dependencies, now_ms(), &state->engine);
+    if (!state->engine) {
+        /* A rejected arena has no snapshot or hardware ownership. Keep it
+         * unknown and preserve the exact rejection for command admission.
+         * A returned engine, including STOPPING/FAULT, still owns recovery. */
+        release_worker(state, initialized);
+        return;
+    }
     publish(state);
     for (;;) {
         unsigned sequence = atomic_load_explicit(&app.safety_sequence, memory_order_acquire);
@@ -238,19 +277,7 @@ static void worker(void *context)
         bool cleanup = current.playback.cleanup_pending;
         for (unsigned i = 0; i < AE_CONSUMERS_MAX; ++i) cleanup |= current.capture[i].cleanup_pending;
         if (atomic_load(&app.shutting_down) && current.hardware_off_confirmed && !cleanup) {
-            if (state->original.codec.completion_notify)
-                state->original.codec.completion_notify(state->original.codec.context, NULL, NULL);
-            if (state->original.store.completion_notify)
-                state->original.store.completion_notify(state->original.store.context, NULL, NULL);
-            portENTER_CRITICAL(&app.lock);
-            app.state = NULL;
-            app.initializing = false;
-            portEXIT_CRITICAL(&app.lock);
-            ae_secure_zero(state->engine_memory, ae_engine_bytes());
-            heap_caps_free(state->engine_memory);
-            ae_secure_zero(state, sizeof(*state));
-            heap_caps_free(state);
-            vTaskDelete(NULL);
+            release_worker(state, AE_UNAVAILABLE);
             return;
         }
         (void)ulTaskNotifyTake(pdTRUE, 1);
@@ -263,12 +290,13 @@ ae_result_t app_audio_init(const ae_dependencies_t *dependencies)
     portENTER_CRITICAL(&app.lock);
     if (app.state || app.initializing) { portEXIT_CRITICAL(&app.lock); return AE_BUSY; }
     app.initializing = true;
+    app.unavailable_result = AE_UNAVAILABLE;
     portEXIT_CRITICAL(&app.lock);
-    app_state_t *state = heap_caps_calloc(1, sizeof(*state), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    void *engine_memory = state ? heap_caps_calloc(1, ae_engine_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : NULL;
+    app_state_t *state = heap_caps_aligned_calloc(_Alignof(app_state_t), 1, sizeof(*state), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *engine_memory = state ? heap_caps_aligned_calloc(ae_engine_alignment(), 1, ae_engine_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : NULL;
     if (!state || !engine_memory) {
         if (state) heap_caps_free(state);
-        portENTER_CRITICAL(&app.lock); app.initializing = false; portEXIT_CRITICAL(&app.lock);
+        portENTER_CRITICAL(&app.lock); app.initializing = false; app.unavailable_result = AE_EXHAUSTED; portEXIT_CRITICAL(&app.lock);
         return AE_EXHAUSTED;
     }
     state->original = *dependencies;
@@ -279,7 +307,7 @@ ae_result_t app_audio_init(const ae_dependencies_t *dependencies)
     atomic_store(&app.shutting_down, false);
     portENTER_CRITICAL(&app.lock); app.state = state; portEXIT_CRITICAL(&app.lock);
     if (xTaskCreate(worker, "audio_manager", WORKER_STACK_BYTES, state, 4, NULL) != pdPASS) {
-        portENTER_CRITICAL(&app.lock); app.state = NULL; app.initializing = false; portEXIT_CRITICAL(&app.lock);
+        portENTER_CRITICAL(&app.lock); app.state = NULL; app.initializing = false; app.unavailable_result = AE_EXHAUSTED; portEXIT_CRITICAL(&app.lock);
         heap_caps_free(engine_memory); heap_caps_free(state); return AE_EXHAUSTED;
     }
     return AE_OK;
@@ -293,7 +321,8 @@ ae_result_t app_audio_submit(const app_audio_command_t *command)
     portENTER_CRITICAL(&app.lock);
     app_state_t *state = app.state;
     ae_result_t result = AE_OK;
-    if (!state || !state->view_valid) result = AE_UNAVAILABLE;
+    if (!state) result = app.unavailable_result;
+    else if (!state->view_valid) result = AE_UNAVAILABLE;
     else if (state->command_pending || state->result_pending) result = AE_BUSY;
     else {
         if ((command->kind == APP_AUDIO_CMD_RECORD_READ && (!command->capacity || command->capacity > sizeof(state->record_data))) ||

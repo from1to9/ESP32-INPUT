@@ -21,7 +21,7 @@ Long/invalid/incomplete summaries disable approval instead of truncating it.
 Parent main owns physical-origin and remote-input allowance checks and fills
 remote-input fields after the helper; neither TLS nor media enables that gate.
 
-The 13 cases include complete ABI-2 disclosure of the HTTPS port, unauthenticated
+The 14 cases include complete ABI-2 disclosure of the HTTPS port, unauthenticated
 SNTP servers, source CA fingerprint, private-source permission, minimum release,
 product/board/layout and all principal, capture and update policy fields. A
 minimal enrollment uses 3 pages; a one-principal/grant/source/policy example uses
@@ -37,3 +37,12 @@ stale approval, missing/nonterminated fields, exact 64-bit visitation and a
 65th-page writer overflow are exercised. Overflow disables approval. Native
 LVGL composition in `tests/ui` additionally renders and touches every actual
 page in both themes; helper-only tests do not prove screen fit.
+
+Bond refresh copies directly into the retained cache, avoiding a large returned
+structure. A separate 1,344-byte coordinator-only PSRAM request workspace is
+cleared before building each BLE preference submission and wiped on return,
+including rejection. The full-capacity reorder/rejected-request/shorter-select
+sequence verifies exact revisions, peer identities, order and zero unused tail.
+The target refresh frame is 176 bytes (previously 1,616); the preference handler
+is now inlined into the 80-byte outer handler instead of a separate 1,424-byte
+frame. Transport submission and durable completion rules are unchanged.

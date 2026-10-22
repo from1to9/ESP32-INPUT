@@ -6,11 +6,20 @@
 
 #include "../../firmware/main/board_audio_mosaico.c"
 #include "codec_ref_mgr.h"
+#include "esp_heap_caps.h"
+
+#ifndef TEST_EXPECT_PSRAM_DMA
+#define TEST_EXPECT_PSRAM_DMA 0
+#endif
+#ifndef TEST_EXPECT_EXTERNAL_STACK
+#define TEST_EXPECT_EXTERNAL_STACK 0
+#endif
 
 struct test_i2s_channel { bool allocated, initialized, enabled; size_t preload; };
 static struct test_i2s_channel tx_channel, rx_channel;
 static unsigned calls, notifications, task_creations, io_calls;
 static unsigned channel_allocations;
+static unsigned dma_init_calls, fail_dma_channel;
 static unsigned lock_depth, rail_calls, pa_level;
 static int fail_register = -1;
 static bool fail_read, fail_write, fail_disable, fail_delete, fail_new, fail_task;
@@ -34,15 +43,32 @@ static void completion_wake(void *context)
 void audio_test_enter(portMUX_TYPE *lock) { (void)lock; assert(lock_depth++ == 0); }
 void audio_test_leave(portMUX_TYPE *lock) { (void)lock; assert(lock_depth-- == 1); }
 static void sdk(void) { assert(lock_depth == 0); ++calls; }
+static void assert_cleared(const void *data, size_t bytes)
+{
+    const uint8_t *p = data;
+    for (size_t i = 0; i < bytes; ++i) assert(p[i] == 0);
+}
 
-BaseType_t xTaskCreate(TaskFunction_t function, const char *name, uint32_t stack,
+static BaseType_t create_task(TaskFunction_t function, const char *name, uint32_t stack,
     void *argument, unsigned priority, TaskHandle_t *handle)
 {
     sdk();
-    assert(function && name && stack >= 4096 && !argument && priority > 0);
+    assert(function == worker && !strcmp(name, "board_audio") && stack == 6144 && !argument && priority == 5);
     ++task_creations;
     *handle = fail_task ? NULL : (void *)&task_creations;
     return fail_task ? 0 : pdPASS;
+}
+BaseType_t xTaskCreate(TaskFunction_t function, const char *name, uint32_t stack,
+    void *argument, unsigned priority, TaskHandle_t *handle)
+{
+    assert(!TEST_EXPECT_EXTERNAL_STACK);
+    return create_task(function, name, stack, argument, priority, handle);
+}
+BaseType_t xTaskCreateWithCaps(TaskFunction_t function, const char *name, uint32_t stack,
+    void *argument, unsigned priority, TaskHandle_t *handle, unsigned caps)
+{
+    assert(TEST_EXPECT_EXTERNAL_STACK && caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    return create_task(function, name, stack, argument, priority, handle);
 }
 void xTaskNotifyGive(TaskHandle_t task) { assert(task); ++notifications; }
 unsigned ulTaskNotifyTake(BaseType_t clear, TickType_t wait) { (void)clear; (void)wait; abort(); }
@@ -103,6 +129,7 @@ int codec_ref_release(const audio_codec_ctrl_info_t *info, codec_ref_stage_t sta
 esp_err_t i2s_new_channel(const i2s_chan_config_t *config, i2s_chan_handle_t *tx, i2s_chan_handle_t *rx)
 {
     sdk(); assert(config->dma_desc_num == 6 && config->dma_frame_num == 240 && config->auto_clear);
+    assert(tx && rx && config->dma_buffer_in_psram == TEST_EXPECT_PSRAM_DMA);
     ++channel_allocations;
     if (fail_new) return ESP_ERR_INVALID_STATE;
     assert(!tx_channel.allocated && !rx_channel.allocated);
@@ -115,6 +142,8 @@ esp_err_t i2s_channel_init_std_mode(i2s_chan_handle_t channel, const i2s_std_con
     sdk(); assert(channel->allocated && !channel->initialized);
     assert(config->clk_cfg.mclk_multiple == 256 && config->slot_cfg.bits == 16 && config->slot_cfg.mode == 2);
     assert(config->gpio_cfg.dout == 52 && config->gpio_cfg.din == 40);
+    ++dma_init_calls;
+    if (fail_dma_channel == (channel == &tx_channel ? 1U : 2U)) return ESP_ERR_NO_MEM;
     if (fail_init) return ESP_FAIL;
     channel->initialized = true; return ESP_OK;
 }
@@ -137,6 +166,7 @@ esp_err_t i2s_del_channel(i2s_chan_handle_t channel)
 esp_err_t i2s_channel_preload_data(i2s_chan_handle_t channel, const void *data, size_t bytes, size_t *actual)
 {
     sdk(); assert(channel == &tx_channel && channel->initialized && !channel->enabled);
+    assert(data == buffers.wire);
     const uint8_t *pcm = data;
     for (size_t i = 0; i < bytes; ++i) assert(pcm[i] == 0);
     size_t available = DMA_BYTES - channel->preload;
@@ -147,6 +177,7 @@ esp_err_t i2s_channel_preload_data(i2s_chan_handle_t channel, const void *data, 
 esp_err_t i2s_channel_read(i2s_chan_handle_t channel, void *data, size_t bytes, size_t *actual, uint32_t timeout)
 {
     sdk(); ++io_calls; assert(channel == &rx_channel && channel->enabled && timeout == 20);
+    assert(data == buffers.wire);
     *actual = bytes < transfer_limit ? bytes : transfer_limit;
     uint8_t *output = data;
     for (size_t i = 0; i < *actual; ++i) output[i] = (uint8_t)(i + 1U);
@@ -157,6 +188,7 @@ esp_err_t i2s_channel_read(i2s_chan_handle_t channel, void *data, size_t bytes, 
 esp_err_t i2s_channel_write(i2s_chan_handle_t channel, const void *data, size_t bytes, size_t *actual, uint32_t timeout)
 {
     sdk(); ++io_calls; assert(channel == &tx_channel && channel->enabled && timeout == 20);
+    assert(data == buffers.wire);
     *actual = bytes < transfer_limit ? bytes : transfer_limit;
     assert(*actual <= sizeof(emitted)); memcpy(emitted, data, *actual); emitted_bytes = *actual;
     return transfer_error;
@@ -188,6 +220,7 @@ static void close_audio(uint64_t generation, ae_result_t expected)
     assert(calls == before); drain();
     assert(port.stop(NULL, generation) == expected);
     assert(!s.prepared && !pa_level && references[0] == 0 && references[1] == 0);
+    assert_cleared(&buffers, sizeof(buffers));
 }
 
 static void formats_and_pcm(void)
@@ -336,6 +369,45 @@ static void privacy_and_failures(void)
     assert(port.prepare(NULL, &mono, 3, offset + 11) == AE_BUSY);
 }
 
+static void dma_allocation_failures(void)
+{
+    for (unsigned failed_channel = 1; failed_channel <= 2; ++failed_channel) {
+        const uint64_t generation = s.last_generation + 1;
+        const unsigned allocations_before = channel_allocations;
+        const unsigned init_before = dma_init_calls;
+        fail_dma_channel = failed_channel;
+        assert(port.prepare(NULL, &mono, AE_MICROPHONE | AE_SPEAKER, generation) == AE_AGAIN);
+        drain();
+        assert(port.prepare(NULL, &mono, AE_MICROPHONE | AE_SPEAKER, generation) == AE_EXHAUSTED);
+        assert(channel_allocations == allocations_before + 1 && dma_init_calls == init_before + failed_channel);
+        assert(!s.tx && !s.rx && !tx_channel.allocated && !rx_channel.allocated);
+        assert(!s.prepared && !s.capture_gate && !s.playback_gate && !s.power_owned && !pa_level);
+        const board_audio_status_t status = board_audio_mosaico_status();
+        assert(status.last_sdk_error == ESP_ERR_NO_MEM && !status.cleanup_uncertain);
+        fail_dma_channel = 0;
+        open_audio(&mono, AE_MICROPHONE | AE_SPEAKER, generation + 1);
+        close_audio(generation + 1, AE_OK);
+    }
+}
+
+static void mailbox_scratch_lifetime(void)
+{
+    const uint64_t generation = s.last_generation + 1;
+    open_audio(&mono, AE_MICROPHONE | AE_SPEAKER, generation);
+    unmute_role(AE_SPEAKER, generation);
+    const uint8_t first[] = {0x12, 0x34, 0x56, 0x78};
+    const uint8_t competing[] = {0x87, 0x65, 0x43, 0x21};
+    size_t actual = 0;
+    assert(port.write(NULL, generation, first, sizeof(first), &actual) == AE_AGAIN);
+    assert(!memcmp(buffers.pcm, first, sizeof(first)));
+    assert(port.write(NULL, generation, competing, sizeof(competing), &actual) == AE_BUSY);
+    assert(!memcmp(buffers.pcm, first, sizeof(first)));
+    drain();
+    assert(port.write(NULL, generation, first, sizeof(first), &actual) == AE_OK && actual == sizeof(first));
+    assert_cleared(buffers.pcm, sizeof(buffers.pcm));
+    close_audio(generation, AE_OK);
+}
+
 static void advertised_profiles_match_actual_prepare(void)
 {
     ae_codec_capabilities_t caps;
@@ -378,6 +450,8 @@ int main(void)
     assert(port.capabilities(NULL, &caps) == AE_OK && caps.implemented && !caps.available && !caps.qualified);
     assert(port.stop(NULL, 1) == AE_UNAVAILABLE);
     fail_task = true; assert(board_audio_mosaico_init() == AE_EXHAUSTED);
+    assert(task_creations == 1 && !s.task && !s.status.worker_started && !s.probe_pending);
+    assert(!s.capture_gate && !s.playback_gate && !s.tx && !s.rx && !io_calls);
     fail_task = false; assert(board_audio_mosaico_init() == AE_OK);
     unsigned tasks = task_creations;
     assert(board_audio_mosaico_init() == AE_OK && task_creations == tasks);
@@ -389,6 +463,8 @@ int main(void)
     assert(port.capabilities(NULL, &caps) == AE_OK && caps.available && !caps.qualified && caps.format_count == 14);
     formats_and_pcm();
     advertised_profiles_match_actual_prepare();
+    dma_allocation_failures();
+    mailbox_scratch_lifetime();
     privacy_and_failures();
     assert(completion_wakes > 30);
     unsigned wakes_before = completion_wakes;
@@ -397,5 +473,7 @@ int main(void)
     assert(port.stop(NULL, s.generation) == AE_UNCERTAIN && completion_wakes == wakes_before);
     assert(lock_depth == 0 && io_calls > 5 && notifications > 10);
     puts("Board audio: real ES8311 driver, bounded worker mailbox, PCM, privacy and failure regressions passed.");
+    printf("DMA policy: PSRAM=%u; 6 x 240 stereo frames per direction; TX/RX allocation failure and cleanup passed.\n",
+        (unsigned)TEST_EXPECT_PSRAM_DMA);
     return 0;
 }

@@ -67,6 +67,25 @@ static fixture_t *create(void)
     app_command_bridge_refresh(f->bridge); return f;
 }
 static void destroy(fixture_t *f) { free(f->bridge); free(f); }
+static void storage_alignment_rejects_without_mutation_and_recovers(void)
+{
+    fixture_t *f = create();
+    size_t bytes = app_command_bridge_bytes(), alignment = app_command_bridge_alignment();
+    assert(alignment > 4 && !(alignment & (alignment - 1)));
+    unsigned char *storage = malloc(bytes + alignment); assert(storage);
+    memset(storage, 0xa5, bytes + alignment);
+    void *aligned = (void *)(((uintptr_t)storage + alignment - 1) & ~(uintptr_t)(alignment - 1));
+    void *weak = (unsigned char *)aligned + 4;
+    app_command_bridge_t *out = f->bridge;
+    app_command_bridge_port_t port = {.user = f, .lock = lock, .unlock = unlock, .now_ms = now,
+        .available = available, .execute = execute, .safety = safety, .read = read_value, .complete = complete};
+    assert(app_command_bridge_init(weak, bytes, &port, &out) == CP_INVALID && out == f->bridge);
+    assert(app_command_bridge_init(aligned, bytes - 1, &port, &out) == CP_INVALID && out == f->bridge);
+    for (size_t i = 0; i < bytes + alignment; ++i) assert(storage[i] == 0xa5);
+    assert(app_command_bridge_init(aligned, bytes, &port, &out) == CP_OK && out == aligned);
+    assert(!f->effects && !f->reads && !f->safeties);
+    free(storage); destroy(f);
+}
 static cp_command_t command(fixture_t *f, uint64_t key)
 {
     cp_command_t c = {.operation = 3, .command_key = key, .deadline_ms = 1000, .identity = f->identity};
@@ -146,6 +165,7 @@ static void dequeued_command_remains_revocable_at_clock_boundary(void)
 }
 int main(void)
 {
+    storage_alignment_rejects_without_mutation_and_recovers();
     dequeued_command_remains_revocable_at_clock_boundary();
     local_takeover_preserves_independent_management_commands();
     bounded_queue_and_exact_once_after_completion_backpressure();

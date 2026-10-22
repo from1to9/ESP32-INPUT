@@ -505,55 +505,144 @@ static void common_keys_checks(void)
     s_state.transport_switch_pending = s_state.transport_error = s_state.release_pending = false;
     s_state.locked = s_state.screen_off = s_state.sending = false;
     s_state.input_transport = APP_INPUT_BLUETOOTH;
+    s_state.host_os = APP_HOST_CTRL;
     strcpy(s_state.preview, "Unsent draft");
+    const char *entry_names[] = {"Motion", "Touch", "Spoken", "Hotkeys"};
+    const char *entry_scenes[] = {"keys-entry-motion", "keys-entry-touch", "keys-entry-spoken", "keys-entry-shortcuts"};
+    for (unsigned submode = 0; submode < 4; ++submode) {
+        s_state.overlay = APP_OVERLAY_NONE;
+        s_state.keyboard_submode = (app_keyboard_submode_t)submode;
+        ++s_state.ui_revision; screenshot(entry_scenes[submode]);
+        assert_rect(control("Keys"), 224, 8, 48, 48);
+        assert_rect(control(entry_names[submode]), 140, 8, 76, 48);
+        const char *header_names[] = {entry_names[submode], "Keys", "Menu"};
+        lv_area_t first_caption = {0};
+        for (unsigned i = 0; i < 3; ++i) {
+            lv_obj_t *caption = lv_obj_get_child(control(header_names[i]), 0);
+            lv_area_t area;
+            lv_obj_get_coords(caption, &area);
+            if (i == 0) first_caption = area;
+            else assert(area.y1 == first_caption.y1 && area.y2 == first_caption.y2);
+            assert(lv_obj_get_style_text_font(caption, 0) == &lv_font_montserrat_16);
+            lv_point_t size;
+            lv_text_get_size(&size, lv_label_get_text(caption), lv_obj_get_style_text_font(caption, 0),
+                lv_obj_get_style_text_letter_space(caption, 0), lv_obj_get_style_text_line_space(caption, 0),
+                LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+            assert(size.x <= lv_obj_get_content_width(caption));
+            if (i == 0) printf("PASS: header %s uses Montserrat 16, text width %d within %d pixels and shared caption baseline\n",
+                entry_names[submode], (int)size.x, (int)lv_obj_get_content_width(caption));
+        }
+        clear_intents(); tap_control("Keys");
+        assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_COMMON_KEYS);
+        assert(action_count(APP_KEY) == 0 && action_count(APP_SHORTCUT) == 0 && action_count(APP_SEND) == 0);
+        assert(s_state.overlay == APP_OVERLAY_NONE && !strcmp(s_state.preview, "Unsent draft"));
+    }
+    s_state.keyboard_submode = APP_KEYBOARD_TOUCH;
+    s_state.listening = true;
+    screenshot("keys-entry-capture");
+    assert_rect(control("Keys"), 224, 8, 48, 48);
+    s_state.listening = false;
+    s_state.connected = s_state.ready = false;
+    screenshot("keys-entry-disconnected");
+    clear_intents(); tap_control("Keys");
+    assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_COMMON_KEYS);
+    s_state.connected = s_state.ready = true;
     s_state.overlay = APP_OVERLAY_KEYBOARD; ++s_state.ui_revision;
     render(); clear_intents(); tap_control("Common keys");
     assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_COMMON_KEYS);
     assert(action_count(APP_KEY) == 0 && s_state.overlay == APP_OVERLAY_KEYBOARD);
     s_state.overlay = APP_OVERLAY_COMMON_KEYS; ++s_state.ui_revision;
     screenshot("common-keys-ready");
-    const char *names[] = {"Esc", "Tab", "Enter", "Backspace", "Delete", "Home", "Up", "End", "Left", "Down", "Right"};
-    const unsigned usage[] = {0x29, 0x2b, 0x28, 0x2a, 0x4c, 0x4a, 0x52, 0x4d, 0x50, 0x51, 0x4f};
+    const char *rows[][3] = {{"Copy", "Paste", "Undo"}, {"Backspace", "Delete fwd", "Enter"},
+        {"Esc", "Tab", NULL}, {"Home", "Up", "End"}, {"Left", "Down", "Right"}};
+    for (unsigned row = 0; row < 5; ++row) row_geometry(rows[row], row == 2 ? 2 : 3);
+    assert_rect(control("Back to keyboard"), 12, 424, 456, 48);
+    assert_rect(control("Close"), 404, 8, 64, 48);
+    s_state.target_name = "Office workstation - shared desk";
+    screenshot("common-keys-long-host");
+    assert(has_visible_label(lv_screen_active(), "Bluetooth / Office workstation - shared desk"));
+    s_state.target_name = original.target_name;
+    render();
+    const char *names[] = {"Backspace", "Delete fwd", "Enter", "Esc", "Tab", "Home", "Up", "End", "Left", "Down", "Right"};
+    const unsigned usage[] = {0x2a, 0x4c, 0x28, 0x29, 0x2b, 0x4a, 0x52, 0x4d, 0x50, 0x51, 0x4f};
     for (unsigned i = 0; i < 11; ++i) {
-        unsigned cell = i < 5 ? i : i + 1;
+        unsigned cell = i < 5 ? i + 3 : i + 4;
         assert_rect(control(names[i]), 12 + (int)(cell % 3) * 156,
-                    104 + (int)(cell / 3) * 76, 144, 68);
+                    112 + (int)(cell / 3) * 60, 144, 52);
         clear_intents(); tap_control(names[i]);
         assert(action_count(APP_KEY) == 1 && (unsigned)last_action(APP_KEY)->x == usage[i]);
         assert(last_action(APP_KEY)->y == 0 && last_action(APP_KEY)->ui_revision == s_state.ui_revision);
         assert(action_count(APP_DELETE) == 0 && action_count(APP_SEND) == 0 && action_count(APP_SHORTCUT) == 0);
         assert(strcmp(s_state.preview, "Unsent draft") == 0);
     }
-    clear_intents(); pointer(396, 138, true);
+    const char *shortcuts[] = {"Copy", "Paste", "Undo"};
+    const app_shortcut_t actions[] = {APP_SHORTCUT_COPY, APP_SHORTCUT_PASTE, APP_SHORTCUT_UNDO};
+    for (unsigned host = 0; host < 2; ++host) {
+        s_state.host_os = host ? APP_HOST_COMMAND : APP_HOST_CTRL;
+        ++s_state.ui_revision; screenshot(host ? "common-keys-command" : "common-keys-control");
+        assert(has_visible_label(lv_screen_active(), host ?
+            "Apple shortcuts / Cmd+C, Cmd+V, Cmd+Z" : "Windows shortcuts / Ctrl+C, Ctrl+V, Ctrl+Z"));
+        for (unsigned submode = 0; submode < 4; ++submode) {
+            s_state.keyboard_submode = (app_keyboard_submode_t)submode;
+            ++s_state.ui_revision; render();
+            for (unsigned i = 0; i < 3; ++i) {
+                assert_rect(control(shortcuts[i]), 12 + (int)i * 156, 112, 144, 52);
+                clear_intents(); tap_control(shortcuts[i]);
+                assert(action_count(APP_SHORTCUT) == 1 && last_action(APP_SHORTCUT)->x == (int)actions[i]);
+                assert(last_action(APP_SHORTCUT)->ui_revision == s_state.ui_revision);
+                assert(action_count(APP_KEY) == 0 && action_count(APP_DELETE) == 0 && action_count(APP_SEND) == 0);
+                assert(strcmp(s_state.preview, "Unsent draft") == 0);
+            }
+        }
+    }
+    /* A held shortcut retains the old revision; it must never adopt a new host setting. */
+    clear_intents(); pointer(84, 138, true);
     app_intent_t begin = *last_action(APP_TOUCH_BEGIN);
+    uint64_t pressed_revision = s_state.ui_revision;
+    s_state.host_os = APP_HOST_CTRL; ++s_state.ui_revision;
+    render(); pointer(84, 138, false); assert_terminal(&begin);
+    assert(action_count(APP_SHORTCUT) == 1 && last_action(APP_SHORTCUT)->ui_revision == pressed_revision);
+    clear_intents(); pointer(396, 198, true);
+    begin = *last_action(APP_TOUCH_BEGIN);
     s_state.ready = false; ++s_state.ui_revision;
-    render(); pointer(396, 138, false); assert_terminal(&begin);
+    render(); pointer(396, 198, false); assert_terminal(&begin);
     assert(action_count(APP_KEY) == 0);
     screenshot("common-keys-unready");
     for (unsigned i = 0; i < 11; ++i) assert(lv_obj_has_state(control(names[i]), LV_STATE_DISABLED));
-    s_state.ready = true; s_state.sending = true;
-    render(); clear_intents(); tap_control("Enter"); assert(action_count(APP_KEY) == 0);
-    s_state.sending = false; s_state.connected = false;
-    screenshot("common-keys-disconnected");
-    clear_intents(); tap_control("Enter"); assert(action_count(APP_KEY) == 0);
-    s_state.connected = true;
+    for (unsigned i = 0; i < 3; ++i) assert(lv_obj_has_state(control(shortcuts[i]), LV_STATE_DISABLED));
+    s_state.ready = true;
+    for (unsigned gate = 0; gate < 3; ++gate) {
+        s_state.sending = gate == 0;
+        s_state.connected = gate != 1;
+        s_state.release_pending = gate == 2;
+        ++s_state.ui_revision; render();
+        for (unsigned i = 0; i < 3; ++i) {
+            clear_intents(); tap_control(shortcuts[i]);
+            assert(action_count(APP_SHORTCUT) == 0 && action_count(APP_SEND) == 0);
+        }
+        clear_intents(); tap_control("Enter"); assert(action_count(APP_KEY) == 0);
+        if (gate == 1) screenshot("common-keys-disconnected");
+    }
+    s_state.connected = true; s_state.release_pending = false;
     for (unsigned gate = 0; gate < 2; ++gate) {
         s_state.locked = gate == 0; s_state.screen_off = gate == 1;
         ++s_state.ui_revision; render(); clear_intents();
-        pointer(396, 138, true);
+        if (!gate) screenshot("common-keys-locked");
+        pointer(84, 138, true);
         begin = *last_action(APP_TOUCH_BEGIN);
         s_state.locked = s_state.screen_off = false;
-        ++s_state.ui_revision; render(); pointer(396, 138, false);
-        assert_terminal(&begin); assert(action_count(APP_KEY) == 0);
+        ++s_state.ui_revision; render(); pointer(84, 138, false);
+        assert_terminal(&begin);
+        assert(action_count(APP_KEY) == 0 && action_count(APP_SHORTCUT) == 0);
     }
     s_state.overlay = APP_OVERLAY_NONE; s_state.keyboard_submode = APP_KEYBOARD_TOUCH;
     grid_groups(); ++s_state.ui_revision; render();
     clear_intents(); tap_control("Delete draft");
-    assert(action_count(APP_DELETE) == 1 && action_count(APP_KEY) == 0);
+    assert(action_count(APP_DELETE) == 1 && action_count(APP_KEY) == 0 && action_count(APP_SHORTCUT) == 0);
     clear_intents(); tap_control("Send");
-    assert(action_count(APP_SEND) == 1 && action_count(APP_KEY) == 0);
+    assert(action_count(APP_SEND) == 1 && action_count(APP_KEY) == 0 && action_count(APP_SHORTCUT) == 0);
     s_state = original; render(); clear_intents();
-    puts("PASS: eleven explicit common-key usages, zero modifiers, separate draft Delete/Send and disabled/held/wake key safety");
+    puts("PASS: one-tap Keys in every Keyboard submode; eleven host usages and three host-setting shortcuts preserve draft, revision and readiness/wake/lock gates");
 }
 
 static void motion_reason_and_tap_setting_checks(void)

@@ -7,7 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "../audio_engine/heap_caps_model.h"
 #include "../../firmware/main/app_media_runtime.c"
+
+#ifndef TEST_EXPECT_EXTERNAL_STACK
+#define TEST_EXPECT_EXTERNAL_STACK 0
+#endif
 
 /* Actual runtime + actual threaded app_audio + actual engine. Only the codec,
  * RTOS, speech/Bluetooth SDK and copied HTTP queue are boundary models. */
@@ -46,9 +51,12 @@ static int64_t micros(void)
 int64_t esp_timer_get_time(void) { return micros(); }
 static void pause_ms(unsigned ms)
 { struct timespec t={.tv_sec=ms/1000,.tv_nsec=(long)(ms%1000)*1000000}; nanosleep(&t,NULL); }
-void *heap_caps_calloc(size_t n,size_t bytes,unsigned caps)
-{ assert(caps==(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)); return calloc(n,bytes); }
-void heap_caps_free(void *memory) { free(memory); }
+void *heap_caps_calloc(size_t n, size_t bytes, unsigned caps)
+{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); return test_heap_allocate(4, n, bytes); }
+void *heap_caps_aligned_calloc(size_t alignment, size_t n, size_t bytes, unsigned caps)
+{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  assert(alignment >= _Alignof(uint64_t)); return test_heap_allocate(alignment, n, bytes); }
+void heap_caps_free(void *data) { test_heap_free(data); }
 void esp_fill_random(void *data,size_t bytes)
 { memset(data,0,bytes); unsigned id=atomic_fetch_add(&ids,1)+1U; memcpy(data,&id,bytes<sizeof(id)?bytes:sizeof(id)); }
 static void *audio_main(void *context)
@@ -56,12 +64,20 @@ static void *audio_main(void *context)
 BaseType_t xTaskCreate(TaskFunction_t fn,const char *name,uint32_t stack,void *argument,unsigned priority,TaskHandle_t *out)
 {
     if (!strcmp(name,"media_control")) {
-        assert(fn==worker && stack==6144 && priority==3 && !out); return pdPASS;
+        assert(!TEST_EXPECT_EXTERNAL_STACK && fn==worker && stack==6144 && priority==3 && !out); return pdPASS;
     }
     assert(stack==8192 && priority==4); audio_task.fn=fn; audio_task.argument=argument;
     assert(!pthread_mutex_init(&audio_task.lock,NULL)); assert(!pthread_cond_init(&audio_task.changed,NULL));
     assert(!pthread_create(&audio_task.thread,NULL,audio_main,&audio_task));
     if (out) *out=&audio_task;
+    return pdPASS;
+}
+BaseType_t xTaskCreateWithCaps(TaskFunction_t fn, const char *name, uint32_t stack,
+    void *argument, unsigned priority, TaskHandle_t *out, unsigned caps)
+{
+    assert(TEST_EXPECT_EXTERNAL_STACK && !strcmp(name, "media_control"));
+    assert(fn == worker && stack == 6144 && priority == 3 && argument && !out);
+    assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     return pdPASS;
 }
 TaskHandle_t xTaskGetCurrentTaskHandle(void) { return &audio_task; }
@@ -115,7 +131,7 @@ board_audio_status_t board_audio_mosaico_status(void)
 esp_err_t bt_audio_init(void) { return ESP_OK; }
 void bt_audio_service(void) { }
 bt_audio_snapshot_t bt_audio_snapshot(void) { return (bt_audio_snapshot_t){0}; }
-bt_audio_bond_list_t bt_audio_bond_list(void) { return (bt_audio_bond_list_t){0}; }
+void bt_audio_copy_bond_list(bt_audio_bond_list_t *out) { assert(out); memset(out,0,sizeof(*out)); }
 uint64_t bt_audio_cancel(void) { return 1; }
 esp_err_t bt_audio_request(uint64_t generation,bt_audio_command_t command,const uint8_t peer[6],uint64_t *id)
 { (void)generation; (void)command; (void)peer; (void)id; return ESP_ERR_NOT_SUPPORTED; }
@@ -321,7 +337,7 @@ int main(void)
     assert(app_audio_shutdown()==AE_AGAIN); assert(!pthread_join(audio_task.thread,NULL));
     assert(app_audio_shutdown()==AE_OK);
     printf("Resource bytes: media runtime=%zu, network scratch=%zu\n",sizeof(*media),sizeof(media->network_capture)+sizeof(media->network_playback));
-    ae_secure_zero(packets,sizeof(packets)); free(media); media=NULL;
+    ae_secure_zero(packets,sizeof(packets)); heap_caps_free(media); media=NULL;
     puts("PASS: actual runtime/audio worker/engine WebSocket PCM composition, bounded retry, exact frames, channel generations, zero-PCM close, pending START and replacement isolation");
     return 0;
 }

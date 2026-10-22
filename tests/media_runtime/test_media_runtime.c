@@ -3,7 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../audio_engine/heap_caps_model.h"
 #include "../../firmware/main/app_media_runtime.c"
+
+#ifndef TEST_EXPECT_EXTERNAL_STACK
+#define TEST_EXPECT_EXTERNAL_STACK 0
+#endif
+static bool fail_media_task;
+static unsigned media_tasks;
 
 static unsigned lock_depth, id_counter, safety_stops, commands, speech_starts, speech_cancels;
 static uint64_t now = 1000;
@@ -20,6 +27,10 @@ static ae_record_metadata_t query_metadata;
 static sl_view_t speech;
 static bt_audio_snapshot_t bluetooth;
 static unsigned bluetooth_requests, bluetooth_cancels;
+static bt_audio_bond_list_t bluetooth_bonds;
+static unsigned bond_copies;
+static const app_remote_media_request_t *bond_reentrant_request;
+static ae_result_t bond_reentrant_result;
 static size_t ingress_capacity;
 static unsigned transport_frames, transport_reads, ingress_frames;
 static unsigned playback_bindings;
@@ -30,12 +41,20 @@ void usb_test_enter(portMUX_TYPE *lock) { (void)lock; assert(!lock_depth); ++loc
 void usb_test_leave(portMUX_TYPE *lock) { (void)lock; assert(lock_depth == 1); --lock_depth; }
 int64_t esp_timer_get_time(void) { return (int64_t)(now * 1000); }
 void esp_fill_random(void *data, size_t bytes) { memset(data, (int)++id_counter, bytes); }
-void *heap_caps_calloc(size_t count, size_t bytes, unsigned caps)
-{ assert(!lock_depth && caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); return calloc(count, bytes); }
-void heap_caps_free(void *data) { free(data); }
+void *heap_caps_calloc(size_t n, size_t bytes, unsigned caps)
+{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); return test_heap_allocate(4, n, bytes); }
+void *heap_caps_aligned_calloc(size_t alignment, size_t n, size_t bytes, unsigned caps)
+{ assert(!lock_depth); assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  assert(alignment >= _Alignof(uint64_t)); return test_heap_allocate(alignment, n, bytes); }
+void heap_caps_free(void *data) { test_heap_free(data); }
 BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t stack, void *argument,
     unsigned priority, TaskHandle_t *handle)
-{ assert(fn == worker && !strcmp(name,"media_control") && stack==6144 && argument && priority==3 && !handle); return pdPASS; }
+{ assert(!TEST_EXPECT_EXTERNAL_STACK && fn == worker && !strcmp(name,"media_control") && stack==6144 && argument && priority==3 && !handle);
+  ++media_tasks; return fail_media_task ? 0 : pdPASS; }
+BaseType_t xTaskCreateWithCaps(TaskFunction_t fn, const char *name, uint32_t stack, void *argument,
+    unsigned priority, TaskHandle_t *handle, unsigned caps)
+{ assert(TEST_EXPECT_EXTERNAL_STACK && fn == worker && !strcmp(name,"media_control") && stack==6144 && argument && priority==3 && !handle);
+  assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); ++media_tasks; return fail_media_task ? 0 : pdPASS; }
 void vTaskDelay(TickType_t delay) { (void)delay; abort(); }
 ae_result_t board_audio_mosaico_init(void) { return AE_OK; }
 ae_codec_port_t board_audio_mosaico_port(void) { return (ae_codec_port_t){0}; }
@@ -44,7 +63,16 @@ board_audio_status_t board_audio_mosaico_status(void)
 esp_err_t bt_audio_init(void) { return ESP_OK; }
 void bt_audio_service(void) { }
 bt_audio_snapshot_t bt_audio_snapshot(void) { return bluetooth; }
-bt_audio_bond_list_t bt_audio_bond_list(void) { return (bt_audio_bond_list_t){.known=true,.revision=9,.count=1,.bonds={{{1,2,3,4,5,6},false,{0},false,false}}}; }
+void bt_audio_copy_bond_list(bt_audio_bond_list_t *out)
+{
+    assert(out && !lock_depth); ++bond_copies;
+    *out=bluetooth_bonds;
+    if (bond_reentrant_request) {
+        const app_remote_media_request_t *nested=bond_reentrant_request;
+        bond_reentrant_request=NULL;
+        bond_reentrant_result=app_media_runtime_submit_remote(nested);
+    }
+}
 uint64_t bt_audio_cancel(void) { ++bluetooth_cancels; return ++bluetooth.generation; }
 esp_err_t bt_audio_request(uint64_t generation, bt_audio_command_t command, const uint8_t peer[6], uint64_t *id)
 {
@@ -117,9 +145,12 @@ ae_result_t app_spoken_letters_confirm(uint64_t token, uint64_t epoch, uint64_t 
 
 static void setup(void)
 {
-    if(media) free(media); media=NULL; media_attempted=false;
+    if(media) heap_caps_free(media); media=NULL; media_attempted=false;
     ingress_capacity = 4; transport_frames = transport_reads = ingress_frames = 0;
     bluetooth = (bt_audio_snapshot_t){.generation = 7}; bluetooth_requests = bluetooth_cancels = 0;
+    bluetooth_bonds=(bt_audio_bond_list_t){.known=true,.revision=9,.count=1,
+        .bonds={{{1,2,3,4,5,6},false,{0},false,false}}};
+    bond_copies=0; bond_reentrant_request=NULL; bond_reentrant_result=AE_OK;
     commands=safety_stops=speech_starts=speech_cancels=0; completion_ready=false; channel_generation=17;
     audio=(ae_snapshot_t){.route=AE_ROUTE_OFF,.audio_generation=1,.revision=1,.hardware_off_confirmed=true};
     const app_media_services_t services={0};
@@ -174,6 +205,49 @@ static void query_ack(void)
     completion=(app_audio_result_t){.request_token=submitted.request_token,.result=AE_OK,
         .metadata=query_metadata,.bytes=submitted.kind==APP_AUDIO_CMD_RECORD_READ?submitted.capacity:0,.count=1};
     completion_ready=true; media_step(media);
+}
+static void remote_link_admission(void)
+{
+    remote_setup();
+    app_remote_media_request_t link={.token=4000,.command_key=4001,.deadline_ms=now+2000,
+        .identity=remote_identity(),.operation=CP_OP_AUDIO_LINK_CONNECT,.action=APP_REMOTE_MEDIA_LINK,
+        .input_epoch=10,.ui_revision=20,.audio_generation=audio.audio_generation,
+        .resource_revision=audio.revision,.route=AE_ROUTE_HFP_HF,.value=true,
+        .peer_id="01:02:03:04:05:06"};
+    assert(app_media_runtime_submit_remote(NULL)==AE_INVALID && !bond_copies);
+    media->view.initialized=false;
+    assert(app_media_runtime_submit_remote(&link)==AE_UNAVAILABLE && !bond_copies);
+    media->view.initialized=true;
+    for (unsigned failure=0;failure<6;++failure) {
+        bluetooth_bonds.known=failure!=0; bluetooth_bonds.refreshing=failure==1;
+        bluetooth_bonds.revision=failure==2 ? 0 : 9;
+        bluetooth_bonds.count=failure==5 ? 0 : 1;
+        strcpy(link.peer_id,failure==3 ? "invalid" : failure==4 ? "06:05:04:03:02:01" : "01:02:03:04:05:06");
+        ae_result_t expected=failure<3 ? AE_UNAVAILABLE : failure==3 ? AE_INVALID : AE_STALE;
+        assert(app_media_runtime_submit_remote(&link)==expected);
+        assert(!media->pending && !media->remote_bonds_busy && !bluetooth_requests);
+    }
+    bluetooth_bonds.count=1; strcpy(link.peer_id,"01:02:03:04:05:06");
+    app_remote_media_request_t nested=link; ++nested.token; ++nested.command_key;
+    strcpy(nested.peer_id,"06:05:04:03:02:01");
+    unsigned copies_before=bond_copies;
+    bond_reentrant_request=&nested;
+    assert(app_media_runtime_submit_remote(&link)==AE_OK);
+    assert(bond_reentrant_result==AE_BUSY && bond_copies==copies_before+1 && !media->remote_bonds_busy);
+    assert(media->pending && media->remote_command.token==link.token &&
+        media->command.bluetooth_generation==7 && media->command.bluetooth_bond_revision==9 &&
+        !memcmp(media->command.bluetooth_peer,bluetooth_bonds.bonds[0].address,6));
+    const app_media_local_request_t accepted=media->command;
+    strcpy(nested.peer_id,link.peer_id);
+    assert(app_media_runtime_submit_remote(&nested)==AE_BUSY && !media->remote_bonds_busy);
+    assert(!memcmp(&accepted,&media->command,sizeof(accepted)) && media->remote_command.token==link.token);
+    media_step(media); assert(bluetooth_requests==1 && !commands);
+    bluetooth.request_status=BT_AUDIO_JOB_SUCCEEDED; media_step(media);
+    app_audio_result_t result;
+    assert(app_media_runtime_poll_remote(link.token,&result) && result.result==AE_OK);
+    app_media_runtime_release_remote_result(link.token);
+    assert(app_media_runtime_submit_remote(&nested)==AE_OK && !media->remote_bonds_busy);
+    puts("PASS: remote saved-peer validation, copy-out lock order, reentrant admission and scratch release after rejection");
 }
 static void remote_and_queries(void)
 {
@@ -322,8 +396,26 @@ static void channel_lifetime_authority(void)
     }
     puts("PASS: pinned WSS admission, close-before-START cancellation, stale close rejection and independent USB/HFP authority");
 }
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2) {
+        assert(!strcmp(argv[1], "task-failure"));
+        fail_media_task = true;
+        const app_media_services_t services = {0};
+        assert(app_media_runtime_init(&services) == AE_EXHAUSTED);
+        assert(media_tasks == 1 && safety_stops == 1 && media && captured.policy_context == media);
+        app_media_snapshot_t view;
+        assert(app_media_runtime_snapshot(&view) && !view.initialized && view.result == AE_EXHAUSTED);
+        assert(app_media_runtime_init(&services) == AE_BUSY && media_tasks == 1);
+        /* The audio owner still borrows policy_context after partial init.
+         * Only this fixture's explicit owner teardown can release it. */
+        assert(captured.monotonic_ms(captured.policy_context) == now);
+        memset(&captured, 0, sizeof(captured));
+        heap_caps_free(media); media = NULL;
+        puts("PASS: media task failure closes audio, retains borrowed policy state and never falls back");
+        return 0;
+    }
+    assert(argc == 1);
     setup(); assert(!commands && !safety_stops && !audio.capture_gate_open);
     assert(captured.route.bind_playback && captured.route.bind_playback(captured.route.context,
         AE_ROUTE_USB_UAC,23,&route_token,29,true)==AE_AGAIN);
@@ -414,9 +506,9 @@ int main(void)
     assert(transport_frames == 4 && ingress_frames == 5 && transport_reads == 5);
     ingress_capacity = 4; media_step(media);
     assert(!transport_frames && ingress_frames == 9 && transport_reads == 9);
-    remote_and_queries(); channel_lifetime_authority();
+    remote_and_queries(); channel_lifetime_authority(); remote_link_admission();
     assert(!lock_depth);
-    free(media); media=NULL;
+    heap_caps_free(media); media=NULL;
     puts("PASS: media runtime local grants, route/start ordering, cancellation, independent HID context and speech preview");
     return 0;
 }

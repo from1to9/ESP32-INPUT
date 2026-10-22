@@ -269,7 +269,7 @@ done:
     portENTER_CRITICAL(&s_lock);
     s->download_active = false;
     portEXIT_CRITICAL(&s_lock);
-    vTaskDelete(NULL);
+    app_network_task_delete_self();
 }
 static esp_err_t begin_recording_download(httpd_req_t *request, server_t *s,
                                           const cp_http_security_t *security)
@@ -289,7 +289,8 @@ static esp_err_t begin_recording_download(httpd_req_t *request, server_t *s,
         (CP_SCOPE_RECORDING_READ | CP_SCOPE_RECORDING_EXPORT)) {
         return error_response(request, "403 Forbidden", "{\"error\":\"export_forbidden\"}");
     }
-    download_t *d = heap_caps_calloc(1, sizeof(*d), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    download_t *d = heap_caps_aligned_calloc(_Alignof(download_t), 1, sizeof(*d),
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!d) {
         return error_response(request, "503 Service Unavailable",
                               "{\"error\":\"memory_unavailable\"}");
@@ -335,7 +336,7 @@ static esp_err_t begin_recording_download(httpd_req_t *request, server_t *s,
     }
     esp_err_t e = httpd_req_async_handler_begin(request, &d->request);
     if (e == ESP_OK &&
-        xTaskCreate(download_worker, "record_download", 8192, d, 1, NULL) == pdPASS) {
+        app_network_task_create(download_worker, "record_download", 8192, d, 1, NULL) == pdPASS) {
         return ESP_OK;
     }
     if (d->request) {
@@ -460,7 +461,8 @@ static esp_err_t websocket_authenticate(httpd_req_t *request)
         return error_response(request, "401 Unauthorized",
                               "{\"error\":\"channel_authentication_required\"}");
     }
-    channel_t *channel = heap_caps_calloc(1, sizeof(*channel), MALLOC_CAP_8BIT);
+    channel_t *channel =
+        heap_caps_aligned_calloc(_Alignof(channel_t), 1, sizeof(*channel), MALLOC_CAP_8BIT);
     if (!channel) {
         return ESP_FAIL;
     }
@@ -665,7 +667,8 @@ esp_err_t app_control_server_capture_send(const cp_identity_t *identity, const u
         return ESP_ERR_INVALID_ARG;
     }
     capture_packet_t *packet =
-        heap_caps_calloc(1, sizeof(*packet), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        heap_caps_aligned_calloc(_Alignof(capture_packet_t), 1, sizeof(*packet),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!packet) {
         return ESP_ERR_NO_MEM;
     }

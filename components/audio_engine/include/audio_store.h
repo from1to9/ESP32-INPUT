@@ -53,13 +53,15 @@ typedef struct {
     uint64_t quota_bytes, used_bytes, reserved_bytes;
 } ae_store_status_t;
 
-/* Memory includes bounded page caches/index and must normally be PSRAM.
+/* Memory includes bounded page caches/index, must be aligned to
+ * ae_store_alignment(), and must normally be PSRAM.
  * init/mount never formats or writes. Unknown/non-erased contents are rejected.
  * service makes bounded recovery/provisioning progress; no capture resumes.
  * Explicit provisioning is the ONLY creation path. It first verifies every
  * page is erased, then writes authenticated ownership/superblock records.
  * Any non-erased unknown region remains untouched, requiring migration. */
 size_t ae_store_bytes(void);
+size_t ae_store_alignment(void);
 void ae_store_deinit(ae_store_t *);
 ae_result_t ae_store_init(void *memory, size_t bytes, const ae_storage_device_t *, ae_store_t **);
 ae_result_t ae_store_provision(ae_store_t *, uint16_t object_limit, uint64_t quota_bytes);

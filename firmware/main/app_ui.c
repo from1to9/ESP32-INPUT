@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
+/* LVGL owner data only; never DMA, ISR, or cache-disabled access. */
 #ifdef ESP_PLATFORM
 #include "esp_attr.h"
 #define UI_TASK_BSS EXT_RAM_BSS_ATTR
@@ -23,6 +24,7 @@
 #define ON_ACCENT 0xfffefe
 #define MAX_BINDINGS 64
 #define MAX_COLOR_BINDINGS 512
+#define COMMON_KEY_BUTTONS 14
 
 #if LV_FONT_MONTSERRAT_16
 #define BODY_FONT (&lv_font_montserrat_16)
@@ -55,10 +57,10 @@ static app_submit_fn s_submit;
 static UI_TASK_BSS app_view_t s_view;
 static char s_message_text[160];
 static char s_target_text[96];
-static binding_t s_bindings[MAX_BINDINGS];
+static UI_TASK_BSS binding_t s_bindings[MAX_BINDINGS];
 static size_t s_binding_count;
 static lv_obj_t *s_screen, *s_panels[3], *s_mode_title, *s_context, *s_status;
-static lv_obj_t *s_critical, *s_keyboard_choice, *s_audio_choice, *s_gain;
+static lv_obj_t *s_critical, *s_keyboard_choice, *s_host_keys, *s_audio_choice, *s_gain;
 static lv_obj_t *s_motion, *s_pad, *s_drag, *s_mouse_controls[4];
 static lv_obj_t *s_pad_hint;
 static lv_obj_t *s_submodes[4], *s_preview, *s_progress, *s_clear;
@@ -112,7 +114,7 @@ static lv_obj_t *s_scan_rows[4], *s_scan_meta[4], *s_scan_state, *s_scan_empty;
 static lv_obj_t *s_scan_previous, *s_scan_next, *s_scan_page, *s_scan_refresh;
 static lv_obj_t *s_network_name, *s_network_detail, *s_network_note, *s_network_join[2];
 static lv_obj_t *s_wifi_find, *s_wifi_saved, *s_wifi_backend, *s_name_edit, *s_tap_click;
-static lv_obj_t *s_motion_detail, *s_common_context, *s_common_keys[11];
+static lv_obj_t *s_motion_detail, *s_common_context, *s_common_modifiers, *s_common_keys[COMMON_KEY_BUTTONS];
 static lv_obj_t *s_motion_values[5], *s_motion_sliders[5], *s_motion_nudges[5][2];
 static lv_obj_t *s_motion_presets[2][3], *s_motion_invert[2], *s_motion_reference;
 static lv_obj_t *s_gesture_help, *s_gesture_drag, *s_gesture_release;
@@ -157,9 +159,10 @@ typedef struct {
     color_property_t property;
 } color_binding_t;
 
-static color_binding_t s_colors[MAX_COLOR_BINDINGS];
+static UI_TASK_BSS color_binding_t s_colors[MAX_COLOR_BINDINGS];
 static size_t s_color_count;
 static bool s_dark_theme;
+static bool s_keyboard_header_compact;
 static app_ui_capture_indicator_t s_capture_indicator;
 static uint64_t s_capture_indicator_revision;
 
@@ -1297,7 +1300,7 @@ static void clear_panel_bindings(void)
     s_scan_state = s_scan_empty = s_scan_previous = s_scan_next = s_scan_page = s_scan_refresh = NULL;
     s_network_name = s_network_detail = s_network_note = NULL;
     s_wifi_find = s_wifi_saved = s_wifi_backend = s_name_edit = s_tap_click = NULL;
-    s_motion_detail = s_common_context = NULL;
+    s_motion_detail = s_common_context = s_common_modifiers = NULL;
     memset(s_motion_values, 0, sizeof(s_motion_values));
     memset(s_motion_sliders, 0, sizeof(s_motion_sliders));
     memset(s_motion_nudges, 0, sizeof(s_motion_nudges));
@@ -1440,13 +1443,18 @@ static void create_extension(lv_obj_t *body, lv_obj_t *title, app_overlay_t kind
     } else if (kind == APP_OVERLAY_COMMON_KEYS) {
         label_text(title, "Live host keys");
         s_common_context = metadata(body, "", 0, 0, 456);
-        const char *names[] = {"Esc", "Tab", "Enter", "Backspace", "Delete", "Home", "Up", "End", "Left", "Down", "Right"};
-        const int usages[] = {0x29, 0x2b, 0x28, 0x2a, 0x4c, 0x4a, 0x52, 0x4d, 0x50, 0x51, 0x4f};
+        s_common_modifiers = metadata(body, "", 0, 24, 456);
+        const char *shortcuts[] = {"Copy", "Paste", "Undo"};
+        const app_shortcut_t actions[] = {APP_SHORTCUT_COPY, APP_SHORTCUT_PASTE, APP_SHORTCUT_UNDO};
+        for (unsigned i = 0; i < 3; ++i)
+            s_common_keys[i] = button(body, shortcuts[i], (int)i * 156, 48, 144, 52, APP_SHORTCUT, actions[i]);
+        const char *names[] = {"Backspace", "Delete fwd", "Enter", "Esc", "Tab", "Home", "Up", "End", "Left", "Down", "Right"};
+        const int usages[] = {0x2a, 0x4c, 0x28, 0x29, 0x2b, 0x4a, 0x52, 0x4d, 0x50, 0x51, 0x4f};
         for (unsigned i = 0; i < 11; ++i) {
-            unsigned cell = i < 5 ? i : i + 1;
-            s_common_keys[i] = button(body, names[i], (int)(cell % 3) * 156, 40 + (int)(cell / 3) * 76, 144, 68, APP_KEY, usages[i]);
+            unsigned cell = i < 5 ? i + 3 : i + 4;
+            s_common_keys[i + 3] = button(body, names[i], (int)(cell % 3) * 156, 48 + (int)(cell / 3) * 60, 144, 52, APP_KEY, usages[i]);
         }
-        lv_obj_t *note = label(body, "Sends now\nPreview stays", 316, 128, 136, MUTED);
+        lv_obj_t *note = label(body, "Sends now\nDraft stays", 316, 174, 136, MUTED);
         lv_obj_set_style_text_font(note, META_FONT, 0);
         button(body, "Back to keyboard", 0, 360, 456, 48, APP_CLOSE, 0);
     }
@@ -1610,6 +1618,7 @@ static void on_screen_delete(lv_event_t *event)
 
 void app_ui_create(lv_display_t *display, app_submit_fn callback)
 {
+    s_keyboard_header_compact = false;
     s_submit = callback;
     s_local_submit = NULL;
     clear_editor();
@@ -1647,6 +1656,7 @@ void app_ui_create(lv_display_t *display, app_submit_fn callback)
     s_critical = critical_control(s_screen);
     button(s_screen, "Menu", 404, 8, 64, 48, APP_MENU, APP_OVERLAY_MODES);
     s_keyboard_choice = button(s_screen, "Touch", 140, 8, 132, 48, APP_MENU, APP_OVERLAY_KEYBOARD);
+    s_host_keys = button(s_screen, "Keys", 224, 8, 48, 48, APP_MENU, APP_OVERLAY_COMMON_KEYS);
     s_audio_choice = button(s_screen, "Voice", 140, 8, 132, 48, APP_MENU, APP_OVERLAY_AUDIO);
     for (int i = 0; i < 3; ++i) s_panels[i] = box(s_screen, 12, 64, 456, 408, SURFACE);
     create_mouse(s_panels[INPUT_MOUSE]);
@@ -1717,9 +1727,11 @@ static void render_extension(const app_view_t *view, bool hid_ready)
 {
     if (view->overlay == APP_OVERLAY_LOCAL_EDITOR) { render_editor(); return; }
     if (view->overlay == APP_OVERLAY_COMMON_KEYS) {
-        label_format(s_common_context, "%s / %s / preview unchanged",
+        label_format(s_common_context, "%s / %s",
             view->input_transport == APP_INPUT_USB ? "USB" : "Bluetooth", s_target_text);
-        for (unsigned i = 0; i < 11; ++i)
+        label_text(s_common_modifiers, view->host_os == APP_HOST_COMMAND ?
+            "Apple shortcuts / Cmd+C, Cmd+V, Cmd+Z" : "Windows shortcuts / Ctrl+C, Ctrl+V, Ctrl+Z");
+        for (unsigned i = 0; i < COMMON_KEY_BUTTONS; ++i)
             enabled(s_common_keys[i], hid_ready && view->mode == INPUT_KEYBOARD && !view->sending);
         return;
     }
@@ -2281,11 +2293,19 @@ void app_ui_render(const app_view_t *view)
     /* The opaque panel/safety surfaces cover the entire core, including its
      * header. Ingest state above, but refresh core presentation only here. */
     const char *mode_names[] = {"Mouse", "Keyboard", "Audio"};
-    const char *entry_names[] = {"Motion", "Touch", "Spoken", "Shortcuts"};
+    const char *entry_names[] = {"Motion", "Touch", "Spoken", "Hotkeys"};
     label_text(s_mode_title, (unsigned)view->mode < 3 ? mode_names[view->mode] : "Input");
     label_format(s_context, "%s / %s", usb ? "USB" : "BT", s_target_text);
     critical_state(s_critical, alert, capture, provider_available);
     visible(s_keyboard_choice, view->mode == INPUT_KEYBOARD || view->mode == INPUT_MOUSE);
+    visible(s_host_keys, view->mode == INPUT_KEYBOARD);
+    bool compact_header = view->mode == INPUT_KEYBOARD;
+    if (compact_header != s_keyboard_header_compact) {
+        s_keyboard_header_compact = compact_header;
+        lv_obj_set_width(s_keyboard_choice, compact_header ? 76 : 132);
+        lv_obj_t *entry_caption = lv_obj_get_child(s_keyboard_choice, 0);
+        lv_obj_set_width(entry_caption, compact_header ? 68 : 124);
+    }
     visible(s_audio_choice, view->mode == INPUT_AUDIO);
     if (view->mode == INPUT_KEYBOARD)
         text(s_keyboard_choice, (unsigned)view->keyboard_submode < 4 ? entry_names[view->keyboard_submode] : "Entry");

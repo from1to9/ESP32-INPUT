@@ -92,6 +92,8 @@ def main():
     app_command = common + ["-pthread", "-I", str(ROOT / "tests/audio_engine/stubs"),
         "-I", str(ROOT / "firmware/main"), str(ROOT / "firmware/main/app_audio.c")]
     app_command += [str(p) for p in engine_sources] + [str(ROOT / "tests/audio_engine/test_app_audio.c")]
+    startup_command = [part for part in app_command if part != str(ROOT / "tests/audio_engine/test_app_audio.c")]
+    startup_command += [str(ROOT / "tests/audio_engine/test_app_audio_startup.c")]
     runtime_store_command = [part for part in store_command if part != str(ROOT / "tests/audio_engine/test_store.c")]
     runtime_store_command += ["-pthread", "-I", str(ROOT / "tests/audio_engine/stubs"), "-I", str(ROOT / "firmware/main"),
         str(ROOT / "tests/audio_engine/test_app_recording_store.c")]
@@ -107,6 +109,20 @@ def main():
         if run.returncode:
             raise SystemExit(run.returncode)
         suites[name] = {"exit": run.returncode, "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
+    startup_binary = output / "test_app_startup"
+    with (output / "startup-build.log").open("w") as log:
+        subprocess.run(startup_command + ["-o", str(startup_binary)], check=True,
+                       stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)
+    for scenario in ("aligned", "state-allocation", "engine-allocation", "task-create",
+                     "rejected-arena", "replacement-startup", "codec-pending", "codec-error", "codec-invalid"):
+        run = subprocess.run([str(startup_binary), scenario], env=environment, text=True,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=ROOT, timeout=10)
+        (output / ("startup-" + scenario + ".log")).write_text(run.stdout)
+        print(run.stdout, end="")
+        if run.returncode:
+            raise SystemExit(run.returncode)
+        suites["startup-" + scenario] = {"exit": run.returncode,
+            "binary_sha256": hashlib.sha256(startup_binary.read_bytes()).hexdigest()}
     recorded = output / "recorded.wav"
     recorded_hash = hashlib.sha256(recorded.read_bytes()).hexdigest()
     assert recorded_hash == (output / "recorded.wav.sha256").read_text()

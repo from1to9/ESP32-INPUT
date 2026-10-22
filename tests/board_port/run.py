@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[2]
@@ -22,3 +23,4 @@ with tempfile.TemporaryDirectory(prefix="esp32-board-test-") as tmp:
         str(root / "components/haptics/haptics.c"), "-lm", "-o", binary,
     ], check=True)
     subprocess.run([binary], check=True)
+subprocess.run([sys.executable, str(root / "tests/display_resources/run.py")], check=True)

@@ -134,11 +134,15 @@ typedef struct {
     bool fanout_enabled;
 } ae_dependencies_t;
 
-/* Caller supplies suitably aligned memory, ordinarily PSRAM on the device.
+/* Caller supplies memory aligned to ae_engine_alignment(), ordinarily PSRAM on the device.
  * No internal heap fallback. No I/O occurs until init explicitly proves off.
  * All calls have one serialized owner, including frame submission/snapshots;
- * app_audio supplies the task/cross-thread queue boundary. */
+ * app_audio supplies the task/cross-thread queue boundary. Init rejects invalid
+ * arguments before I/O and leaves the output untouched. Once an engine is
+ * returned, retain it even for non-OK codec stop results: its snapshot and
+ * recovery lifecycle remain valid. */
 size_t ae_engine_bytes(void);
+size_t ae_engine_alignment(void);
 ae_result_t ae_init(void *memory, size_t bytes, const ae_dependencies_t *, uint64_t now_ms,
     ae_engine_t **engine);
 void ae_environment(ae_engine_t *, const ae_environment_t *, uint64_t now_ms);

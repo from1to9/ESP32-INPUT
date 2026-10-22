@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../../firmware/main/app_control_trust.c"
+#include "weak_heap.h"
 
 static uint64_t clock_ms = 100;
 static uint8_t banks[2][BANK_BYTES];
@@ -21,10 +22,13 @@ int64_t esp_timer_get_time(void) { return (int64_t)clock_ms * 1000; }
 void esp_fill_random(void *p, size_t n) { memset(p, 0x35, n); }
 void *heap_caps_calloc(size_t n, size_t s, unsigned caps)
 {
-    (void)caps;
-    return calloc(n, s);
+    return test_heap_calloc(4, n, s, caps);
 }
-void heap_caps_free(void *p) { free(p); }
+void *heap_caps_aligned_calloc(size_t alignment, size_t n, size_t s, unsigned caps)
+{
+    return test_heap_calloc(alignment, n, s, caps);
+}
+void heap_caps_free(void *p) { test_heap_free(p); }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return (void *)1; }
 int xSemaphoreTake(SemaphoreHandle_t m, TickType_t t)
 {
@@ -204,7 +208,12 @@ static void test_review_authority_disclosure(void)
 }
 int main(void)
 {
+    test_heap_fail_next = 2;
+    assert(app_control_trust_init() == ESP_ERR_NO_MEM && !trust && !test_heap_live);
+    test_heap_fail_external = true;
     assert(app_control_trust_init() == ESP_OK);
+    assert(test_heap_external_failures);
+    test_heap_fail_external = false;
     app_control_trust_snapshot_t view;
     app_control_trust_snapshot(&view);
     assert(view.known && !view.present && !view.at_rest_protected);
@@ -214,6 +223,10 @@ int main(void)
     assert(app_control_trust_open_local_window(token) == ESP_OK);
     assert(app_control_trust_import(token, package, strlen(package)) == ESP_ERR_INVALID_STATE &&
            writes == 0);
+    test_heap_fail_bytes = sizeof(cj_document_t);
+    assert(app_control_trust_stage(token, package, strlen(package)) == ESP_ERR_NO_MEM &&
+           test_heap_live == 1 && writes == 0);
+    test_heap_fail_bytes = 0;
     assert(app_control_trust_stage(token, package, strlen(package)) == ESP_OK);
     assert(app_control_trust_import(token, package, strlen(package)) == ESP_ERR_INVALID_STATE &&
            writes == 0);
@@ -275,8 +288,9 @@ int main(void)
     assert(app_control_trust_verify() == ESP_OK);
     assert(critical == 0);
     wipe(trust, sizeof(*trust));
-    free(trust);
+    heap_caps_free(trust);
     trust = NULL;
+    assert(!test_heap_live);
     puts("PASS: protected trust local Review, exact digest/single use/expiry, grants, bank "
          "failures and explicit recovery");
     return 0;

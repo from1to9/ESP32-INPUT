@@ -9,9 +9,20 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
+#include "esp_attr.h"
 #include "es8311_codec.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
+#include "soc/soc_caps.h"
+
+#if CONFIG_SPIRAM && CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM && !CONFIG_I2C_ISR_IRAM_SAFE && !CONFIG_I2S_ISR_IRAM_SAFE
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
+#define BOARD_AUDIO_EXTERNAL_STACK 1
+#else
+#define BOARD_AUDIO_EXTERNAL_STACK 0
+#endif
 
 #define CONTROL_TIMEOUT_MS 5
 #define DMA_DESCRIPTORS 6U
@@ -49,8 +60,6 @@ static struct {
     request_t request;
     ae_result_t result;
     size_t actual;
-    uint8_t pcm[AE_FRAME_BYTES_MAX];
-    uint8_t wire[WIRE_BYTES_MAX];
     uint64_t last_generation;
     uint64_t safety_epoch;
     bool capture_gate;
@@ -87,6 +96,14 @@ static struct {
     void *completion_context;
 } s = { .lock = portMUX_INITIALIZER_UNLOCKED,
     .status = {.last_result = AE_UNAVAILABLE, .probe_result = AE_AGAIN}, .probe_result = AE_AGAIN };
+
+/* Task-only mailbox PCM and synchronous I2S copy scratch. Keep driver handles,
+ * locks and status internal; the SDK owns separate DMA payloads/descriptors.
+ * External BSS placement is static and never falls back through heap allocation. */
+static EXT_RAM_BSS_ATTR struct {
+    uint8_t pcm[AE_FRAME_BYTES_MAX];
+    uint8_t wire[WIRE_BYTES_MAX];
+} buffers;
 
 static bool same_format(const ae_format_t *a, const ae_format_t *b)
 {
@@ -208,13 +225,13 @@ static ae_result_t pa(bool on)
 static ae_result_t flush_tx(void)
 {
     if (!s.tx || !s.tx_initialized || !s.tx_dirty || s.tx_running) return s.tx_running ? AE_BUSY : AE_OK;
-    memset(s.wire, 0, sizeof(s.wire));
+    memset(buffers.wire, 0, sizeof(buffers.wire));
     size_t total = 0;
     while (total < DMA_BYTES) {
         size_t requested = DMA_BYTES - total;
-        if (requested > sizeof(s.wire)) requested = sizeof(s.wire);
+        if (requested > sizeof(buffers.wire)) requested = sizeof(buffers.wire);
         size_t loaded = 0;
-        esp_err_t error = i2s_channel_preload_data(s.tx, s.wire, requested, &loaded);
+        esp_err_t error = i2s_channel_preload_data(s.tx, buffers.wire, requested, &loaded);
         remember(error);
         if (error != ESP_OK || loaded == 0 || loaded > requested || loaded % 4U) return AE_IO_ERROR;
         total += loaded;
@@ -244,7 +261,7 @@ static ae_result_t hardware_mute(ae_role_t role)
         }
         if (!s.tx_running && flush_tx() != AE_OK) result = AE_UNCERTAIN;
     }
-    memset(s.wire, 0, sizeof(s.wire));
+    memset(buffers.wire, 0, sizeof(buffers.wire));
     return result;
 }
 
@@ -301,6 +318,12 @@ static ae_result_t hardware_prepare(const request_t *request)
     channels.dma_desc_num = DMA_DESCRIPTORS;
     channels.dma_frame_num = DMA_FRAMES;
     channels.auto_clear = true;
+#if SOC_PSRAM_DMA_CAPABLE && CONFIG_SPIRAM && !CONFIG_I2S_ISR_IRAM_SAFE
+    /* The SDK keeps descriptors internal and synchronizes PSRAM payloads.
+     * Allocation failure must propagate, without retrying in internal RAM.
+     * IRAM-safe auto-clear requires internal buffers in the pinned driver. */
+    channels.dma_buffer_in_psram = true;
+#endif
     /* Claim I2S before touching power/PA. A preexisting BSP audio owner fails. */
     esp_err_t error = i2s_new_channel(&channels, &s.tx, &s.rx);
     remember(error);
@@ -416,25 +439,25 @@ static ae_result_t hardware_pcm(const request_t *request, size_t *actual)
     size_t frames = request->bytes / media_frame;
     size_t wire_bytes = frames * 4U;
     *actual = 0;
-    if (wire_bytes > sizeof(s.wire)) return AE_INVALID;
+    if (wire_bytes > sizeof(buffers.wire)) return AE_INVALID;
     if (!reading) {
         for (size_t i = 0; i < frames; ++i) {
-            int32_t mono = sample_get(s.pcm + i * media_frame);
+            int32_t mono = sample_get(buffers.pcm + i * media_frame);
             if (s.format.channels == 2)
-                mono = (mono + sample_get(s.pcm + i * media_frame + 2U)) / 2;
-            sample_put(s.wire + i * 4U, (int16_t)mono);
-            sample_put(s.wire + i * 4U + 2U, (int16_t)mono);
+                mono = (mono + sample_get(buffers.pcm + i * media_frame + 2U)) / 2;
+            sample_put(buffers.wire + i * 4U, (int16_t)mono);
+            sample_put(buffers.wire + i * 4U + 2U, (int16_t)mono);
         }
     }
     size_t transferred = 0;
     if (!reading) s.tx_dirty = true;
-    esp_err_t error = reading ? i2s_channel_read(s.rx, s.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS) :
-        i2s_channel_write(s.tx, s.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS);
+    esp_err_t error = reading ? i2s_channel_read(s.rx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS) :
+        i2s_channel_write(s.tx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS);
     remember(error);
     if (transferred > wire_bytes || transferred % 4U) return AE_INTEGRITY;
     frames = transferred / 4U;
     if (reading) {
-        for (size_t i = 0; i < frames; ++i) memcpy(s.pcm + i * 2U, s.wire + i * 4U, 2U);
+        for (size_t i = 0; i < frames; ++i) memcpy(buffers.pcm + i * 2U, buffers.wire + i * 4U, 2U);
     }
     *actual = frames * media_frame;
     if (error == ESP_OK && transferred != wire_bytes) return AE_TIMEOUT;
@@ -571,7 +594,7 @@ static bool service(void)
         (request.operation == OP_WRITE && !s.playback_gate)) {
         result = AE_STALE;
         actual = 0;
-        memset(s.pcm, 0, sizeof(s.pcm));
+        memset(buffers.pcm, 0, sizeof(buffers.pcm));
     }
     if (request.operation == OP_UNMUTE && result == AE_OK) {
         if (request.roles == AE_MICROPHONE && !(s.mute_pending & AE_MICROPHONE)) s.capture_gate = true;
@@ -609,7 +632,7 @@ static ae_result_t exchange(const request_t *request, void *data, size_t *actual
     if (!s.status.worker_started) { portEXIT_CRITICAL(&s.lock); return AE_UNAVAILABLE; }
     if (s.slot != SLOT_EMPTY) {
         if (!same_request(request, &s.request) || (request->operation == OP_WRITE &&
-            memcmp(data, s.pcm, request->bytes))) {
+            memcmp(data, buffers.pcm, request->bytes))) {
             portEXIT_CRITICAL(&s.lock); return AE_BUSY;
         }
         if (s.slot != SLOT_DONE) { portEXIT_CRITICAL(&s.lock); return AE_AGAIN; }
@@ -620,8 +643,8 @@ static ae_result_t exchange(const request_t *request, void *data, size_t *actual
             confirmed = 0;
         }
         if (actual) *actual = confirmed;
-        if (request->operation == OP_READ && confirmed) memcpy(data, s.pcm, confirmed);
-        memset(s.pcm, 0, sizeof(s.pcm));
+        if (request->operation == OP_READ && confirmed) memcpy(data, buffers.pcm, confirmed);
+        memset(buffers.pcm, 0, sizeof(buffers.pcm));
         s.slot = SLOT_EMPTY;
         portEXIT_CRITICAL(&s.lock);
         return result;
@@ -655,7 +678,7 @@ static ae_result_t exchange(const request_t *request, void *data, size_t *actual
     }
     s.request = *request;
     s.request.safety_epoch = s.safety_epoch;
-    if (request->operation == OP_WRITE) memcpy(s.pcm, data, request->bytes);
+    if (request->operation == OP_WRITE) memcpy(buffers.pcm, data, request->bytes);
     s.slot = SLOT_PENDING;
     portEXIT_CRITICAL(&s.lock);
     xTaskNotifyGive(s.task);
@@ -773,7 +796,7 @@ static ae_result_t stop(void *context, uint64_t generation)
         ae_result_t result = s.stop_result;
         s.stop_done = false;
         s.slot = SLOT_EMPTY;
-        memset(s.pcm, 0, sizeof(s.pcm));
+        memset(buffers.pcm, 0, sizeof(buffers.pcm));
         portEXIT_CRITICAL(&s.lock); return result;
     }
     if (!s.stop_pending) {
@@ -788,7 +811,17 @@ static ae_result_t stop(void *context, uint64_t generation)
 ae_result_t board_audio_mosaico_init(void)
 {
     if (board_audio_mosaico_status().worker_started) return AE_OK;
+#if BOARD_AUDIO_EXTERNAL_STACK
+    /* This resident task only calls synchronous codec/I2C/I2S/GPIO APIs and
+     * task notifications. It executes no flash/NVS operations. Keep cache-off
+     * ISR configurations internal because I2C can borrow its caller buffer.
+     * The SDK owns an internal TCB and unwinds partial allocation on failure;
+     * PSRAM exhaustion must not fall back to internal RAM. */
+    if (xTaskCreateWithCaps(worker, "board_audio", 6144, NULL, 5, &s.task,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) return AE_EXHAUSTED;
+#else
     if (xTaskCreate(worker, "board_audio", 6144, NULL, 5, &s.task) != pdPASS) return AE_EXHAUSTED;
+#endif
     portENTER_CRITICAL(&s.lock);
     s.probe_pending = true;
     s.status.worker_started = true;

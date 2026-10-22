@@ -13,7 +13,8 @@ typedef struct {
     connection_request_t request;
     bool admitted;
 } connection_binding_t;
-static connection_binding_t s_connection_bindings[CONNECTION_BINDINGS], s_connection_pressed;
+static UI_TASK_BSS connection_binding_t s_connection_bindings[CONNECTION_BINDINGS];
+static connection_binding_t s_connection_pressed;
 static size_t s_connection_count;
 static lv_obj_t *s_connection_state, *s_connection_detail, *s_connection_reason;
 static lv_obj_t *s_connection_allow_note;

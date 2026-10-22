@@ -225,6 +225,7 @@ ae_result_t ae_authorize(ae_engine_t *engine, ae_job_t *job, ae_authority_operat
 }
 
 size_t ae_engine_bytes(void) { return sizeof(ae_engine_t); }
+size_t ae_engine_alignment(void) { return _Alignof(ae_engine_t); }
 
 ae_result_t ae_init(void *memory, size_t bytes, const ae_dependencies_t *dependencies,
     uint64_t now_ms, ae_engine_t **output)

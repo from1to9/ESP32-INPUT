@@ -136,9 +136,11 @@ The draft distinguishes `APP_WIFI_OBTAINING_IP`, `lan_ready` and `backend_availa
 
 ## 11. Common keys without shrinking the character grid
 
-Add `Common keys` to the Keyboard choice panel and open `APP_OVERLAY_COMMON_KEYS` through the existing `APP_MENU` action. The four existing entry choices and the new entry fit five 456 x 64 rows with 8-pixel gaps. Primary character entry retains its nine 112 x 76 cells, utility rail, preview and explicit Send. No permanent extra key row crowds the primary screen.
+The Keyboard header exposes a persistent `Keys` button at x 224/y 8, 48 x 48 pixels in every submode. The submode chooser uses x 140/y 8, 76 x 48 pixels with the same 16 px caption as Keys and Menu. Its existing `Common keys` entry remains available. Both submit `APP_MENU` / `APP_OVERLAY_COMMON_KEYS`; navigation waits for coordinator acknowledgement. Primary character entry retains its nine 112 x 76 cells, utility rail, preview and explicit Send.
 
-The Common keys panel explicitly says `Live keys / preview unchanged`. Eleven 144 x 68 buttons occupy four rows, with a noninteractive explanation in the unused slot. The arrangement is Esc / Tab / Enter; Backspace / Delete / explanation; Home / Up / End; Left / Down / Right. A press emits the existing `APP_KEY` with the following HID usage and zero modifiers. The existing engine reserves the corresponding release; the panel introduces no sustained keyboard hold or implicit repeat.
+The panel identifies the selected host and acknowledged Ctrl/Command setting. Fourteen 144 x 52 buttons occupy five rows, starting at x 12/168/324 and y 112 with a 60 px row step. The arrangement is Copy / Paste / Undo; Backspace / Delete fwd / Enter; Esc / Tab / explanation; Home / Up / End; Left / Down / Right. The noninteractive explanation reads `Sends now / Draft stays`; Back to keyboard remains at y 424. All targets remain at least 44 x 44 pixels. No full-height scrolling or shrinking of the character grid is needed.
+
+Copy/Paste/Undo emit the existing `APP_SHORTCUT` identities from every Keyboard submode. The coordinator uses the acknowledged host setting to send Ctrl+C/V/Z for Windows or Command+C/V/Z for Apple, with a reserved release and no sticky modifier. Paste never reads the host clipboard or automatically sends the draft. The other eleven buttons emit `APP_KEY` with the following HID usage and zero modifiers; they never imply repeat or append Enter.
 
 | Label | HID usage | Meaning |
 | --- | --- | --- |
@@ -146,13 +148,13 @@ The Common keys panel explicitly says `Live keys / preview unchanged`. Eleven 14
 | Tab | `0x2b` | Host Tab |
 | Enter | `0x28` | Explicit host Enter, independent of Send |
 | Backspace | `0x2a` | Delete backward at the host |
-| Delete | `0x4c` | Delete forward at the host |
+| Delete fwd | `0x4c` | Delete forward at the host |
 | Home / End | `0x4a` / `0x4d` | Host Home / End |
 | Left / Up / Down / Right | `0x50` / `0x52` / `0x51` / `0x4f` | Host arrow keys |
 
-`APP_DELETE` keeps its existing meaning of removing the last local preview character. Label the preview action `Delete draft` and explain the distinction in the Common keys panel. Copy/Paste/Undo remain in the existing Shortcuts submode and continue using its Ctrl/Command setting; this change adds no sticky modifiers. The common-key panel is admitted only in Keyboard mode and shares ordinary host-readiness, modal, stale-gesture, wake, lock and release gates. Local draft and private editors are unchanged by a live key press. No common key is sent while a private editor is open.
+`APP_DELETE` keeps its existing meaning of removing the last local preview character. Label the preview action `Delete draft` and explain the distinction in the Common keys panel. The existing Shortcuts submode remains compatible with the same coordinator-owned Ctrl/Command setting. The common-key panel is admitted only in Keyboard mode and shares ordinary host-readiness, modal, stale-gesture, wake, lock and release gates. Local draft and private editors are unchanged by a live key press. No common key is sent while a private editor is open.
 
-Required checks cover every distinct HID usage, preview preservation, explicit Enter, disabled/disconnected host state, held-button invalidation, stale actions after closing, and absence of a key press during wake, lock or private editing.
+Required checks cover the one-tap entry in all four Keyboard submodes, readable header captions, all fourteen actions, both host modifier settings, preview preservation, explicit Enter, disabled/disconnected/sending/release-pending state, held-button revisions, stale actions after closing, and absence of a key press during wake, lock or private editing. Actual 480 x 480 renders cover both themes, ready/disconnected state and capture/lock cues.
 
 ## 12. Tap to click and double-tap drag
 

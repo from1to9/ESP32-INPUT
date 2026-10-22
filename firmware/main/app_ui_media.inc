@@ -6,7 +6,8 @@ typedef struct {
     app_media_request_t request;
     bool admitted;
 } media_binding_t;
-static media_binding_t s_media_bindings[MEDIA_BINDINGS], s_media_pressed;
+static UI_TASK_BSS media_binding_t s_media_bindings[MEDIA_BINDINGS];
+static media_binding_t s_media_pressed;
 static size_t s_media_binding_count, s_core_media_bindings;
 static lv_obj_t *s_voice_reject;
 static lv_obj_t *s_media_routes[4], *s_media_enable[2], *s_media_mute[2], *s_media_gain[2];

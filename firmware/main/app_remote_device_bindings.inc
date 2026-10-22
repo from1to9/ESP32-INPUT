@@ -25,7 +25,8 @@ typedef struct {
     app_remote_device_request_t request;
     app_remote_device_outcome_t outcome;
 } remote_device_binding_job_t;
-static remote_device_binding_job_t s_remote_device_jobs[APP_REMOTE_DEVICE_JOBS];
+/* Coordinator-owned value receipts never enter an ISR or a DMA descriptor. */
+static EXT_RAM_BSS_ATTR remote_device_binding_job_t s_remote_device_jobs[APP_REMOTE_DEVICE_JOBS];
 typedef struct {
     bool used;
     uint64_t created_ms, ui_revision;
@@ -33,7 +34,7 @@ typedef struct {
     app_remote_device_request_t request;
     app_remote_device_approval_t approval;
 } remote_device_review_t;
-static remote_device_review_t s_remote_device_reviews[4];
+static EXT_RAM_BSS_ATTR remote_device_review_t s_remote_device_reviews[4];
 static char s_remote_device_local_review[CP_ID_HEX_CAPACITY];
 
 static bool remote_device_id_equal(const void *a, const void *b, size_t bytes)
@@ -63,7 +64,8 @@ static bool remote_device_observe(void *context, cp_operation_id_t operation, ap
 {
     (void)context;
     ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
-    ble_hid_bond_list_t bonds = ble_hid_bond_list();
+    static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+    ble_hid_copy_bond_list(&bonds);
     portENTER_CRITICAL(&s_control_lock);
     bool busy = s_touch_down || s_physical_down || s_local_submission_pending;
     bool awake = s_screen_accepts_input;
@@ -93,6 +95,14 @@ static bool remote_device_target_store_ready(const ble_hid_target_snapshot_t *ta
      * preferences remain healthy. Successful loading also proves absence. */
     return target->loaded && (target->durable || known_default) && terminal && target->request_error == ESP_OK;
 }
+/* Called only by the coordinator, like the other owning device callbacks. */
+static uint64_t remote_device_bond_revision(void)
+{
+    static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+    ble_hid_copy_bond_list(&bonds);
+    return bonds.revision;
+}
+
 static bool remote_device_owner_available(void *context, cp_operation_id_t operation, uint32_t fields,
     char reason[CP_REASON_CAPACITY])
 {
@@ -110,7 +120,8 @@ static bool remote_device_owner_available(void *context, cp_operation_id_t opera
     else if (operation >= CP_OP_BLUETOOTH_PAIRING_OPEN && operation <= CP_OP_BLUETOOTH_TARGET_REQUEST) {
         available = available && bluetooth.initialized && !bluetooth.failed;
         if (operation == CP_OP_BLUETOOTH_TARGET_REQUEST || operation == CP_OP_BLUETOOTH_BOND_FORGET) {
-            ble_hid_bond_list_t bonds = ble_hid_bond_list();
+            static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+            ble_hid_copy_bond_list(&bonds);
             available = available && bonds.known && !bonds.updating;
         }
     } else if (operation == CP_OP_HAPTICS_TEST) available = available && board.haptics && board_haptics_enabled();
@@ -121,8 +132,11 @@ static bool remote_device_owner_available(void *context, cp_operation_id_t opera
     else if (operation == CP_OP_SYSTEM_RESTART) available = available && remote_device_restart_available && s_remote_device_maintenance_revision != UINT64_MAX;
     else if (operation == CP_OP_PREFERENCES_RESET) available = available && settings_store_status().available;
     else if (operation == CP_OP_DEVICE_FACTORY_RESET_REQUEST) {
-        app_wifi_profiles_snapshot_t wifi; app_wifi_profiles_snapshot(&wifi);
-        ble_hid_bond_list_t bonds = ble_hid_bond_list(); ble_hid_target_snapshot_t target = ble_hid_target_snapshot();
+        static EXT_RAM_BSS_ATTR app_wifi_profiles_snapshot_t wifi;
+        app_wifi_profiles_snapshot(&wifi);
+        static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+        ble_hid_copy_bond_list(&bonds);
+        ble_hid_target_snapshot_t target = ble_hid_target_snapshot();
         available = available && settings_store_status().available && wifi.known && !wifi.uncertain && !wifi.operation_pending &&
             bonds.known && !bonds.updating && remote_device_target_store_ready(&target) && s_remote_device_maintenance_revision != UINT64_MAX;
     } else available = false;
@@ -162,7 +176,8 @@ static void remote_device_applied(remote_device_binding_job_t *job, uint64_t rev
 }
 static bool remote_device_target(const app_remote_device_request_t *request, ble_hid_target_t *target)
 {
-    ble_hid_bond_list_t bonds = ble_hid_bond_list();
+    static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+    ble_hid_copy_bond_list(&bonds);
     if (!bonds.known || bonds.updating || bonds.revision != request->bond_revision || !request->peer_id[0]) return false;
     for (uint8_t i = 0; i < bonds.count; ++i) {
         const ble_hid_bond_t *bond = &bonds.bonds[i]; char id[BLE_HID_BOND_ID_BYTES * 2U + 1U];
@@ -305,11 +320,11 @@ static void remote_device_bluetooth_progress(remote_device_binding_job_t *job)
     } else if (request->operation == CP_OP_BLUETOOTH_BONDS_FORGET_ALL) {
         if (bluetooth.bond_forget_state == BLE_HID_FORGET_FAILED) remote_device_failed(job, CP_STORAGE_UNCERTAIN, true);
         else if (bluetooth.bond_forget_state == BLE_HID_FORGET_DONE && bluetooth.bond_count_known && !bluetooth.bond_count)
-            remote_device_applied(job, ble_hid_bond_list().revision, true);
+            remote_device_applied(job, remote_device_bond_revision(), true);
     } else if (request->operation == CP_OP_BLUETOOTH_BOND_FORGET) {
         ble_hid_bond_forget_snapshot_t status = ble_hid_bond_forget_snapshot();
         if (status.request_id != job->bond_forget_id) remote_device_failed(job, CP_STALE, true);
-        else if (status.status == BLE_HID_BOND_FORGET_SUCCEEDED) remote_device_applied(job, ble_hid_bond_list().revision, true);
+        else if (status.status == BLE_HID_BOND_FORGET_SUCCEEDED) remote_device_applied(job, remote_device_bond_revision(), true);
         else if (status.status == BLE_HID_BOND_FORGET_FAILED || status.status == BLE_HID_BOND_FORGET_UNCERTAIN)
             remote_device_failed(job, CP_STORAGE_UNCERTAIN, status.status == BLE_HID_BOND_FORGET_UNCERTAIN);
         else if (status.status == BLE_HID_BOND_FORGET_CANCELLED)
@@ -328,7 +343,7 @@ static void remote_device_bluetooth_progress(remote_device_binding_job_t *job)
 }
 static bool remote_device_microphone_safe(void)
 {
-    app_media_snapshot_t media;
+    static EXT_RAM_BSS_ATTR app_media_snapshot_t media;
     if (!app_media_runtime_snapshot(&media) || !media.audio_known || media.audio.quarantined) return false;
     return media.audio.hardware_off_confirmed ||
         (media.audio.state == AE_RUNNING && media.audio.microphone_muted && !media.audio.capture_indicator_required);
@@ -378,7 +393,10 @@ static cp_error_t remote_device_submit_action(remote_device_binding_job_t *job, 
         if (operation == CP_OP_BLUETOOTH_TARGET_REQUEST || operation == CP_OP_BLUETOOTH_BOND_FORGET) {
             ble_hid_target_t target; if (!remote_device_target(request, &target)) return CP_STALE;
         } else if (request->peer_id[0]) {
-            ble_hid_bond_list_t bonds = ble_hid_bond_list(); ble_hid_snapshot_t link = ble_hid_snapshot(); bool matched = false;
+            static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+            ble_hid_copy_bond_list(&bonds);
+            ble_hid_snapshot_t link = ble_hid_snapshot();
+            bool matched = false;
             for (uint8_t i = 0; i < bonds.count && i < BLE_HID_MAX_BONDS; ++i) {
                 char id[65]; remote_device_hex(bonds.bonds[i].bond_id, sizeof(bonds.bonds[i].bond_id), id);
                 if (bonds.known && !bonds.updating && link.connected && bonds.current_match_known &&
@@ -548,7 +566,8 @@ static cp_error_t remote_device_prepare_approval(void *context, const app_remote
     if (!unique) return CP_UNAVAILABLE;
     cp_scope_mask_t scopes = 0;
     for (size_t i = 0; i < cp_operation_count(); ++i) if (cp_operation_at(i)->id == request->operation) scopes = cp_operation_at(i)->scopes;
-    app_wifi_profiles_snapshot_t wifi; app_wifi_profiles_snapshot(&wifi);
+    static EXT_RAM_BSS_ATTR app_wifi_profiles_snapshot_t wifi;
+    app_wifi_profiles_snapshot(&wifi);
     *review = (remote_device_review_t){.used = true, .created_ms = s_now_ms, .request = *request,
         .wifi_revision = wifi.revision, .target_revision = ble_hid_target_snapshot().revision,
         .approval = {.operation = request->operation, .owner = request->identity, .required_scopes = scopes,
@@ -594,9 +613,10 @@ static cp_error_t remote_device_approval_claim(void *context, const app_remote_d
             !remote_device_id_equal(approval->action_digest, review->approval.action_digest, 32)) return CP_STALE;
         if (review->request.settings_revision != s_settings_revision) return CP_STALE;
         if (review->request.operation == CP_OP_DEVICE_FACTORY_RESET_REQUEST) {
-            app_wifi_profiles_snapshot_t wifi; app_wifi_profiles_snapshot(&wifi);
+            static EXT_RAM_BSS_ATTR app_wifi_profiles_snapshot_t wifi;
+            app_wifi_profiles_snapshot(&wifi);
             if (!wifi.known || wifi.uncertain || wifi.operation_pending || wifi.revision != review->wifi_revision ||
-                ble_hid_bond_list().revision != review->request.bond_revision ||
+                remote_device_bond_revision() != review->request.bond_revision ||
                 ble_hid_target_snapshot().revision != review->target_revision) return CP_STALE;
         }
         review->approval.consumed = true; return CP_OK;
@@ -651,7 +671,7 @@ static void remote_device_review_view(app_remote_review_view_t *view)
 static bool remote_device_confirm_local(bool confirm, const app_remote_review_request_t *request)
 {
     if (!s_remote_device_local_review[0]) return false;
-    app_remote_review_view_t view; remote_device_review_view(&view);
+    static EXT_RAM_BSS_ATTR app_remote_review_view_t view; remote_device_review_view(&view);
     if (!request || !view.pending || (confirm && !view.can_confirm) ||
         s_overlay != APP_OVERLAY_CONFIRM || s_confirmation != APP_CONFIRM_REMOTE ||
         request->management_generation != view.request.management_generation || request->resource_revision != view.request.resource_revision ||
@@ -704,7 +724,8 @@ static bool remote_device_initialize(void)
 {
     if (s_remote_device) return true;
     remote_device_restart_available = app_device_restart_init() == ESP_OK;
-    void *memory = heap_caps_calloc(1, app_remote_device_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *memory = heap_caps_aligned_calloc(app_remote_device_alignment(), 1,
+        app_remote_device_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!memory) return false;
     app_remote_device_port_t port = {.observe = remote_device_observe, .available = remote_device_owner_available,
         .validate_settings = remote_device_validate_settings, .random = remote_device_random,

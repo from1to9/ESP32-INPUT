@@ -36,6 +36,11 @@ void test_leave(void);
 #define portEXIT_CRITICAL(p) ((void)(p),test_leave())
 typedef void *SemaphoreHandle_t;
 typedef unsigned TickType_t;
+typedef int BaseType_t;
+typedef unsigned UBaseType_t;
+typedef void *TaskHandle_t;
+typedef void (*TaskFunction_t)(void *);
+#define configMINIMAL_STACK_SIZE 1536U
 #define pdTRUE 1
 #define pdPASS 1
 #define pdMS_TO_TICKS(n) (n)
@@ -44,12 +49,17 @@ int xSemaphoreTake(SemaphoreHandle_t,TickType_t);
 void xSemaphoreGive(SemaphoreHandle_t);
 void vSemaphoreDelete(SemaphoreHandle_t);
 int xTaskCreate(void (*)(void *),const char *,unsigned,void *,unsigned,void *);
+int xTaskCreateWithCaps(void (*)(void *),const char *,unsigned,void *,unsigned,void *,unsigned);
+void vTaskDelete(void *);
+void vTaskDeleteWithCaps(void *);
 void vTaskDelay(TickType_t);
 int64_t esp_timer_get_time(void);
 void esp_fill_random(void *,size_t);
 #define MALLOC_CAP_SPIRAM 1
 #define MALLOC_CAP_8BIT 2
+#define MALLOC_CAP_INTERNAL 4
 void *heap_caps_calloc(size_t,size_t,unsigned);
+void *heap_caps_aligned_calloc(size_t,size_t,size_t,unsigned);
 void *heap_caps_malloc(size_t,unsigned);
 void heap_caps_free(void *);
 typedef struct {unsigned type,subtype;uint32_t address,size;bool encrypted;} esp_partition_t;

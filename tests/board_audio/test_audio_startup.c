@@ -11,11 +11,13 @@ int main(int argc, char **argv)
     bool probe_first = !strcmp(argv[1], "probe_first");
     bool failed = !strcmp(argv[1], "probe_failure");
     bool control_failure = !strcmp(argv[1], "control_failure");
-    assert(probe_first || failed || control_failure || !strcmp(argv[1], "stop_first"));
+    bool dma_failure = !strcmp(argv[1], "dma_tx_failure") || !strcmp(argv[1], "dma_rx_failure");
+    assert(probe_first || failed || control_failure || dma_failure || !strcmp(argv[1], "stop_first"));
     port = board_audio_mosaico_port();
     assert(board_audio_mosaico_init() == AE_OK && s.probe_pending);
     if (failed) fail_new = true;
     if (control_failure) { fail_register = 0x31; fail_read = true; }
+    if (dma_failure) fail_dma_channel = !strcmp(argv[1], "dma_tx_failure") ? 1 : 2;
     if (probe_first) drain();
     void *memory = calloc(1, ae_engine_bytes()); assert(memory);
     ae_dependencies_t dependencies = {.codec = port, .monotonic_ms = startup_clock};
@@ -29,9 +31,14 @@ int main(int argc, char **argv)
     assert(port.capabilities(NULL, &caps) == AE_OK);
     assert(status.probe_complete && !s.probe_pending && !s.probe_running && channel_allocations == 1);
     assert(!s.prepared && !s.capture_gate && !s.playback_gate && !s.rx_running && !s.tx_running && !io_calls);
-    if (failed || control_failure) {
+    if (failed || control_failure || dma_failure) {
         assert(!status.hardware_observed && !caps.available && status.probe_result != AE_OK && caps.reason != AE_OK);
-        assert(status.probe_result == (failed ? AE_BUSY : AE_UNCERTAIN));
+        assert(status.probe_result == (failed ? AE_BUSY : dma_failure ? AE_EXHAUSTED : AE_UNCERTAIN));
+        if (dma_failure) {
+            assert(status.last_sdk_error == ESP_ERR_NO_MEM && !status.cleanup_uncertain);
+            assert(!s.tx && !s.rx && !tx_channel.allocated && !rx_channel.allocated && !s.power_owned && !pa_level);
+            assert(dma_init_calls == fail_dma_channel);
+        }
     } else {
         assert(view.state == AE_OFF && view.hardware_off_confirmed && !view.quarantined);
         assert(status.hardware_observed && status.probe_result == AE_OK && caps.available);

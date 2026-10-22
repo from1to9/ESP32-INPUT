@@ -240,10 +240,15 @@ size_t cp_sessions_snapshot(const cp_context_t *c, cp_session_view_t out[CP_MAX_
     return count;
 }
 size_t cp_context_size(void) { return sizeof(cp_context_t); }
+size_t cp_context_alignment(void) { return _Alignof(cp_context_t); }
 cp_error_t cp_initialize(void *memory, size_t size, const cp_callbacks_t *callbacks,
                          cp_context_t **out)
 {
-    if (!memory || size < sizeof(cp_context_t) || !callbacks || !out || !callbacks->random) {
+    if (out) {
+        *out = NULL;
+    }
+    if (!memory || (uintptr_t)memory % cp_context_alignment() || size < sizeof(cp_context_t) ||
+        !callbacks || !out || !callbacks->random) {
         return CP_INVALID;
     }
     cp_context_t *c = memory;

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdarg.h>
+#include "../audio_engine/heap_caps_model.h"
 
 /* Include production helpers unchanged, preserving their actual static state.
  * Hardware interfaces are substituted only through the included public headers. */
@@ -43,6 +44,8 @@ static device_settings_t test_saved_request;
 static esp_err_t test_storage_error;
 static unsigned test_storage_requests;
 static app_wifi_snapshot_t test_wifi;
+static app_control_runtime_snapshot_t test_control_runtime;
+static bool test_media_snapshot_unavailable;
 static app_wifi_setup_info_t test_wifi_info;
 static esp_err_t test_wifi_start_error, test_wifi_stop_error, test_wifi_forget_error;
 static esp_err_t test_wifi_info_error;
@@ -60,7 +63,7 @@ static size_t test_usb_enable_trace[32], test_usb_enable_count;
 static input_link_t test_previous_link;
 static void (*test_ble_after_accept)(void), (*test_usb_after_accept)(void);
 static bool test_diagnostic_logs_enabled, test_heap_observation_enabled;
-static char test_diagnostic_logs[8][256];
+static char test_diagnostic_logs[16][256];
 static size_t test_diagnostic_log_count, test_heap_observation_count;
 static size_t test_heap_free_internal, test_heap_largest_internal;
 static size_t test_heap_free_dma, test_heap_largest_dma;
@@ -120,10 +123,34 @@ static ble_hid_target_preferences_request_t test_remote_target_request;
 static uint64_t test_remote_wifi_forget_revision;
 static bool test_remote_wifi_forget_acknowledge;
 static ble_hid_bond_forget_snapshot_t test_remote_bond_forget;
-void *heap_caps_calloc(size_t count, size_t bytes, uint32_t caps) { (void)caps; return calloc(count, bytes); }
-void heap_caps_free(void *memory) { free(memory); }
+static size_t test_heap_calls, test_heap_aligned_calls, test_heap_outstanding, test_heap_fail_at;
+static bool test_media_authority_available;
+void *heap_caps_calloc(size_t count, size_t bytes, uint32_t caps)
+{
+    assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    ++test_heap_calls;
+    if (test_heap_calls == test_heap_fail_at) return NULL;
+    void *memory = test_heap_allocate(4, count, bytes);
+    if (memory) ++test_heap_outstanding;
+    return memory;
+}
+void *heap_caps_aligned_calloc(size_t alignment, size_t count, size_t bytes, uint32_t caps)
+{
+    assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    ++test_heap_calls; ++test_heap_aligned_calls;
+    if (test_heap_calls == test_heap_fail_at) return NULL;
+    void *memory = test_heap_allocate(alignment, count, bytes);
+    if (memory) ++test_heap_outstanding;
+    return memory;
+}
+void heap_caps_free(void *memory)
+{
+    if (memory) { assert(test_heap_outstanding); --test_heap_outstanding; }
+    test_heap_free(memory);
+}
 void esp_fill_random(void *memory, size_t bytes) { memset(memory, 0x17, bytes); }
 esp_err_t app_control_runtime_init(const app_control_host_t *host) { (void)host; return ESP_OK; }
+void app_control_runtime_snapshot(app_control_runtime_snapshot_t *out) { *out = test_control_runtime; }
 esp_err_t app_control_runtime_attach_usb_stdio(void) { return ESP_OK; }
 esp_err_t app_control_runtime_publish_state(const cp_device_state_t *state) { test_control_state = *state; return ESP_OK; }
 esp_err_t app_control_runtime_complete(uint64_t key, const cp_result_t *result)
@@ -170,6 +197,7 @@ esp_err_t board_haptics_cancel(uint64_t id)
     return ESP_OK;
 }
 bt_audio_bond_list_t bt_audio_bond_list(void) { return test_classic_bonds; }
+void bt_audio_copy_bond_list(bt_audio_bond_list_t *out) { if (out) *out = test_classic_bonds; }
 void bt_audio_pairing_close(void) {}
 void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out) { *out = test_wifi_profiles; }
 esp_err_t app_wifi_profiles_forget_all(uint64_t revision, bool acknowledge)
@@ -237,7 +265,7 @@ cp_error_t app_control_runtime_capture_authority(const cp_capture_authority_requ
 bool app_control_trust_grant(const uint8_t id[CP_ID_BYTES], cp_capture_grant_t *out)
 { (void)id; memset(out, 0, sizeof(*out)); return false; }
 ae_result_t app_media_runtime_set_remote_authority(const app_media_remote_authority_t *port)
-{ (void)port; return AE_UNAVAILABLE; }
+{ (void)port; return test_media_authority_available ? AE_OK : AE_UNAVAILABLE; }
 ae_result_t app_media_runtime_submit_remote(const app_remote_media_request_t *request)
 { (void)request; return AE_UNAVAILABLE; }
 bool app_media_runtime_poll_remote(uint64_t token, app_audio_result_t *out)
@@ -265,7 +293,11 @@ ae_result_t app_media_runtime_copy_remote_data(uint64_t token, size_t offset, vo
 ae_result_t app_media_runtime_init(const app_media_services_t *services)
 { (void)services; return AE_UNAVAILABLE; }
 bool app_media_runtime_snapshot(app_media_snapshot_t *snapshot)
-{ *snapshot = test_media_snapshot; return snapshot->initialized; }
+{
+    if (test_media_snapshot_unavailable) return false;
+    *snapshot = test_media_snapshot;
+    return snapshot->initialized;
+}
 void app_media_runtime_environment(const ae_environment_t *environment, uint64_t epoch,
     uint64_t revision, bool speech)
 { (void)epoch; (void)revision; test_media_environment = *environment; test_media_speech_context = speech; }
@@ -434,6 +466,7 @@ bool ble_hid_forget_bonds(uint64_t generation)
     return test_pair_accept;
 }
 ble_hid_bond_list_t ble_hid_bond_list(void) { return test_bonds; }
+void ble_hid_copy_bond_list(ble_hid_bond_list_t *out) { if (out) *out = test_bonds; }
 
 QueueHandle_t xQueueCreateStatic(UBaseType_t capacity, UBaseType_t item_size,
                                 uint8_t *bytes, StaticQueue_t *storage)
@@ -784,8 +817,7 @@ static void consume_one(void)
 {
     coordinator_event_t event;
     assert(xQueueReceive(s_intents, &event, 0) == pdTRUE);
-    if (event.contacts) handle_contacts(&event);
-    else handle_intent(&event.value.intent, &test_link);
+    consume_coordinator_event(&event, &test_link);
 }
 
 static void deliver(app_intent_t intent)
@@ -796,9 +828,13 @@ static void deliver(app_intent_t intent)
 
 static void setup(input_mode_t mode)
 {
-    free(s_remote_input); free(s_command_bridge);
-    free(s_remote_device); s_remote_device = NULL;
-    free(s_remote_media); s_remote_media = NULL;
+    heap_caps_free(s_remote_input); heap_caps_free(s_command_bridge);
+    heap_caps_free(s_remote_device); s_remote_device = NULL;
+    heap_caps_free(s_remote_media); s_remote_media = NULL;
+    heap_caps_free(s_remote_media_preview); s_remote_media_preview = NULL;
+    assert(!test_heap_outstanding);
+    test_heap_calls = test_heap_aligned_calls = test_heap_fail_at = 0;
+    test_media_authority_available = false;
     s_remote_media_immediate_ready = false;
     memset(&s_remote_media_immediate, 0, sizeof(s_remote_media_immediate));
     memset(s_remote_device_jobs, 0, sizeof(s_remote_device_jobs));
@@ -839,6 +875,8 @@ static void setup(input_mode_t mode)
     test_control_completions = 0;
     test_control_state = (cp_device_state_t){0};
     test_control_result = (cp_result_t){0};
+    test_control_runtime = (app_control_runtime_snapshot_t){.error = ESP_ERR_INVALID_STATE};
+    test_media_snapshot_unavailable = false;
     test_media_snapshot = (app_media_snapshot_t){0};
     test_indicator = (app_presenter_indicator_status_t){0};
     test_media_environment = (ae_environment_t){0};
@@ -1476,6 +1514,22 @@ static void raw_button_timing_and_takeover(void)
 static void motion_gates_and_local_keyboard_focus(void)
 {
     setup(INPUT_MOUSE);
+    sample_after(10, 0, 0);
+    assert(s_interaction.view.calibrating && s_interaction.view.calibration_samples == 1);
+    const interaction_t calibrating = s_interaction;
+    const hid_engine_t engine = s_engine;
+    const uint64_t accepted_timestamp = s_last_imu_us;
+    /* A discarded late board batch can return the same still-fresh cache.
+     * Repeated reads must not count it again or advance any motion state. */
+    for (unsigned i = 0; i < 4; ++i) {
+        s_now_ms += 10;
+        process_motion();
+        assert(s_last_imu_us == accepted_timestamp);
+        assert(memcmp(&s_interaction, &calibrating, sizeof calibrating) == 0);
+        assert(memcmp(&s_engine, &engine, sizeof engine) == 0);
+        expect_idle();
+    }
+    setup(INPUT_MOUSE);
     action(APP_MOTION, 0);
     assert(!s_engine.state.gyro_enabled); /* Uncalibrated. */
     calibrate();
@@ -1552,6 +1606,64 @@ static void rendered_state_is_truthful(void)
     test_presenter_available = false;
     render_view(&test_link, ESP_OK);
     assert(test_publish_count == 3);
+}
+
+static void motion_recovery_requires_fresh_samples_and_explicit_enable(void)
+{
+    setup(INPUT_MOUSE);
+    calibrate();
+    action(APP_MOTION, 0);
+    assert(s_engine.state.gyro_enabled);
+    const uint64_t accepted_timestamp = s_last_imu_us;
+    test_capabilities.imu = false;
+    test_imu_result = ESP_ERR_TIMEOUT;
+    for (unsigned i = 0; i < 10; ++i) {
+        s_now_ms += 10;
+        process_motion();
+        assert(s_last_imu_us == accepted_timestamp);
+        assert(!s_engine.state.gyro_enabled && !s_interaction.view.motion_enabled);
+        expect_idle();
+    }
+    render_view(&test_link, ESP_OK);
+    assert(!test_view.motion_available && test_view.motion_reason == APP_MOTION_SENSOR_UNAVAILABLE);
+
+    /* A fresh board sample restores availability, never the user's old ON
+     * request. The gap invalidates the orientation reference without banking
+     * missing movement; subsequent fresh samples reestablish that reference. */
+    test_capabilities.imu = true;
+    sample_after(10, 200, 0);
+    expect_idle();
+    for (unsigned i = 0; i < 20; ++i) {
+        sample_after(10, 0, 0);
+        expect_idle();
+    }
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_available && test_view.motion_reason == APP_MOTION_READY);
+    assert(!test_view.motion_enabled && !s_interaction.view.motion_enabled);
+    action(APP_MOTION, 0);
+    sample_after(10, 25, 0);
+    const uint8_t moved[] = {0, 2, 0, 0};
+    expect_report(2, moved, sizeof moved);
+    process_motion();
+    expect_idle();
+
+    /* A gap during startup calibration cannot combine disjoint sample
+     * windows into a successful calibration or count repeated cached data. */
+    setup(INPUT_MOUSE);
+    for (unsigned i = 0; i < 20; ++i) sample_after(10, 0, 0);
+    assert(s_interaction.view.calibrating && s_interaction.view.calibration_samples == 20);
+    test_capabilities.imu = false;
+    test_imu_result = ESP_ERR_TIMEOUT;
+    s_now_ms += 100;
+    process_motion();
+    test_capabilities.imu = true;
+    sample_after(10, 0, 0);
+    assert(s_interaction.view.calibration_samples == 0 && !s_interaction.view.calibrated);
+    process_motion();
+    assert(s_interaction.view.calibration_samples == 0);
+    calibrate();
+    assert(!s_engine.state.gyro_enabled);
+    expect_idle();
 }
 
 static void touch_lifecycle_rejects_ended_gesture(void)
@@ -3700,27 +3812,27 @@ static void allocation_diagnostics_ignore_an_unpublished_record(void)
 
 static void boot_memory_diagnostics_preserve_bounded_capability_history(void)
 {
-    static const char *const stages[] = {"entry", "usb", "board", "ui", "bluetooth", "wifi"};
+    static const char *const stages[] = {"entry", "usb", "board", "bluetooth", "wifi", "media", "ui", "remote"};
     setup(INPUT_MOUSE);
     test_heap_observation_enabled = true;
-    for (size_t i = 0; i < 6; ++i) {
+    for (size_t i = 0; i < 8; ++i) {
         test_heap_free_internal = 80000 - i * 1000;
         test_heap_largest_internal = 50000 - i * 1000;
         test_heap_free_dma = 30000 - i * 1000;
         test_heap_largest_dma = 10000 - i * 1000;
         record_boot_memory(stages[i]);
     }
-    assert(test_heap_observation_count == 24);
+    assert(test_heap_observation_count == 32);
     /* Extra stages must be discarded before even querying heap state. */
     test_heap_observation_enabled = false;
     for (unsigned i = 0; i < 1000; ++i) record_boot_memory("overflow");
-    assert(s_boot_memory_count == 6 && test_heap_observation_count == 24);
+    assert(s_boot_memory_count == 8 && test_heap_observation_count == 32);
     test_diagnostic_logs_enabled = true;
     for (unsigned repeat = 0; repeat < 100; ++repeat) {
         test_diagnostic_log_count = 0;
         report_memory_diagnostics();
-        assert(test_diagnostic_log_count == 6);
-        for (size_t i = 0; i < 6; ++i) {
+        assert(test_diagnostic_log_count == 8);
+        for (size_t i = 0; i < 8; ++i) {
             char expected[160];
             int length = snprintf(expected, sizeof expected,
                 "stage=%s free_internal=%zu largest_internal=%zu free_dma=%zu largest_dma=%zu",
@@ -3728,13 +3840,87 @@ static void boot_memory_diagnostics_preserve_bounded_capability_history(void)
             assert(length > 0 && (size_t)length < sizeof expected);
             assert(strstr(test_diagnostic_logs[i], expected));
         }
-        assert(s_boot_memory_count == 6 && test_heap_observation_count == 24);
+        assert(s_boot_memory_count == 8 && test_heap_observation_count == 32);
     }
     record_allocation_failure(1024, MALLOC_CAP_DMA, "after_boot");
     test_diagnostic_log_count = 0;
     report_memory_diagnostics();
-    assert(test_diagnostic_log_count == 7);
-    assert(strstr(test_diagnostic_logs[6], "size=1024 caps=0x00000008 function=after_boot"));
+    assert(test_diagnostic_log_count == 9);
+    assert(strstr(test_diagnostic_logs[8], "size=1024 caps=0x00000008 function=after_boot"));
+}
+
+static void runtime_diagnostics_keep_unknowns_private_and_observation_only(void)
+{
+    setup(INPUT_MOUSE);
+    test_diagnostic_logs_enabled = true;
+    test_wifi.initialized = test_wifi.lan_ready = true;
+    test_wifi.backend_available = false;
+    test_wifi.backend_error = ESP_FAIL;
+    (void)snprintf(test_wifi.ssid, sizeof test_wifi.ssid, "%s", "PRIVATE_NETWORK");
+    test_media_snapshot = (app_media_snapshot_t){.initialized = true, .audio_known = true,
+        .speech_known = true, .busy = true, .result_ready = true, .result = AE_BUSY};
+    test_media_snapshot.audio.error = AE_UNAVAILABLE;
+    test_media_snapshot.speech.result = AE_UNAVAILABLE;
+    test_control_runtime.initialized = true;
+    test_control_runtime.error = ESP_OK;
+    test_control_runtime.server.state = APP_CONTROL_ERROR;
+    test_control_runtime.server.error = ESP_FAIL;
+    test_control_runtime.trust.known = true;
+    test_control_runtime.trust.present = false;
+    test_control_runtime.trust.uncertain = true;
+    (void)snprintf(test_control_runtime.server.address, sizeof test_control_runtime.server.address,
+                   "%s", "PRIVATE_LISTENER");
+    (void)snprintf(test_control_runtime.trust.active_digest, sizeof test_control_runtime.trust.active_digest,
+                   "%s", "PRIVATE_IDENTITY");
+    app_intent_t intent = {.action = APP_THEME, .x = 1};
+    assert(submit_intent(&intent));
+    const hid_engine_t engine = s_engine;
+    const interaction_t interaction = s_interaction;
+    const device_settings_t settings = s_settings;
+    const unsigned queued = uxQueueMessagesWaiting(s_intents);
+    const unsigned priority = s_priority_requests;
+    const uint64_t revision = s_ui_revision;
+    report_runtime_diagnostics();
+    assert(test_diagnostic_log_count == 3);
+    assert(strstr(test_diagnostic_logs[0], "initialized=1"));
+    assert(strstr(test_diagnostic_logs[0], "lan_ready=1 backend_available=0"));
+    assert(strstr(test_diagnostic_logs[1], "snapshot_available=1 initialized=1 audio_known=1"));
+    assert(strstr(test_diagnostic_logs[1], "off_confirmed=0 speech_known=1"));
+    char expected_error[48];
+    (void)snprintf(expected_error, sizeof expected_error, "backend_error=%d", (int)ESP_FAIL);
+    assert(strstr(test_diagnostic_logs[0], expected_error));
+    (void)snprintf(expected_error, sizeof expected_error, "audio_error=%d", (int)AE_UNAVAILABLE);
+    assert(strstr(test_diagnostic_logs[1], expected_error));
+    (void)snprintf(expected_error, sizeof expected_error, "speech_result=%d", (int)AE_UNAVAILABLE);
+    assert(strstr(test_diagnostic_logs[1], expected_error));
+    (void)snprintf(expected_error, sizeof expected_error, "server_error=%d", (int)ESP_FAIL);
+    assert(strstr(test_diagnostic_logs[2], expected_error));
+    assert(strstr(test_diagnostic_logs[2], "trust_known=1 trust_present=0 trust_uncertain=1 clock_known=0"));
+    for (size_t i = 0; i < 3; ++i) assert(!strstr(test_diagnostic_logs[i], "PRIVATE_"));
+    for (size_t i = 0; i < sizeof s_runtime_diagnostics; ++i)
+        assert(((const uint8_t *)&s_runtime_diagnostics)[i] == 0);
+
+    /* A missing snapshot does not write its output. Previous ready flags and
+     * result bytes must not leak into a later unavailable observation. */
+    test_media_snapshot_unavailable = true;
+    test_wifi.initialized = test_wifi.lan_ready = false;
+    test_control_runtime = (app_control_runtime_snapshot_t){.error = ESP_ERR_INVALID_STATE};
+    for (unsigned repeat = 0; repeat < 10; ++repeat) {
+        test_diagnostic_log_count = 0;
+        report_runtime_diagnostics();
+        assert(test_diagnostic_log_count == 3);
+        assert(strstr(test_diagnostic_logs[0], "initialized=0 state=-1 lan_ready=0"));
+        assert(strstr(test_diagnostic_logs[1], "snapshot_available=0 initialized=0 audio_known=0 audio_state=-1 audio_error=-1"));
+        assert(strstr(test_diagnostic_logs[1], "off_confirmed=0 speech_known=0 speech_state=-1 speech_result=-1 busy=0 result_known=0 result=-1"));
+        assert(strstr(test_diagnostic_logs[2], "initialized=0 server_state=-1"));
+        for (size_t i = 0; i < sizeof s_runtime_diagnostics; ++i)
+            assert(((const uint8_t *)&s_runtime_diagnostics)[i] == 0);
+    }
+    assert(memcmp(&s_engine, &engine, sizeof engine) == 0);
+    assert(memcmp(&s_interaction, &interaction, sizeof interaction) == 0);
+    assert(memcmp(&s_settings, &settings, sizeof settings) == 0);
+    assert(uxQueueMessagesWaiting(s_intents) == queued && s_priority_requests == priority);
+    assert(s_ui_revision == revision && test_heap_observation_count == 0);
 }
 
 static void expect_neutral_navigation_trace(void)
@@ -4357,6 +4543,45 @@ static void common_keys_are_explicit_and_preserve_preview(void)
     assert(s_overlay == APP_OVERLAY_NONE && s_engine.state.epoch == epoch && s_ui_revision == revision);
 }
 
+static void common_keys_include_host_edit_shortcuts_in_each_keyboard_submode(void)
+{
+    const uint8_t usages[] = {0x06, 0x19, 0x1d}; /* Copy, Paste, Undo. */
+    const uint8_t up[8] = {0};
+    for (int host = APP_HOST_CTRL; host <= APP_HOST_COMMAND; ++host) {
+        for (int submode = APP_KEYBOARD_MOTION; submode <= APP_KEYBOARD_SHORTCUTS; ++submode) {
+            setup(INPUT_KEYBOARD);
+            fill_preview(4);
+            action(APP_MENU, APP_OVERLAY_SETTINGS);
+            action(APP_SETTINGS_PAGE, APP_SETTINGS_INPUT);
+            action(APP_HOST_OS, host);
+            release_barrier(); action(APP_CLOSE, 0); sync_interaction();
+            action(APP_KEYBOARD_SUBMODE, submode);
+            release_barrier(); sync_interaction();
+            action(APP_MENU, APP_OVERLAY_COMMON_KEYS);
+            release_barrier(); sync_interaction();
+            assert(s_keyboard_submode == (app_keyboard_submode_t)submode);
+            for (int shortcut = APP_SHORTCUT_COPY; shortcut <= APP_SHORTCUT_UNDO; ++shortcut) {
+                action(APP_SHORTCUT, shortcut);
+                const uint8_t down[8] = {host == APP_HOST_COMMAND ? 8 : 1, 0,
+                    usages[shortcut], 0, 0, 0, 0, 0};
+                expect_report(1, down, sizeof down);
+                expect_report(1, up, sizeof up);
+                assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+                expect_idle();
+            }
+            action(APP_SHORTCUT, -1); action(APP_SHORTCUT, APP_SHORTCUT_ENTER + 1);
+            /* Non-edit shortcuts use the explicit unmodified APP_KEY path
+             * in this panel; forged enum variants cannot bypass its contract. */
+            for (int other = APP_SHORTCUT_TAB; other <= APP_SHORTCUT_ENTER; ++other)
+                action(APP_SHORTCUT, other);
+            app_intent_t stale = make_intent(APP_SHORTCUT, APP_SHORTCUT_PASTE, 0, NULL);
+            action(APP_CLOSE, 0); deliver(stale);
+            assert(s_overlay == APP_OVERLAY_NONE && s_keyboard_submode == (app_keyboard_submode_t)submode);
+            expect_idle();
+        }
+    }
+}
+
 static bool memory_has_text(const void *memory, size_t bytes, const char *text)
 {
     size_t length = strlen(text);
@@ -4946,6 +5171,49 @@ static void media_preview_confirmation_uses_normal_input_context(void)
     assert(test_media_handles == handled);
 }
 
+static void remote_initializers_honor_alignment_and_clean_allocation_failures(void)
+{
+    setup(INPUT_MOUSE);
+    void *weak = heap_caps_calloc(1, 64, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    assert(weak && ((uintptr_t)weak & 7U) == 4U);
+    heap_caps_free(weak);
+    for (size_t failure = 0; failure <= 5; ++failure) {
+        setup(INPUT_MOUSE);
+        test_media_authority_available = true;
+        test_heap_fail_at = failure;
+        remote_control_init(false);
+        assert(test_heap_calls == 5 && test_heap_aligned_calls == 5);
+        if (failure == 0) {
+            assert(s_remote_input && s_command_bridge && s_remote_device && s_remote_media && s_remote_media_preview);
+            assert((uintptr_t)s_remote_input % app_remote_input_alignment() == 0);
+            assert((uintptr_t)s_command_bridge % app_command_bridge_alignment() == 0);
+            assert((uintptr_t)s_remote_device % app_remote_device_alignment() == 0);
+            assert((uintptr_t)s_remote_media % app_remote_media_alignment() == 0);
+            assert((uintptr_t)s_remote_media_preview % _Alignof(interaction_t) == 0);
+            assert(test_heap_outstanding == 5);
+        } else if (failure == 1) {
+            assert(!s_remote_device && s_remote_input && s_command_bridge && s_remote_media && s_remote_media_preview);
+            assert(test_heap_outstanding == 4);
+        } else if (failure <= 3) {
+            assert(!s_remote_media && !s_remote_media_preview && s_remote_device && s_remote_input && s_command_bridge);
+            assert(test_heap_outstanding == 3);
+        } else {
+            assert(!s_remote_input && !s_command_bridge && s_remote_device && s_remote_media && s_remote_media_preview);
+            assert(test_heap_outstanding == 3);
+        }
+        /* Independent owners retain valid contexts; rejected temporary input,
+         * bridge or media/preview storage is already released. Teardown then
+         * permits a complete fresh initialization without leaked allocations. */
+        setup(INPUT_MOUSE);
+        test_media_authority_available = true;
+        remote_control_init(false);
+        assert(test_heap_outstanding == 5 && s_remote_input && s_command_bridge && s_remote_device &&
+               s_remote_media && s_remote_media_preview);
+    }
+    setup(INPUT_MOUSE);
+    assert(!test_heap_outstanding);
+}
+
 static cp_command_t remote_test_command(cp_operation_id_t operation, uint64_t key, const char *arguments)
 {
     app_remote_input_state_t observed; assert(remote_observe(NULL, &observed));
@@ -5178,6 +5446,36 @@ static void applied_remote_receipt_survives_later_local_selection(void)
 #include "update_cases.inc"
 #include "remote_device_cases.inc"
 
+static void consumed_event_workspace_does_not_retain_private_payloads(void)
+{
+    setup(INPUT_KEYBOARD);
+    coordinator_event_t event;
+    memset(&event, 0xa5, sizeof(event));
+    event.contacts = false;
+    event.value.intent = make_intent(APP_TEXT, 0, 0, "AZ");
+    consume_coordinator_event(&event, &test_link);
+    const uint8_t *bytes = (const uint8_t *)&event;
+    for (size_t i = 0; i < sizeof(event); ++i) assert(bytes[i] == 0);
+    static const uint8_t a[] = {2, 0, 4, 0, 0, 0, 0, 0};
+    static const uint8_t z[] = {2, 0, 29, 0, 0, 0, 0, 0};
+    static const uint8_t zero[8] = {0};
+    expect_report(1, a, sizeof(a)); expect_report(1, zero, sizeof(zero));
+    expect_report(1, z, sizeof(z)); expect_report(1, zero, sizeof(zero));
+    expect_idle();
+
+    memset(&event, 0xa5, sizeof(event));
+    event.contacts = true;
+    event.value.touch.sample.epoch = s_engine.state.epoch - 1;
+    consume_coordinator_event(&event, &test_link);
+    for (size_t i = 0; i < sizeof(event); ++i) assert(bytes[i] == 0);
+    expect_idle();
+
+    event.value.intent = make_intent(APP_LOCK, 1, 0, "private-event-marker");
+    consume_coordinator_event(&event, &test_link);
+    assert(process_priority() && s_engine.state.locked);
+    for (size_t i = 0; i < sizeof(event); ++i) assert(bytes[i] == 0);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -5212,6 +5510,7 @@ int main(int argc, char **argv)
     RUN(raw_button_timing_and_takeover);
     RUN(motion_gates_and_local_keyboard_focus);
     RUN(rendered_state_is_truthful);
+    RUN(motion_recovery_requires_fresh_samples_and_explicit_enable);
     RUN(touch_lifecycle_rejects_ended_gesture);
     RUN(touch_release_has_one_freeze_interval);
     RUN(physical_down_freezes_before_classification);
@@ -5279,6 +5578,8 @@ int main(int argc, char **argv)
     RUN(allocation_diagnostics_retain_only_first_complete_failure);
     RUN(allocation_diagnostics_ignore_an_unpublished_record);
     RUN(boot_memory_diagnostics_preserve_bounded_capability_history);
+    RUN(runtime_diagnostics_keep_unknowns_private_and_observation_only);
+    RUN(remote_initializers_honor_alignment_and_clean_allocation_failures);
     RUN(quick_status_settings_back_preserves_primary_context);
     RUN(chooser_entry_rejects_wrong_mode_and_invalid_payload_without_cancelling_send);
     RUN(chooser_entry_cannot_nest_behind_another_panel);
@@ -5297,6 +5598,7 @@ int main(int argc, char **argv)
     RUN(touch_drag_boundaries_and_contact_deadman_release);
     RUN(touch_release_survives_congestion_and_refused_down_never_drags);
     RUN(common_keys_are_explicit_and_preserve_preview);
+    RUN(common_keys_include_host_edit_shortcuts_in_each_keyboard_submode);
     RUN(local_name_persists_only_matching_verified_acknowledgement);
     RUN(failed_or_stale_local_names_cannot_change_preferences);
     RUN(private_wifi_submission_waits_for_touch_fifo_and_cancel);
@@ -5315,6 +5617,7 @@ int main(int argc, char **argv)
     RUN(full_contact_fifo_precedes_primary_and_drains_pair);
     RUN(full_contact_right_click_and_cancelled_drag);
     RUN(contact_overflow_stale_context_and_motion_keep_safe_defaults);
+    RUN(consumed_event_workspace_does_not_retain_private_payloads);
 #undef RUN
     assert(passed);
     if (argc == 2) printf("PASS: coordinator case %s\n", argv[1]);

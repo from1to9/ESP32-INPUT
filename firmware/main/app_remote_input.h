@@ -62,6 +62,8 @@ typedef struct {
  * Parent injects the SAME engine/model used by native input, never a sidecar.
  * observe/changed/complete/delegate are bounded non-reentrant owner callbacks. */
 size_t app_remote_input_bytes(void);
+/* Caller storage must satisfy both this alignment and the byte requirement. */
+size_t app_remote_input_alignment(void);
 cp_error_t app_remote_input_init(void *memory, size_t bytes,
     const app_remote_input_port_t *, app_remote_input_t **);
 /* Pure operation ownership for coordinator dispatch, independent of runtime

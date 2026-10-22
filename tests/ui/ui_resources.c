@@ -12,7 +12,7 @@
 #define IDLE_MS 10000
 #define FRAME_BYTES (WIDTH * HEIGHT * 2U)
 /* design/ui-plan.md: fixed input pages preserve gestures; one panel is dynamic. */
-#define CORE_OBJECT_LIMIT 104 /* Explicit Reject button plus caption. */
+#define CORE_OBJECT_LIMIT 106 /* Persistent Keys button and caption added to the 104-object core. */
 #define PANEL_OBJECT_LIMIT 160
 
 typedef struct {

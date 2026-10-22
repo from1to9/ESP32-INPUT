@@ -6,6 +6,27 @@
 #include <string.h>
 #include "../../firmware/main/ble_hid.c"
 
+/* Existing state-transition assertions exercise copy-out and legacy callers. */
+static ble_hid_bond_list_t observed_bonds(void)
+{
+    ble_hid_bond_list_t copy, legacy;
+    memset(&copy, 0xa5, sizeof(copy));
+    ble_hid_copy_bond_list(NULL);
+    ble_hid_copy_bond_list(&copy);
+    legacy = ble_hid_bond_list();
+    assert(copy.known == legacy.known && copy.updating == legacy.updating &&
+        copy.error == legacy.error && copy.revision == legacy.revision &&
+        copy.count == legacy.count && copy.capacity == legacy.capacity && copy.preferences_revision == legacy.preferences_revision &&
+        copy.current_match_known == legacy.current_match_known);
+    assert(memcmp(copy.bonds, legacy.bonds, sizeof(copy.bonds)) == 0);
+    /* The caller owns this buffer; changing it must not alter cached state. */
+    copy.bonds[0].address[0] ^= 0xffU;
+    ble_hid_copy_bond_list(&copy);
+    assert(memcmp(copy.bonds, legacy.bonds, sizeof(copy.bonds)) == 0);
+    return copy;
+}
+
+
 typedef struct { unsigned count, head, capacity, item_size; unsigned char data[16 * sizeof(control_command_t)]; } fake_queue_t;
 static fake_queue_t queue_storage;
 static esp_err_t nvs_result = ESP_OK;
@@ -1302,7 +1323,7 @@ static void test_forget_multiple_and_capacity(void) {
     assert(ble_hid_snapshot().bond_forget_state == BLE_HID_FORGET_DONE);
 }
 static void assert_current_bond(int expected, unsigned count) {
-    ble_hid_bond_list_t list = ble_hid_bond_list();
+    ble_hid_bond_list_t list = observed_bonds();
     assert(list.known && !list.updating && list.error == ESP_OK && list.count == count);
     assert(list.current_match_known == (expected >= 0));
     for (unsigned i = 0; i < count; ++i) {
@@ -1545,39 +1566,39 @@ static void add_after_bond_count(void) {
 
 static void test_bond_list_cache_availability(void) {
     reset_startup();
-    ble_hid_bond_list_t list = ble_hid_bond_list();
+    ble_hid_bond_list_t list = observed_bonds();
     assert(!list.known && !list.updating && list.error == ESP_ERR_INVALID_STATE);
     assert(!ble_hid_snapshot().bond_count_known);
     assert(ble_hid_snapshot().bond_capacity == PAIRING_BOND_CAPACITY);
     assert(list.revision == 0 && !list.current_match_known);
     assert(ble_hid_init() == ESP_OK); worker_cycle();
-    list = ble_hid_bond_list();
+    list = observed_bonds();
     assert(list.known && list.count == 0 && list.error == ESP_OK && list.revision != 0);
     for (unsigned i = 0; i < 3; ++i) make_bond(i, (uint8_t)(0x42U + i), (uint8_t)(i + 1));
-    list = ble_hid_bond_list();
+    list = observed_bonds();
     /* Render copies may run with SDK/storage unavailable and have no side
      * effects on the cached revision, status or actual saved devices. */
     callback_active = true;
     for (unsigned i = 0; i < 1000; ++i) {
-        ble_hid_bond_list_t copy = ble_hid_bond_list();
+        ble_hid_bond_list_t copy = observed_bonds();
         assert(copy.revision == list.revision && copy.known && copy.count == 3);
     }
     callback_active = false;
     assert(fake_bond_count == 3 && commit_calls == 0 && remove_calls == 0);
     bond_result = ESP_FAIL;
     assert(refresh_known_bonds() == ESP_FAIL);
-    ble_hid_bond_list_t failed = ble_hid_bond_list();
+    ble_hid_bond_list_t failed = observed_bonds();
     assert(!failed.known && !failed.updating && failed.error == ESP_FAIL && failed.count == 3);
     assert(failed.revision > list.revision && failed.bonds[0].address[0] == 0x42);
     assert(!ble_hid_snapshot().bond_count_known && !failed.current_match_known);
     bond_result = ESP_OK; assert(refresh_known_bonds() == ESP_OK);
     assert_current_bond(-1, 3);
     fake_bond_count = -1;
-    assert(refresh_known_bonds() == ESP_ERR_INVALID_STATE && !ble_hid_bond_list().known);
+    assert(refresh_known_bonds() == ESP_ERR_INVALID_STATE && !observed_bonds().known);
     fake_bond_count = (int)BLE_HID_MAX_BONDS + 1;
-    assert(refresh_known_bonds() == ESP_ERR_INVALID_STATE && ble_hid_bond_list().count == 3);
+    assert(refresh_known_bonds() == ESP_ERR_INVALID_STATE && observed_bonds().count == 3);
     fake_bond_count = 0; assert(refresh_known_bonds() == ESP_OK);
-    list = ble_hid_bond_list();
+    list = observed_bonds();
     assert(list.known && list.count == 0);
     for (unsigned i = 0; i < BLE_HID_MAX_BONDS; ++i) {
         assert(list.bonds[i].address[0] == 0 && !list.bonds[i].address_type_known);
@@ -1587,13 +1608,13 @@ static void test_bond_list_cache_availability(void) {
     bond_hook = remove_during_bond_read;
     assert(ble_hid_init() == ESP_OK); worker_cycle();
     assert(state.public.failed && !ble_hid_snapshot().pairing_open);
-    list = ble_hid_bond_list();
+    list = observed_bonds();
     assert(!list.known && list.error == ESP_ERR_INVALID_STATE);
 
     reset_startup();
     bond_count_hook = add_after_bond_count;
     assert(ble_hid_init() == ESP_OK); worker_cycle();
-    list = ble_hid_bond_list();
+    list = observed_bonds();
     assert(list.known && list.count == 1 && list.bonds[0].address[0] == active_peer);
     assert(!ble_hid_snapshot().pairing_open && !state.public.failed);
 }
@@ -2439,6 +2460,61 @@ static void test_durable_target_commit_race_and_old_record(void) {
     }
 }
 
+static void assert_target_submission_scratch_empty(void) {
+    const uint8_t *bytes = (const uint8_t *)&state.target_request_scratch;
+    for (size_t i = 0; i < sizeof(state.target_request_scratch); ++i) assert(bytes[i] == 0);
+}
+
+static void reject_target_submissions_while_worker_owns_candidate(void) {
+    assert(state.target.request_status == BLE_HID_TARGET_PENDING ||
+        state.target.request_status == BLE_HID_TARGET_APPLYING);
+    unsigned char pending[sizeof(state.target_candidate)];
+    memcpy(pending, &state.target_candidate, sizeof(pending));
+    ble_hid_target_preferences_request_t request = target_request();
+    uint64_t id = UINT64_MAX, active_id = state.target.request_id;
+    assert(ble_hid_target_select(state.bond_list.revision, NULL) == ESP_ERR_INVALID_STATE);
+    assert_target_submission_scratch_empty();
+    assert(ble_hid_target_order(state.bond_list.revision, request.order, request.count) == ESP_ERR_INVALID_STATE);
+    assert_target_submission_scratch_empty();
+    assert(ble_hid_target_preferences_request(&request, &id) == ESP_ERR_INVALID_STATE && id == UINT64_MAX);
+    assert(state.target.request_id == active_id && !memcmp(pending, &state.target_candidate, sizeof(pending)));
+}
+
+static void test_target_submission_workspace_ownership(void) {
+    prepare_durable_targets();
+    unsigned char previous[sizeof(state.target_candidate)];
+    memcpy(previous, &state.target_candidate, sizeof(previous));
+    ble_hid_target_preferences_request_t request = target_request(), invalid = request;
+    uint64_t id = UINT64_MAX;
+    invalid.order[1] = invalid.order[0]; /* Reject after one valid order entry. */
+    assert(ble_hid_target_preferences_request(&invalid, &id) == ESP_ERR_INVALID_ARG && id == UINT64_MAX);
+    assert(!memcmp(previous, &state.target_candidate, sizeof(previous)) && !state.target.request_id);
+    invalid = request; invalid.target.address[0] ^= 0x40U; /* Reject after the complete order. */
+    assert(ble_hid_target_preferences_request(&invalid, &id) == ESP_ERR_NOT_FOUND && id == UINT64_MAX);
+    assert(!memcmp(previous, &state.target_candidate, sizeof(previous)) && !state.target.request_id);
+    assert(ble_hid_target_preferences_request(&request, &id) == ESP_OK);
+    ble_hid_target_t selected = request.target;
+    memset(&request, 0, sizeof(request)); /* No caller storage survives submission. */
+    reject_target_submissions_while_worker_owns_candidate();
+    target_commit_hook = reject_target_submissions_while_worker_owns_candidate;
+    worker_cycle(); target_commit_hook = NULL;
+    assert(state.target.request_status == BLE_HID_TARGET_APPLIED && state.target.request_id == id &&
+        state.target.selected && !memcmp(state.target.target.bond_id, selected.bond_id, sizeof(selected.bond_id)));
+    /* A completed candidate can be borrowed as input to the wrappers. They
+     * must capture it before the next candidate is cleared and published. */
+    assert(ble_hid_target_select(state.bond_list.revision, &state.target_candidate.target) == ESP_OK);
+    assert_target_submission_scratch_empty();
+    worker_cycle();
+    assert(state.target.request_status == BLE_HID_TARGET_APPLIED && state.target.selected &&
+        !memcmp(state.target.target.bond_id, selected.bond_id, sizeof(selected.bond_id)));
+    assert(ble_hid_target_order(state.bond_list.revision, state.target_candidate.order,
+        state.target_candidate.count) == ESP_OK);
+    assert_target_submission_scratch_empty();
+    worker_cycle();
+    assert(state.target.request_status == BLE_HID_TARGET_APPLIED && state.target.selected &&
+        !memcmp(state.target.target.bond_id, selected.bond_id, sizeof(selected.bond_id)) && target_commit_calls == 3);
+}
+
 static void test_durable_target_stale_request_and_schema(void) {
     prepare_durable_targets(); ble_hid_target_preferences_request_t request = target_request();
     request.order[0].bond_id[0] ^= 1U;
@@ -2588,6 +2664,7 @@ static void test_quiet_forget_all_and_empty_durable_preferences(void) {
 }
 
 int main(void) {
+    test_target_submission_workspace_ownership();
     test_quiet_forget_all_and_empty_durable_preferences();
     test_single_bond_forget_success_and_preservation(); test_single_bond_forget_cancel_and_stale();
     test_single_bond_forget_failures_and_late_events(); test_single_bond_forget_private_and_partial_cleanup();

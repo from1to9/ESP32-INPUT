@@ -26,6 +26,14 @@ returns busy. Safety mute/stop preempts unfinished media and closes software
 egress gates immediately. The worker, rather than the manager or Bluetooth
 callbacks, owns all codec, GPIO, power and I2S operations.
 
+The resident worker retains its 6144-byte stack. Supported PSRAM/external-task
+builds place that stack in PSRAM with an internal TCB; allocation failure is
+reported without retrying internal RAM. Configurations without that support,
+or with cache-off-safe I2C/I2S interrupts, keep the stack internal. Seven native
+configurations check the exact creation API, capacity, no-fallback failure and
+explicit retry, alongside DMA placement and both-channel cleanup. These tasks
+have no deletion lifecycle; any future deletion must use the matching SDK API.
+
 The physical ES8311 is a singleton in BOTH mode, with shared I2S0, MCLK 256,
 stereo 16-bit wire slots, six DMA descriptors of 240 sample frames per direction
 and a 20 ms maximum read/write wait. Codec I2C uses the BSP bus and 0x19 address,

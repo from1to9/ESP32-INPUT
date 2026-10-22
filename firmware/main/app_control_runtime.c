@@ -506,7 +506,8 @@ static esp_err_t start_native(work_t *w)
             if (!cp_command_json(c, "profile_ids", encoded, sizeof(encoded))) {
                 return ESP_ERR_INVALID_ARG;
             }
-            cj_document_t *d = heap_caps_calloc(1, sizeof(*d), MALLOC_CAP_8BIT);
+            cj_document_t *d =
+                heap_caps_aligned_calloc(_Alignof(cj_document_t), 1, sizeof(*d), MALLOC_CAP_8BIT);
             if (!d) {
                 return ESP_ERR_NO_MEM;
             }
@@ -1088,9 +1089,10 @@ esp_err_t app_control_runtime_init(const app_control_host_t *host)
     if (!host || host->abi_version != APP_CONTROL_RUNTIME_ABI || runtime) {
         return ESP_ERR_INVALID_ARG;
     }
-    runtime_t *created = heap_caps_calloc(1, sizeof(*created), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    runtime_t *created = heap_caps_aligned_calloc(_Alignof(runtime_t), 1, sizeof(*created),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!created) {
-        created = heap_caps_calloc(1, sizeof(*created), MALLOC_CAP_8BIT);
+        created = heap_caps_aligned_calloc(_Alignof(runtime_t), 1, sizeof(*created), MALLOC_CAP_8BIT);
     }
     if (!created) {
         return ESP_ERR_NO_MEM;

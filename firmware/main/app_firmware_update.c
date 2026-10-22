@@ -405,7 +405,8 @@ static esp_err_t verify_catalog(const char *json, size_t length, release_t *out)
                                                "sha256",
                                                "url",
                                                "expires_unix_seconds"};
-    cj_document_t *d = heap_caps_calloc(1, sizeof(*d), MALLOC_CAP_8BIT);
+    cj_document_t *d =
+        heap_caps_aligned_calloc(_Alignof(cj_document_t), 1, sizeof(*d), MALLOC_CAP_8BIT);
     if (!d) {
         return ESP_ERR_NO_MEM;
     }
@@ -932,9 +933,10 @@ esp_err_t app_update_init(const app_update_config_t *config)
     if (updater) {
         return ESP_ERR_INVALID_STATE;
     }
-    updater = heap_caps_calloc(1, sizeof(*updater), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    updater = heap_caps_aligned_calloc(_Alignof(update_t), 1, sizeof(*updater),
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!updater) {
-        updater = heap_caps_calloc(1, sizeof(*updater), MALLOC_CAP_8BIT);
+        updater = heap_caps_aligned_calloc(_Alignof(update_t), 1, sizeof(*updater), MALLOC_CAP_8BIT);
     }
     if (!updater) {
         return ESP_ERR_NO_MEM;

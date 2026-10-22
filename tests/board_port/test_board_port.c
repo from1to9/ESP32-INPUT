@@ -42,6 +42,11 @@ static struct {
     TaskFunction_t imu_entry;
     unsigned imu_stack, imu_priority, task_creations, delay_calls;
     bool worker_running;
+    unsigned stop_sensor_after_delays;
+    void (*on_sensor_delay)(void);
+    bool record_sensor_attempts;
+    uint64_t sensor_attempt_times[512];
+    unsigned sensor_attempt_count;
     void (*during_gyro_read)(void);
     unsigned motor_strength;
     esp_err_t gauge_bus_error, gauge_add_error, gauge_read_error, gauge_cleanup_error;
@@ -49,6 +54,11 @@ static struct {
     uint16_t gauge_words[256];
     unsigned gauge_reads, gauge_adds, gauge_removes;
     uint64_t gauge_read_delay_us;
+    uint64_t gauge_after_read_delay_us, gauge_last_packet_end_us;
+    bool gauge_packet_seen;
+    unsigned gauge_gap_delays, power_warnings;
+    char power_warning[256];
+    void (*during_gauge_read)(void);
     uint64_t gauge_poll_times[16];
     unsigned gauge_polls;
     TaskFunction_t power_entry;
@@ -91,6 +101,12 @@ void board_test_log(const char *tag, const char *format, ...)
         vsnprintf(hw.spi_limit_log, sizeof(hw.spi_limit_log), format, arguments);
         va_end(arguments);
         ++hw.spi_limit_logs;
+    } else if (strncmp(format, "Battery telemetry unavailable:", 30) == 0) {
+        va_list arguments;
+        va_start(arguments, format);
+        vsnprintf(hw.power_warning, sizeof(hw.power_warning), format, arguments);
+        va_end(arguments);
+        ++hw.power_warnings;
     }
 }
 
@@ -113,12 +129,18 @@ int64_t esp_timer_get_time(void)
     return (int64_t)hw.time_us;
 }
 
+void esp_rom_delay_us(uint32_t microseconds)
+{
+    assert(hw.critical_depth == 0 && microseconds == 100);
+    hw.time_us += microseconds; ++hw.gauge_gap_delays;
+}
+
 BaseType_t xTaskCreate(TaskFunction_t function, const char *name, uint32_t stack,
     void *argument, unsigned priority, TaskHandle_t *handle)
 {
     assert(hw.critical_depth == 0 && argument == NULL);
     ++hw.task_creations;
-    if (strcmp(name, "imu") == 0) {
+    if (strcmp(name, "board_sensor") == 0) {
         hw.imu_entry = function;
         hw.imu_stack = stack;
         hw.imu_priority = priority;
@@ -175,6 +197,9 @@ BaseType_t xTaskDelayUntil(TickType_t *deadline, TickType_t increment)
         hw.time_us += (uint64_t)wait * 1000;
     }
     ++hw.delay_calls;
+    if (hw.worker_running && hw.stop_sensor_after_delays && hw.delay_calls >= hw.stop_sensor_after_delays)
+        longjmp(worker_exit, 1);
+    if (hw.worker_running && hw.on_sensor_delay) hw.on_sensor_delay();
     return wait > 0;
 }
 
@@ -296,6 +321,7 @@ esp_err_t i2c_master_bus_add_device(i2c_master_bus_handle_t bus,
     assert(hw.critical_depth == 0 && bus == &gauge_bus);
     assert(config->dev_addr_length == I2C_ADDR_BIT_LEN_7);
     assert(config->device_address == 0x55 && config->scl_speed_hz == 400000);
+    assert(config->scl_wait_us == 5000); /* TI permits a 4 ms stretch. */
     ++hw.gauge_adds;
     if (hw.gauge_add_error == ESP_OK) {
         *device = &gauge_device;
@@ -315,25 +341,37 @@ esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t device,
     size_t read_size, int timeout_ms)
 {
     assert(hw.critical_depth == 0 && device == &gauge_device);
-    assert(write_size == 1 && read_size == 2 && timeout_ms == 3);
+    assert(write_size == 1 && timeout_ms == 6);
     const uint8_t command = *write_buffer;
-    assert(command == 0x06 || command == 0x08 || command == 0x0a || command == 0x0c ||
-        command == 0x2c || command == 0x3a); /* No gauge profile/control writes. */
+    assert((command == 0x06 && read_size == 8) ||
+        ((command == 0x2c || command == 0x3a) && read_size == 2)); /* Read-only packets. */
+    if (hw.gauge_packet_seen) {
+        assert(hw.time_us >= hw.gauge_last_packet_end_us &&
+            hw.time_us - hw.gauge_last_packet_end_us >= 66);
+    }
     if (command == 0x3a) {
         assert(hw.gauge_polls < 16);
         hw.gauge_poll_times[hw.gauge_polls++] = hw.time_us;
     }
     ++hw.gauge_reads;
-    hw.time_us += hw.gauge_read_delay_us;
+    hw.time_us += hw.gauge_read_delay_us + hw.gauge_after_read_delay_us;
+    if (hw.during_gauge_read) {
+        void (*hook)(void) = hw.during_gauge_read; hw.during_gauge_read = NULL; hook();
+    }
+    hw.gauge_packet_seen = true; hw.gauge_last_packet_end_us = hw.time_us;
     if (hw.gauge_read_error != ESP_OK) {
         return hw.gauge_read_error;
     }
-    if (command == hw.gauge_fail_command) {
+    if (hw.gauge_read_delay_us > (uint64_t)timeout_ms * 1000U) return ESP_ERR_TIMEOUT;
+    if (hw.gauge_fail_command >= command &&
+        hw.gauge_fail_command < (int)(command + read_size)) {
         return ESP_FAIL;
     }
-    const uint16_t word = hw.gauge_words[command];
-    read_buffer[0] = (uint8_t)word;
-    read_buffer[1] = (uint8_t)(word >> 8);
+    for (size_t i = 0; i < read_size; ++i) {
+        const unsigned address = (unsigned)command + (unsigned)i;
+        const uint16_t word = hw.gauge_words[address & ~1U];
+        read_buffer[i] = (uint8_t)(word >> ((address & 1U) * 8U));
+    }
     return ESP_OK;
 }
 
@@ -445,6 +483,30 @@ int8_t bmi2_get_status(uint8_t *status, struct bmi2_dev *device)
     return hw.status_error;
 }
 
+int8_t bmi2_get_sensor_data(struct bmi2_sens_data *data, struct bmi2_dev *device)
+{
+    if (hw.record_sensor_attempts) {
+        assert(hw.sensor_attempt_count < 512);
+        hw.sensor_attempt_times[hw.sensor_attempt_count++] = hw.time_us;
+    }
+    int8_t error = bmi2_get_status(&data->status, device);
+    if (error != BMI2_OK) return error;
+    ++hw.gyro_reads; ++hw.accel_reads;
+    hw.time_us += hw.read_delay_us * 2U; /* Complete corrected-frame wall span. */
+    if (hw.during_gyro_read) {
+        void (*hook)(void) = hw.during_gyro_read; hw.during_gyro_read = NULL; hook();
+    }
+    if (hw.gyro_error != ESP_OK || hw.accel_error != ESP_OK) return BMI2_E_COM_FAIL;
+    int16_t *gyro[] = {&data->gyr.x, &data->gyr.y, &data->gyr.z};
+    int16_t *accel[] = {&data->acc.x, &data->acc.y, &data->acc.z};
+    for (unsigned i = 0; i < 3; ++i) {
+        assert(isfinite(hw.gyro[i]) && isfinite(hw.accel[i]));
+        *gyro[i] = (int16_t)lroundf(hw.gyro[i] * (32768.0f / 2000.0f));
+        *accel[i] = (int16_t)lroundf(hw.accel[i] * (32768.0f / 4.0f));
+    }
+    return BMI2_OK;
+}
+
 esp_err_t bsp_imu_get_gyro(float *x, float *y, float *z)
 {
     assert(hw.critical_depth == 0);
@@ -503,12 +565,12 @@ static void reset(void)
     hw.gauge_words[0x0c] = (uint16_t)-12;
     hw.gauge_words[0x06] = 2981;
     hw.gauge_words[0x2c] = 63;
-    hw.gyro[0] = 1.25f;
-    hw.gyro[1] = -2.5f;
-    hw.gyro[2] = 3.75f;
-    hw.accel[0] = 0.1f;
-    hw.accel[1] = -0.2f;
-    hw.accel[2] = 0.95f;
+    hw.gyro[0] = 20 * (2000.0f / 32768.0f);
+    hw.gyro[1] = -40 * (2000.0f / 32768.0f);
+    hw.gyro[2] = 60 * (2000.0f / 32768.0f);
+    hw.accel[0] = 1024 * (4.0f / 32768.0f);
+    hw.accel[1] = -2048 * (4.0f / 32768.0f);
+    hw.accel[2] = 8192 * (4.0f / 32768.0f);
     s_caps = (board_capabilities_t){.name = "uninitialized"};
     s_init_attempted = false;
     s_display = NULL;
@@ -520,6 +582,9 @@ static void reset(void)
     s_haptic_status = (board_haptic_status_t){.error = ESP_ERR_INVALID_STATE};
     s_haptic_diagnostic_pending = false;
     s_imu_task = NULL;
+    s_imu_hardware_live = false; s_imu_generation = 0;
+    memset(&s_imu_config, 0, sizeof(s_imu_config));
+    s_imu_accel_scale = s_imu_gyro_scale = 0;
     memset(&s_imu_sample, 0, sizeof(s_imu_sample));
     s_imu_sample_valid = false;
     s_imu_error = ESP_ERR_INVALID_STATE;
@@ -631,11 +696,11 @@ static void test_imu_real_units_and_nonblocking_cache(void)
     assert(board_capabilities().imu && hw.status_reads > 1);
     assert(hw.imu_config.accel_odr == BMI2_ACC_ODR_100HZ);
     assert(hw.imu_config.gyro_odr == BMI2_GYR_ODR_100HZ);
-    assert(hw.imu_stack == 3072 && hw.imu_priority == 2 && hw.task_creations == 3);
+    assert(hw.imu_stack == 4096 && hw.imu_priority == 6 && hw.task_creations == 3);
     board_imu_sample_t sample;
     assert(board_imu_read(&sample) == ESP_OK);
-    assert(sample.x_dps == 2.5f && sample.y_dps == 1.25f && sample.z_dps == 3.75f);
-    assert(sample.x_g == 0.2f && sample.y_g == 0.1f && sample.z_g == 0.95f);
+    assert(sample.x_dps == -hw.gyro[1] && sample.y_dps == hw.gyro[0] && sample.z_dps == hw.gyro[2]);
+    assert(sample.x_g == -hw.accel[1] && sample.y_g == hw.accel[0] && sample.z_g == hw.accel[2]);
     assert(sample.timestamp_us < hw.time_us); /* Other board initialization does not retimestamp the cache. */
     const unsigned status_reads = hw.status_reads;
     const unsigned gyro_reads = hw.gyro_reads;
@@ -648,8 +713,9 @@ static void test_imu_real_units_and_nonblocking_cache(void)
     ++hw.time_us;
     assert_read_fails_untouched(ESP_ERR_TIMEOUT);
     assert(!board_capabilities().imu);
-    assert(imu_update() == ESP_ERR_TIMEOUT);
-    assert(hw.status_reads == status_reads); /* Faulted stream does not reacquire. */
+    assert(board_imu_status().phase == BOARD_IMU_RECOVERING);
+    assert(imu_update() == ESP_OK && board_capabilities().imu);
+    assert(hw.status_reads == status_reads + 1); /* Only a new frame restores capability. */
 }
 
 static void test_imu_display_frame_is_one_proper_rotation(void)
@@ -659,18 +725,21 @@ static void test_imu_display_frame_is_one_proper_rotation(void)
     const float expected[3][3] = {{0, 1, 0}, {-1, 0, 0}, {0, 0, 1}};
     float transformed[3][3];
     for (unsigned axis = 0; axis < 3; ++axis) {
-        for (unsigned component = 0; component < 3; ++component)
-            hw.gyro[component] = hw.accel[component] = component == axis ? 1.0f : 0.0f;
+        for (unsigned component = 0; component < 3; ++component) {
+            hw.gyro[component] = component == axis ? 62.5f : 0.0f;
+            hw.accel[component] = component == axis ? 0.125f : 0.0f;
+        }
         hw.time_us += 10000;
         assert(imu_update() == ESP_OK);
         const board_imu_sample_t raw_cache = s_imu_sample;
         const unsigned bus_reads = hw.gyro_reads + hw.accel_reads + hw.status_reads;
         board_imu_sample_t output;
         assert(board_imu_read(&output) == ESP_OK);
-        transformed[axis][0] = output.x_dps;
-        transformed[axis][1] = output.y_dps;
-        transformed[axis][2] = output.z_dps;
-        assert(output.x_g == output.x_dps && output.y_g == output.y_dps && output.z_g == output.z_dps);
+        transformed[axis][0] = output.x_dps / 62.5f;
+        transformed[axis][1] = output.y_dps / 62.5f;
+        transformed[axis][2] = output.z_dps / 62.5f;
+        assert(output.x_g / 0.125f == output.x_dps / 62.5f &&
+            output.y_g / 0.125f == output.y_dps / 62.5f && output.z_g / 0.125f == output.z_dps / 62.5f);
         for (unsigned component = 0; component < 3; ++component)
             assert(transformed[axis][component] == expected[axis][component]);
         assert(output.timestamp_us == raw_cache.timestamp_us);
@@ -703,7 +772,7 @@ static void test_imu_start_waits_for_gyro_with_a_finite_deadline(void)
     assert(board_init(legacy_hold) == ESP_OK);
     board_imu_status_t status = board_imu_status();
     assert(status.available && status.sample_count == 1 && !status.fault_latched);
-    assert(hw.accel_only_status_reads > 0 && hw.gyro_reads == 1 && hw.accel_reads == 1);
+    assert(hw.accel_only_status_reads > 0 && hw.gyro_reads == hw.status_reads && hw.accel_reads == hw.status_reads);
     assert(status.last_sample_us >= hw.gyro_ready_after_us);
     assert(status.last_sample_us - start_us < 100000 && status.data_ready_bits == 0xd0);
     hw.time_us = status.last_sample_us + 50001;
@@ -722,7 +791,7 @@ static void test_imu_start_waits_for_gyro_with_a_finite_deadline(void)
     assert(status.first_fault_us - timeout_start_us >= 100000);
     assert(status.first_fault_us - timeout_start_us < 102000);
     assert(status.data_ready_known && status.data_ready_bits == 0x90);
-    assert(hw.accel_only_status_reads > 0 && hw.gyro_reads == 0 && hw.accel_reads == 0);
+    assert(hw.accel_only_status_reads > 0 && hw.gyro_reads == hw.status_reads && hw.accel_reads == hw.status_reads);
     assert(hw.imu_stops == 1 && hw.imu_deinits == 1 && !hw.sensor_initialized);
 
     reset();
@@ -738,7 +807,7 @@ static void test_imu_start_waits_for_gyro_with_a_finite_deadline(void)
 static void test_optional_sensor_failures(void)
 {
     static const char *const stages[] = {
-        "init", "start", "status", "gyro", "accel", "worker_create", "first_sample",
+        "init", "start", "frame", "frame", "frame", "worker_create", "first_sample",
     };
     for (unsigned fault = 0; fault < 7; ++fault) {
         reset();
@@ -762,7 +831,7 @@ static void test_optional_sensor_failures(void)
         assert(status.first_fault_us <= status.timestamp_us);
         assert(status.initialization_succeeded == (fault != 0));
         assert(status.start_succeeded == (fault != 0 && fault != 1));
-        assert(!status.worker_created && !status.worker_running);
+        assert(status.worker_created == (fault != 5) && !status.worker_running);
         assert(status.sample_count == (fault == 5 ? 1U : 0U));
     }
     reset();
@@ -845,8 +914,8 @@ static void test_runtime_faults_and_inflight_cancellation(void)
         case 0: hw.gyro_error = ESP_FAIL; break;
         case 1: hw.accel_error = ESP_FAIL; break;
         case 2: hw.status_error = -1; break;
-        case 3: hw.gyro[1] = NAN; expected = ESP_ERR_INVALID_RESPONSE; break;
-        case 4: hw.accel[2] = INFINITY; expected = ESP_ERR_INVALID_RESPONSE; break;
+        case 3: s_imu_gyro_scale = NAN; expected = ESP_ERR_INVALID_RESPONSE; break;
+        case 4: s_imu_accel_scale = INFINITY; expected = ESP_ERR_INVALID_RESPONSE; break;
         case 5: hw.during_gyro_read = stale_consumer_during_bus_read; expected = ESP_ERR_TIMEOUT; break;
         }
         assert(imu_update() == expected);
@@ -860,7 +929,11 @@ static void test_runtime_faults_and_inflight_cancellation(void)
         }
         hw.gyro_error = hw.accel_error = ESP_OK;
         hw.status_error = 0;
-        assert(imu_update() == expected && !board_capabilities().imu);
+        if (fault == 0 || fault == 1 || fault == 5) {
+            hw.time_us += 10000;
+            assert(imu_update() == ESP_OK && board_capabilities().imu);
+            assert(board_imu_status().recovery_count == 1);
+        } else assert(imu_update() == expected && !board_capabilities().imu);
     }
     reset();
     assert(board_init(legacy_hold) == ESP_OK);
@@ -871,13 +944,138 @@ static void test_runtime_faults_and_inflight_cancellation(void)
     reset();
     assert(board_init(legacy_hold) == ESP_OK);
     hw.time_us = s_imu_sample.timestamp_us - 100;
+    assert(imu_update() == ESP_ERR_TIMEOUT && !board_capabilities().imu);
+    assert(!strcmp(board_imu_status().last_hardware_stage, "clock"));
+
+    reset();
+    assert(board_init(legacy_hold) == ESP_OK);
+    hw.time_us = s_imu_sample.timestamp_us; hw.read_delay_us = 0;
     assert(imu_update() == ESP_ERR_INVALID_STATE && !board_capabilities().imu);
+    assert(board_imu_status().phase == BOARD_IMU_FATAL &&
+        !strcmp(board_imu_status().first_fault_stage, "sample_time"));
+}
+
+static void test_late_batch_discard_preserves_cache_and_recovers(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    board_imu_sample_t accepted, raw;
+    assert(board_imu_read(&accepted) == ESP_OK);
+    memcpy(&raw, &s_imu_sample, sizeof(raw));
+    hw.time_us = accepted.timestamp_us + 1000;
+    hw.read_delay_us = 10001; /* 20002 us total, just outside coherence. */
+    hw.gyro[0] = hw.gyro[1] = hw.gyro[2] = 62.5f;
+    hw.accel[0] = hw.accel[1] = hw.accel[2] = 0.5f;
+    assert(imu_update() == ESP_OK);
+    assert(!memcmp(&raw, &s_imu_sample, sizeof(raw)));
+    board_imu_status_t status = board_imu_status();
+    assert(status.available && status.sample_fresh && !status.fault_latched && status.error == ESP_OK);
+    assert(status.sample_count == 1 && status.late_batch_count == 1 && !status.late_batch_count_saturated);
+    assert(status.last_hardware_error == ESP_ERR_TIMEOUT && !strcmp(status.last_hardware_stage, "batch_time"));
+    board_imu_sample_t repeated; assert(board_imu_read(&repeated) == ESP_OK);
+    assert(repeated.timestamp_us == accepted.timestamp_us && repeated.x_dps == accepted.x_dps &&
+        repeated.y_g == accepted.y_g && repeated.z_g == accepted.z_g);
+    assert(!hw.imu_stops && !hw.imu_deinits);
+    hw.read_delay_us = 10; hw.time_us += 10000;
+    assert(imu_update() == ESP_OK);
+    status = board_imu_status();
+    assert(status.sample_count == 2 && status.late_batch_count == 1 && !status.fault_latched);
+    assert(board_imu_read(&repeated) == ESP_OK && repeated.timestamp_us > accepted.timestamp_us && repeated.z_dps == 62.5f);
+}
+
+static void test_late_batch_exact_coherence_and_freshness_boundaries(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    const uint64_t first = s_imu_sample.timestamp_us;
+    hw.time_us = first + 1000; hw.read_delay_us = 10000;
+    assert(imu_update() == ESP_OK); /* Exactly 20 ms is a coherent batch. */
+    board_imu_status_t status = board_imu_status();
+    assert(status.sample_count == 2 && !status.late_batch_count && status.last_sample_us == first + 21000);
+    for (unsigned excess = 0; excess < 2; ++excess) {
+        reset(); assert(board_init(legacy_hold) == ESP_OK);
+        const uint64_t timestamp = s_imu_sample.timestamp_us;
+        hw.time_us = timestamp + 28000 + excess; hw.read_delay_us = 11000;
+        assert(imu_update() == (excess ? ESP_ERR_TIMEOUT : ESP_OK));
+        status = board_imu_status();
+        assert(status.sample_count == 1 && status.late_batch_count == 1 && status.last_sample_us == timestamp);
+        assert(status.sample_age_us == 50000 + excess && status.available == !excess);
+        if (!excess) {
+            board_imu_sample_t sample; assert(board_imu_read(&sample) == ESP_OK && sample.timestamp_us == timestamp);
+            ++hw.time_us; assert_read_fails_untouched(ESP_ERR_TIMEOUT);
+        } else assert_read_fails_untouched(ESP_ERR_TIMEOUT);
+    }
+}
+
+static void rollback_during_gyro_read(void)
+{
+    hw.time_us -= 30000;
+}
+
+static void test_late_discard_never_hides_other_faults_or_overflows(void)
+{
+    for (unsigned fault = 0; fault < 5; ++fault) {
+        reset(); assert(board_init(legacy_hold) == ESP_OK);
+        hw.time_us = s_imu_sample.timestamp_us + 10000; hw.read_delay_us = 11000;
+        switch (fault) {
+        case 0: hw.gyro_error = ESP_ERR_TIMEOUT; hw.read_delay_us = 25000; break;
+        case 1: hw.accel_error = ESP_ERR_TIMEOUT; break;
+        case 2: hw.during_gyro_read = rollback_during_gyro_read; break;
+        case 3: s_imu_gyro_scale = NAN; break;
+        case 4: s_imu_sample_valid = false; break;
+        }
+        const esp_err_t expected = fault < 2 ? ESP_FAIL : ESP_ERR_TIMEOUT;
+        assert(imu_update() == expected && !board_capabilities().imu);
+        const board_imu_status_t status = board_imu_status();
+        assert(status.fault_latched && status.sample_count == 1 && status.late_batch_count == (fault == 4 ? 1U : 0U));
+        assert_read_fails_untouched(expected);
+    }
+    reset(); hw.read_delay_us = 11000;
+    assert(board_init(legacy_hold) == ESP_OK && !board_capabilities().imu);
+    board_imu_status_t status = board_imu_status();
+    assert(status.sample_count == 0 && status.late_batch_count == 1 && status.fault_latched);
+    assert(!strcmp(status.first_fault_stage, "batch_time")); /* No coherent initial sample to retain. */
+
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    hw.time_us = s_imu_sample.timestamp_us + 1000; hw.read_delay_us = 11000;
+    s_imu_status.late_batch_count = UINT64_MAX;
+    assert(imu_update() == ESP_OK);
+    status = board_imu_status();
+    assert(status.late_batch_count == UINT64_MAX && status.late_batch_count_saturated && status.sample_count == 1);
+    assert(status.available && !status.fault_latched);
+
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    hw.time_us += 10000; hw.read_delay_us = 11000;
+    hw.during_gyro_read = stale_consumer_during_bus_read;
+    assert(imu_update() == ESP_ERR_TIMEOUT && !board_capabilities().imu);
+    status = board_imu_status();
+    assert(status.late_batch_count == 1 && status.sample_count == 1 && !strcmp(status.first_fault_stage, "cache_age"));
+}
+
+static void test_repeated_late_batches_expire_on_normal_worker_schedule(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    const uint64_t timestamp = s_imu_sample.timestamp_us;
+    hw.time_us = timestamp; hw.read_delay_us = 11000;
+    hw.worker_running = true; hw.stop_sensor_after_delays = 4;
+    if (setjmp(worker_exit) == 0) {
+        hw.imu_entry(NULL);
+        assert(!"Bounded worker fixture must yield");
+    }
+    hw.worker_running = false;
+    const board_imu_status_t status = board_imu_status();
+    assert(status.late_batch_count == 3 && status.sample_count == 1 && status.last_sample_us == timestamp);
+    assert(hw.delay_calls == 4 && hw.time_us - timestamp >= 100000);
+    assert(status.fault_latched && !status.available && status.worker_running && status.phase == BOARD_IMU_RECOVERING);
+    assert(hw.imu_stops == 0 && hw.imu_deinits == 0);
+    assert_read_fails_untouched(ESP_ERR_TIMEOUT);
+    hw.read_delay_us = 10; hw.time_us += 10000;
+    assert(imu_update() == ESP_OK && board_capabilities().imu && board_imu_status().recovery_count == 1);
 }
 
 static void test_sensor_worker_cleans_up_after_fault(void)
 {
     for (unsigned cleanup_fails = 0; cleanup_fails < 2; ++cleanup_fails) {
         reset();
+        hw.gauge_add_error = ESP_FAIL; /* No remaining battery owner after fatal sensor cleanup. */
         hw.time_us = (uint64_t)UINT32_MAX * 1000 - 1000;
         assert(board_init(legacy_hold) == ESP_OK);
         hw.status_error = -1;
@@ -894,9 +1092,179 @@ static void test_sensor_worker_cleans_up_after_fault(void)
         assert_read_fails_untouched(ESP_FAIL);
         const board_imu_status_t status = board_imu_status();
         assert(status.worker_created && !status.worker_running && status.fault_latched);
-        assert(strcmp(status.first_fault_stage, "status") == 0 && status.first_fault_error == ESP_FAIL);
+        assert(strcmp(status.first_fault_stage, "frame") == 0 && status.first_fault_error == ESP_FAIL);
         assert(!status.data_ready_known && status.last_hardware_error == ESP_FAIL);
     }
+}
+
+static void transient_then_fresh_frame(void)
+{
+    if (hw.delay_calls == 1) {
+        hw.read_delay_us = 30000; /* Full burst returns after the old cache expired. */
+        hw.gyro[2] = 62.5f;
+    } else if (hw.delay_calls == 2) {
+        const uint64_t generation = s_imu_generation;
+        const uint64_t timestamp = s_imu_sample.timestamp_us;
+        for (unsigned i = 0; i < 100; ++i) assert_read_fails_untouched(ESP_ERR_TIMEOUT);
+        assert(s_imu_generation == generation && s_imu_sample.timestamp_us == timestamp);
+        assert(board_imu_status().phase == BOARD_IMU_RECOVERING && board_imu_status().sample_count == 1);
+        hw.read_delay_us = 10;
+    }
+}
+
+static void run_sensor_until(unsigned delays)
+{
+    hw.worker_running = true; hw.stop_sensor_after_delays = delays;
+    if (setjmp(worker_exit) == 0) {
+        hw.imu_entry(NULL);
+        assert(!"Controlled sensor schedule must yield to its fixture");
+    }
+    hw.worker_running = false;
+}
+
+static void test_worker_recovers_without_reinitialization_or_old_output(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    const uint64_t first = s_imu_sample.timestamp_us;
+    hw.time_us = first; hw.on_sensor_delay = transient_then_fresh_frame;
+    run_sensor_until(5);
+    board_imu_status_t status = board_imu_status();
+    assert(status.worker_running && status.phase == BOARD_IMU_ACTIVE && status.available);
+    assert(status.sample_count == 4 && status.recovery_count == 1 && status.late_batch_count == 1);
+    assert(status.last_sample_us > first && status.sample_fresh && status.failure_streak == 0);
+    assert(status.fault_latched && !strcmp(status.first_fault_stage, "batch_time"));
+    assert(hw.imu_inits == 1 && hw.imu_starts == 1 && !hw.imu_stops && !hw.imu_deinits);
+    board_imu_sample_t sample; assert(board_imu_read(&sample) == ESP_OK && sample.z_dps == 62.5f);
+}
+
+static void test_persistent_transport_failure_has_capped_fair_backoff(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    hw.time_us = s_imu_sample.timestamp_us; hw.gyro_error = ESP_FAIL;
+    hw.record_sensor_attempts = true;
+    run_sensor_until(16);
+    const board_imu_status_t status = board_imu_status();
+    assert(status.phase == BOARD_IMU_RECOVERING && status.worker_running && !status.available);
+    assert(status.sample_count == 1 && status.failure_streak == 15 && status.retry_delay_ms == 250);
+    assert(hw.sensor_attempt_count == 15 && hw.gauge_polls == 3);
+    const uint32_t periods_ms[] = {10, 20, 40, 80, 160, 250};
+    for (unsigned i = 1; i < hw.sensor_attempt_count; ++i) {
+        const uint32_t period = periods_ms[i - 1 < 6 ? i - 1 : 5];
+        const uint64_t delta = hw.sensor_attempt_times[i] - hw.sensor_attempt_times[i - 1];
+        assert(delta >= period * 1000U && delta <= period * 1000U + 1000U);
+    }
+    assert(!hw.imu_stops && !hw.imu_deinits && hw.gauge_adds == 1);
+    assert_read_fails_untouched(ESP_FAIL);
+    hw.gyro_error = ESP_OK; hw.time_us += 10000;
+    assert(imu_update() == ESP_OK && board_imu_status().phase == BOARD_IMU_ACTIVE);
+    assert(board_imu_status().failure_streak == 0 && board_imu_status().retry_delay_ms == 10);
+}
+
+static void expire_cache_then_corrupt_scale(void)
+{
+    stale_consumer_during_bus_read();
+    s_imu_accel_scale = INFINITY;
+}
+
+static void test_fatal_outcomes_win_over_transient_generation_and_early_exit(void)
+{
+    for (unsigned not_ready = 0; not_ready < 2; ++not_ready) {
+        reset(); assert(board_init(legacy_hold) == ESP_OK);
+        hw.time_us = s_imu_sample.timestamp_us - 1000;
+        if (not_ready) hw.ready_mask = 0;
+        else hw.gyro_error = ESP_FAIL;
+        assert(imu_update() == ESP_ERR_TIMEOUT);
+        assert(board_imu_status().phase == BOARD_IMU_FATAL &&
+            !strcmp(board_imu_status().last_hardware_stage, "clock"));
+    }
+    for (unsigned not_ready = 0; not_ready < 2; ++not_ready) {
+        reset(); assert(board_init(legacy_hold) == ESP_OK);
+        hw.time_us = s_imu_sample.timestamp_us + 10000;
+        hw.read_delay_us = 11000; hw.during_gyro_read = rollback_during_gyro_read;
+        if (not_ready) hw.ready_mask = 0;
+        else hw.gyro_error = ESP_FAIL;
+        assert(imu_update() == ESP_ERR_TIMEOUT);
+        const board_imu_status_t status = board_imu_status();
+        assert(status.phase == BOARD_IMU_FATAL && !status.available && !strcmp(status.last_hardware_stage, "clock"));
+        unsigned reads = hw.status_reads;
+        assert(imu_update() == ESP_ERR_TIMEOUT && hw.status_reads == reads);
+    }
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    hw.time_us += 10000; hw.during_gyro_read = expire_cache_then_corrupt_scale;
+    assert(imu_update() == ESP_ERR_TIMEOUT); /* Both late and nonfinite is fatal. */
+    assert(board_imu_status().phase == BOARD_IMU_FATAL && !board_capabilities().imu);
+    assert(!strcmp(board_imu_status().first_fault_stage, "cache_age")); /* History retained. */
+
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    s_imu_config.accel_range = 0xff;
+    assert(imu_update() == ESP_ERR_INVALID_STATE && board_imu_status().phase == BOARD_IMU_FATAL);
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    hw.sensor_initialized = false;
+    assert(imu_update() == ESP_ERR_INVALID_STATE && board_imu_status().phase == BOARD_IMU_FATAL);
+}
+
+static void consume_expiring_cache_during_coherent_frame(void)
+{
+    const uint64_t generation = s_imu_generation;
+    assert_read_fails_untouched(ESP_ERR_TIMEOUT);
+    assert(s_imu_generation == generation + 1);
+    for (unsigned i = 0; i < 100; ++i) assert_read_fails_untouched(ESP_ERR_TIMEOUT);
+    assert(s_imu_generation == generation + 1);
+}
+
+static void test_inflight_coherent_frame_cannot_cross_loss_generation(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    const uint64_t timestamp = s_imu_sample.timestamp_us;
+    hw.time_us = timestamp + 49990; hw.read_delay_us = 10;
+    hw.during_gyro_read = consume_expiring_cache_during_coherent_frame;
+    assert(imu_update() == ESP_ERR_TIMEOUT && board_imu_status().sample_count == 1);
+    assert(board_imu_status().last_hardware_error == ESP_OK && !board_capabilities().imu);
+    hw.time_us += 10000;
+    s_imu_status.recovery_count = UINT64_MAX;
+    assert(imu_update() == ESP_OK && board_capabilities().imu);
+    assert(board_imu_status().sample_count == 2 && s_imu_sample.timestamp_us > timestamp);
+    assert(board_imu_status().recovery_count == UINT64_MAX && board_imu_status().recovery_count_saturated);
+
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    s_imu_generation = UINT64_MAX;
+    hw.time_us = s_imu_sample.timestamp_us + 50001;
+    assert_read_fails_untouched(ESP_ERR_INVALID_STATE);
+    assert(board_imu_status().phase == BOARD_IMU_FATAL && !strcmp(board_imu_status().first_fault_stage, "generation"));
+}
+
+static void queue_brightness_during_sensor_schedule(void)
+{
+    assert(board_brightness_set((int)(hw.delay_calls % 101)) == ESP_OK);
+}
+
+static void assert_power_unknown(const board_power_status_t *status);
+static void test_single_owner_schedules_long_battery_without_sensor_starvation(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    hw.gauge_read_delay_us = 1000; hw.gauge_after_read_delay_us = 18000;
+    hw.record_sensor_attempts = true;
+    hw.on_sensor_delay = queue_brightness_during_sensor_schedule;
+    run_sensor_until(270);
+    const board_imu_status_t status = board_imu_status();
+    assert(status.phase == BOARD_IMU_ACTIVE && status.worker_running && status.available && status.sample_fresh);
+    assert(status.sample_count == 270 && hw.sensor_attempt_count == 269);
+    assert(hw.gauge_polls == 3 && hw.gauge_reads == 7 && hw.gauge_adds == 1);
+    assert(status.max_schedule_late_us >= 28000 && !hw.imu_stops && !hw.imu_deinits);
+    assert(hw.brightness_writes == 0 && hw.notifications > 250); /* No display lock in sensor owner. */
+    assert(hw.power_warnings == 1 && strstr(hw.power_warning, "stage=batch_time") &&
+        strstr(hw.power_warning, "command=0x06") && strstr(hw.power_warning, "packet_us=19000"));
+    for (unsigned i = 1; i < hw.gauge_polls; ++i)
+        assert(hw.gauge_poll_times[i] - hw.gauge_poll_times[i - 1] >= 1000000);
+    for (unsigned i = 1; i < hw.sensor_attempt_count; ++i) {
+        const uint64_t ticks = hw.sensor_attempt_times[i] / 1000U - hw.sensor_attempt_times[i - 1] / 1000U;
+        if (ticks < 10) fprintf(stderr, "Sensor cadence index=%u previous=%llu current=%llu ticks=%llu\n", i,
+            (unsigned long long)hw.sensor_attempt_times[i - 1], (unsigned long long)hw.sensor_attempt_times[i],
+            (unsigned long long)ticks);
+        assert(ticks >= 10); /* Real 1 kHz scheduling is quantized to ticks. */
+    }
+    board_power_status_t power;
+    assert(board_power_read(&power) == ESP_ERR_TIMEOUT); assert_power_unknown(&power);
 }
 
 static void test_long_stream_crosses_32_bit_milliseconds(void)
@@ -910,7 +1278,7 @@ static void test_long_stream_crosses_32_bit_milliseconds(void)
         assert(imu_update() == ESP_OK);
         board_imu_sample_t sample;
         assert(board_imu_read(&sample) == ESP_OK);
-        assert(sample.timestamp_us > previous_us && sample.z_g == 0.95f);
+        assert(sample.timestamp_us > previous_us && sample.z_g == 1.0f);
         previous_us = sample.timestamp_us;
     }
     assert(board_capabilities().imu && hw.task_creations == 3);
@@ -975,6 +1343,7 @@ static void test_checked_battery_readings_and_truth_states(void)
 static void test_battery_failures_staleness_and_recovery(void)
 {
     const uint8_t commands[] = {0x3a, 0x0a, 0x08, 0x0c, 0x06, 0x2c};
+    const unsigned packets_to_fail[] = {1, 2, 2, 2, 2, 3};
     board_power_status_t status;
     for (size_t i = 0; i < sizeof(commands); ++i) {
         reset();
@@ -982,7 +1351,7 @@ static void test_battery_failures_staleness_and_recovery(void)
         assert(board_init(legacy_hold) == ESP_OK);
         assert(board_power_read(&status) == ESP_FAIL);
         assert_power_unknown(&status);
-        assert(hw.gauge_reads == i + 1 && !board_capabilities().battery);
+        assert(hw.gauge_reads == packets_to_fail[i] && !board_capabilities().battery);
         hw.gauge_fail_command = -1;
         power_update();
         assert(board_power_read(&status) == ESP_OK && board_capabilities().battery);
@@ -1027,26 +1396,86 @@ static void test_battery_failures_staleness_and_recovery(void)
     reset();
     hw.gauge_read_delay_us = 4000;
     assert(board_init(legacy_hold) == ESP_OK);
-    assert(board_power_read(&status) == ESP_ERR_TIMEOUT);
-    assert_power_unknown(&status);
-    assert(hw.gauge_reads == 6); /* Batch budget rejects a late all-success response. */
+    assert(board_power_read(&status) == ESP_OK && hw.gauge_reads == 3);
+    assert(hw.gauge_gap_delays == 3 && !hw.power_warnings);
+    assert(status.percent_valid && status.percent == 63 && status.current_ma == -12);
+
+    reset();
+    hw.gauge_read_delay_us = 4000; hw.gauge_after_read_delay_us = 3000;
+    assert(board_init(legacy_hold) == ESP_OK);
+    assert(board_power_read(&status) == ESP_ERR_TIMEOUT); assert_power_unknown(&status);
+    assert(hw.gauge_reads == 3); /* The unchanged 20 ms gate rejects a late all-success batch. */
+    assert(hw.power_warnings == 1 && strstr(hw.power_warning, "stage=batch_time") &&
+        strstr(hw.power_warning, "command=0x2c") && strstr(hw.power_warning, "batch_us=21300"));
 
     reset();
     hw.fail_power_task = true;
     assert(board_init(legacy_hold) == ESP_OK);
-    assert(board_power_read(&status) == ESP_ERR_NO_MEM);
-    assert_power_unknown(&status);
-    assert(!board_capabilities().brightness && !board_capabilities().battery);
-    assert(hw.gauge_removes == 1 && s_gauge == NULL);
+    assert(board_power_read(&status) == ESP_OK && board_capabilities().battery);
+    assert(!board_capabilities().brightness && hw.gauge_removes == 0 && s_gauge != NULL);
     assert(board_brightness_set(50) == ESP_ERR_INVALID_STATE);
 
     reset();
-    hw.fail_power_task = true;
+    hw.fail_imu_task = true;
+    assert(board_init(legacy_hold) == ESP_OK);
+    assert(board_power_read(&status) == ESP_ERR_NO_MEM);
+    assert_power_unknown(&status);
+    assert(board_capabilities().brightness && !board_capabilities().battery);
+    assert(hw.gauge_removes == 1 && s_gauge == NULL);
+    assert(board_brightness_set(50) == ESP_OK);
+
+    reset();
+    hw.fail_imu_task = true;
     hw.gauge_cleanup_error = ESP_FAIL;
     assert(board_init(legacy_hold) == ESP_OK);
     assert(board_power_read(&status) == ESP_ERR_NO_MEM && !board_capabilities().battery);
     assert_power_unknown(&status);
     assert(hw.gauge_removes == 1 && s_gauge != NULL); /* Preserve failed-cleanup ownership. */
+}
+
+static void rollback_during_gauge_read(void)
+{
+    hw.time_us -= 1000;
+}
+
+static void finish_power_batch_at_boundary(void)
+{
+    /* Three packets include 300 us gap and 30 us wire time by default. */
+    hw.gauge_after_read_delay_us = 0;
+    hw.time_us += 19670;
+}
+
+static void test_battery_packet_contract_and_truthful_failure_stages(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    board_power_status_t status;
+    assert(hw.gauge_reads == 3 && hw.gauge_gap_delays == 3);
+    hw.gauge_read_error = ESP_ERR_TIMEOUT;
+    power_update();
+    assert(board_power_read(&status) == ESP_ERR_TIMEOUT && !status.gauge_available && !status.percent_valid);
+    assert(strstr(hw.power_warning, "stage=read") && strstr(hw.power_warning, "command=0x3a") &&
+        strstr(hw.power_warning, "batch_us_known=1"));
+    unsigned reads = hw.gauge_reads;
+    hw.gauge_read_error = ESP_OK; power_update();
+    assert(board_power_read(&status) == ESP_OK && hw.gauge_reads == reads + 3);
+    hw.gauge_read_delay_us = 6001;
+    power_update();
+    assert(board_power_read(&status) == ESP_ERR_TIMEOUT && strstr(hw.power_warning, "stage=read"));
+    assert_power_unknown(&status);
+
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    hw.during_gauge_read = rollback_during_gauge_read;
+    power_update();
+    assert(board_power_read(&status) == ESP_ERR_TIMEOUT && strstr(hw.power_warning, "stage=clock") &&
+        strstr(hw.power_warning, "batch_us_known=0"));
+    assert_power_unknown(&status);
+
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    hw.during_gauge_read = finish_power_batch_at_boundary;
+    power_update();
+    assert(board_power_read(&status) == ESP_OK); /* Exactly 20 ms remains valid. */
+    assert(status.current_ma == -12 && status.voltage_mv == 3850 && status.percent == 63);
+    assert(!hw.power_warnings);
 }
 
 static void request_restore_during_blank(void)
@@ -1143,7 +1572,7 @@ static void test_worker_rate_limits_battery_during_brightness_flood(void)
         assert(!"Deterministic worker harness must end at its wait boundary");
     }
     hw.power_worker_running = false;
-    assert(hw.gauge_polls == 3 && hw.gauge_reads == 18);
+    assert(hw.gauge_polls == 1 && hw.gauge_reads == 3); /* Brightness cannot start sensor IO. */
     assert(hw.brightness_writes >= 90 && hw.brightness_writes <= 101);
     assert(hw.gauge_adds == 1 && hw.task_creations == 3);
     for (unsigned i = 1; i < hw.gauge_polls; ++i) {
@@ -1251,10 +1680,20 @@ int main(void)
     test_optional_sensor_failures();
     test_imu_health_is_nonmutating_and_retains_first_fault();
     test_runtime_faults_and_inflight_cancellation();
+    test_late_batch_discard_preserves_cache_and_recovers();
+    test_late_batch_exact_coherence_and_freshness_boundaries();
+    test_late_discard_never_hides_other_faults_or_overflows();
+    test_repeated_late_batches_expire_on_normal_worker_schedule();
     test_sensor_worker_cleans_up_after_fault();
+    test_worker_recovers_without_reinitialization_or_old_output();
+    test_persistent_transport_failure_has_capped_fair_backoff();
+    test_fatal_outcomes_win_over_transient_generation_and_early_exit();
+    test_inflight_coherent_frame_cannot_cross_loss_generation();
+    test_single_owner_schedules_long_battery_without_sensor_starvation();
     test_long_stream_crosses_32_bit_milliseconds();
     test_checked_battery_readings_and_truth_states();
     test_battery_failures_staleness_and_recovery();
+    test_battery_packet_contract_and_truthful_failure_stages();
     test_brightness_queue_off_restore_and_failures();
     test_worker_rate_limits_battery_during_brightness_flood();
     puts("Board adapter: physical edges, IMU stream, checked battery states, brightness transitions, faults and bounded worker schedules passed");

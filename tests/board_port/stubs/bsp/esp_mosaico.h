@@ -8,6 +8,7 @@
 #include "esp_lcd_types.h"
 #define CONFIG_BSP_DISPLAY_ENABLE 1
 #define CONFIG_BSP_DISPLAY_LVGL_ENABLE 1
+#define CONFIG_APP_DISPLAY_SPI_QUEUE_DEPTH 1
 #define CONFIG_BSP_MOTOR_ENABLE_PWM 1
 #define BSP_BATTERY_I2C_ADDR 0x55
 #define BSP_BATTERY_I2C_SPEED_HZ 400000
@@ -26,8 +27,18 @@ typedef struct { uint8_t accel_odr, accel_range, gyro_odr, gyro_range; } bsp_imu
 #define BMI2_DRDY_GYR 0x40
 #define BMI2_DRDY_ACC 0x80
 #define BMI2_OK 0
+#define BMI2_E_COM_FAIL -2
+#define BMI2_ACC_RANGE_4G 1
+#define BMI2_GYR_RANGE_2000 0
 #define BSP_IMU_CONFIG_DEFAULT() {.accel_odr = 8, .accel_range = 1, .gyro_odr = 8, .gyro_range = 0}
 struct bmi2_dev { int identifier; };
+struct bmi2_sens_axes_data { int16_t x, y, z; };
+struct bmi2_sens_data {
+    struct bmi2_sens_axes_data acc, gyr;
+    uint8_t aux_data[8];
+    uint32_t sens_time;
+    uint8_t status;
+};
 esp_err_t bsp_board_variant_get(bsp_board_variant_t *variant);
 esp_err_t bsp_power_init(void);
 lv_display_t *bsp_display_start_with_config(const bsp_display_config_t *config);
@@ -52,5 +63,6 @@ esp_err_t bsp_imu_stop(void);
 esp_err_t bsp_imu_deinit(void);
 struct bmi2_dev *bsp_imu_get_handle(void);
 int8_t bmi2_get_status(uint8_t *status, struct bmi2_dev *device);
+int8_t bmi2_get_sensor_data(struct bmi2_sens_data *, struct bmi2_dev *);
 esp_err_t bsp_imu_get_gyro(float *x, float *y, float *z);
 esp_err_t bsp_imu_get_accel(float *x, float *y, float *z);

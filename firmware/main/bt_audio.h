@@ -168,6 +168,10 @@ esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t bond_revision,
                                  bt_audio_command_t command, const uint8_t peer[6], uint64_t *request_id);
 /* Cached bounded copy, no SDK calls. Unknown/read failure retains old rows
  * labelled unknown. Names stay explicitly unavailable; no identity inference. */
+/* Same-lock observation directly into caller-owned storage, without a large
+ * return-value temporary. NULL is ignored. */
+void bt_audio_copy_bond_list(bt_audio_bond_list_t *out);
+/* Compatibility wrapper; new stack-sensitive callers should use copy-out. */
 bt_audio_bond_list_t bt_audio_bond_list(void);
 /* Nonblocking refresh request; service performs the SDK read and updates the
  * revision. Acceptance is not a completed/fresh read. */

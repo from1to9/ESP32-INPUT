@@ -49,8 +49,12 @@ static cp_error_t remote_device_peers_read(const char *resource, char *json, siz
     unsigned cursor, limit;
     cp_error_t error = remote_device_page(resource, &cursor, &limit);
     if (error != CP_OK) return error;
-    ble_hid_snapshot_t link = ble_hid_snapshot(); ble_hid_bond_list_t ble = ble_hid_bond_list();
-    bt_audio_bond_list_t classic = bt_audio_bond_list(); ble_hid_target_snapshot_t target = ble_hid_target_snapshot();
+    ble_hid_snapshot_t link = ble_hid_snapshot();
+    static EXT_RAM_BSS_ATTR ble_hid_bond_list_t ble;
+    ble_hid_copy_bond_list(&ble);
+    static EXT_RAM_BSS_ATTR bt_audio_bond_list_t classic;
+    bt_audio_copy_bond_list(&classic);
+    ble_hid_target_snapshot_t target = ble_hid_target_snapshot();
     if (ble.count > BLE_HID_MAX_BONDS || classic.count > BT_AUDIO_CLASSIC_BONDS_MAX) return CP_INTERNAL;
     unsigned total = (unsigned)ble.count + classic.count;
     if (cursor > total) return CP_STALE;

@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 from types import SimpleNamespace
 import unittest
 
@@ -26,6 +27,433 @@ def feed(capture, data, elapsed=10.0):
 def result(capture, completed=True):
     capture.finish()
     return capture.summary(35.0, 35, completed)
+
+
+RUNTIME_VALUES = {
+    "media": {"snapshot_available": 1, "initialized": 1, "audio_known": 1, "audio_state": 0,
+              "audio_error": 0, "off_confirmed": 1, "speech_known": 1, "speech_state": 1,
+              "speech_result": 0, "busy": 0, "result_known": 0, "result": -1},
+    "wifi": {"initialized": 1, "state": 1, "lan_ready": 0, "backend_available": 0,
+             "error": 0, "backend_error": 259},
+    "control": {"initialized": 1, "server_state": 0, "tls": 0, "error": 0, "server_error": 0,
+                "trust_known": 1, "trust_present": 0, "trust_uncertain": 0, "clock_known": 0},
+}
+
+
+def runtime(component, **overrides):
+    values = dict(RUNTIME_VALUES[component], **overrides)
+    label = "Wi-Fi" if component == "wifi" else component
+    return ("I (10000) input: Runtime " + label + " " +
+            " ".join(f"{key}={value}" for key, value in values.items()) + "\r\n").encode()
+
+
+def motion(sample_count, legacy=False, **overrides):
+    values = {"imu_available": 1, "imu_error": "ESP_OK", "samples": sample_count,
+              "sample_age_known": 1, "sample_age_us": 1000,
+              "calibrated": 0, "calibrating": 1, "calibration_samples": 0,
+              "input_kind": 0, "input_connected": 0, "input_ready": 0}
+    if not legacy:
+        values.update(late_batches=0, late_batches_saturated=0)
+    values.update(overrides)
+    return ("I (10000) input: Motion " +
+            " ".join(f"{key}={value}" for key, value in values.items()) + "\r\n").encode()
+
+
+def recovering_motion(sample_count, **overrides):
+    fields = {"phase": 1, "worker_running": 1, "recoveries": 0, "failure_streak": 0,
+              "retry_ms": 0, "batch_time_known": 1, "batch_us": 1000,
+              "max_batch_us": 1000, "schedule_late_us": 0}
+    fields.update(overrides)
+    return motion(sample_count, **fields)
+
+
+class MotionParserTests(unittest.TestCase):
+    def capture(self, records=None):
+        records = records if records is not None else [motion(samples) for samples in (100, 1100, 2100)]
+        capture = smoke.HealthCapture()
+        for index, uptime in enumerate((10, 20, 30)):
+            if index < len(records):
+                for offset in range(0, len(records[index]), 7):
+                    feed(capture, records[index][offset:offset + 7], uptime)
+            feed(capture, health(uptime), uptime)
+        for record in records[3:]:
+            feed(capture, record, 30)
+        return capture
+
+    def test_freshness_limit_matches_the_production_board_contract(self):
+        source = (ROOT / "firmware/main/board_mosaico.c").read_text()
+        match = re.search(r"\bIMU_MAX_AGE_US\s*=\s*([0-9]+)", source)
+        self.assertIsNotNone(match)
+        self.assertEqual(smoke.MOTION_MAX_AGE_US, int(match.group(1)))
+
+    def test_fragmented_progressing_motion_does_not_require_hid_or_calibration(self):
+        for kind in (0, 1):
+            with self.subTest(kind=kind):
+                records = [motion(samples, input_kind=kind) for samples in (100, 1100, 2100)]
+                summary = result(self.capture(records))
+                self.assertEqual(summary["status"], "passed")
+                self.assertEqual(summary["failure_codes"], [])
+                observed = summary["motion"]
+                self.assertEqual(observed["valid_samples"], 3)
+                self.assertEqual(observed["samples"], {"first": 100, "last": 2100})
+                self.assertEqual(observed["sample_progress"], {"advanced": 2, "stalled": 0,
+                                                             "regressed": 0, "unverifiable": 0})
+                self.assertEqual(observed["sample_age_us"], {"min": 1000, "max": 1000})
+                self.assertEqual(observed["last_values"]["calibrated"], 0)
+                self.assertEqual(observed["last_values"]["input_connected"], 0)
+                self.assertEqual(observed["last_values"]["input_ready"], 0)
+
+    def test_historical_absence_and_pre_late_counter_schema_remain_distinct(self):
+        summary = result(self.capture([]))
+        self.assertEqual(summary["status"], "passed")
+        self.assertIsNone(summary["motion"])
+        for legacy in (True, False):
+            with self.subTest(legacy=legacy):
+                summary = result(self.capture([motion(n, legacy=legacy) for n in (1, 2, 3)]))
+                self.assertEqual(summary["status"], "passed")
+                self.assertEqual("late_batches" in summary["motion"]["last_values"], not legacy)
+        capture = self.capture([])
+        feed(capture, b"I (30000) ui: Motion chooser remains open\n", 30)
+        self.assertIsNone(result(capture)["motion"])
+
+    def test_stalled_and_regressed_samples_fail_without_error_text(self):
+        for counts, failure in [((20, 20, 20), "motion_samples_stalled"),
+                                ((20, 19, 21), "motion_samples_regressed")]:
+            with self.subTest(counts=counts):
+                summary = result(self.capture([motion(n) for n in counts]))
+                self.assertEqual(summary["failure_codes"], [failure])
+                self.assertEqual(summary["motion"]["valid_samples"], 3)
+                self.assertEqual(summary["motion"]["samples"]["last"], counts[-1])
+
+    def test_freshness_boundary_is_independent_of_availability_or_error_text(self):
+        for age, failures in ((50000, []), (50001, ["motion_sample_stale"])):
+            with self.subTest(age=age):
+                summary = result(self.capture([motion(n, sample_age_us=age) for n in (1, 2, 3)]))
+                self.assertEqual(summary["failure_codes"], failures)
+                self.assertEqual(summary["motion"]["sample_age_us"], {"min": age, "max": age})
+
+    def test_unavailable_unknown_age_and_error_are_valid_failure_observations(self):
+        cases = [({"imu_available": 0}, "motion_imu_unavailable"),
+                 ({"imu_error": "ESP_FAIL"}, "motion_imu_error"),
+                 ({"sample_age_known": 0, "sample_age_us": 0}, "motion_sample_age_unknown")]
+        for overrides, failure in cases:
+            with self.subTest(overrides=overrides):
+                summary = result(self.capture([motion(n, **overrides) for n in (1, 2, 3)]))
+                self.assertEqual(summary["failure_codes"], [failure])
+                self.assertEqual(summary["motion"]["valid_samples"], 3)
+                if not overrides.get("sample_age_known", 1):
+                    self.assertIsNone(summary["motion"]["sample_age_us"])
+
+    def test_missing_samples_never_become_fresh_success(self):
+        summary = result(self.capture([motion(0, sample_age_known=0, sample_age_us=0)] +
+                                      [motion(n) for n in (1, 2)]))
+        self.assertIn("motion_no_samples", summary["failure_codes"])
+        self.assertIn("motion_sample_age_unknown", summary["failure_codes"])
+        self.assertNotIn("invalid_motion_values", summary["failure_codes"])
+
+    def test_uint64_domains_and_saturation_do_not_wrap_or_invent_progress(self):
+        maximum = (1 << 64) - 1
+        summary = result(self.capture([motion(n, late_batches=maximum, late_batches_saturated=1)
+                                       for n in (maximum - 2, maximum - 1, maximum)]))
+        self.assertEqual(summary["status"], "passed")
+        self.assertEqual(summary["motion"]["samples"]["last"], maximum)
+        self.assertEqual(summary["motion"]["last_values"]["late_batches"], maximum)
+        summary = result(self.capture([motion(maximum, sample_count_saturated=1) for _ in range(3)]))
+        self.assertEqual(summary["failure_codes"], ["motion_progress_unverifiable"])
+        self.assertEqual(summary["motion"]["valid_samples"], 3)
+        self.assertEqual(summary["motion"]["sample_progress"]["unverifiable"], 2)
+        summary = result(self.capture([motion(n, sample_age_us=maximum) for n in (1, 2, 3)]))
+        self.assertEqual(summary["failure_codes"], ["motion_sample_stale"])
+
+    def test_boolean_input_kind_and_unsigned_domains_reject_poison(self):
+        for field in ("imu_available", "sample_age_known", "calibrated", "calibrating",
+                      "input_connected", "input_ready", "late_batches_saturated", "sample_count_saturated"):
+            for value in (-1, 2, 165):
+                with self.subTest(field=field, value=value):
+                    capture = self.capture()
+                    feed(capture, motion(3100, **{field: value}), 30)
+                    self.assertIn("invalid_motion_values", result(capture)["failure_codes"])
+        for field, value in (("samples", -1), ("sample_age_us", -1), ("late_batches", -1),
+                             ("calibration_samples", 1 << 32), ("input_kind", 2), ("input_kind", -1515870811)):
+            with self.subTest(field=field, value=value):
+                capture = self.capture()
+                feed(capture, motion(3100, **{field: value}), 30)
+                self.assertIn("invalid_motion_values", result(capture)["failure_codes"])
+
+    def test_malformed_missing_duplicate_and_overflow_records_do_not_replace_valid_data(self):
+        line = motion(3100)
+        records = [line.replace(b"samples=3100", b"samples=nan"),
+                   line.replace(b"samples=3100", b"samples=18446744073709551616"),
+                   line.replace(b"samples=3100", b"samples=" + b"9" * 100),
+                   line.replace(b"samples=3100 ", b""), line.rstrip() + b" samples=3100\n",
+                   line.replace(b"imu_error=ESP_OK", b"imu_error=nan"),
+                   line.rstrip() + b" imu_error=ESP_OK\n", b"Motion\n"]
+        for record in records:
+            with self.subTest(record=record):
+                capture = self.capture()
+                feed(capture, record, 30)
+                summary = result(capture)
+                self.assertIn("malformed_motion", summary["failure_codes"])
+                self.assertEqual(summary["motion"]["valid_samples"], 3)
+                self.assertEqual(summary["motion"]["records"], 4)
+                self.assertEqual(summary["motion"]["samples"]["last"], 2100)
+
+    def test_recovery_updates_last_values_but_preserves_observed_faults(self):
+        records = [motion(20, imu_available=0, imu_error="ESP_FAIL", sample_age_us=1000000),
+                   motion(21), motion(22)]
+        capture = self.capture(records)
+        feed(capture, motion(23), 40)
+        feed(capture, health(40), 40)
+        summary = capture.summary(45, 45, True)
+        self.assertEqual(summary["failure_codes"], ["motion_imu_error", "motion_imu_unavailable", "motion_sample_stale"])
+        self.assertEqual(summary["motion"]["last_values"]["imu_available"], 1)
+        self.assertTrue(summary["motion"]["last_values"]["imu_error_ok"])
+        self.assertEqual(summary["motion"]["samples"], {"first": 20, "last": 23})
+        self.assertEqual(summary["motion"]["sample_age_us"]["max"], 1000000)
+
+    def test_latched_first_fault_repetitions_do_not_become_new_fault_events(self):
+        capture = self.capture()
+        line = b"W (30000) input: First IMU fault stage=private_stage error=ESP_FAIL\n"
+        for _ in range(9):
+            feed(capture, line, 30)
+        summary = result(capture)
+        self.assertEqual(summary["failure_codes"], ["motion_fault_latched"])
+        self.assertEqual(summary["motion"]["records"], 3)
+        self.assertNotIn("private_stage", json.dumps(summary))
+
+    def test_partial_motion_coverage_cannot_qualify_sustained_sampling(self):
+        for count in (1, 2):
+            with self.subTest(count=count):
+                summary = result(self.capture([motion(n + 1) for n in range(count)]))
+                self.assertIn("insufficient_motion_samples", summary["failure_codes"])
+
+    def test_motion_cadence_stalls_fail_even_while_health_keeps_arriving(self):
+        cases = [(range(10, 100, 10), (10, 20, 30), 90, "motion_final_silence"),
+                 (range(10, 70, 10), (30, 40, 50), 60, "motion_initial_silence"),
+                 (range(10, 70, 10), (10, 20, 50, 60), 60, "motion_gap_exceeded")]
+        for health_times, motion_times, duration, failure in cases:
+            with self.subTest(failure=failure):
+                capture = smoke.HealthCapture()
+                samples = 1
+                for elapsed in health_times:
+                    if elapsed in motion_times:
+                        feed(capture, motion(samples), elapsed)
+                        samples += 1
+                    feed(capture, health(elapsed), elapsed)
+                self.assertEqual(capture.summary(duration, duration, True)["failure_codes"], [failure])
+        capture = smoke.HealthCapture()
+        for count, elapsed in enumerate((25, 50, 75), 1):
+            feed(capture, motion(count), elapsed)
+            feed(capture, health(elapsed), elapsed)
+        self.assertEqual(capture.summary(100, 100, True)["status"], "passed")
+
+    def test_summary_does_not_copy_unknown_columns_or_symbolic_error_text(self):
+        capture = self.capture()
+        feed(capture, motion(3100, private_identity=12345, imu_error="ESP_ERR_PRIVATE_IDENTITY"), 30)
+        summary = result(capture)
+        self.assertIn("motion_imu_error", summary["failure_codes"])
+        encoded = json.dumps(summary)
+        self.assertNotIn("private_identity", encoded)
+        self.assertNotIn("PRIVATE_IDENTITY", encoded)
+        self.assertNotIn("12345", encoded)
+
+    def test_optional_recovery_group_keeps_historical_batch_time_separate_from_freshness(self):
+        maximum = (1 << 64) - 1
+        records = [recovering_motion(n, phase=2, recoveries=maximum, failure_streak=1, retry_ms=10,
+                                     batch_us=25000, max_batch_us=maximum, schedule_late_us=maximum)
+                   for n in (1, 2, 3)]
+        summary = result(self.capture(records))
+        self.assertEqual(summary["status"], "passed")
+        last = summary["motion"]["last_values"]
+        self.assertEqual(last["phase_name"], "BOARD_IMU_RECOVERING")
+        self.assertEqual(last["max_batch_us"], maximum)
+        self.assertEqual(last["batch_us"], 25000)
+        summary = result(self.capture([recovering_motion(n, batch_time_known=0) for n in (1, 2, 3)]))
+        self.assertEqual(summary["status"], "passed")
+        self.assertEqual(summary["motion"]["last_values"]["batch_time_known"], 0)
+
+    def test_recovery_group_requires_complete_fields_and_typed_domains(self):
+        line = recovering_motion(3100)
+        fields = {"phase": 1, "worker_running": 1, "recoveries": 0, "failure_streak": 0,
+                  "retry_ms": 0, "batch_time_known": 1, "batch_us": 1000,
+                  "max_batch_us": 1000, "schedule_late_us": 0}
+        for field, value in fields.items():
+            with self.subTest(missing=field):
+                capture = self.capture()
+                record = line.replace(f" {field}={value}".encode(), b"", 1)
+                feed(capture, record, 30)
+                self.assertIn("malformed_motion", result(capture)["failure_codes"])
+        cases = [("phase", -1), ("phase", 4), ("worker_running", 165), ("batch_time_known", 2),
+                 ("failure_streak", 1 << 32), ("retry_ms", 1 << 32), ("recoveries", -1),
+                 ("batch_us", -1), ("max_batch_us", -1), ("schedule_late_us", -1)]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                capture = self.capture()
+                feed(capture, recovering_motion(3100, **{field: value}), 30)
+                self.assertIn("invalid_motion_values", result(capture)["failure_codes"])
+        for field in ("recoveries", "batch_us", "max_batch_us", "schedule_late_us"):
+            with self.subTest(overflow=field):
+                capture = self.capture()
+                feed(capture, recovering_motion(3100, **{field: 1 << 64}), 30)
+                self.assertIn("malformed_motion", result(capture)["failure_codes"])
+
+    def test_fatal_phase_or_stopped_worker_cannot_pass_even_with_fresh_counts(self):
+        for overrides, failure in [({"phase": 3}, "motion_phase_fatal"),
+                                   ({"worker_running": 0}, "motion_worker_stopped")]:
+            with self.subTest(overrides=overrides):
+                records = [recovering_motion(1, **overrides), recovering_motion(2), recovering_motion(3)]
+                summary = result(self.capture(records))
+                self.assertEqual(summary["failure_codes"], [failure])
+                self.assertEqual(summary["motion"]["last_values"]["phase"], 1)
+                self.assertEqual(summary["motion"]["valid_samples"], 3)
+
+
+class RuntimeParserTests(unittest.TestCase):
+    def capture(self, *records):
+        capture = smoke.HealthCapture()
+        for uptime in (10, 20, 30):
+            feed(capture, health(uptime), uptime)
+        for record in records:
+            for offset in range(0, len(record), 7):
+                feed(capture, record[offset:offset + 7], 30)
+        return capture
+
+    def test_enum_domains_match_the_owning_firmware_types(self):
+        contracts = [
+            ("components/audio_engine/include/audio_engine.h", "ae_state_t", smoke.AUDIO_STATES),
+            ("components/audio_engine/include/audio_io.h", "ae_result_t", smoke.AUDIO_RESULTS),
+            ("components/spoken_letters/include/spoken_letters.h", "sl_state_t", smoke.SPEECH_STATES),
+            ("firmware/main/app_wifi.h", "app_wifi_state_t", smoke.WIFI_STATES),
+            ("firmware/main/app_control_server.h", "app_control_server_state_t", smoke.CONTROL_STATES),
+            ("firmware/main/app_ui.h", "app_input_transport_t", smoke.MOTION_INPUT_KINDS),
+            ("firmware/main/board_port.h", "board_imu_phase_t", smoke.MOTION_PHASES),
+        ]
+        for path, typedef, expected in contracts:
+            with self.subTest(typedef=typedef):
+                text = re.sub(r"/\*.*?\*/|//[^\n]*", "", (ROOT / path).read_text(), flags=re.S)
+                match = re.search(r"typedef\s+enum\s*\{([^{}]*)\}\s*" + typedef + r"\s*;", text, re.S)
+                self.assertIsNotNone(match)
+                names = tuple(word.strip() for word in match.group(1).split(",") if word.strip())
+                self.assertEqual(names, expected)  # Explicit values also require a reviewed parser update.
+
+    def test_fragmented_idle_and_unprovisioned_observations_are_not_readiness_claims(self):
+        summary = result(self.capture(*(runtime(component) for component in RUNTIME_VALUES)))
+        self.assertEqual(summary["status"], "passed")
+        self.assertEqual(summary["health_samples"], 3)
+        self.assertEqual(summary["failure_codes"], [])
+        self.assertEqual(summary["runtime_observations"]["wifi"]["enum_names"]["state"], "APP_WIFI_IDLE")
+        self.assertEqual(summary["runtime_observations"]["wifi"]["last_values"]["backend_available"], 0)
+        self.assertEqual(summary["runtime_observations"]["control"]["last_values"]["trust_present"], 0)
+        self.assertEqual(summary["runtime_observations"]["control"]["enum_names"]["server_state"], "APP_CONTROL_STOPPED")
+        self.assertEqual(summary["runtime_observations"]["media"]["enum_names"]["audio_state"], "AE_OFF")
+        self.assertIn("do not qualify service readiness", summary["qualification"])
+
+    def test_absent_runtime_records_remain_unobserved_for_historical_logs(self):
+        summary = result(self.capture())
+        self.assertEqual(summary["status"], "passed")
+        self.assertEqual(summary["runtime_observations"], {})
+        self.assertEqual(summary["failure_codes"], [])
+
+    def test_valid_unknown_sentinels_and_legitimate_unavailable_speech(self):
+        unknown = runtime("media", snapshot_available=0, initialized=0, audio_known=0,
+                          audio_state=-1, audio_error=-1, off_confirmed=0, speech_known=0,
+                          speech_state=-1, speech_result=-1)
+        summary = result(self.capture(unknown, runtime("wifi", initialized=0, state=-1),
+                                      runtime("control", initialized=0, server_state=-1, trust_known=0)))
+        self.assertEqual(summary["status"], "passed")
+        for component, observation in summary["runtime_observations"].items():
+            self.assertEqual(observation["valid_samples"], 1)
+            self.assertTrue(all(value is None for value in observation["enum_names"].values()), component)
+        summary = result(self.capture(runtime("media", speech_state=0, speech_result=3,
+                                               result_known=1, result=5)))
+        self.assertEqual(summary["status"], "passed")
+        names = summary["runtime_observations"]["media"]["enum_names"]
+        self.assertEqual(names["speech_state"], "SL_UNAVAILABLE")
+        self.assertEqual(names["speech_result"], "AE_UNAVAILABLE")
+        self.assertEqual(names["result"], "AE_BUSY")
+
+    def test_observed_a5_poison_fails_without_an_unrelated_error_log(self):
+        poison = runtime("media", audio_state=-1515870811, audio_error=-1515870811, off_confirmed=165)
+        capture = self.capture(poison)
+        summary = result(capture)
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["failure_codes"], ["invalid_runtime_media_values"])
+        self.assertEqual(summary["runtime_observations"], {})
+        self.assertEqual(summary["health_samples"], 3)
+        feed(capture, runtime("media"), 30)
+        summary = result(capture)
+        self.assertIn("invalid_runtime_media_values", summary["failure_codes"])
+        self.assertEqual(summary["runtime_observations"]["media"]["valid_samples"], 1)
+
+    def test_every_runtime_boolean_rejects_noncanonical_values(self):
+        fields = {
+            "media": ("snapshot_available", "initialized", "audio_known", "off_confirmed", "speech_known", "busy", "result_known"),
+            "wifi": ("initialized", "lan_ready", "backend_available"),
+            "control": ("initialized", "tls", "trust_known", "trust_present", "trust_uncertain", "clock_known"),
+        }
+        for component, keys in fields.items():
+            for key in keys:
+                for invalid in (-1, 2, 165):
+                    with self.subTest(component=component, field=key, invalid=invalid):
+                        summary = result(self.capture(runtime(component, **{key: invalid})))
+                        self.assertEqual(summary["failure_codes"], ["invalid_runtime_" + component + "_values"])
+
+    def test_known_enums_and_results_reject_unknown_or_out_of_domain_values(self):
+        fields = [("media", "audio_state", 6), ("media", "audio_error", 19),
+                  ("media", "speech_state", 8), ("media", "speech_result", 19),
+                  ("media", "result", 19), ("wifi", "state", 7), ("control", "server_state", 5)]
+        for component, key, limit in fields:
+            for invalid in (-1515870811, -2, -1, limit):
+                with self.subTest(component=component, field=key, invalid=invalid):
+                    overrides = {key: invalid}
+                    if key == "result":
+                        overrides["result_known"] = 1
+                    summary = result(self.capture(runtime(component, **overrides)))
+                    self.assertEqual(summary["failure_codes"], ["invalid_runtime_" + component + "_values"])
+
+    def test_unknown_flags_cannot_publish_success_shaped_values(self):
+        cases = [runtime("media", audio_known=0), runtime("media", speech_known=0),
+                 runtime("media", result=0), runtime("media", snapshot_available=0),
+                 runtime("wifi", initialized=0), runtime("control", initialized=0)]
+        for record in cases:
+            with self.subTest(record=record):
+                summary = result(self.capture(record))
+                self.assertEqual(summary["status"], "failed")
+                self.assertTrue(any(code.startswith("invalid_runtime_") for code in summary["failure_codes"]))
+
+    def test_malformed_duplicate_and_missing_runtime_fields_fail(self):
+        for component in RUNTIME_VALUES:
+            line = runtime(component)
+            label = "Wi-Fi" if component == "wifi" else component
+            variants = [line.replace(b"initialized=1", b"initialized=nan"),
+                        line.rstrip() + b" initialized=1\n", line.replace(b"initialized=1 ", b""),
+                        line.replace(b"initialized=1", b"initialized=2147483648"),
+                        line.replace(b"initialized=1", b"initialized=-2147483649"),
+                        line.replace(b"initialized=1", b"initialized=" + b"9" * 100),
+                        ("Runtime " + label + "\n").encode()]
+            for record in variants:
+                with self.subTest(component=component, record=record):
+                    summary = result(self.capture(record))
+                    self.assertEqual(summary["failure_codes"], ["malformed_runtime_" + component])
+                    self.assertEqual(summary["runtime_observations"], {})
+
+    def test_explicit_runtime_faults_are_distinct_from_corruption_and_sticky(self):
+        cases = [("media", {"audio_state": 5, "audio_error": 11}),
+                 ("media", {"speech_state": 7, "speech_result": 3}),
+                 ("wifi", {"state": 5, "error": -1}),
+                 ("control", {"server_state": 4, "error": -1})]
+        for component, values in cases:
+            with self.subTest(component=component, values=values):
+                summary = result(self.capture(runtime(component, **values), runtime(component)))
+                self.assertEqual(summary["failure_codes"], ["runtime_" + component + "_fault"])
+                self.assertEqual(summary["runtime_observations"][component]["valid_samples"], 2)
+
+    def test_runtime_summary_whitelists_fields_and_preserves_existing_fault_detection(self):
+        capture = self.capture(runtime("media", private_identity=12345), b"E (42) battery: failure\n")
+        summary = result(capture)
+        self.assertEqual(summary["failure_codes"], ["esp_error"])
+        self.assertNotIn("private_identity", json.dumps(summary))
+        self.assertNotIn("12345", json.dumps(summary))
 
 
 class HealthParserTests(unittest.TestCase):
@@ -445,6 +873,24 @@ class SerialLifecycleTests(unittest.TestCase):
         self.assertIn("log_limit_exceeded", summary["failure_codes"])
         self.assertTrue(summary["log_truncated"])
         self.assertFalse(summary["capture_completed"])
+
+    def test_runtime_poison_completed_in_line_grace_still_fails(self):
+        base = [(10, health(10)), (10, health(20)), (10, health(30))]
+        line = runtime("media", audio_state=-1515870811, audio_error=-1515870811, off_confirmed=165)
+        _, summary, _ = self.capture_events(base + [(5, line[:-1]), (0.4, line[-1:])])
+        self.assertTrue(summary["capture_completed"])
+        self.assertEqual(summary["capture_duration_seconds"], 35.4)
+        self.assertEqual(summary["failure_codes"], ["invalid_runtime_media_values"])
+
+    def test_stale_motion_completed_in_line_grace_still_fails(self):
+        base = [(10, motion(1) + health(10)), (10, motion(2) + health(20)),
+                (10, motion(3) + health(30))]
+        line = motion(4, sample_age_us=50001)
+        _, summary, _ = self.capture_events(base + [(5, line[:-1]), (0.4, line[-1:])])
+        self.assertTrue(summary["capture_completed"])
+        self.assertEqual(summary["capture_duration_seconds"], 35.4)
+        self.assertEqual(summary["failure_codes"], ["motion_sample_stale"])
+        self.assertEqual(summary["motion"]["valid_samples"], 4)
 
     def test_duration_has_documented_minimum_and_default(self):
         self.assertEqual(smoke.DEFAULT_SECONDS, 90)

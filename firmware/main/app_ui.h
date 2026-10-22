@@ -326,10 +326,13 @@ typedef struct {
  * APP_MENU opens the shared quick panel (MODES), Status (TARGET), Settings,
  * or the KEYBOARD/AUDIO choice panel. Choices emit KEYBOARD_SUBMODE/AUDIO_KIND;
  * the coordinator acknowledges the selection and closes that panel.
- * MENU COMMON_KEYS is Keyboard-only. Its buttons emit APP_KEY: x is a supported
- * HID usage and y=0; one explicit press/release pair, never an implicit Enter.
+ * The Keyboard header Keys button opens MENU COMMON_KEYS in every submode.
+ * Its Copy/Paste/Undo emit APP_SHORTCUT with the existing shortcut identity;
+ * the coordinator selects Ctrl or Command from the acknowledged host setting.
+ * Other buttons emit APP_KEY: x is a supported HID usage and y=0; one explicit
+ * press/release pair, never an implicit Enter or clipboard read.
  * APP_DELETE only edits the preview; host Backspace/Delete are distinct APP_KEY
- * usages. Existing Copy/Paste/Undo host-modifier shortcuts remain separate.
+ * usages. Host keys never send or edit the local preview.
  * SETTINGS_PAGE x selects app_settings_page_t and opens Settings. APP_CLOSE
  * returns to the primary mode. Settings Home Back emits MENU MODES; nested
  * Back uses SETTINGS_PAGE (HOME/CONNECTIVITY);

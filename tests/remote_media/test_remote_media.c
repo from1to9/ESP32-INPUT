@@ -69,6 +69,23 @@ static cp_command_t command(cp_operation_id_t operation, const char *args)
         .deadline_ms=now+2000,.management_generation=11,.resource_revision=22};
     assert(strlen(args)<sizeof(c.args_json)); strcpy(c.args_json,args); return c;
 }
+static void storage_alignment_rejects_without_mutation_and_recovers(void)
+{
+    setup();
+    size_t bytes = app_remote_media_bytes(), alignment = app_remote_media_alignment();
+    assert(alignment > 4 && !(alignment & (alignment - 1)));
+    unsigned char *storage = malloc(bytes + alignment); assert(storage);
+    memset(storage, 0xa5, bytes + alignment);
+    void *aligned = (void *)(((uintptr_t)storage + alignment - 1) & ~(uintptr_t)(alignment - 1));
+    void *weak = (unsigned char *)aligned + 4;
+    app_remote_media_t *out = adapter;
+    app_remote_media_port_t port = {.observe = observe, .submit = submit, .poll = poll,
+        .release_result = release, .session_alive = session};
+    assert(app_remote_media_init(weak, bytes, &port, &out) == CP_INVALID && out == adapter);
+    for (size_t i = 0; i < bytes + alignment; ++i) assert(storage[i] == 0xa5);
+    assert(app_remote_media_init(aligned, bytes, &port, &out) == CP_OK && out == aligned);
+    free(storage);
+}
 static const char *record_args="{\"source\":\"local_microphone\",\"format\":\"wav_pcm_s16le\",\"sample_profile\":\"pcm16_mono_16k\",\"storage\":\"records_partition\",\"duration_seconds\":5,\"byte_limit\":65536,\"retention\":{\"policy\":\"expire_after\",\"duration_seconds\":3600},\"export_policy\":\"owner_download\",\"disconnect_policy\":\"continue_local\",\"activate_microphone\":true,\"consent_id\":\"03000000000000000000000000000000\",\"background_grant_id\":\"04000000000000000000000000000000\"}";
 static void started(void)
 {
@@ -170,6 +187,7 @@ static void local_network_streams(void)
 }
 int main(void)
 {
+    storage_alignment_rejects_without_mutation_and_recovers();
     immutable_and_lifecycle(); guards_and_redaction(); local_network_streams();
     printf("Resource bytes: remote media adapter=%zu\n",app_remote_media_bytes()); free(memory); return 0;
 }

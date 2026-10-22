@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "audio_store.h"
+#include "heap_caps_model.h"
 #define main store_fixture_main
 #define service fixture_store_service
 #include "test_store.c"
@@ -11,9 +12,12 @@ static board_recording_flash_status_t physical;
 static uint8_t nvs_value[64], nvs_staged[64];
 static bool nvs_present, commit_uncertain;
 static unsigned commits, provision_calls;
-void *heap_caps_calloc(size_t n, size_t size, unsigned caps)
-{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); return calloc(n, size); }
-void heap_caps_free(void *p) { free(p); }
+void *heap_caps_calloc(size_t n, size_t bytes, unsigned caps)
+{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); return test_heap_allocate(4, n, bytes); }
+void *heap_caps_aligned_calloc(size_t alignment, size_t n, size_t bytes, unsigned caps)
+{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  assert(alignment >= _Alignof(uint64_t)); return test_heap_allocate(alignment, n, bytes); }
+void heap_caps_free(void *data) { test_heap_free(data); }
 int64_t esp_timer_get_time(void) { return 1000000; }
 esp_err_t nvs_flash_init_partition(const char *name) { assert(!strcmp(name, "control")); return ESP_OK; }
 esp_err_t nvs_open_from_partition(const char *partition, const char *name, int mode, nvs_handle_t *handle)
@@ -46,7 +50,7 @@ static void boot(void)
 {
     if (state) {
         if (state->store) ae_store_deinit(state->store);
-        free(state->store_memory); ae_secure_zero(state, sizeof(*state)); free(state); state = NULL;
+        heap_caps_free(state->store_memory); ae_secure_zero(state, sizeof(*state)); heap_caps_free(state); state = NULL;
     }
     app_recording_store_config_t config = {.wall_time = utc};
     assert(app_recording_store_init(&config) == AE_OK); port = app_recording_store_port();
@@ -59,6 +63,13 @@ static void boot(void)
 int main(void)
 {
     memset(disk.bytes, 255, sizeof(disk.bytes)); disk.time = 100000; disk.async = true;
+    void *weak = heap_caps_calloc(1, ae_store_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ae_storage_device_t weak_device = device();
+    ae_store_t *weak_store = NULL;
+    assert((uintptr_t)weak % 8 == 4 && ae_store_alignment() >= 8);
+    assert(ae_store_init(weak, ae_store_bytes(), &weak_device, &weak_store) == AE_UNAVAILABLE);
+    assert(!weak_store && !disk.writes && !disk.erases);
+    heap_caps_free(weak);
     physical = (board_recording_flash_status_t){.state = BOARD_RECORDING_FLASH_ERASED, .geometry_verified = true,
         .capacity_bytes = DISK_BYTES, .erase_bytes = 4096};
     boot(); for (unsigned i = 0; i < 50; ++i) tick();
@@ -90,7 +101,7 @@ int main(void)
     for (unsigned i = 0; i < 10000 && !state->view.store.mounted; ++i) tick();
     assert(state->view.store.mounted); RETRY(port.reserve(port.context, &another));
     assert(read64(nvs_value + 56) == durable_counter + AE_STORE_NONCE_LEASE);
-    ae_store_deinit(state->store); free(state->store_memory); ae_secure_zero(state, sizeof(*state)); free(state); state = NULL;
+    ae_store_deinit(state->store); heap_caps_free(state->store_memory); ae_secure_zero(state, sizeof(*state)); heap_caps_free(state); state = NULL;
     puts("PASS: actual recording runtime and encrypted store, explicit ownership, blank boot preservation, NVS custody, no per-frame commits, reboot and ambiguous nonce burn");
     return 0;
 }

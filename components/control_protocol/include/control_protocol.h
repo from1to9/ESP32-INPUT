@@ -176,6 +176,8 @@ bool cp_command_json(const cp_command_t *, const char *key, char *out, size_t ca
 
 typedef struct cp_context cp_context_t;
 size_t cp_context_size(void);
+/* Caller-owned storage must satisfy both the size and alignment queries. */
+size_t cp_context_alignment(void);
 cp_error_t cp_initialize(void *storage, size_t capacity, const cp_callbacks_t *, cp_context_t **);
 void cp_set_device_state(cp_context_t *, const cp_device_state_t *, uint64_t now_ms);
 void cp_tick(cp_context_t *, uint64_t now_ms);

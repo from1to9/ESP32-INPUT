@@ -247,8 +247,8 @@ ae_result_t app_recording_store_init(const app_recording_store_config_t *config)
 {
     if (!config || !config->wall_time) return AE_INVALID;
     if (state) return AE_BUSY;
-    recording_state_t *s = heap_caps_calloc(1, sizeof(*s), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    void *memory = s ? heap_caps_calloc(1, ae_store_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : NULL;
+    recording_state_t *s = heap_caps_aligned_calloc(_Alignof(recording_state_t), 1, sizeof(*s), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *memory = s ? heap_caps_aligned_calloc(ae_store_alignment(), 1, ae_store_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : NULL;
     if (!s || !memory) { if (s) heap_caps_free(s); return AE_EXHAUSTED; }
     s->config = *config; s->store_memory = memory; state = s; publish(s, AE_AGAIN); return AE_OK;
 }

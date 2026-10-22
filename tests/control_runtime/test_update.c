@@ -11,6 +11,7 @@ static void test_freeaddrinfo(struct addrinfo *);
 #define getaddrinfo test_getaddrinfo
 #define freeaddrinfo test_freeaddrinfo
 #include "../../firmware/main/app_firmware_update.c"
+#include "weak_heap.h"
 
 static uint64_t clock_ms=100;static unsigned critical,begins,writes,ends,aborts,boot_writes,restarts,health_marks;
 static bool signature_valid=true,known_clock=true,fail_read,flip_readback,cancel_on_read,bad_encoding,probation;
@@ -42,9 +43,10 @@ void test_leave(void){
 }
 int64_t esp_timer_get_time(void){return(int64_t)clock_ms*1000;}
 void esp_fill_random(void *p,size_t n){memset(p,0x35,n);}
-void *heap_caps_calloc(size_t n,size_t s,unsigned caps){(void)caps;return calloc(n,s);}
-void *heap_caps_malloc(size_t n,unsigned caps){(void)caps;return malloc(n);}
-void heap_caps_free(void *p){free(p);}
+void *heap_caps_calloc(size_t n,size_t s,unsigned caps){return test_heap_calloc(4,n,s,caps);}
+void *heap_caps_aligned_calloc(size_t a,size_t n,size_t s,unsigned caps){return test_heap_calloc(a,n,s,caps);}
+void *heap_caps_malloc(size_t n,unsigned caps){return test_heap_calloc(4,1,n,caps);}
+void heap_caps_free(void *p){test_heap_free(p);}
 int xTaskCreate(void (*fn)(void *),const char *name,unsigned stack,void *arg,unsigned priority,void *out){assert(fn==worker&&!strcmp(name,"firmware_update")&&stack==16384&&priority==1&&!arg&&!out);return pdPASS;}
 void vTaskDelay(TickType_t ticks){assert(!critical);if(ticks==20)longjmp(loop_end,1);clock_ms+=ticks;}
 bool app_clock_wall_time(uint64_t *seconds){if(!known_clock)return false;*seconds=1900000000;return true;}
@@ -115,7 +117,7 @@ static app_update_authority_t authority_make(void){app_update_authority_t a={.au
 static void prepare_release(void){updater->staged=NULL;updater->view.boot_selected=false;updater->view.state=APP_UPDATE_IDLE;boot=&partitions[0];assert(app_update_check()==ESP_OK);step_worker();assert(updater->view.state==APP_UPDATE_AVAILABLE);}
 static void regression_boot(const app_update_config_t *config,bool pending,esp_err_t query_error)
 {
-    assert(!critical);if(updater){wipe(updater,sizeof(*updater));free(updater);updater=NULL;}
+    assert(!critical);if(updater){wipe(updater,sizeof(*updater));heap_caps_free(updater);updater=NULL;}
     clock_ms=100;probation=pending;state_query_error=query_error;mark_error=floor_read_error=floor_open_error=ESP_OK;new_image=false;
     apply_failed_mark=ignore_successful_mark=fail_state_after_mark=fail_state_on_image_open=cancel_on_staged_publish=false;
     signature_valid=known_clock=true;fail_read=flip_readback=cancel_on_read=bad_encoding=false;
@@ -211,7 +213,7 @@ static void confirmation_readback_and_terminal_probation_deadline(const app_upda
 static void confirmed_boot_cannot_override_failed_downgrade_floor_validation(const app_update_config_t *config)
 {
     for(unsigned failure=0;failure<3;++failure){
-        regression_boot(config,false,ESP_OK);wipe(updater,sizeof(*updater));free(updater);updater=NULL;
+        regression_boot(config,false,ESP_OK);wipe(updater,sizeof(*updater));heap_caps_free(updater);updater=NULL;
         probation=true;floor_present=true;memset(floor_blob,0,sizeof(floor_blob));
         if(failure==1)floor_read_error=ESP_FAIL;
         else if(failure==2)floor_open_error=ESP_FAIL;
@@ -235,7 +237,15 @@ static void confirmed_boot_cannot_override_failed_downgrade_floor_validation(con
 int main(void){
     for(unsigned i=0;i<sizeof(image);++i)image[i]=(uint8_t)i;catalog_make();uint8_t public_key[65]={4};
     app_update_config_t c={.abi_version=1,.catalog_url="https://publisher.example/catalog",.tls_ca_pem="TEST CA",.signing_key_id="release-key",.signing_public_key=public_key,.product="input",.board="mosaico",.layout=APP_UPDATE_LAYOUT};
+    test_heap_fail_next=2;
+    assert(app_update_init(&c)==ESP_ERR_NO_MEM&&!updater&&!test_heap_live);
+    test_heap_fail_external=true;
     assert(app_update_init(&c)==ESP_OK&&updater->view.available);assert(!app_update_flash_busy());
+    assert(test_heap_external_failures);test_heap_fail_external=false;
+    test_heap_fail_bytes=sizeof(cj_document_t);
+    assert(app_update_check()==ESP_OK);step_worker();
+    assert(updater->view.state==APP_UPDATE_ERROR&&updater->view.error==ESP_ERR_NO_MEM&&test_heap_live==1&&!begins&&!boot_writes);
+    test_heap_fail_bytes=0;
     assert(layout_ready());partitions[0].address=0x420000;assert(!layout_ready());partitions[0].address=0x10000;
     partitions[1].size=0x400000;assert(!layout_ready());partitions[1].size=APP_UPDATE_SLOT_BYTES;assert(layout_ready());
     source_t source;assert(!source_parse("http://publisher.example/image.bin",&source));assert(!source_parse("https://user@publisher.example/image.bin",&source));assert(!source_parse("https://publisher.example/image.bin?token=x",&source));
@@ -262,6 +272,6 @@ int main(void){
     staged_and_queued_cancellation_revokes_actual_stage_authority(&c);
     confirmation_readback_and_terminal_probation_deadline(&c);
     confirmed_boot_cannot_override_failed_downgrade_floor_validation(&c);
-    assert(critical==0);wipe(updater,sizeof(*updater));free(updater);updater=NULL;
+    assert(critical==0);wipe(updater,sizeof(*updater));heap_caps_free(updater);updater=NULL;assert(!test_heap_live);
     puts("PASS: production OTA trust/signature boundary, source/TLS/DNS binding, inactive-slot stream/hash/readback, cancellation, uncertain boot and health probation");return 0;
 }

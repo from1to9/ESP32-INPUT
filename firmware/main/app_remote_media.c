@@ -353,6 +353,7 @@ static void changed(media_job_t *j, cp_result_state_t state, cp_error_t e, const
     j->terminal=terminal;
 }
 size_t app_remote_media_bytes(void) { return sizeof(app_remote_media_t); }
+size_t app_remote_media_alignment(void) { return _Alignof(app_remote_media_t); }
 cp_error_t app_remote_media_init(void *memory, size_t bytes, const app_remote_media_port_t *port, app_remote_media_t **out)
 {
     if (!memory || !port || !out || bytes<sizeof(app_remote_media_t) || (uintptr_t)memory%_Alignof(app_remote_media_t) ||

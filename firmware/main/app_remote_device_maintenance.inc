@@ -11,7 +11,7 @@ static bool remote_device_neutral(void)
 }
 static bool remote_device_media_off(void)
 {
-    app_media_snapshot_t media;
+    static EXT_RAM_BSS_ATTR app_media_snapshot_t media;
     return app_media_runtime_snapshot(&media) && remote_update_media_quiet(&media);
 }
 static void remote_device_maintenance_cancelled(remote_device_binding_job_t *job)
@@ -72,7 +72,9 @@ static void remote_device_factory_progress(remote_device_binding_job_t *job)
         job->reset_step = 2;
     }
     if (job->reset_step == 2) {
-        ble_hid_snapshot_t bluetooth = ble_hid_snapshot(); ble_hid_bond_list_t bonds = ble_hid_bond_list();
+        ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
+        static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+        ble_hid_copy_bond_list(&bonds);
         if (!job->action_started) {
             if (!bonds.known || bonds.updating || bonds.revision != job->request.bond_revision || bluetooth.connected ||
                 !ble_hid_forget_bonds_without_pairing(bluetooth.generation)) { remote_device_failed(job, CP_STALE, true); return; }
@@ -83,14 +85,23 @@ static void remote_device_factory_progress(remote_device_binding_job_t *job)
         job->reset_step = 3;
     }
     if (job->reset_step == 3) {
-        ble_hid_target_snapshot_t target = ble_hid_target_snapshot(); ble_hid_bond_list_t bonds = ble_hid_bond_list();
+        ble_hid_target_snapshot_t target = ble_hid_target_snapshot();
+        static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+        ble_hid_copy_bond_list(&bonds);
         if (!job->target_id) {
-            ble_hid_target_preferences_request_t request = {.expected_bond_revision = bonds.revision, .expected_revision = job->target_revision};
+            static EXT_RAM_BSS_ATTR ble_hid_target_preferences_request_t request;
+            memset(&request, 0, sizeof(request));
+            request.expected_bond_revision = bonds.revision;
+            request.expected_revision = job->target_revision;
             /* Deleting the bonds makes a durable selected key unavailable.
              * Clearing that orphan needs store health, not selectability. A
              * successfully loaded absent record is also a known empty default. */
-            if (!bonds.known || bonds.updating || bonds.error != ESP_OK || bonds.count || !remote_device_target_store_ready(&target) ||
-                target.revision != job->target_revision || ble_hid_target_preferences_request(&request, &job->target_id) != ESP_OK) {
+            bool admitted = bonds.known && !bonds.updating && bonds.error == ESP_OK && !bonds.count &&
+                remote_device_target_store_ready(&target) && target.revision == job->target_revision &&
+                ble_hid_target_preferences_request(&request, &job->target_id) == ESP_OK;
+            /* The owner copied the request before return; retain no scratch. */
+            clear_private(&request, sizeof(request));
+            if (!admitted) {
                 remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return;
             }
             return;
@@ -102,7 +113,8 @@ static void remote_device_factory_progress(remote_device_binding_job_t *job)
         job->reset_step = 4;
     }
     if (job->reset_step == 4) {
-        app_wifi_profiles_snapshot_t wifi; app_wifi_profiles_snapshot(&wifi);
+        static EXT_RAM_BSS_ATTR app_wifi_profiles_snapshot_t wifi;
+        app_wifi_profiles_snapshot(&wifi);
         if (!job->wifi_id) {
             if (!wifi.known || wifi.uncertain || wifi.revision != job->wifi_revision ||
                 app_wifi_profiles_forget_all_request(job->wifi_revision, false, &job->wifi_id) != ESP_OK) {

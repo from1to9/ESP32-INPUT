@@ -1,0 +1,18 @@
+menu "Input device board resources"
+
+    config APP_DISPLAY_SPI_QUEUE_DEPTH
+        int "Mosaico display SPI transaction queue ceiling"
+        range 1 2
+        default 1
+        help
+            Limit queued transactions for the Mosaico CO5300 panel only.
+            The pinned BSP uses PSRAM draw buffers with internal DMA bounce
+            buffers. Each queued chunk retains up to 8190 payload bytes with
+            the pinned S31 bus configuration, plus allocation metadata.
+            A ceiling of one limits that payload to 8190 bytes; two permits
+            16380 bytes. The SDK recycles chunks while sending the entire
+            viewport and retains the existing TE and final completion path.
+            Increasing this ceiling requires a complete internal/DMA memory
+            budget and device throughput qualification.
+
+endmenu

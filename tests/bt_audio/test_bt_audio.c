@@ -11,6 +11,25 @@
 #include "esp_gap_bt_api.h"
 #include "freertos/timers.h"
 
+/* Existing state-transition assertions exercise copy-out and legacy callers. */
+static bt_audio_bond_list_t observed_bonds(void)
+{
+    bt_audio_bond_list_t copy, legacy;
+    memset(&copy, 0xa5, sizeof(copy));
+    bt_audio_copy_bond_list(NULL);
+    bt_audio_copy_bond_list(&copy);
+    legacy = bt_audio_bond_list();
+    assert(copy.known == legacy.known && copy.refreshing == legacy.refreshing &&
+        copy.error == legacy.error && copy.revision == legacy.revision &&
+        copy.count == legacy.count && copy.capacity == legacy.capacity);
+    assert(memcmp(copy.bonds, legacy.bonds, sizeof(copy.bonds)) == 0);
+    /* The caller owns this buffer; changing it must not alter cached state. */
+    copy.bonds[0].address[0] ^= 0xffU;
+    bt_audio_copy_bond_list(&copy);
+    assert(memcmp(copy.bonds, legacy.bonds, sizeof(copy.bonds)) == 0);
+    return copy;
+}
+
 static uint64_t clock_us = 1000000;
 static void (*clock_hook)(void);
 static bool no_memory, stack_enabled = true;
@@ -131,9 +150,9 @@ static void normal(void)
 {
     initialized();
     assert(bt_audio_init() == ESP_ERR_INVALID_STATE);
-    assert(!bt_audio_bond_list().known);
+    assert(!observed_bonds().known);
     bt_audio_service();
-    bt_audio_bond_list_t saved = bt_audio_bond_list();
+    bt_audio_bond_list_t saved = observed_bonds();
     assert(saved.known && saved.count == 1 && !saved.bonds[0].name_known && saved.bonds[0].name[0] == 0 &&
         memcmp(saved.bonds[0].address, peer, 6) == 0);
     uint64_t request;
@@ -146,7 +165,7 @@ static void normal(void)
     bt_audio_cancel(); assert(bt_audio_snapshot().control_inflight);
     assert(bt_audio_request(bt_audio_snapshot().generation, BT_AUDIO_CONNECT_HFP, peer, NULL) == ESP_ERR_INVALID_STATE);
     hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
-    assert(bt_audio_bond_list().bonds[0].hfp_current && !bt_audio_bond_list().bonds[0].a2dp_current);
+    assert(observed_bonds().bonds[0].hfp_current && !observed_bonds().bonds[0].a2dp_current);
     assert(!bt_audio_snapshot().control_inflight && bt_audio_snapshot().request_status == BT_AUDIO_JOB_CANCELLED);
     voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
     assert(bt_audio_snapshot().hfp_sample_rate == 16000 && bt_audio_snapshot().microphone_muted);
@@ -240,13 +259,13 @@ static void normal(void)
     assert(bt_audio_receive(&frame) == AE_STALE); /* Expired receive packet revokes the reservation. */
     music_format(3, ESP_A2D_SBC_CIE_CH_MODE_MONO, 43);
     assert(!bt_audio_snapshot().a2dp_format_known);
-    assert(bt_audio_refresh_bonds() == ESP_OK && bt_audio_bond_list().refreshing);
-    assert(bt_audio_saved_request(bt_audio_snapshot().generation, bt_audio_bond_list().revision,
+    assert(bt_audio_refresh_bonds() == ESP_OK && observed_bonds().refreshing);
+    assert(bt_audio_saved_request(bt_audio_snapshot().generation, observed_bonds().revision,
         BT_AUDIO_DISCONNECT_A2DP, peer, NULL) == ESP_ERR_INVALID_STATE);
     bond_list_error = ESP_FAIL; bt_audio_service();
-    saved = bt_audio_bond_list(); assert(!saved.known && saved.error == ESP_FAIL && saved.count == 1);
+    saved = observed_bonds(); assert(!saved.known && saved.error == ESP_FAIL && saved.count == 1);
     bond_list_error = ESP_OK; assert(bt_audio_refresh_bonds() == ESP_OK); bt_audio_service();
-    saved = bt_audio_bond_list(); assert(saved.known && saved.bonds[0].a2dp_current);
+    saved = observed_bonds(); assert(saved.known && saved.bonds[0].a2dp_current);
     unsigned prior_calls = calls;
     assert(bt_audio_saved_request(bt_audio_snapshot().generation, saved.revision,
         BT_AUDIO_DISCONNECT_A2DP, peer, NULL) == ESP_OK);
@@ -255,7 +274,7 @@ static void normal(void)
     music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 43);
     assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED);
     music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 44);
-    saved = bt_audio_bond_list(); prior_calls = calls;
+    saved = observed_bonds(); prior_calls = calls;
     assert(bt_audio_saved_request(bt_audio_snapshot().generation, saved.revision,
         BT_AUDIO_DISCONNECT_A2DP, peer, NULL) == ESP_OK);
     esp_bt_gap_cb_param_t mutation = {.auth_cmpl.stat = 1};

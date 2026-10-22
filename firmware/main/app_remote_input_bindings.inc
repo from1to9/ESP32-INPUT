@@ -316,8 +316,10 @@ static void remote_control_init(bool usb_available)
     s_management_generation = generation;
     if (!remote_device_initialize()) ESP_LOGW(TAG, "Remote device controls unavailable");
     remote_media_init();
-    void *input = heap_caps_calloc(1, app_remote_input_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    void *bridge = heap_caps_calloc(1, app_command_bridge_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *input = heap_caps_aligned_calloc(app_remote_input_alignment(), 1,
+        app_remote_input_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void *bridge = heap_caps_aligned_calloc(app_command_bridge_alignment(), 1,
+        app_command_bridge_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     app_remote_input_port_t input_port = {.engine = &s_engine, .interaction = &s_interaction,
         .observe = remote_observe, .changed = remote_changed, .complete = remote_complete,
         .delegate_available = remote_delegate_available, .delegate = remote_delegate};

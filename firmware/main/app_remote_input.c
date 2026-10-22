@@ -264,6 +264,7 @@ static cp_error_t lease_gate(const app_remote_input_t *m, const cp_command_t *cm
 }
 
 size_t app_remote_input_bytes(void) { return sizeof(app_remote_input_t); }
+size_t app_remote_input_alignment(void) { return _Alignof(app_remote_input_t); }
 
 cp_error_t app_remote_input_init(void *memory, size_t bytes, const app_remote_input_port_t *port,
                                 app_remote_input_t **out)

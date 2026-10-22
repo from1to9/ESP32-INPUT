@@ -48,6 +48,23 @@ Run `python3 tools/check_repository.py` for first-party text hygiene and local M
 
 Distinguish source-reviewed, host-tested, target-compiled, device-tested, host-compatible and release-qualified evidence. One level does not establish the next. Record SDK/dependency revisions, target and configuration for build evidence; record actual board and host versions for compatibility. Do not invent latency, stability or interoperability results.
 
+For coordinator stack changes or growing snapshots, run
+`python3 tools/check_stack_budget.py` after configuring the pinned target build.
+It uses that build's compile database, writes isolated objects and stack-usage
+evidence outside the shared build directory, and checks the declared startup,
+render, polling and management callback paths. Count GCC split/clone bodies as
+well as public entries, including nested owning adapters and backend leaves.
+It rejects drift in the measured first-party sources and headers, compile
+database, configuration and command response files during measurement; the
+report states the exact hashed input scope. The startup frame limit is 512 bytes; the known path
+sums must leave 2 KiB for SDK, library, RTOS and interrupt overhead. This reserve
+is an engineering budget, not a measured bound on opaque SDK or device usage.
+Keep runtime-only frames out of startup, and give large copied observations
+bounded storage with explicit single-task or serialized ownership. Distinct
+nested workspaces must not overwrite pending requests; clear transient private
+payloads after their owning consumer has copied them. Target stack reports do
+not replace device high-water and failure evidence.
+
 Stop expanding a successful run without a specific unresolved concern. Revalidate after substantive edits or integration changes. Documentation changes do not require unrelated hardware tests.
 
 ## 5. Git and delivery

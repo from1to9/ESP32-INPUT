@@ -20,6 +20,16 @@ static struct {
 static app_remote_device_t *device;
 static void *memory;
 static uint64_t now = 1000, command_key;
+static void (*validation_hook)(void), (*submit_hook)(void);
+
+static void assert_cleared(const app_remote_device_t *instance)
+{
+    const unsigned char *bytes = (const unsigned char *)&instance->document;
+    for (size_t i = 0; i < sizeof(instance->document); ++i) assert(!bytes[i]);
+    bytes = (const unsigned char *)&instance->execution;
+    for (size_t i = 0; i < sizeof(instance->execution); ++i) assert(!bytes[i]);
+    assert(!instance->executing);
+}
 
 static bool observe(void *user, cp_operation_id_t operation, app_remote_device_state_t *out)
 {
@@ -33,7 +43,9 @@ static bool available(void *user, cp_operation_id_t operation, uint32_t fields, 
 }
 static cp_error_t validate(void *user, const device_settings_t *settings, uint32_t fields, bool durable)
 {
-    (void)user; (void)durable; assert(fields && device_settings_validate(settings)); ++model.validations; return CP_OK;
+    (void)user; (void)durable; assert(fields && device_settings_validate(settings)); ++model.validations;
+    if (validation_hook) validation_hook();
+    return CP_OK;
 }
 static bool random_bytes(void *user, uint8_t *data, size_t bytes)
 {
@@ -42,7 +54,9 @@ static bool random_bytes(void *user, uint8_t *data, size_t bytes)
 }
 static cp_error_t submit(void *user, const app_remote_device_request_t *request, app_remote_device_outcome_t *out)
 {
-    (void)user; ++model.submits; model.request = *request; *out = model.outcome; return model.submit_error;
+    (void)user; ++model.submits;
+    if (submit_hook) submit_hook();
+    model.request = *request; *out = model.outcome; return model.submit_error;
 }
 static bool poll(void *user, uint64_t token, app_remote_device_outcome_t *out)
 {
@@ -87,6 +101,7 @@ static void setup(void)
 {
     free(memory); memory = calloc(1, app_remote_device_bytes()); assert(memory);
     memset(&model, 0, sizeof(model)); now = 1000; command_key = 0;
+    validation_hook = submit_hook = NULL;
     model.present = model.available = model.complete_accept = true;
     model.state = (app_remote_device_state_t){.management_generation = 3, .resource_revision = 7,
         .settings_revision = 5, .ui_revision = 9, .bluetooth_generation = 11, .bond_revision = 13, .screen_awake = true};
@@ -108,6 +123,7 @@ static cp_command_t command(cp_operation_id_t operation, const char *args)
 static cp_result_t dispatch(cp_command_t *value, cp_error_t expected)
 {
     cp_result_t result; assert(app_remote_device_execute(device, value, now, &result) == expected);
+    assert_cleared(device);
     assert(result.command_key == value->command_key && result.uncertain_index == -1);
     return result;
 }
@@ -233,9 +249,11 @@ static void jobs_and_ui_gates(void)
     setup(); cp_command_t ui = command(CP_OP_UI_NAVIGATE, "{\"overlay\":\"settings\",\"page\":\"input\"}");
     (void)dispatch(&ui, CP_FORBIDDEN); assert(!model.submits);
     cp_result_t result; assert(app_remote_device_execute_ui_authorized(device, &ui, now, &result) == CP_OK && model.submits == 1);
+    assert_cleared(device);
     assert(!strcmp(model.request.overlay, "settings") && !strcmp(model.request.page, "input"));
     setup(); ui = command(CP_OP_UI_PRIMARY_ACTIVATE, "{}"); model.state.screen_awake = false;
     assert(app_remote_device_execute_ui_authorized(device, &ui, now, &result) == CP_UNAVAILABLE && !model.submits);
+    assert_cleared(device);
     setup(); wake = command(CP_OP_DISPLAY_WAKE, "{}"); model.state.locked = true; (void)dispatch(&wake, CP_LOCKED);
     model.state.locked = false; model.state.local_busy = true; (void)dispatch(&wake, CP_LOCAL_BUSY);
     model.state.local_busy = false; --wake.management_generation; (void)dispatch(&wake, CP_STALE);
@@ -290,10 +308,133 @@ static void independent_native_motion_fields_and_alias_conflicts(void)
     assert(strstr(json,"\"pointer.gain_x_hid_per_degree\":4.00") && strstr(json,"\"pointer.gain_y_hid_per_degree\":8.75") &&
         strstr(json,"\"pointer.invert_x\":true") && strstr(json,"\"pointer.invert_y\":false") && strstr(json,"\"pointer.freeze_ms\":620"));
 }
+static void reject_same_instance_reentry(void)
+{
+    validation_hook = submit_hook = NULL;
+    execute_workspace_t saved = device->execution;
+    cj_document_t document = device->document;
+    assert(device->executing);
+    cp_command_t nested = command(CP_OP_CONFIG_STAGE, "{\"patch\":{\"display.theme\":\"dark\"}}");
+    cp_result_t result;
+    assert(app_remote_device_execute(device, &nested, now, &result) == CP_BUSY);
+    assert(result.state == CP_RESULT_REJECTED && result.error == CP_BUSY &&
+        result.command_key == nested.command_key && result.uncertain_index == -1);
+    nested = command(CP_OP_UI_PRIMARY_ACTIVATE, "{}");
+    assert(app_remote_device_execute_ui_authorized(device, &nested, now, &result) == CP_BUSY);
+    assert(result.command_key == nested.command_key && result.uncertain_index == -1);
+    assert(app_remote_device_execute(device, &nested, now, NULL) == CP_INVALID);
+    assert(device->executing && !memcmp(&saved, &device->execution, sizeof(saved)) &&
+        !memcmp(&document, &device->document, sizeof(document)));
+}
+static app_remote_device_t *other_device;
+static cp_result_t other_stage;
+static void execute_other_instance(void)
+{
+    validation_hook = NULL;
+    execute_workspace_t saved = device->execution;
+    cj_document_t document = device->document;
+    cp_command_t nested = command(CP_OP_CONFIG_STAGE, "{\"patch\":{\"display.brightness_percent\":90}}");
+    assert(app_remote_device_execute(other_device, &nested, now, &other_stage) == CP_OK);
+    assert(other_stage.state == CP_RESULT_APPLIED && !strcmp(other_stage.reason, "staged_inert"));
+    assert_cleared(other_device);
+    assert(device->executing && !memcmp(&saved, &device->execution, sizeof(saved)) &&
+        !memcmp(&document, &device->document, sizeof(document)));
+}
+static void workspace_reentry_and_instance_isolation(void)
+{
+    setup(); validation_hook = reject_same_instance_reentry;
+    cp_result_t staged = stage("{\"display.brightness_percent\":70}");
+    cp_command_t apply = transaction_command(CP_OP_CONFIG_APPLY, staged.object_id);
+    submit_hook = reject_same_instance_reentry;
+    (void)dispatch(&apply, CP_OK);
+    assert(model.submits == 1 && model.request.settings.brightness_percent == 70);
+
+    setup(); void *other_memory = calloc(1, app_remote_device_bytes()); assert(other_memory);
+    assert(app_remote_device_init(other_memory, app_remote_device_bytes(), &device->port, &other_device) == CP_OK);
+    validation_hook = execute_other_instance;
+    staged = stage("{\"display.brightness_percent\":70}");
+    apply = transaction_command(CP_OP_CONFIG_APPLY, staged.object_id); (void)dispatch(&apply, CP_OK);
+    assert(model.request.settings.brightness_percent == 70);
+    apply = transaction_command(CP_OP_CONFIG_APPLY, other_stage.object_id);
+    cp_result_t result; assert(app_remote_device_execute(other_device, &apply, now, &result) == CP_OK);
+    assert_cleared(other_device); assert(model.request.settings.brightness_percent == 90 && model.submits == 2);
+    free(other_memory); other_device = NULL;
+}
+static void retained_copies_survive_workspace_reuse(void)
+{
+    setup(); cp_result_t first = stage("{\"display.brightness_percent\":70}");
+    (void)stage("{\"display.brightness_percent\":90}");
+    cp_command_t apply = transaction_command(CP_OP_CONFIG_APPLY, first.object_id);
+    cp_result_t pending = dispatch(&apply, CP_OK);
+    assert(model.request.settings.brightness_percent == 70 && model.submits == 1);
+    app_remote_device_request_t submitted = model.request;
+    (void)stage("{\"haptics.enabled\":false}");
+    assert(!memcmp(&device->jobs[0].request, &submitted, sizeof(submitted)));
+    model.outcome = (app_remote_device_outcome_t){.phase = APP_REMOTE_DEVICE_COMPLETED,
+        .boundary_confirmed = true, .durable_confirmed = true, .resource_revision = 6};
+    app_remote_device_service(device, ++now);
+    assert(model.last_completion.command_key == apply.command_key && model.last_completion.state == CP_RESULT_APPLIED);
+    cp_result_t replay = dispatch(&apply, CP_OK);
+    assert(replay.job_id == pending.job_id && replay.state == CP_RESULT_APPLIED && model.submits == 1);
+
+    setup(); cp_command_t pairing = command(CP_OP_BLUETOOTH_PAIRING_OPEN, "{\"window_seconds\":45}");
+    pending = dispatch(&pairing, CP_OK);
+    app_remote_device_request_t reviewed = device->jobs[0].request;
+    (void)stage("{\"display.brightness_percent\":90}");
+    cp_command_t confirm = confirmation(CP_OP_OPERATION_CONFIRM); (void)dispatch(&confirm, CP_OK);
+    app_remote_device_service(device, ++now);
+    assert(model.submits == 1 && model.claims == 1 && model.request.window_seconds == 45 &&
+        model.request.command_key == pairing.command_key && model.request.token == pending.job_id &&
+        same_owner(&model.request.identity, &reviewed.identity) &&
+        equal(model.request.action_digest, reviewed.action_digest, sizeof(reviewed.action_digest)));
+}
+static void early_exit_cleanup(void)
+{
+    setup(); cp_result_t result;
+    cp_command_t value = command(CP_OP_DISPLAY_WAKE, "{}");
+    memset(&device->document, 0xa5, sizeof(device->document));
+    memset(&device->execution, 0xa5, sizeof(device->execution));
+    assert(app_remote_device_execute(device, &value, now, NULL) == CP_INVALID); assert_cleared(device);
+    memset(&device->document, 0xa5, sizeof(device->document));
+    memset(&device->execution, 0xa5, sizeof(device->execution));
+    assert(app_remote_device_execute(device, NULL, now, &result) == CP_INVALID); assert_cleared(device);
+    assert(result.command_key == 0 && result.uncertain_index == -1);
+    assert(app_remote_device_execute_ui_authorized(device, &value, now, &result) == CP_INVALID); assert_cleared(device);
+    assert(result.command_key == value.command_key && result.uncertain_index == -1);
+    assert(app_remote_device_execute_ui_authorized(device, NULL, now, &result) == CP_INVALID); assert_cleared(device);
+    value.version = 0; (void)dispatch(&value, CP_INVALID); value.version = CP_API_VERSION;
+    memset(value.identity.principal_id, 0, sizeof(value.identity.principal_id)); (void)dispatch(&value, CP_UNAUTHENTICATED);
+    value = command(CP_OP_DISPLAY_WAKE, "{"); (void)dispatch(&value, CP_INVALID);
+    value = command(CP_OP_DISPLAY_WAKE, "{}"); model.available = false; (void)dispatch(&value, CP_UNAVAILABLE);
+    model.available = true; model.present = false; (void)dispatch(&value, CP_UNAVAILABLE);
+    model.present = true; value.deadline_ms = now; (void)dispatch(&value, CP_EXPIRED);
+    assert(!model.submits);
+}
+static void bounded_instance_initialization(void)
+{
+    setup(); app_remote_device_t *unchanged = device;
+    size_t bytes = app_remote_device_bytes(), alignment = app_remote_device_alignment();
+    assert(alignment > 4 && !(alignment & (alignment - 1)));
+    unsigned char *storage = malloc(bytes + alignment); assert(storage);
+    memset(storage, 0xa5, bytes + alignment);
+    void *aligned = (void *)(((uintptr_t)storage + alignment - 1) & ~(uintptr_t)(alignment - 1));
+    void *weak = (unsigned char *)aligned + 4;
+    assert(app_remote_device_init(weak, bytes, &device->port, &unchanged) == CP_INVALID && unchanged == device);
+    for (size_t i = 0; i < bytes + alignment; ++i) assert(storage[i] == 0xa5);
+    assert(app_remote_device_init(aligned, bytes, &device->port, &unchanged) == CP_OK && unchanged == aligned);
+    free(storage); unchanged = device;
+    memset(&device->execution, 0xa5, sizeof(device->execution));
+    assert(app_remote_device_init(memory, app_remote_device_bytes() - 1U, &device->port, &unchanged) == CP_INVALID);
+    assert(unchanged == device && ((unsigned char *)&device->execution)[0] == 0xa5);
+    assert(app_remote_device_init(NULL, app_remote_device_bytes(), &device->port, &unchanged) == CP_INVALID);
+    assert(unchanged == device);
+}
 int main(void)
 {
     configuration_transactions(); exact_values_and_secret_rejection(); immutable_approvals(); jobs_and_ui_gates(); read_snapshots_and_clock();
     independent_native_motion_fields_and_alias_conflicts();
+    workspace_reentry_and_instance_isolation(); retained_copies_survive_workspace_reuse(); early_exit_cleanup();
+    bounded_instance_initialization();
     free(memory);
     puts("Remote device: canonical inert transactions, shared settings requests, identity/scope/revision gates, immutable approvals, actual-boundary results, cancellation and secret-free reads passed.");
     return 0;

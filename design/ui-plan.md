@@ -12,7 +12,7 @@ Use a 480 x 480 logical canvas, 12 px side margins, minimum 8 px gaps, 12 px con
 | --- | --- | --- |
 | Mode title | x 12/y 8/w 120/h 24 | Mouse, Keyboard or Audio; not a navigation target |
 | Current input context | x 12/y 36/w 120/h 18 | Ellipsized BT/USB plus actual safe target label, or explicit unknown/disconnected; full identity in the quick panel |
-| Compact entry/kind selector | x 140/y 8/w 132/h 48 | Keyboard submode or audio kind only; Mouse needs none |
+| Compact entry/kind selector | x 140/y 8/h 48; w 132 for Mouse/Audio, w 76 for Keyboard | Mouse help, audio kind, or keyboard submode; Keyboard adds Keys at x 224/w 48 with the same 16 px font and baseline |
 | Critical-state action | x 280/y 8/w 116/h 48 | Visible only for remote ownership, capture/recording, input errors or readiness blockers; bounded text/icon plus safe Stop/takeover/details action |
 | Menu launcher | x 404/y 8/w 64/h 48 | Always in the same position; opens the shared quick panel |
 | Core workspace | x 12/y 64/w 456/h 408 | Mode functions only; coordinates below include this area's controls |
@@ -40,7 +40,8 @@ Touch start and physical AI down suppress motion. Existing click freeze, relativ
 
 | Element | Geometry | Behavior |
 | --- | --- | --- |
-| Compact submode chooser | x 140/y 8/w 132/h 48 | Opens Motion, Touch, Spoken letters and Shortcuts choices |
+| Compact submode chooser | x 140/y 8/w 76/h 48 | Opens Motion, Touch, Spoken letters and Shortcuts choices; 16 px captions Motion / Touch / Spoken / Hotkeys; chooser retains full names |
+| Keys | x 224/y 8/w 48/h 48 | One-tap access to live-host keys and Copy/Paste/Undo in every Keyboard submode |
 | Preview | x 12/y 64/w 456/h 64 | Bounded preview, count/target metadata and Clear |
 | Clear | x 372/y 72/w 88/h 48 | Disabled while sending or empty; no appended host action |
 | Nine character cells | x 12/x 132/x 252; y 140/y 224/y 308; each 112 x 76 | Exactly three columns by three rows; fixed row-major engine indices |
@@ -50,7 +51,9 @@ Touch start and physical AI down suppress motion. Existing click freeze, relativ
 
 The real groups remain ABCD / EFGH / IJKL / MNOP / QRST / UVWX / YZ 01 / 2345 / 6789. A second-stage group has four valid characters in the engine's row-major cells; empty cells are hidden/non-actionable and excluded from motion focus. The UI must not invent a second character mapping or reorder indices for visual symmetry. Group -> character -> preview -> explicit Send remains unchanged. Sending never appends Enter and never replays the accepted prefix after interruption.
 
-The chooser is an on-demand panel with four 456 x 76 rows at y 64/y 152/y 240/y 328, plus Close at the shared top-right position. The focused preview currently uses 12 px row gaps and the same bounded region. Motion and Touch use the same grid. Shortcuts uses six 144 x 116 controls at x 12/x 168/x 324 and y 140/y 268, including explicit Enter. Spoken letters preserves preview/actions but displays its real unavailable state until qualified; no sample word masquerades as recognition.
+The chooser is an on-demand panel with five 456 x 64 rows at y 64/y 136/y 208/y 280/y 352, with 8 px gaps and Close at the shared top-right position. The first four rows select Motion, Touch, Spoken letters and Shortcuts; the fifth opens Common keys. Motion and Touch use the same grid. Shortcuts uses six 144 x 116 controls at x 12/x 168/x 324 and y 140/y 268, including explicit Enter. Spoken letters preserves preview/actions but displays its real unavailable state until qualified; no sample word masquerades as recognition.
+
+The 2026-10-22 user-requested discoverability revision adds the persistent Keys entry without moving or shrinking the grid, preview, Clear or Delete draft/Space/Send controls. It reuses the Common keys overlay with fourteen controls in a three-column, five-row layout; Copy/Paste/Undo share the panel with the eleven explicit host keys. The capture cue and Menu retain their original header rectangles. The additional button and caption raise the fixed-core budget by exactly two objects (104 to 106); the dynamic-panel ceiling remains 160. See [Common keys](native-wifi-ui.md#11-common-keys-without-shrinking-the-character-grid) for layout and action semantics.
 
 Each cell grows from 112 x 44 to 112 x 76, with 44 px minimum targets retained everywhere. The local/remote draft revision, focus, accepted prefix, consent and send cancellation remain shared state. An AI single on a hidden keyboard page does not confirm a character.
 
@@ -102,7 +105,7 @@ The existing 280 ms single/double exclusion window remains subject to hardware q
 
 The current production construction was measured at **315 objects, 84 action bindings and 663 color bindings**. The linked UI's static internal SRAM footprint is 19, 016 bytes, including 14, 336 bytes for the fixed color registry. These are baseline source/native object and target-map observations, not the dynamic target heap total. Exact run artifacts stay in `.agent/local/`; they must not be confused with a performance result for this proposal.
 
-Keep the three primary pages and safety/navigation shell fixed, with at most one dynamically constructed panel or Settings category. This avoids destroying a primary input surface during a gesture while removing all eagerly constructed hidden settings and overlays. Domain state, drafts, mode, confirmation identity and settings remain in the coordinator. The measured fixed core contains **102 objects**, replacing the earlier only-current-page proposal of at most 100. The architectural resource ceilings are **102 with no panel** and **160 with one panel**; independent panel-peak and repeated-navigation measurements must confirm them before acceptance. Required controls are not removed to meet the obsolete proposal.
+Keep the three primary pages and safety/navigation shell fixed, with at most one dynamically constructed panel or Settings category. This avoids destroying a primary input surface during a gesture while removing all eagerly constructed hidden settings and overlays. Domain state, drafts, mode, confirmation identity and settings remain in the coordinator. The original focused-layout core measured 102 objects; the explicit speech Reject control raised it to 104. The user-requested persistent Keys button and caption add exactly two objects, making the current architectural ceilings **106 with no panel** and **160 with one panel**. Independent panel-peak and repeated-navigation measurements must confirm these ceilings before acceptance. Required controls are not removed to meet an obsolete proposal.
 
 Object lifetime changes require a dedicated reviewed lifecycle, not a touch workaround:
 

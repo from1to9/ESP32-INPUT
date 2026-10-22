@@ -23,13 +23,21 @@ typedef struct {
     app_remote_device_request_t request;
     cp_result_t result;
 } device_job_t;
+typedef struct {
+    app_remote_device_request_t request;
+    app_remote_device_state_t state, original;
+    uint8_t command_fingerprint[32];
+    uint8_t hash_bytes[CP_MAX_ARGS_BYTES + 320U];
+    uint8_t settings_record[DEVICE_SETTINGS_RECORD_SIZE];
+} execute_workspace_t;
 struct app_remote_device {
     app_remote_device_port_t port;
     uint64_t next_token, last_ms;
-    bool clock_failed;
+    bool clock_failed, executing;
     transaction_t transactions[APP_REMOTE_DEVICE_TRANSACTIONS];
     device_job_t jobs[APP_REMOTE_DEVICE_JOBS];
     cj_document_t document;
+    execute_workspace_t execution;
 };
 
 static void wipe(void *memory, size_t bytes)
@@ -196,9 +204,10 @@ static void append_bytes(uint8_t *buffer, size_t *length, const void *data, size
 {
     memcpy(buffer + *length, data, bytes); *length += bytes;
 }
-static void action_digest(app_remote_device_request_t *request)
+static void action_digest(app_remote_device_request_t *request, execute_workspace_t *workspace)
 {
-    uint8_t buffer[640] = {0}, record[DEVICE_SETTINGS_RECORD_SIZE] = {0}; size_t length = 0;
+    uint8_t *buffer = workspace->hash_bytes, *record = workspace->settings_record; size_t length = 0;
+    memset(record, 0, sizeof(workspace->settings_record));
     append64(buffer, &length, request->operation);
     append_bytes(buffer, &length, request->identity.principal_id, CP_ID_BYTES);
     append_bytes(buffer, &length, request->identity.session_id, CP_ID_BYTES);
@@ -208,19 +217,20 @@ static void action_digest(app_remote_device_request_t *request)
     append64(buffer, &length, request->durable); append64(buffer, &length, request->timeout_ms);
     append64(buffer, &length, request->window_seconds); append64(buffer, &length, request->duration_ms);
     append64(buffer, &length, request->strength_percent);
-    if (request->settings_fields) (void)device_settings_encode(&request->settings, record, sizeof(record));
-    append_bytes(buffer, &length, record, sizeof(record));
+    if (request->settings_fields) (void)device_settings_encode(&request->settings, record, sizeof(workspace->settings_record));
+    append_bytes(buffer, &length, record, sizeof(workspace->settings_record));
     append_bytes(buffer, &length, request->peer_id, sizeof(request->peer_id));
     append_bytes(buffer, &length, request->pattern, sizeof(request->pattern));
     append_bytes(buffer, &length, request->overlay, sizeof(request->overlay));
     append_bytes(buffer, &length, request->page, sizeof(request->page));
     append_bytes(buffer, &length, request->group, sizeof(request->group));
     append_bytes(buffer, &length, request->retained_manifest_digest, sizeof(request->retained_manifest_digest));
-    cp_sha256(buffer, length, request->action_digest); wipe(buffer, sizeof(buffer)); wipe(record, sizeof(record));
+    cp_sha256(buffer, length, request->action_digest);
+    wipe(buffer, sizeof(workspace->hash_bytes)); wipe(record, sizeof(workspace->settings_record));
 }
-static void fingerprint(const cp_command_t *command, uint8_t digest[32])
+static void fingerprint(const cp_command_t *command, execute_workspace_t *workspace)
 {
-    uint8_t buffer[CP_MAX_ARGS_BYTES + 320U]; size_t length = 0;
+    uint8_t *buffer = workspace->hash_bytes; size_t length = 0;
     append64(buffer, &length, command->version); append64(buffer, &length, command->operation);
     append64(buffer, &length, command->command_key); append64(buffer, &length, command->deadline_ms);
     append64(buffer, &length, command->management_generation); append64(buffer, &length, command->resource_revision);
@@ -231,7 +241,7 @@ static void fingerprint(const cp_command_t *command, uint8_t digest[32])
     append_bytes(buffer, &length, command->lease_id, CP_ID_BYTES);
     append_bytes(buffer, &length, command->target_id, sizeof(command->target_id));
     append_bytes(buffer, &length, command->args_json, strlen(command->args_json));
-    cp_sha256(buffer, length, digest); wipe(buffer, sizeof(buffer));
+    cp_sha256(buffer, length, workspace->command_fingerprint); wipe(buffer, sizeof(workspace->hash_bytes));
 }
 
 static bool exact_scaled(cj_document_t *doc, uint16_t node, double scale, unsigned minimum, unsigned maximum, uint16_t *out)
@@ -418,6 +428,7 @@ static cp_error_t start(app_remote_device_t *d, app_remote_device_request_t *req
 }
 
 size_t app_remote_device_bytes(void) { return sizeof(app_remote_device_t); }
+size_t app_remote_device_alignment(void) { return _Alignof(app_remote_device_t); }
 cp_error_t app_remote_device_init(void *memory, size_t bytes, const app_remote_device_port_t *port, app_remote_device_t **out)
 {
     if (!memory || bytes < sizeof(app_remote_device_t) || !port || !out || (uintptr_t)memory % _Alignof(app_remote_device_t)) return CP_INVALID;
@@ -442,14 +453,16 @@ static cp_error_t execute(app_remote_device_t *d, const cp_command_t *command, u
 {
     if (!result) return CP_INVALID;
     *result = (cp_result_t){.state = CP_RESULT_REJECTED, .command_key = command ? command->command_key : 0, .uncertain_index = -1};
-    if (!d || !command || command->version != CP_API_VERSION || !command->command_key || !owned_operation(command->operation)) return rejected(result, CP_INVALID);
+    if (!d || !command || command->version != CP_API_VERSION || !command->command_key || !owned_operation(command->operation) ||
+        (ui_authorized && !ui_operation(command->operation))) return rejected(result, CP_INVALID);
     const uint8_t empty[CP_ID_BYTES] = {0};
     if (equal(command->identity.principal_id, empty, sizeof(empty)) || equal(command->identity.session_id, empty, sizeof(empty))) return rejected(result, CP_UNAUTHENTICATED);
     if (ui_operation(command->operation) && !ui_authorized) return rejected(result, CP_FORBIDDEN);
     if (parse(d, command) != CP_OK) return rejected(result, CP_INVALID);
-    uint8_t command_fingerprint[32]; fingerprint(command, command_fingerprint);
+    execute_workspace_t *workspace = &d->execution;
+    fingerprint(command, workspace);
     for (size_t i = 0; i < APP_REMOTE_DEVICE_JOBS; ++i) if (d->jobs[i].used && d->jobs[i].request.command_key == command->command_key) {
-        if (!equal(command_fingerprint, d->jobs[i].fingerprint, 32)) return rejected(result, CP_REQUEST_CONFLICT);
+        if (!equal(workspace->command_fingerprint, d->jobs[i].fingerprint, 32)) return rejected(result, CP_REQUEST_CONFLICT);
         *result = d->jobs[i].result; return CP_OK;
     }
     if (!clock_valid(d, now) || command->deadline_ms <= now) return rejected(result, CP_EXPIRED);
@@ -457,30 +470,31 @@ static cp_error_t execute(app_remote_device_t *d, const cp_command_t *command, u
     if (!info || (command->identity.scopes & info->scopes) != info->scopes) return rejected(result, CP_FORBIDDEN);
     char unavailable[CP_REASON_CAPACITY];
     if (!app_remote_device_available(d, command->operation, unavailable)) return rejected(result, CP_UNAVAILABLE);
-    app_remote_device_state_t state;
-    if (!d->port.observe(d->port.user, command->operation, &state)) return rejected(result, CP_UNAVAILABLE);
+    app_remote_device_state_t *state = &workspace->state;
+    if (!d->port.observe(d->port.user, command->operation, state)) return rejected(result, CP_UNAVAILABLE);
     bool ui = ui_operation(command->operation);
-    if (ui && (!ui_authorized || command->ui_revision != state.ui_revision)) return rejected(result, CP_FORBIDDEN);
-    if (!ui && command->management_generation != state.management_generation) return rejected(result, CP_STALE);
+    if (ui && (!ui_authorized || command->ui_revision != state->ui_revision)) return rejected(result, CP_FORBIDDEN);
+    if (!ui && command->management_generation != state->management_generation) return rejected(result, CP_STALE);
     bool safety = command->operation == CP_OP_CONFIG_CANCEL || command->operation == CP_OP_OPERATION_CANCEL;
-    if (!safety && state.locked) return rejected(result, CP_LOCKED);
-    if (!safety && (state.local_busy || state.transition_busy)) return rejected(result, CP_LOCAL_BUSY);
-    if (ui && !state.screen_awake) return rejected(result, CP_UNAVAILABLE);
-    app_remote_device_request_t request = {.operation = command->operation, .command_key = command->command_key,
-        .identity = command->identity, .management_generation = state.management_generation,
-        .resource_revision = state.resource_revision, .settings_revision = state.settings_revision,
-        .bluetooth_generation = state.bluetooth_generation, .bond_revision = state.bond_revision};
+    if (!safety && state->locked) return rejected(result, CP_LOCKED);
+    if (!safety && (state->local_busy || state->transition_busy)) return rejected(result, CP_LOCAL_BUSY);
+    if (ui && !state->screen_awake) return rejected(result, CP_UNAVAILABLE);
+    app_remote_device_request_t *request = &workspace->request;
+    request->operation = command->operation; request->command_key = command->command_key;
+    request->identity = command->identity; request->management_generation = state->management_generation;
+    request->resource_revision = state->resource_revision; request->settings_revision = state->settings_revision;
+    request->bluetooth_generation = state->bluetooth_generation; request->bond_revision = state->bond_revision;
     if (now > UINT64_MAX - APP_REMOTE_DEVICE_STAGE_MS) return rejected(result, CP_INTERNAL);
-    request.deadline_ms = now + APP_REMOTE_DEVICE_JOB_MS;
+    request->deadline_ms = now + APP_REMOTE_DEVICE_JOB_MS;
     if (configuration(command->operation)) {
-        if (command->operation != CP_OP_CONFIG_CANCEL && command->resource_revision != state.settings_revision) return rejected(result, CP_STALE);
-        request.resource_revision = state.settings_revision;
+        if (command->operation != CP_OP_CONFIG_CANCEL && command->resource_revision != state->settings_revision) return rejected(result, CP_STALE);
+        request->resource_revision = state->settings_revision;
         if (command->operation == CP_OP_CONFIG_STAGE || command->operation == CP_OP_CONFIG_RESET) {
             cp_scope_mask_t scopes = CP_SCOPE_VIEW;
-            cp_error_t error = candidate(d, &state, command->operation == CP_OP_CONFIG_RESET, &request, &scopes);
+            cp_error_t error = candidate(d, state, command->operation == CP_OP_CONFIG_RESET, request, &scopes);
             if (error != CP_OK) return rejected(result, error);
             if ((command->identity.scopes & scopes) != scopes) return rejected(result, CP_FORBIDDEN);
-            if (!d->port.available(d->port.user, command->operation, request.settings_fields, unavailable)) return rejected(result, CP_UNAVAILABLE);
+            if (!d->port.available(d->port.user, command->operation, request->settings_fields, unavailable)) return rejected(result, CP_UNAVAILABLE);
             if (command->operation == CP_OP_CONFIG_STAGE) {
                 transaction_t *transaction = NULL;
                 for (size_t i = 0; i < APP_REMOTE_DEVICE_TRANSACTIONS; ++i)
@@ -495,11 +509,11 @@ static cp_error_t execute(app_remote_device_t *d, const cp_command_t *command, u
                 }
                 if (!unique) return rejected(result, CP_INTERNAL);
                 *transaction = (transaction_t){.used = true, .owner = command->identity, .scopes = scopes,
-                    .management_generation = state.management_generation, .revision = state.settings_revision,
-                    .expires_ms = now + APP_REMOTE_DEVICE_STAGE_MS, .candidate = request.settings,
-                    .fields = request.settings_fields, .durable = request.durable};
+                    .management_generation = state->management_generation, .revision = state->settings_revision,
+                    .expires_ms = now + APP_REMOTE_DEVICE_STAGE_MS, .candidate = request->settings,
+                    .fields = request->settings_fields, .durable = request->durable};
                 memcpy(transaction->id, hex, sizeof(hex)); memcpy(result->object_id, hex, sizeof(hex));
-                result->state = CP_RESULT_APPLIED; result->resource_revision = state.settings_revision; reason(result, "staged_inert"); return CP_OK;
+                result->state = CP_RESULT_APPLIED; result->resource_revision = state->settings_revision; reason(result, "staged_inert"); return CP_OK;
             }
         } else {
             char id[CP_ID_HEX_CAPACITY];
@@ -512,12 +526,12 @@ static cp_error_t execute(app_remote_device_t *d, const cp_command_t *command, u
             if (command->operation == CP_OP_CONFIG_CANCEL) {
                 wipe(transaction, sizeof(*transaction)); result->state = CP_RESULT_CANCELLED; reason(result, "stage_cancelled"); return CP_OK;
             }
-            if (now >= transaction->expires_ms || state.management_generation != transaction->management_generation ||
-                state.settings_revision != transaction->revision) return rejected(result, CP_STALE);
-            request.settings = transaction->candidate; request.settings_fields = transaction->fields; request.durable = transaction->durable;
-            cp_error_t error = d->port.validate_settings(d->port.user, &request.settings, request.settings_fields, request.durable);
+            if (now >= transaction->expires_ms || state->management_generation != transaction->management_generation ||
+                state->settings_revision != transaction->revision) return rejected(result, CP_STALE);
+            request->settings = transaction->candidate; request->settings_fields = transaction->fields; request->durable = transaction->durable;
+            cp_error_t error = d->port.validate_settings(d->port.user, &request->settings, request->settings_fields, request->durable);
             if (error != CP_OK) return rejected(result, error);
-            if (!d->port.available(d->port.user, command->operation, request.settings_fields, unavailable)) return rejected(result, CP_UNAVAILABLE);
+            if (!d->port.available(d->port.user, command->operation, request->settings_fields, unavailable)) return rejected(result, CP_UNAVAILABLE);
             wipe(transaction, sizeof(*transaction));
         }
     } else if (command->operation == CP_OP_OPERATION_CONFIRM || command->operation == CP_OP_OPERATION_CANCEL) {
@@ -527,64 +541,81 @@ static cp_error_t execute(app_remote_device_t *d, const cp_command_t *command, u
         app_remote_device_approval_t approval;
         if (!d->port.approval(d->port.user, id, &approval) || !same_owner(&approval.owner, &command->identity) ||
             !equal(digest, approval.action_digest, sizeof(digest)) || revision != approval.resource_revision ||
-            command->resource_revision != revision || approval.management_generation != state.management_generation ||
+            command->resource_revision != revision || approval.management_generation != state->management_generation ||
             (command->identity.scopes & approval.required_scopes) != approval.required_scopes) return rejected(result, CP_FORBIDDEN);
         if (approval.cancelled || approval.consumed || now >= approval.expires_ms) return rejected(result, CP_STALE);
         bool confirm = command->operation == CP_OP_OPERATION_CONFIRM;
         if (confirm && approval.physical_required && !approval.physical_satisfied) return rejected(result, CP_FORBIDDEN);
-        app_remote_device_state_t original;
-        if (confirm && (!d->port.observe(d->port.user, approval.operation, &original) ||
-            original.resource_revision != approval.resource_revision || original.locked || original.transition_busy)) return rejected(result, CP_STALE);
+        app_remote_device_state_t *original = &workspace->original;
+        if (confirm && (!d->port.observe(d->port.user, approval.operation, original) ||
+            original->resource_revision != approval.resource_revision || original->locked || original->transition_busy)) return rejected(result, CP_STALE);
         cp_error_t error = d->port.approval_decide(d->port.user, &approval, confirm);
         if (error != CP_OK) return rejected(result, error);
         result->state = confirm ? CP_RESULT_APPLIED : CP_RESULT_CANCELLED;
         result->resource_revision = approval.resource_revision; memcpy(result->object_id, id, sizeof(id));
         reason(result, confirm ? "approval_confirmed" : "approval_cancelled"); return CP_OK;
     } else {
-        if (!ui && command->resource_revision != state.resource_revision) return rejected(result, CP_STALE);
-        optional_string(&d->document, "peer_id", request.peer_id, sizeof(request.peer_id));
-        optional_string(&d->document, "pattern", request.pattern, sizeof(request.pattern));
-        optional_string(&d->document, "overlay", request.overlay, sizeof(request.overlay));
-        optional_string(&d->document, "page", request.page, sizeof(request.page));
-        optional_string(&d->document, "group", request.group, sizeof(request.group));
-        optional_string(&d->document, "confirmation_id", request.approval_id, sizeof(request.approval_id));
-        if (command->operation == CP_OP_SYSTEM_RESTART) optional_string(&d->document, "approval_id", request.approval_id, sizeof(request.approval_id));
-        optional_string(&d->document, "retained_manifest_digest", request.retained_manifest_digest, sizeof(request.retained_manifest_digest));
+        if (!ui && command->resource_revision != state->resource_revision) return rejected(result, CP_STALE);
+        optional_string(&d->document, "peer_id", request->peer_id, sizeof(request->peer_id));
+        optional_string(&d->document, "pattern", request->pattern, sizeof(request->pattern));
+        optional_string(&d->document, "overlay", request->overlay, sizeof(request->overlay));
+        optional_string(&d->document, "page", request->page, sizeof(request->page));
+        optional_string(&d->document, "group", request->group, sizeof(request->group));
+        optional_string(&d->document, "confirmation_id", request->approval_id, sizeof(request->approval_id));
+        if (command->operation == CP_OP_SYSTEM_RESTART) optional_string(&d->document, "approval_id", request->approval_id, sizeof(request->approval_id));
+        optional_string(&d->document, "retained_manifest_digest", request->retained_manifest_digest, sizeof(request->retained_manifest_digest));
         int64_t integer;
-        request.window_seconds = cj_integer(&d->document, cj_get(&d->document, 0, "window_seconds"), &integer) ? (uint32_t)integer : 120;
-        request.timeout_ms = cj_integer(&d->document, cj_get(&d->document, 0, "timeout_ms"), &integer) ? (uint32_t)integer : 10000;
-        request.duration_ms = cj_integer(&d->document, cj_get(&d->document, 0, "duration_ms"), &integer) ? (uint32_t)integer : 60;
-        request.strength_percent = cj_integer(&d->document, cj_get(&d->document, 0, "strength_percent"), &integer) ? (uint8_t)integer : 100;
-        request.duration_provided = cj_get(&d->document, 0, "duration_ms") != CJ_NONE;
-        request.strength_provided = cj_get(&d->document, 0, "strength_percent") != CJ_NONE;
+        request->window_seconds = cj_integer(&d->document, cj_get(&d->document, 0, "window_seconds"), &integer) ? (uint32_t)integer : 120;
+        request->timeout_ms = cj_integer(&d->document, cj_get(&d->document, 0, "timeout_ms"), &integer) ? (uint32_t)integer : 10000;
+        request->duration_ms = cj_integer(&d->document, cj_get(&d->document, 0, "duration_ms"), &integer) ? (uint32_t)integer : 60;
+        request->strength_percent = cj_integer(&d->document, cj_get(&d->document, 0, "strength_percent"), &integer) ? (uint8_t)integer : 100;
+        request->duration_provided = cj_get(&d->document, 0, "duration_ms") != CJ_NONE;
+        request->strength_provided = cj_get(&d->document, 0, "strength_percent") != CJ_NONE;
         uint64_t generation;
         uint16_t node = cj_get(&d->document, 0, "generation");
-        if (node != CJ_NONE && (!cj_u64(&d->document, node, &generation) || generation != state.bluetooth_generation)) return rejected(result, CP_STALE);
-        if (command->operation == CP_OP_IMU_CALIBRATE) request.deadline_ms = now + request.timeout_ms;
-        request.approval_required = destructive(command->operation);
+        if (node != CJ_NONE && (!cj_u64(&d->document, node, &generation) || generation != state->bluetooth_generation)) return rejected(result, CP_STALE);
+        if (command->operation == CP_OP_IMU_CALIBRATE) request->deadline_ms = now + request->timeout_ms;
+        request->approval_required = destructive(command->operation);
         if (command->operation == CP_OP_PREFERENCES_RESET || command->operation == CP_OP_DEVICE_FACTORY_RESET_REQUEST) {
-            cp_error_t error = reset_candidate(&request, &state.settings);
+            cp_error_t error = reset_candidate(request, &state->settings);
             if (error != CP_OK) return rejected(result, error);
-            error = d->port.validate_settings(d->port.user, &request.settings, request.settings_fields, true);
+            error = d->port.validate_settings(d->port.user, &request->settings, request->settings_fields, true);
             if (error != CP_OK) return rejected(result, error);
         }
     }
-    action_digest(&request);
-    return start(d, &request, command_fingerprint, now, result);
+    action_digest(request, workspace);
+    return start(d, request, workspace->command_fingerprint, now, result);
 }
 
+/* The sole coordinator serializes all instance calls. This gate additionally
+ * rejects callback reentry without clearing the caller's borrowed workspace. */
+static cp_error_t execute_owned(app_remote_device_t *d, const cp_command_t *command,
+    uint64_t now, cp_result_t *result, bool ui_authorized)
+{
+    if (d && d->executing) {
+        if (!result) return CP_INVALID;
+        *result = (cp_result_t){.state = CP_RESULT_REJECTED, .command_key = command ? command->command_key : 0, .uncertain_index = -1};
+        return rejected(result, CP_BUSY);
+    }
+    if (d) {
+        d->executing = true;
+        wipe(&d->execution, sizeof(d->execution));
+    }
+    cp_error_t error = execute(d, command, now, result, ui_authorized);
+    if (d) {
+        wipe(&d->document, sizeof(d->document));
+        wipe(&d->execution, sizeof(d->execution));
+        d->executing = false;
+    }
+    return error;
+}
 cp_error_t app_remote_device_execute(app_remote_device_t *d, const cp_command_t *command, uint64_t now, cp_result_t *result)
 {
-    cp_error_t error = execute(d, command, now, result, false);
-    if (d) wipe(&d->document, sizeof(d->document));
-    return error;
+    return execute_owned(d, command, now, result, false);
 }
 cp_error_t app_remote_device_execute_ui_authorized(app_remote_device_t *d, const cp_command_t *command, uint64_t now, cp_result_t *result)
 {
-    if (!command || !ui_operation(command->operation)) return result ? rejected(result, CP_INVALID) : CP_INVALID;
-    cp_error_t error = execute(d, command, now, result, true);
-    if (d) wipe(&d->document, sizeof(d->document));
-    return error;
+    return execute_owned(d, command, now, result, true);
 }
 
 static void cancel_job(app_remote_device_t *d, device_job_t *job)

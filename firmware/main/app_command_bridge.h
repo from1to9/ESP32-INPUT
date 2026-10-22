@@ -24,6 +24,8 @@ typedef struct {
     bool (*complete)(void *, const cp_result_t *);
 } app_command_bridge_port_t;
 size_t app_command_bridge_bytes(void);
+/* Caller storage must satisfy both this alignment and the byte requirement. */
+size_t app_command_bridge_alignment(void);
 cp_error_t app_command_bridge_init(void *, size_t, const app_command_bridge_port_t *, app_command_bridge_t **);
 /* Network/management worker calls. No pointer survives the call. */
 bool app_command_bridge_available(void *, cp_operation_id_t, char reason[CP_REASON_CAPACITY]);

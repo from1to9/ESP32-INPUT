@@ -17,6 +17,22 @@ principal and object authority, revision changes, expiry, clock rollback and
 session revocation immediately before publication. Denied content is cleared.
 Authority callbacks assert that the composition lock is not held.
 
+Remote Bluetooth link admission uses a fixed PSRAM bond-list buffer with an
+exclusive claim. Tests cover unknown or refreshing lists, missing revisions,
+invalid or unsaved peers, reentrant submission, and release after both lookup
+and final admission rejection. Bluetooth copy-out runs outside the media lock;
+a competing request cannot overwrite an already accepted asynchronous command.
+The heap boundary supplies only four-byte alignment for generic allocations;
+the runtime and actual audio worker must explicitly request their owner and
+opaque-engine alignment.
+
+Four configuration variants verify the unchanged 6144-byte resident media
+stack: default, external, no PSRAM and external-task support disabled. Supported
+external allocation never falls back to internal RAM. A task creation failure
+after audio initialization closes audio and retains its borrowed policy state;
+the fixture checks that failure cannot free the still-referenced owner. The
+actual audio manager remains on its internal stack in every network test.
+
 `test_network_composition.c` additionally links the actual threaded audio
 worker and portable engine to the actual runtime and ACM1 codec. Its HTTP
 queue, codec, renderer acknowledgement, RTOS and unused SDK services are

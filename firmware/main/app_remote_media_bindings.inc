@@ -26,7 +26,7 @@ static bool remote_media_random(void *context, uint8_t *bytes, size_t count)
 static bool remote_media_observe(void *context, app_remote_media_state_t *output)
 {
     (void)context;
-    app_media_snapshot_t current;
+    static EXT_RAM_BSS_ATTR app_media_snapshot_t current;
     if (!app_media_runtime_snapshot(&current) || !s_control_state_published) return false;
     *output=(app_remote_media_state_t){.device=s_published_control_state,.audio_known=current.audio_known,
         .speech_known=current.speech_known,.audio=current.audio,.speech=current.speech,
@@ -60,7 +60,7 @@ static bool remote_media_candidate_context(void *context, const cp_command_t *co
 static bool remote_media_owner_available(void *context, cp_operation_id_t operation, char reason[CP_REASON_CAPACITY])
 {
     (void)context; reason[0]=0;
-    app_media_snapshot_t current;
+    static EXT_RAM_BSS_ATTR app_media_snapshot_t current;
     if (!app_media_runtime_snapshot(&current) || !current.initialized) {
         (void)snprintf(reason,CP_REASON_CAPACITY,"media_owner_unavailable"); return false;
     }
@@ -101,7 +101,7 @@ static ae_result_t remote_media_submit(void *context, const app_remote_media_req
         /* Admission just checked the exact shared lease/UI context. This is
          * one serialized coordinator turn, not a later unguarded worker edit. */
         if (!s_remote_media_preview || s_ui_revision==UINT64_MAX || remote_update_maintenance()) return AE_BUSY;
-        app_media_snapshot_t current;
+        static EXT_RAM_BSS_ATTR app_media_snapshot_t current;
         if (!app_media_runtime_snapshot(&current) || !current.speech_known || current.speech.state!=SL_CANDIDATE ||
             current.speech.token!=request->candidate_token || current.speech.ui_revision!=request->candidate_revision) return AE_STALE;
         const char expected=current.speech.candidate;
@@ -152,8 +152,10 @@ static void remote_media_init(void)
 {
     app_media_remote_authority_t authority={.session_alive=remote_media_session,.capture_authority=remote_media_authority};
     if (app_media_runtime_set_remote_authority(&authority)!=AE_OK) return;
-    void *memory=heap_caps_calloc(1,app_remote_media_bytes(),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-    s_remote_media_preview=heap_caps_calloc(1,sizeof(*s_remote_media_preview),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    void *memory=heap_caps_aligned_calloc(app_remote_media_alignment(),1,
+        app_remote_media_bytes(),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    s_remote_media_preview=heap_caps_aligned_calloc(_Alignof(interaction_t),1,
+        sizeof(*s_remote_media_preview),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     app_remote_media_port_t port={.observe=remote_media_observe,.available=remote_media_owner_available,
         .random=remote_media_random,.session_alive=remote_media_session,.grant=remote_media_grant,
         .capture_authority=remote_media_authority,.submit=remote_media_submit,.poll=remote_media_poll,

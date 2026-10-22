@@ -56,6 +56,11 @@ static void *allocate(size_t bytes)
     void *p = heap_caps_calloc(1, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     return p ? p : heap_caps_calloc(1, bytes, MALLOC_CAP_8BIT);
 }
+static void *allocate_aligned(size_t alignment, size_t bytes)
+{
+    void *p = heap_caps_aligned_calloc(alignment, 1, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p ? p : heap_caps_aligned_calloc(alignment, 1, bytes, MALLOC_CAP_8BIT);
+}
 static bool equal(const void *a, const void *b, size_t n)
 {
     const uint8_t *x = a, *y = b;
@@ -238,7 +243,7 @@ static esp_err_t parse_package(const char *json, size_t length, package_t *p)
                                        "update_source",
                                        "replace_unknown_store",
                                        "update_policy"};
-    cj_document_t *d = allocate(sizeof(*d));
+    cj_document_t *d = allocate_aligned(_Alignof(cj_document_t), sizeof(*d));
     if (!d) {
         return ESP_ERR_NO_MEM;
     }
@@ -492,7 +497,7 @@ esp_err_t app_control_trust_verify(void)
     trust->view.uncertain = true;
     portEXIT_CRITICAL(&trust_lock);
     uint8_t *bank = allocate(BANK_BYTES);
-    package_t *loaded = allocate(sizeof(*loaded));
+    package_t *loaded = allocate_aligned(_Alignof(package_t), sizeof(*loaded));
     esp_err_t error = (!bank || !loaded) ? ESP_ERR_NO_MEM : ESP_OK;
     nvs_handle_t nvs = 0;
     uint64_t best = 0;
@@ -568,7 +573,7 @@ esp_err_t app_control_trust_init(void)
     if (trust) {
         return ESP_ERR_INVALID_STATE;
     }
-    trust_t *created = allocate(sizeof(*created));
+    trust_t *created = allocate_aligned(_Alignof(trust_t), sizeof(*created));
     SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
     if (!created || !mutex) {
         if (created) {
@@ -635,7 +640,7 @@ esp_err_t app_control_trust_stage(const uint8_t token[32], const char *json, siz
     if (!trust || !token || !json || !length || length > APP_CONTROL_TRUST_PACKAGE_BYTES) {
         return ESP_ERR_INVALID_ARG;
     }
-    package_t *candidate = allocate(sizeof(*candidate));
+    package_t *candidate = allocate_aligned(_Alignof(package_t), sizeof(*candidate));
     if (!candidate) {
         return ESP_ERR_NO_MEM;
     }
@@ -836,7 +841,7 @@ esp_err_t app_control_trust_start_server(const cp_callbacks_t *callbacks)
     if (!trust || !callbacks) {
         return ESP_ERR_INVALID_STATE;
     }
-    package_t *p = allocate(sizeof(*p));
+    package_t *p = allocate_aligned(_Alignof(package_t), sizeof(*p));
     if (!p) {
         return ESP_ERR_NO_MEM;
     }

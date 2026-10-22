@@ -4,6 +4,10 @@
 #include <string.h>
 #include "app_control_runtime.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_heap_caps.h"
+#include "control_json.h"
+#include "weak_heap.h"
 #ifndef ESP_ERR_NOT_FOUND
 #define ESP_ERR_NOT_FOUND 0x105
 #endif
@@ -14,6 +18,28 @@ static uint64_t now_ms(void) { return clock_ms; }
 static unsigned mutations, publications;
 static bool identity_live;
 static unsigned interleave;
+static bool fail_runtime_task;
+static unsigned reordered;
+void *heap_caps_calloc(size_t n, size_t bytes, unsigned caps)
+{ return test_heap_calloc(4, n, bytes, caps); }
+void *heap_caps_aligned_calloc(size_t alignment, size_t n, size_t bytes, unsigned caps)
+{ return test_heap_calloc(alignment, n, bytes, caps); }
+void heap_caps_free(void *p) { test_heap_free(p); }
+static void worker(void *unused) { (void)unused; assert(false); }
+BaseType_t xTaskCreate(TaskFunction_t entry, const char *name, uint32_t bytes, void *argument,
+                      unsigned priority, TaskHandle_t *handle)
+{
+    assert(entry == worker && !strcmp(name, "control_runtime") && bytes == 12288 &&
+           !argument && priority == 1 && !handle);
+    return fail_runtime_task ? 0 : pdPASS;
+}
+esp_err_t app_wifi_profiles_reorder(const char ids[APP_WIFI_PROFILE_CAPACITY][APP_WIFI_PROFILE_ID_CAPACITY], uint8_t count,
+                                    uint64_t revision)
+{
+    assert(count == 1 && revision == 42 && !strcmp(ids[0], "11111111111111111111111111111111"));
+    ++reordered;
+    return ESP_OK;
+}
 static void safety(void *, cp_safety_reason_t, const cp_identity_t *);
 static app_wifi_snapshot_t native_state;
 static void host_safety(void *u, cp_safety_reason_t r, const cp_identity_t *who)
@@ -77,6 +103,36 @@ bool app_control_server_identity_alive(const cp_identity_t *who)
 }
 /* PRODUCTION */
 /* TESTS */
+static void runtime_storage_contract(void)
+{
+    runtime = NULL;
+    app_control_host_t host = {.abi_version = APP_CONTROL_RUNTIME_ABI, .safety = host_safety};
+    test_heap_fail_next = 2;
+    assert(app_control_runtime_init(&host) == ESP_ERR_NO_MEM && !runtime && !test_heap_live);
+    fail_runtime_task = true;
+    assert(app_control_runtime_init(&host) == ESP_ERR_NO_MEM && !runtime && !test_heap_live);
+    fail_runtime_task = false;
+    test_heap_fail_external = true;
+    assert(app_control_runtime_init(&host) == ESP_OK && runtime && test_heap_external_failures);
+    test_heap_fail_external = false;
+    assert((uintptr_t)runtime % _Alignof(runtime_t) == 0 && !runtime->state_known);
+    cp_device_state_t state = {.management_generation = UINT64_C(0x1122334455667788)};
+    assert(app_control_runtime_publish_state(&state) == ESP_OK && runtime->state_known &&
+           runtime->state.management_generation == state.management_generation);
+    wipe(runtime, sizeof(*runtime));
+    heap_caps_free(runtime);
+    runtime = NULL;
+    assert(!test_heap_live);
+
+    cp_command_t command = {.operation = CP_OP_WIFI_PROFILES_REORDER, .resource_revision = 42};
+    strcpy(command.args_json, "{\"profile_ids\":[\"11111111111111111111111111111111\"]}");
+    assert(production_reorder(&command) == ESP_OK && reordered == 1 && !test_heap_live);
+    test_heap_fail_bytes = sizeof(cj_document_t);
+    assert(production_reorder(&command) == ESP_ERR_NO_MEM && reordered == 1 && !test_heap_live);
+    test_heap_fail_bytes = 0;
+    strcpy(command.args_json, "{\"profile_ids\":[\"bad\"]}");
+    assert(production_reorder(&command) == ESP_ERR_INVALID_ARG && reordered == 1 && !test_heap_live);
+}
 static runtime_t fixture;
 static cp_command_t begin(void)
 {
@@ -102,6 +158,7 @@ static cp_command_t begin(void)
 }
 int main(void)
 {
+    runtime_storage_contract();
     for (unsigned scenario = 0; scenario < 8; ++scenario) {
         cp_command_t c = begin();
         if (scenario == 0) {

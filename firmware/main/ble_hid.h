@@ -250,6 +250,10 @@ const char *ble_hid_failure_stage_name(void);
  * SDK bond indices may be private/pseudo;
  * their display does not infer a name/OS or promise peripheral-initiated
  * connection to that host. No automatic logging of identities. */
+/* Same-lock observation directly into caller-owned storage, without a large
+ * return-value temporary. No SDK calls; NULL is ignored. */
+void ble_hid_copy_bond_list(ble_hid_bond_list_t *out);
+/* Compatibility wrapper; new stack-sensitive callers should use copy-out. */
 ble_hid_bond_list_t ble_hid_bond_list(void);
 
 /* Task-only reconnect-admission preference, with the exact known bond-list

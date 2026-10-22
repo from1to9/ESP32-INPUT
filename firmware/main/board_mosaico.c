@@ -10,6 +10,7 @@
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,11 +37,18 @@ enum {
      * Allow a 100 Hz sample period, the 20 ms batch and polling margin at
      * startup; the running stream retains its separate 50 ms freshness gate. */
     IMU_START_TIMEOUT_US = 100000,
-    IMU_STACK_BYTES = 3072,
+    SENSOR_STACK_BYTES = 4096,
+    SENSOR_PRIORITY = 6, /* Matches configured LVGL priority, below radio/system priorities. */
+    IMU_MAX_RETRY_MS = 250,
     POWER_POLL_MS = 1000,
     POWER_MAX_AGE_US = 5000000,
     POWER_MAX_BATCH_US = 20000,
-    POWER_I2C_TIMEOUT_MS = 3,
+    /* TI SLUSCB7A 7.3.1.3/4: >=66 us between gauge packets and up to
+     * 4 ms clock stretch. Keep software/physical waits above that valid
+     * response while retaining the separate 20 ms complete-batch gate. */
+    POWER_I2C_PACKET_GAP_US = 100,
+    POWER_I2C_SCL_WAIT_US = 5000,
+    POWER_I2C_TIMEOUT_MS = 6,
     POWER_STACK_BYTES = 3072,
     BRIGHTNESS_LOCK_MS = 100,
     BRIGHTNESS_MIN_INTERVAL_US = 20000,
@@ -74,6 +82,10 @@ static haptics_t s_haptics;
 static board_haptic_status_t s_haptic_status = {.error = ESP_ERR_INVALID_STATE};
 static bool s_haptic_diagnostic_pending, s_haptic_cancel_requested;
 static TaskHandle_t s_imu_task;
+static bool s_imu_hardware_live;
+static uint64_t s_imu_generation;
+static bsp_imu_config_t s_imu_config;
+static float s_imu_accel_scale, s_imu_gyro_scale;
 static board_imu_sample_t s_imu_sample;
 static bool s_imu_sample_valid;
 static esp_err_t s_imu_error = ESP_ERR_INVALID_STATE;
@@ -382,19 +394,40 @@ static void imu_count_sample_locked(void)
     }
 }
 
-static void imu_latch_fault(esp_err_t error, const char *stage)
+static esp_err_t imu_failure_locked(esp_err_t error, const char *stage, bool fatal, bool attempted)
 {
-    portENTER_CRITICAL(&s_status_mux);
+    if (s_imu_status.phase == BOARD_IMU_FATAL) return s_imu_error;
+    if (!fatal && s_imu_status.phase != BOARD_IMU_RECOVERING) {
+        if (s_imu_generation == UINT64_MAX) {
+            fatal = true;
+            error = ESP_ERR_INVALID_STATE;
+            stage = "generation";
+        } else ++s_imu_generation;
+    }
     imu_record_fault_locked(error, stage);
+    s_imu_status.phase = fatal ? BOARD_IMU_FATAL : BOARD_IMU_RECOVERING;
     s_imu_error = error;
     s_imu_sample_valid = false;
     s_caps.imu = false;
+    if (attempted && s_imu_status.failure_streak != UINT32_MAX) ++s_imu_status.failure_streak;
+    const uint32_t delays[] = {10, 20, 40, 80, 160, IMU_MAX_RETRY_MS};
+    uint32_t index = s_imu_status.failure_streak ? s_imu_status.failure_streak - 1U : 0U;
+    if (index >= sizeof(delays) / sizeof(delays[0])) index = sizeof(delays) / sizeof(delays[0]) - 1U;
+    s_imu_status.retry_delay_ms = fatal ? 0 : delays[index];
+    return s_imu_error;
+}
+
+static void imu_latch_fault(esp_err_t error, const char *stage)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    imu_failure_locked(error, stage, true, false);
     portEXIT_CRITICAL(&s_status_mux);
     ESP_LOGW(TAG, "IMU stream unavailable: %s", esp_err_to_name(error));
 }
 
 static void imu_cleanup(bool initialized)
 {
+    s_imu_hardware_live = false;
     if (initialized) {
         const esp_err_t stop = bsp_imu_stop();
         if (stop != ESP_OK) {
@@ -407,9 +440,12 @@ static void imu_cleanup(bool initialized)
     }
 }
 
-static esp_err_t imu_read_hardware(board_imu_sample_t *sample, const char **stage)
+typedef enum { IMU_READ_FATAL, IMU_READ_COMMUNICATION, IMU_READ_NOT_READY, IMU_READ_LATE, IMU_READ_SAMPLE } imu_read_kind_t;
+
+static esp_err_t imu_read_hardware(board_imu_sample_t *sample, const char **stage, imu_read_kind_t *kind)
 {
     const uint64_t started_us = (uint64_t)esp_timer_get_time();
+    *kind = IMU_READ_FATAL;
     esp_err_t result = ESP_ERR_INVALID_STATE;
     bool status_known = false;
     uint8_t status = 0;
@@ -418,120 +454,190 @@ static esp_err_t imu_read_hardware(board_imu_sample_t *sample, const char **stag
     if (!device) {
         goto done;
     }
-    *stage = "status";
-    if (bmi2_get_status(&status, device) != BMI2_OK) {
+    *stage = "config";
+    if (s_imu_config.accel_range != BMI2_ACC_RANGE_4G || s_imu_config.gyro_range != BMI2_GYR_RANGE_2000) goto done;
+    /* Both BSP scalar getters independently fetch this complete corrected
+     * Bosch frame. Fetch it once with the same driver and configured ranges. */
+    struct bmi2_sens_data data = {0};
+    *stage = "frame";
+    const int8_t frame_result = bmi2_get_sensor_data(&data, device);
+    if (frame_result != BMI2_OK) {
+        if (frame_result == BMI2_E_COM_FAIL) *kind = IMU_READ_COMMUNICATION;
         result = ESP_FAIL;
         goto done;
     }
+    status = data.status;
     status_known = true;
     *stage = "data_ready";
     if ((status & (BMI2_DRDY_GYR | BMI2_DRDY_ACC)) != (BMI2_DRDY_GYR | BMI2_DRDY_ACC)) {
+        *kind = IMU_READ_NOT_READY;
         result = ESP_ERR_NOT_FOUND;
         goto done;
     }
-    board_imu_sample_t candidate;
-    *stage = "gyro";
-    result = bsp_imu_get_gyro(&candidate.x_dps, &candidate.y_dps, &candidate.z_dps);
-    if (result != ESP_OK) {
-        goto done;
-    }
-    *stage = "accel";
-    result = bsp_imu_get_accel(&candidate.x_g, &candidate.y_g, &candidate.z_g);
-    if (result != ESP_OK) {
-        goto done;
-    }
+    board_imu_sample_t candidate = {
+        .x_dps = data.gyr.x * s_imu_gyro_scale, .y_dps = data.gyr.y * s_imu_gyro_scale,
+        .z_dps = data.gyr.z * s_imu_gyro_scale,
+        .x_g = data.acc.x * s_imu_accel_scale, .y_g = data.acc.y * s_imu_accel_scale,
+        .z_g = data.acc.z * s_imu_accel_scale,
+    };
     candidate.timestamp_us = (uint64_t)esp_timer_get_time();
+    const bool finite = isfinite(candidate.x_dps) && isfinite(candidate.y_dps) && isfinite(candidate.z_dps) &&
+        isfinite(candidate.x_g) && isfinite(candidate.y_g) && isfinite(candidate.z_g);
     *stage = "batch_time";
     if (candidate.timestamp_us < started_us || candidate.timestamp_us - started_us > IMU_MAX_BATCH_US) {
+        /* Only a finite, monotonic slow batch is discardable. Transport
+         * failures have their separate, typed recovery path. */
+        if (finite && candidate.timestamp_us >= started_us) *kind = IMU_READ_LATE;
         result = ESP_ERR_TIMEOUT;
         goto done;
     }
     *stage = "finite";
-    if (!isfinite(candidate.x_dps) || !isfinite(candidate.y_dps) || !isfinite(candidate.z_dps) ||
-            !isfinite(candidate.x_g) || !isfinite(candidate.y_g) || !isfinite(candidate.z_g)) {
+    if (!finite) {
         result = ESP_ERR_INVALID_RESPONSE;
         goto done;
     }
     *sample = candidate;
+    *kind = IMU_READ_SAMPLE;
     *stage = "sample";
     result = ESP_OK;
 done:
     portENTER_CRITICAL(&s_status_mux);
+    const uint64_t ended_us = (uint64_t)esp_timer_get_time();
+    if (ended_us < started_us ||
+            (s_imu_status.sample_count && started_us < s_imu_sample.timestamp_us)) {
+        *kind = IMU_READ_FATAL;
+        *stage = "clock";
+        result = ESP_ERR_TIMEOUT;
+    }
     s_imu_status.hardware_read_seen = true;
     s_imu_status.last_hardware_stage = *stage;
     s_imu_status.last_hardware_error = result;
-    s_imu_status.last_hardware_us = (uint64_t)esp_timer_get_time();
+    s_imu_status.last_hardware_us = ended_us;
+    s_imu_status.batch_time_known = s_imu_status.last_hardware_us >= started_us;
+    s_imu_status.last_batch_us = s_imu_status.batch_time_known ? s_imu_status.last_hardware_us - started_us : 0;
+    if (s_imu_status.batch_time_known && s_imu_status.last_batch_us > s_imu_status.max_batch_us)
+        s_imu_status.max_batch_us = s_imu_status.last_batch_us;
     s_imu_status.data_ready_known = status_known;
     s_imu_status.data_ready_bits = status_known ? status : 0;
+    if (*kind == IMU_READ_LATE) {
+        if (s_imu_status.late_batch_count != UINT64_MAX) ++s_imu_status.late_batch_count;
+        else s_imu_status.late_batch_count_saturated = true;
+    }
     portEXIT_CRITICAL(&s_status_mux);
     return result;
 }
 
-/* One sampler owns all BSP sensor reads. A fault set by a consumer while a bus
- * read is in flight wins over the result, so stale data cannot restore imu. */
+/* A consumer loss invalidates the in-flight generation once. Only a subsequent
+ * fresh acquisition may recover capability; user Motion intent stays off. */
 static esp_err_t imu_update(void)
 {
     portENTER_CRITICAL(&s_status_mux);
     esp_err_t result = s_imu_error;
+    const bool fatal = s_imu_status.phase == BOARD_IMU_FATAL;
+    const uint64_t generation = s_imu_generation;
     portEXIT_CRITICAL(&s_status_mux);
-    if (result != ESP_OK) {
+    if (fatal) {
         return result;
     }
     board_imu_sample_t candidate;
     const char *stage;
-    result = imu_read_hardware(&candidate, &stage);
+    imu_read_kind_t kind;
+    result = imu_read_hardware(&candidate, &stage, &kind);
     portENTER_CRITICAL(&s_status_mux);
-    if (s_imu_error != ESP_OK) {
+    if (s_imu_status.phase == BOARD_IMU_FATAL) {
+        result = s_imu_error;
+    } else if (kind == IMU_READ_FATAL) {
+        result = imu_failure_locked(result, stage, true, true);
+    } else if (generation != s_imu_generation) {
         result = s_imu_error;
     } else if (result == ESP_OK) {
-        if (s_imu_sample_valid && candidate.timestamp_us <= s_imu_sample.timestamp_us) {
+        const uint64_t publish_us = (uint64_t)esp_timer_get_time();
+        if (publish_us < candidate.timestamp_us) {
+            result = ESP_ERR_TIMEOUT;
+            result = imu_failure_locked(result, "publication_clock", true, true);
+        } else if (publish_us - candidate.timestamp_us > IMU_MAX_AGE_US) {
+            result = ESP_ERR_TIMEOUT;
+            result = imu_failure_locked(result, "publication_age", false, true);
+        } else if (s_imu_status.sample_count && candidate.timestamp_us <= s_imu_sample.timestamp_us) {
             result = ESP_ERR_INVALID_STATE;
             stage = "sample_time";
+            result = imu_failure_locked(result, stage, true, true);
         } else {
+            if (s_imu_status.phase == BOARD_IMU_RECOVERING) {
+                if (s_imu_status.recovery_count != UINT64_MAX) ++s_imu_status.recovery_count;
+                else s_imu_status.recovery_count_saturated = true;
+            }
             s_imu_sample = candidate;
             s_imu_sample_valid = true;
+            s_imu_status.phase = BOARD_IMU_ACTIVE;
+            s_imu_status.failure_streak = 0;
+            s_imu_status.retry_delay_ms = IMU_POLL_MS;
+            s_imu_error = ESP_OK;
+            s_caps.imu = true;
             imu_count_sample_locked();
         }
-    } else if (result == ESP_ERR_NOT_FOUND) {
+    } else if (kind == IMU_READ_NOT_READY || kind == IMU_READ_LATE) {
+        /* Keep the original accepted cache only within its existing freshness
+         * budget. No candidate publication, retimestamping or immediate retry. */
         const uint64_t time_us = (uint64_t)esp_timer_get_time();
         result = s_imu_sample_valid && time_us >= s_imu_sample.timestamp_us &&
             time_us - s_imu_sample.timestamp_us <= IMU_MAX_AGE_US ? ESP_OK : ESP_ERR_TIMEOUT;
-        stage = "sample_age";
-    }
-    if (result != ESP_OK) {
-        imu_record_fault_locked(result, stage);
+        if (kind == IMU_READ_NOT_READY) stage = "sample_age";
+        if (result != ESP_OK) result = imu_failure_locked(result, stage, false, true);
+    } else {
+        result = imu_failure_locked(result, stage, kind != IMU_READ_COMMUNICATION, true);
     }
     portEXIT_CRITICAL(&s_status_mux);
-    if (result != ESP_OK) {
-        imu_latch_fault(result, stage);
-    }
     return result;
 }
 
-static void imu_worker(void *argument)
+static void power_update(void);
+static void sensor_worker(void *argument)
 {
     (void)argument;
     portENTER_CRITICAL(&s_status_mux);
     s_imu_status.worker_running = true;
     portEXIT_CRITICAL(&s_status_mux);
-    TickType_t poll_ticks = pdMS_TO_TICKS(IMU_POLL_MS);
-    if (!poll_ticks) {
-        poll_ticks = 1;
-    }
     TickType_t deadline = xTaskGetTickCount();
+    uint64_t last_power_us = (uint64_t)esp_timer_get_time();
     for (;;) {
+        portENTER_CRITICAL(&s_status_mux);
+        const bool fatal = s_imu_status.phase == BOARD_IMU_FATAL;
+        const uint32_t delay_ms = fatal ? POWER_POLL_MS :
+            s_imu_status.retry_delay_ms ? s_imu_status.retry_delay_ms : IMU_POLL_MS;
+        portEXIT_CRITICAL(&s_status_mux);
+        TickType_t poll_ticks = pdMS_TO_TICKS(delay_ms);
+        if (!poll_ticks) poll_ticks = 1;
         /* Skip missed periods after a slow bus transaction rather than issuing
          * a burst of catch-up reads with misleading sample intervals. */
         const TickType_t current = xTaskGetTickCount();
-        if ((TickType_t)(current - deadline) >= poll_ticks) {
+        const TickType_t elapsed = current - deadline;
+        const TickType_t overdue = elapsed > poll_ticks ? elapsed - poll_ticks : 0;
+        if (elapsed >= poll_ticks) {
             deadline = current;
         }
         (void)xTaskDelayUntil(&deadline, poll_ticks);
-        if (imu_update() != ESP_OK) {
-            break;
+        const TickType_t woke = xTaskGetTickCount();
+        const TickType_t wake_late = woke - deadline;
+        portENTER_CRITICAL(&s_status_mux);
+        s_imu_status.last_schedule_late_us = (uint64_t)(wake_late > overdue ? wake_late : overdue) * portTICK_PERIOD_MS * 1000U;
+        if (s_imu_status.last_schedule_late_us > s_imu_status.max_schedule_late_us)
+            s_imu_status.max_schedule_late_us = s_imu_status.last_schedule_late_us;
+        portEXIT_CRITICAL(&s_status_mux);
+        if (!fatal) (void)imu_update();
+        portENTER_CRITICAL(&s_status_mux);
+        const bool now_fatal = s_imu_status.phase == BOARD_IMU_FATAL;
+        portEXIT_CRITICAL(&s_status_mux);
+        if (now_fatal && s_imu_hardware_live) imu_cleanup(true);
+        /* One owner gives the IMU first opportunity, then at most one battery
+         * batch per second. Long/failed batches never enqueue catch-up work. */
+        const uint64_t time_us = (uint64_t)esp_timer_get_time();
+        if (s_gauge && (time_us < last_power_us || time_us - last_power_us >= POWER_POLL_MS * 1000U)) {
+            power_update();
+            last_power_us = (uint64_t)esp_timer_get_time();
         }
+        if (now_fatal && !s_gauge) break;
     }
-    imu_cleanup(true);
     portENTER_CRITICAL(&s_status_mux);
     s_imu_status.worker_running = false;
     portEXIT_CRITICAL(&s_status_mux);
@@ -555,6 +661,8 @@ static void init_optional_imu(void)
     bsp_imu_config_t config = BSP_IMU_CONFIG_DEFAULT();
     config.accel_odr = BMI2_ACC_ODR_100HZ;
     config.gyro_odr = BMI2_GYR_ODR_100HZ;
+    config.accel_range = BMI2_ACC_RANGE_4G;
+    config.gyro_range = BMI2_GYR_RANGE_2000;
     result = bsp_imu_start(&config);
     if (result != ESP_OK) {
         imu_latch_fault(result, "start");
@@ -563,10 +671,15 @@ static void init_optional_imu(void)
     }
     portENTER_CRITICAL(&s_status_mux);
     s_imu_status.start_succeeded = true;
+    s_imu_hardware_live = true;
+    s_imu_config = config;
+    s_imu_accel_scale = 4.0f / 32768.0f;
+    s_imu_gyro_scale = 2000.0f / 32768.0f;
     portEXIT_CRITICAL(&s_status_mux);
     const uint64_t started_us = (uint64_t)esp_timer_get_time();
     board_imu_sample_t first;
     const char *stage = "first_sample";
+    imu_read_kind_t kind;
     do {
         const uint64_t before_us = (uint64_t)esp_timer_get_time();
         if (before_us < started_us || before_us - started_us >= IMU_START_TIMEOUT_US) {
@@ -574,7 +687,7 @@ static void init_optional_imu(void)
             stage = "first_sample";
             break;
         }
-        result = imu_read_hardware(&first, &stage);
+        result = imu_read_hardware(&first, &stage, &kind);
         if (result != ESP_OK && result != ESP_ERR_NOT_FOUND) {
             break;
         }
@@ -599,16 +712,9 @@ static void init_optional_imu(void)
     s_imu_sample = first;
     s_imu_sample_valid = true;
     s_imu_error = ESP_OK;
+    s_imu_status.phase = BOARD_IMU_ACTIVE;
+    s_imu_status.retry_delay_ms = IMU_POLL_MS;
     imu_count_sample_locked();
-    portEXIT_CRITICAL(&s_status_mux);
-    if (xTaskCreate(imu_worker, "imu", IMU_STACK_BYTES, NULL,
-                    tskIDLE_PRIORITY + 2, &s_imu_task) != pdPASS) {
-        imu_latch_fault(ESP_ERR_NO_MEM, "worker_create");
-        imu_cleanup(true);
-        return;
-    }
-    portENTER_CRITICAL(&s_status_mux);
-    s_imu_status.worker_created = true;
     s_caps.imu = s_imu_error == ESP_OK;
     portEXIT_CRITICAL(&s_status_mux);
 }
@@ -618,36 +724,59 @@ static board_power_status_t power_unknown(esp_err_t error)
     return (board_power_status_t){.error = error};
 }
 
-static esp_err_t gauge_read_word(uint8_t command, uint16_t *word)
+typedef struct {
+    const char *stage;
+    uint8_t command;
+    bool elapsed_known;
+    uint64_t elapsed_us;
+    bool packet_time_known;
+    uint64_t packet_us;
+} power_read_diagnostic_t;
+
+static uint16_t gauge_word(const uint8_t *bytes)
 {
-    uint8_t bytes[2];
-    const esp_err_t result = i2c_master_transmit_receive(s_gauge, &command, 1,
-        bytes, sizeof(bytes), POWER_I2C_TIMEOUT_MS);
-    if (result == ESP_OK) {
-        *word = (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
-    }
-    return result;
+    return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
 }
 
-static board_power_status_t power_read_hardware(void)
+static board_power_status_t power_read_hardware(power_read_diagnostic_t *diagnostic)
 {
+    *diagnostic = (power_read_diagnostic_t){.stage = "handle"};
     if (!s_gauge) {
         return power_unknown(ESP_ERR_INVALID_STATE);
     }
     const uint64_t started_us = (uint64_t)esp_timer_get_time();
-    const uint8_t commands[] = {GAUGE_OPERATION_STATUS, GAUGE_BATTERY_STATUS,
-        GAUGE_VOLTAGE, GAUGE_CURRENT, GAUGE_TEMPERATURE, GAUGE_PERCENT};
-    uint16_t words[sizeof(commands) / sizeof(commands[0])];
-    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-        const esp_err_t result = gauge_read_word(commands[i], &words[i]);
+    /* TI's incremental read keeps contiguous 0x06..0x0d in one packet:
+     * temperature, voltage, battery flags and signed current. Three packets
+     * accommodate each documented 4 ms stretch within the original batch gate.
+     * Only a one-byte address pointer is written; no profile/control writes. */
+    uint8_t bytes[12];
+    const struct { uint8_t command, offset, bytes; } packets[] = {
+        {GAUGE_OPERATION_STATUS, 0, 2}, {GAUGE_TEMPERATURE, 2, 8}, {GAUGE_PERCENT, 10, 2},
+    };
+    for (size_t i = 0; i < sizeof(packets) / sizeof(packets[0]); ++i) {
+        diagnostic->stage = "read";
+        diagnostic->command = packets[i].command;
+        esp_rom_delay_us(POWER_I2C_PACKET_GAP_US);
+        const uint64_t packet_started_us = (uint64_t)esp_timer_get_time();
+        const esp_err_t result = i2c_master_transmit_receive(s_gauge, &packets[i].command, 1,
+            bytes + packets[i].offset, packets[i].bytes, POWER_I2C_TIMEOUT_MS);
+        const uint64_t time_us = (uint64_t)esp_timer_get_time();
+        diagnostic->elapsed_known = time_us >= started_us;
+        diagnostic->elapsed_us = diagnostic->elapsed_known ? time_us - started_us : 0;
+        diagnostic->packet_time_known = time_us >= packet_started_us;
+        diagnostic->packet_us = diagnostic->packet_time_known ? time_us - packet_started_us : 0;
         if (result != ESP_OK) {
             return power_unknown(result);
         }
-        const uint64_t time_us = (uint64_t)esp_timer_get_time();
         if (time_us < started_us || time_us - started_us > POWER_MAX_BATCH_US) {
+            diagnostic->stage = time_us < started_us ? "clock" : "batch_time";
             return power_unknown(ESP_ERR_TIMEOUT);
         }
     }
+    const uint16_t words[] = {gauge_word(bytes), gauge_word(bytes + 6), gauge_word(bytes + 4),
+        gauge_word(bytes + 8), gauge_word(bytes + 2), gauge_word(bytes + 10)};
+    diagnostic->stage = "gauge_state";
+    diagnostic->command = GAUGE_OPERATION_STATUS;
     board_power_status_t status = {
         .timestamp_us = (uint64_t)esp_timer_get_time(),
         .gauge_available = true,
@@ -681,13 +810,17 @@ static board_power_status_t power_read_hardware(void)
 
 static void power_update(void)
 {
-    const board_power_status_t status = power_read_hardware();
+    power_read_diagnostic_t diagnostic;
+    const board_power_status_t status = power_read_hardware(&diagnostic);
     portENTER_CRITICAL(&s_status_mux);
     s_power = status;
     s_caps.battery = status.error == ESP_OK && status.gauge_available;
     portEXIT_CRITICAL(&s_status_mux);
     if (status.error != ESP_OK && status.error != s_power_logged_error) {
-        ESP_LOGW(TAG, "Battery telemetry unavailable: %s", esp_err_to_name(status.error));
+        ESP_LOGW(TAG, "Battery telemetry unavailable: %s stage=%s command=0x%02x batch_us_known=%d batch_us=%llu packet_us_known=%d packet_us=%llu",
+                 esp_err_to_name(status.error), diagnostic.stage, (unsigned)diagnostic.command,
+                 diagnostic.elapsed_known, (unsigned long long)diagnostic.elapsed_us,
+                 diagnostic.packet_time_known, (unsigned long long)diagnostic.packet_us);
     }
     s_power_logged_error = status.error;
 }
@@ -731,21 +864,10 @@ static void brightness_update(void)
 static void power_worker(void *argument)
 {
     (void)argument;
-    uint64_t last_poll_us = (uint64_t)esp_timer_get_time();
     for (;;) {
         brightness_update();
-        const uint64_t time_us = (uint64_t)esp_timer_get_time();
-        if (s_gauge && (time_us < last_poll_us || time_us - last_poll_us >= POWER_POLL_MS * 1000U)) {
-            power_update();
-            last_poll_us = (uint64_t)esp_timer_get_time();
-        }
         const uint64_t after_us = (uint64_t)esp_timer_get_time();
         uint32_t wait_ms = POWER_POLL_MS;
-        if (s_gauge && after_us >= last_poll_us) {
-            const uint64_t elapsed_us = after_us - last_poll_us;
-            wait_ms = elapsed_us >= POWER_POLL_MS * 1000U ? 1 :
-                (uint32_t)((POWER_POLL_MS * 1000U - elapsed_us + 999) / 1000);
-        }
         portENTER_CRITICAL(&s_status_mux);
         const bool brightness_pending = s_brightness.pending;
         portEXIT_CRITICAL(&s_status_mux);
@@ -777,6 +899,7 @@ static void init_optional_power(void)
             .dev_addr_length = I2C_ADDR_BIT_LEN_7,
             .device_address = BSP_BATTERY_I2C_ADDR,
             .scl_speed_hz = BSP_BATTERY_I2C_SPEED_HZ,
+            .scl_wait_us = POWER_I2C_SCL_WAIT_US,
         };
         result = i2c_master_bus_add_device(bus, &config, &s_gauge);
     }
@@ -791,9 +914,25 @@ static void init_optional_power(void)
     if (xTaskCreate(power_worker, "board_power", POWER_STACK_BYTES, NULL,
                     tskIDLE_PRIORITY + 1, &s_power_task) != pdPASS) {
         portENTER_CRITICAL(&s_status_mux);
+        s_brightness.error = ESP_ERR_NO_MEM;
+        portEXIT_CRITICAL(&s_status_mux);
+        return;
+    }
+    portENTER_CRITICAL(&s_status_mux);
+    s_caps.brightness = true;
+    portEXIT_CRITICAL(&s_status_mux);
+}
+
+static void start_sensor_worker(void)
+{
+    if (!s_imu_hardware_live && !s_gauge) return;
+    if (xTaskCreate(sensor_worker, "board_sensor", SENSOR_STACK_BYTES, NULL,
+                    tskIDLE_PRIORITY + SENSOR_PRIORITY, &s_imu_task) != pdPASS) {
+        imu_latch_fault(ESP_ERR_NO_MEM, "worker_create");
+        if (s_imu_hardware_live) imu_cleanup(true);
+        portENTER_CRITICAL(&s_status_mux);
         s_power = power_unknown(ESP_ERR_NO_MEM);
         s_caps.battery = false;
-        s_brightness.error = ESP_ERR_NO_MEM;
         portEXIT_CRITICAL(&s_status_mux);
         if (s_gauge) {
             const esp_err_t cleanup = i2c_master_bus_rm_device(s_gauge);
@@ -806,7 +945,7 @@ static void init_optional_power(void)
         return;
     }
     portENTER_CRITICAL(&s_status_mux);
-    s_caps.brightness = true;
+    s_imu_status.worker_created = true;
     portEXIT_CRITICAL(&s_status_mux);
 }
 
@@ -863,15 +1002,16 @@ esp_err_t board_init(void (*lock_callback)(void))
         ESP_LOGE(TAG, "Required display/touch unavailable");
         return ESP_ERR_NOT_FOUND;
     }
-    /* The pinned BSP CO5300 configuration uses queue depth 10. Query the
-     * driver's actual transfer limit rather than assuming its DMA rounding. */
+    /* The BSP requests ten transactions; the board IO factory caps that
+     * queue. Query the driver's actual DMA-rounded transfer limit. */
     size_t spi_max_bytes = 0;
     const esp_err_t spi_limit_result = spi_bus_get_max_transaction_len(BSP_LCD_SPI_HOST, &spi_max_bytes);
     if (spi_limit_result == ESP_OK) {
-        ESP_LOGI(TAG, "Display SPI max_transaction_bytes=%zu pinned_queue_depth=10", spi_max_bytes);
+        ESP_LOGI(TAG, "Display SPI max_transaction_bytes=%zu pinned_requested_queue_depth=10 effective_queue_ceiling=%u",
+                 spi_max_bytes, (unsigned)CONFIG_APP_DISPLAY_SPI_QUEUE_DEPTH);
     } else {
-        ESP_LOGW(TAG, "Display SPI transfer limit unavailable: %s (pinned_queue_depth=10)",
-                 esp_err_to_name(spi_limit_result));
+        ESP_LOGW(TAG, "Display SPI transfer limit unavailable: %s (pinned_requested_queue_depth=10 effective_queue_ceiling=%u)",
+                 esp_err_to_name(spi_limit_result), (unsigned)CONFIG_APP_DISPLAY_SPI_QUEUE_DEPTH);
     }
     if (!board_display_lock(1000)) {
         return ESP_ERR_TIMEOUT;
@@ -909,6 +1049,7 @@ esp_err_t board_init(void (*lock_callback)(void))
     init_optional_imu();
     init_optional_haptics();
     init_optional_power();
+    start_sensor_worker();
     return ESP_OK;
 }
 
@@ -934,10 +1075,7 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
     if (result == ESP_OK) {
         if (time_us < s_imu_sample.timestamp_us || time_us - s_imu_sample.timestamp_us > IMU_MAX_AGE_US) {
             result = ESP_ERR_TIMEOUT;
-            imu_record_fault_locked(result, "cache_age");
-            s_imu_error = result;
-            s_imu_sample_valid = false;
-            s_caps.imu = false;
+            result = imu_failure_locked(result, "cache_age", time_us < s_imu_sample.timestamp_us, false);
         } else {
             *sample = s_imu_sample;
             /* The factory firmware documents a 90-degree clockwise sensor

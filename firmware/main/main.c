@@ -55,7 +55,7 @@ typedef struct {
     const char *stage;
     size_t free_internal, largest_internal, free_dma, largest_dma;
 } boot_memory_t;
-static boot_memory_t s_boot_memory[6];
+static boot_memory_t s_boot_memory[8];
 static size_t s_boot_memory_count;
 
 static void present_boot(app_boot_ui_state_t state, const char *stage, const char *detail)
@@ -122,7 +122,10 @@ typedef struct {
 } coordinator_event_t;
 static QueueHandle_t s_intents;
 static StaticQueue_t s_intent_storage;
-static uint8_t s_intent_bytes[INTENT_CAPACITY * sizeof(coordinator_event_t)];
+/* Only cache-enabled LVGL/coordinator task calls copy this queue payload.
+ * Keep the queue control block, locks and emergency state in internal RAM;
+ * an ISR/cache-disabled producer must never use this external payload. */
+static EXT_RAM_BSS_ATTR uint8_t s_intent_bytes[INTENT_CAPACITY * sizeof(coordinator_event_t)];
 static portMUX_TYPE s_control_lock = portMUX_INITIALIZER_UNLOCKED;
 static unsigned s_priority_requests;
 static app_intent_t s_touch_emergency[2];
@@ -226,6 +229,52 @@ static void clear_private(void *memory, size_t length)
 {
     volatile unsigned char *bytes = memory;
     while (length--) *bytes++ = 0;
+}
+
+typedef struct {
+    app_wifi_snapshot_t wifi;
+    app_media_snapshot_t media;
+    app_control_runtime_snapshot_t control;
+} runtime_diagnostics_t;
+/* One coordinator owns these copied observations, including their cleanup. */
+static EXT_RAM_BSS_ATTR runtime_diagnostics_t s_runtime_diagnostics;
+
+static void __attribute__((noinline)) report_runtime_diagnostics(void)
+{
+    runtime_diagnostics_t *observed = &s_runtime_diagnostics;
+    memset(observed, 0, sizeof(*observed));
+    app_wifi_get_snapshot(&observed->wifi);
+    bool media_available = app_media_runtime_snapshot(&observed->media);
+    app_control_runtime_snapshot(&observed->control);
+    ESP_LOGI(TAG, "Runtime Wi-Fi initialized=%d state=%d lan_ready=%d backend_available=%d "
+             "error=%d backend_error=%d",
+             observed->wifi.initialized,
+             observed->wifi.initialized ? (int)observed->wifi.state : -1,
+             observed->wifi.lan_ready, observed->wifi.backend_available,
+             (int)observed->wifi.last_error, (int)observed->wifi.backend_error);
+    ESP_LOGI(TAG, "Runtime media snapshot_available=%d initialized=%d audio_known=%d "
+             "audio_state=%d audio_error=%d off_confirmed=%d speech_known=%d speech_state=%d "
+             "speech_result=%d busy=%d result_known=%d result=%d",
+             media_available, media_available && observed->media.initialized,
+             media_available && observed->media.audio_known,
+             media_available && observed->media.audio_known ? (int)observed->media.audio.state : -1,
+             media_available && observed->media.audio_known ? (int)observed->media.audio.error : -1,
+             media_available && observed->media.audio_known && observed->media.audio.hardware_off_confirmed,
+             media_available && observed->media.speech_known,
+             media_available && observed->media.speech_known ? (int)observed->media.speech.state : -1,
+             media_available && observed->media.speech_known ? (int)observed->media.speech.result : -1,
+             media_available && observed->media.busy,
+             media_available && observed->media.result_ready,
+             media_available && observed->media.result_ready ? (int)observed->media.result : -1);
+    ESP_LOGI(TAG, "Runtime control initialized=%d server_state=%d tls=%d error=%d server_error=%d "
+             "trust_known=%d trust_present=%d trust_uncertain=%d clock_known=%d",
+             observed->control.initialized,
+             observed->control.initialized ? (int)observed->control.server.state : -1,
+             observed->control.server.tls, (int)observed->control.error,
+             (int)observed->control.server.error, observed->control.trust.known,
+             observed->control.trust.present, observed->control.trust.uncertain,
+             observed->control.clock.known);
+    clear_private(observed, sizeof(*observed));
 }
 
 static void cancel_local_editor(void)
@@ -502,9 +551,13 @@ static ae_result_t recording_wall_time(void *context, uint64_t *seconds)
     return app_control_runtime_wall_time(seconds) ? AE_OK : AE_TIME_UNKNOWN;
 }
 
+/* Large copied observations belong to the sole coordinator, never its task
+ * stack. Each helper has distinct bounded workspace so nested helpers cannot
+ * overwrite one another. Network/LVGL producers still submit copied events;
+ * the command bridge invokes owning callbacks only on this coordinator. */
 static bool capture_requires_display(void)
 {
-    app_media_snapshot_t media;
+    static EXT_RAM_BSS_ATTR app_media_snapshot_t media;
     return app_media_runtime_snapshot(&media) && media.audio_known &&
         media.audio.capture_indicator_required;
 }
@@ -915,7 +968,7 @@ static bool allowed_in_overlay(app_action_t action)
     if (s_overlay == APP_OVERLAY_API_REVIEW) return action == APP_API_COMMISSIONING;
     if (s_overlay == APP_OVERLAY_WIFI_PROFILES) return action == APP_WIFI_PROFILE_CONTROL || action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_BLUETOOTH_TARGET) return action == APP_BLUETOOTH_TARGET_CONTROL || action == APP_SETTINGS_PAGE;
-    if (s_overlay == APP_OVERLAY_COMMON_KEYS) return action == APP_KEY;
+    if (s_overlay == APP_OVERLAY_COMMON_KEYS) return action == APP_KEY || action == APP_SHORTCUT;
     if (s_overlay == APP_OVERLAY_LOCAL_EDITOR) return false;
     if (s_overlay == APP_OVERLAY_WIFI_NETWORKS)
         return action == APP_WIFI_SCAN || action == APP_WIFI_SCAN_PAGE ||
@@ -1189,7 +1242,8 @@ static void recover_input(const ble_hid_snapshot_t *link)
     s_message = "Link recovery requested; old input will not replay.";
 }
 
-static void handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *link)
+/* Optional intent branches must not become a permanent coordinator-loop frame. */
+static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *link)
 {
     /* A callback may enqueue after the loop's initial clock sample. Observe the
      * actual clock rather than treating that legitimate event as future input. */
@@ -1391,7 +1445,8 @@ static void handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *
         return;
     case APP_BLUETOOTH_PAGE: {
         if (s_overlay != APP_OVERLAY_SETTINGS || s_settings_page != APP_SETTINGS_BLUETOOTH || intent->x < 0) return;
-        ble_hid_bond_list_t bonds = ble_hid_bond_list();
+        static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+        ble_hid_copy_bond_list(&bonds);
         unsigned pages = bonds.known && bonds.count ?
             ((unsigned)bonds.count + APP_UI_BONDS_PER_PAGE - 1U) / APP_UI_BONDS_PER_PAGE : 1U;
         s_bluetooth_page = (unsigned)intent->x < pages ? (unsigned)intent->x : pages - 1U;
@@ -1657,10 +1712,12 @@ static void handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *
         s_message = "Stopped; unsent characters remain in preview.";
         return;
     case APP_SHORTCUT: {
-        if (s_engine.state.mode != INPUT_KEYBOARD || s_keyboard_submode != APP_KEYBOARD_SHORTCUTS)
+        if (s_engine.state.mode != INPUT_KEYBOARD ||
+            (s_keyboard_submode != APP_KEYBOARD_SHORTCUTS && s_overlay != APP_OVERLAY_COMMON_KEYS))
             return;
         static const unsigned usages[] = {0x06, 0x19, 0x1d, 0x2b, 0x29, 0x28};
         if (intent->x < APP_SHORTCUT_COPY || intent->x > APP_SHORTCUT_ENTER) return;
+        if (s_overlay == APP_OVERLAY_COMMON_KEYS && intent->x > APP_SHORTCUT_UNDO) return;
         unsigned modifier = intent->x <= APP_SHORTCUT_UNDO ?
             (s_host_os == APP_HOST_COMMAND ? 0x08U : 0x01U) : 0;
         result = hid_engine_enqueue_key(&s_engine, intent->epoch, INPUT_LOCAL,
@@ -2102,7 +2159,8 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
     }
 }
 
-static void render_view(const ble_hid_snapshot_t *link, esp_err_t error)
+/* Render scratch is live only for publication, never across command dispatch. */
+static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link, esp_err_t error)
 {
     input_link_t active = input_link_snapshot(link);
     usb_hid_snapshot_t usb = usb_hid_snapshot();
@@ -2189,7 +2247,8 @@ static void render_view(const ble_hid_snapshot_t *link, esp_err_t error)
     view.paired_host_count = link->bond_count_known ? (int)link->bond_count : -1;
     view.paired_host_capacity = link->bond_capacity;
     view.pairing_seconds_left = (link->pairing_remaining_ms + 999U) / 1000U;
-    ble_hid_bond_list_t bonds = ble_hid_bond_list();
+    static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+    ble_hid_copy_bond_list(&bonds);
     view.bluetooth_hosts_available = bonds.known;
     view.bluetooth_host_count = bonds.known && bonds.count <= APP_UI_BOND_CAPACITY ? bonds.count : 0;
     unsigned pages = view.bluetooth_host_count ?
@@ -2304,6 +2363,149 @@ static void observe_input_link(const input_link_t *link, input_link_t *previous)
 #include "app_remote_device_bindings.inc"
 #include "app_remote_input_bindings.inc"
 
+/* Dispatch is synchronous: handlers/managers copy anything retained. Erase
+ * every consumed payload before the priority-break path can leave the loop. */
+static void consume_coordinator_event(coordinator_event_t *event, const ble_hid_snapshot_t *link)
+{
+    if (event->contacts) handle_contacts(event);
+    else handle_intent(&event->value.intent, link);
+    clear_private(event, sizeof(*event));
+}
+
+/* Runtime snapshots must not inflate the main task frame during board/NVS
+ * startup. Keep this lifetime boundary explicit under target optimization. */
+static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
+{
+    input_link_t previous = {0};
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+    int64_t last_health_us = esp_timer_get_time();
+    hid_engine_step_result_t previous_step = HID_ENGINE_STEP_IDLE;
+    unsigned ui_tick = 0;
+    for (;;) {
+        s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
+        remote_update_service();
+        process_buttons();
+        ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
+        service_usb_selection();
+        input_link_t link = input_link_snapshot(&bluetooth);
+        observe_input_link(&link, &previous);
+        sync_interaction();
+        (void)process_priority();
+        static EXT_RAM_BSS_ATTR coordinator_event_t event;
+        for (unsigned i = 0; i < 4 && xQueueReceive(s_intents, &event, 0) == pdTRUE; ++i) {
+            consume_coordinator_event(&event, &bluetooth);
+            if (process_priority()) {
+                break;
+            }
+        }
+        remote_control_service();
+        service_local_editor();
+        service_bluetooth_name();
+        service_multitouch();
+        (void)apply_touch_result(interaction_touch_tick(&s_interaction, s_now_ms, s_ui_revision));
+        /* Congestion may begin after the snapshot; send rechecks its gate.
+         * Failure cancels queued actions and starts bounded release recovery. */
+        (void)process_priority();
+        sync_interaction();
+        process_motion();
+        if (!link.congested) {
+            hid_engine_step_result_t step = hid_engine_step(&s_engine, send_report, &link.generation);
+            if (step != previous_step &&
+                (step == HID_ENGINE_STEP_SEND_FAILED || step == HID_ENGINE_STEP_RETRY_EXHAUSTED)) {
+                s_message = "Send failed; input cancelled. Release recovery has priority.";
+                ESP_LOGW(TAG, "HID send failed; release pending=%d", s_engine.state.release_pending);
+            }
+            if (step == HID_ENGINE_STEP_RETRY_EXHAUSTED && step != previous_step) {
+                if (s_input_transport == APP_INPUT_USB)
+                    (void)usb_hid_recover_generation(link.generation);
+                else (void)ble_hid_disconnect_generation(link.generation);
+            }
+            previous_step = step;
+        }
+        app_remote_input_service(s_remote_input, s_now_ms);
+        update_send(false);
+        service_pair_operation(&bluetooth);
+        service_transport_switch();
+        service_display();
+        service_media();
+        service_connectivity();
+        if (s_engine.state.release_pending) s_drag_requested = false;
+        if (++ui_tick >= 10) {
+            ui_tick = 0;
+            render_view(&bluetooth, error);
+        }
+        int64_t now = esp_timer_get_time();
+        if (now - last_health_us >= 10000000) {
+            last_health_us = now;
+            report_memory_diagnostics();
+            report_runtime_diagnostics();
+            board_imu_status_t imu = board_imu_status();
+            app_presenter_status_t presentation = app_presenter_status();
+            ESP_LOGI(TAG, "Motion imu_available=%d imu_error=%s samples=%llu "
+                     "sample_age_known=%d sample_age_us=%llu late_batches=%llu late_batches_saturated=%d "
+                     "calibrated=%d calibrating=%d "
+                     "calibration_samples=%u input_kind=%d input_connected=%d input_ready=%d "
+                     "phase=%d worker_running=%d recoveries=%llu failure_streak=%u retry_ms=%u "
+                     "batch_time_known=%d batch_us=%llu max_batch_us=%llu schedule_late_us=%llu",
+                     imu.available, esp_err_to_name(imu.error),
+                     (unsigned long long)imu.sample_count, imu.sample_age_known,
+                     (unsigned long long)imu.sample_age_us,
+                     (unsigned long long)imu.late_batch_count, imu.late_batch_count_saturated,
+                     s_interaction.view.calibrated,
+                     s_interaction.view.calibrating, (unsigned)s_interaction.view.calibration_samples,
+                     (int)link.kind, link.connected, s_engine.ready, (int)imu.phase, imu.worker_running,
+                     (unsigned long long)imu.recovery_count, (unsigned)imu.failure_streak,
+                     (unsigned)imu.retry_delay_ms, imu.batch_time_known,
+                     (unsigned long long)imu.last_batch_us, (unsigned long long)imu.max_batch_us,
+                     (unsigned long long)imu.last_schedule_late_us);
+            if (imu.fault_latched)
+                ESP_LOGW(TAG, "First IMU fault stage=%s error=%s uptime_us=%llu "
+                         "last_hardware_stage=%s last_hardware_error=%s ready_known=%d ready_bits=%u",
+                         imu.first_fault_stage, esp_err_to_name(imu.first_fault_error),
+                         (unsigned long long)imu.first_fault_us, imu.last_hardware_stage,
+                         esp_err_to_name(imu.last_hardware_error), imu.data_ready_known,
+                         (unsigned)imu.data_ready_bits);
+            ESP_LOGI(TAG, "UI published=%llu applied=%llu pending=%d pending_age_ms=%llu "
+                     "applying=%d last_apply_latency_ms=%llu",
+                     (unsigned long long)presentation.published_count,
+                     (unsigned long long)presentation.applied_count, presentation.pending,
+                     (unsigned long long)presentation.pending_age_ms, presentation.applying,
+                     (unsigned long long)presentation.last_apply_latency_ms);
+            ESP_LOGI(TAG, "Health uptime_s=%llu heap=%u min_heap=%u queue=%u locked=%d "
+                     "free_internal=%u largest_internal=%u stack_bytes=%u "
+                     "free_dma=%u largest_dma=%u "
+                     "ble_initialized=%d ble_connected=%d ble_ready=%d ble_failed=%d",
+                     (unsigned long long)(now / 1000000),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
+                     (unsigned)s_engine.count, s_engine.state.locked,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+                     bluetooth.initialized,
+                     bluetooth.connected, bluetooth.ready, bluetooth.failed);
+            if (error != ESP_OK || bluetooth.failed) {
+                /* Initialization logs can precede USB attachment. Preserve a
+                 * bounded periodic failure signal after enumeration. */
+                ESP_LOGE(TAG, "Bluetooth unavailable: init_error=%s transport_failed=%d",
+                         esp_err_to_name(error), bluetooth.failed);
+                ble_hid_failure_t failure = ble_hid_failure();
+                if (failure.recorded) {
+                    ESP_LOGE(TAG, "First Bluetooth failure stage=%s error=%s sdk_status_known=%d "
+                             "sdk_status=%u uptime_ms=%llu", failure.stage,
+                             esp_err_to_name(failure.error), failure.sdk_status_known,
+                             (unsigned)failure.sdk_status, (unsigned long long)failure.uptime_ms);
+                }
+            }
+        }
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
+        /* Never catch up delayed ticks by emitting a burst of stale reports. */
+        vTaskDelay(pdMS_TO_TICKS(COORDINATOR_PERIOD_MS));
+    }
+}
+
 void app_main(void)
 {
     esp_err_t diagnostic_error = heap_caps_register_failed_alloc_callback(record_allocation_failure);
@@ -2390,6 +2592,7 @@ void app_main(void)
     if (media_error != AE_OK)
         ESP_LOGW(TAG, "Media runtime unavailable: %d", (int)media_error);
     if (!app_media_controls_init()) ESP_LOGW(TAG, "Media controls unavailable");
+    record_boot_memory("media");
     if (!board_display_lock(1000)) {
         report_boot_fault("display lock", ESP_ERR_TIMEOUT);
         return;
@@ -2410,124 +2613,7 @@ void app_main(void)
     }
     record_boot_memory("ui");
     remote_control_init(usb_error == ESP_OK);
+    record_boot_memory("remote");
     if (!app_connectivity_controls_init()) ESP_LOGW(TAG, "Connectivity controls unavailable");
-    input_link_t previous = {0};
-    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
-    int64_t last_health_us = esp_timer_get_time();
-    hid_engine_step_result_t previous_step = HID_ENGINE_STEP_IDLE;
-    unsigned ui_tick = 0;
-    for (;;) {
-        s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
-        remote_update_service();
-        process_buttons();
-        ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
-        service_usb_selection();
-        input_link_t link = input_link_snapshot(&bluetooth);
-        observe_input_link(&link, &previous);
-        sync_interaction();
-        (void)process_priority();
-        coordinator_event_t event;
-        for (unsigned i = 0; i < 4 && xQueueReceive(s_intents, &event, 0) == pdTRUE; ++i) {
-            if (event.contacts) handle_contacts(&event);
-            else handle_intent(&event.value.intent, &bluetooth);
-            if (process_priority()) {
-                break;
-            }
-        }
-        remote_control_service();
-        service_local_editor();
-        service_bluetooth_name();
-        service_multitouch();
-        (void)apply_touch_result(interaction_touch_tick(&s_interaction, s_now_ms, s_ui_revision));
-        /* Congestion may begin after the snapshot; send rechecks its gate.
-         * Failure cancels queued actions and starts bounded release recovery. */
-        (void)process_priority();
-        sync_interaction();
-        process_motion();
-        if (!link.congested) {
-            hid_engine_step_result_t step = hid_engine_step(&s_engine, send_report, &link.generation);
-            if (step != previous_step &&
-                (step == HID_ENGINE_STEP_SEND_FAILED || step == HID_ENGINE_STEP_RETRY_EXHAUSTED)) {
-                s_message = "Send failed; input cancelled. Release recovery has priority.";
-                ESP_LOGW(TAG, "HID send failed; release pending=%d", s_engine.state.release_pending);
-            }
-            if (step == HID_ENGINE_STEP_RETRY_EXHAUSTED && step != previous_step) {
-                if (s_input_transport == APP_INPUT_USB)
-                    (void)usb_hid_recover_generation(link.generation);
-                else (void)ble_hid_disconnect_generation(link.generation);
-            }
-            previous_step = step;
-        }
-        app_remote_input_service(s_remote_input, s_now_ms);
-        update_send(false);
-        service_pair_operation(&bluetooth);
-        service_transport_switch();
-        service_display();
-        service_media();
-        service_connectivity();
-        if (s_engine.state.release_pending) s_drag_requested = false;
-        if (++ui_tick >= 10) {
-            ui_tick = 0;
-            render_view(&bluetooth, error);
-        }
-        int64_t now = esp_timer_get_time();
-        if (now - last_health_us >= 10000000) {
-            last_health_us = now;
-            report_memory_diagnostics();
-            board_imu_status_t imu = board_imu_status();
-            app_presenter_status_t presentation = app_presenter_status();
-            ESP_LOGI(TAG, "Motion imu_available=%d imu_error=%s samples=%llu "
-                     "sample_age_known=%d sample_age_us=%llu calibrated=%d calibrating=%d "
-                     "calibration_samples=%u input_kind=%d input_connected=%d input_ready=%d",
-                     imu.available, esp_err_to_name(imu.error),
-                     (unsigned long long)imu.sample_count, imu.sample_age_known,
-                     (unsigned long long)imu.sample_age_us, s_interaction.view.calibrated,
-                     s_interaction.view.calibrating, (unsigned)s_interaction.view.calibration_samples,
-                     (int)link.kind, link.connected, s_engine.ready);
-            if (imu.fault_latched)
-                ESP_LOGW(TAG, "First IMU fault stage=%s error=%s uptime_us=%llu "
-                         "last_hardware_stage=%s last_hardware_error=%s ready_known=%d ready_bits=%u",
-                         imu.first_fault_stage, esp_err_to_name(imu.first_fault_error),
-                         (unsigned long long)imu.first_fault_us, imu.last_hardware_stage,
-                         esp_err_to_name(imu.last_hardware_error), imu.data_ready_known,
-                         (unsigned)imu.data_ready_bits);
-            ESP_LOGI(TAG, "UI published=%llu applied=%llu pending=%d pending_age_ms=%llu "
-                     "applying=%d last_apply_latency_ms=%llu",
-                     (unsigned long long)presentation.published_count,
-                     (unsigned long long)presentation.applied_count, presentation.pending,
-                     (unsigned long long)presentation.pending_age_ms, presentation.applying,
-                     (unsigned long long)presentation.last_apply_latency_ms);
-            ESP_LOGI(TAG, "Health uptime_s=%llu heap=%u min_heap=%u queue=%u locked=%d "
-                     "free_internal=%u largest_internal=%u stack_bytes=%u "
-                     "free_dma=%u largest_dma=%u "
-                     "ble_initialized=%d ble_connected=%d ble_ready=%d ble_failed=%d",
-                     (unsigned long long)(now / 1000000),
-                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT),
-                     (unsigned)s_engine.count, s_engine.state.locked,
-                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-                     (unsigned)uxTaskGetStackHighWaterMark(NULL),
-                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
-                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
-                     bluetooth.initialized,
-                     bluetooth.connected, bluetooth.ready, bluetooth.failed);
-            if (error != ESP_OK || bluetooth.failed) {
-                /* Initialization logs can precede USB attachment. Preserve a
-                 * bounded periodic failure signal after enumeration. */
-                ESP_LOGE(TAG, "Bluetooth unavailable: init_error=%s transport_failed=%d",
-                         esp_err_to_name(error), bluetooth.failed);
-                ble_hid_failure_t failure = ble_hid_failure();
-                if (failure.recorded) {
-                    ESP_LOGE(TAG, "First Bluetooth failure stage=%s error=%s sdk_status_known=%d "
-                             "sdk_status=%u uptime_ms=%llu", failure.stage,
-                             esp_err_to_name(failure.error), failure.sdk_status_known,
-                             (unsigned)failure.sdk_status, (unsigned long long)failure.uptime_ms);
-                }
-            }
-        }
-        ESP_ERROR_CHECK(esp_task_wdt_reset());
-        /* Never catch up delayed ticks by emitting a burst of stale reports. */
-        vTaskDelay(pdMS_TO_TICKS(COORDINATOR_PERIOD_MS));
-    }
+    coordinator_run(error);
 }

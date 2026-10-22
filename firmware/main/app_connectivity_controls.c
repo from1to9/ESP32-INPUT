@@ -48,6 +48,9 @@ typedef struct {
 /* Only the serialized coordinator accesses this cache. It contains no lock,
  * DMA buffer, interrupt state or callback-owned memory. */
 static EXT_RAM_BSS_ATTR connectivity_controls_t controls;
+/* Separate request workspace owned only by the serialized coordinator. The
+ * transport copies it before returning; retain no extra peer identity after. */
+static EXT_RAM_BSS_ATTR ble_hid_target_preferences_request_t bluetooth_request;
 
 static bool text(const char *value, size_t capacity)
 {
@@ -316,7 +319,7 @@ static void rebuild(void)
 static void refresh_owners(void)
 {
     app_wifi_get_snapshot(&controls.wifi); app_wifi_profiles_snapshot(&controls.profiles);
-    controls.bluetooth = ble_hid_snapshot(); controls.bonds = ble_hid_bond_list(); controls.preference = ble_hid_target_snapshot();
+    controls.bluetooth = ble_hid_snapshot(); ble_hid_copy_bond_list(&controls.bonds); controls.preference = ble_hid_target_snapshot();
     app_control_runtime_snapshot(&controls.runtime);
     /* The runtime's published management snapshot may lag its immediate local
      * window gate. Use the trust owner's current cached gate before admission. */
@@ -399,13 +402,20 @@ static void handle_bluetooth(const app_bluetooth_target_request_t *request, app_
     if (controls.context.overlay != APP_OVERLAY_BLUETOOTH_TARGET || !ble_idle() ||
         (request->operation != APP_BLUETOOTH_TARGET_SELECT && request->operation != APP_BLUETOOTH_TARGET_PREFER) ||
         (request->operation == APP_BLUETOOTH_TARGET_SELECT && !controls.bonds.bonds[found].selection_supported)) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return; }
-    ble_hid_target_preferences_request_t update = {.expected_bond_revision = request->bond_revision,
-        .expected_revision = request->preferences_revision, .selected = controls.preference.selected, .target = controls.preference.target, .count = controls.bonds.count};
-    if (request->operation == APP_BLUETOOTH_TARGET_SELECT) { update.selected = true; update.target = owner_key(&controls.bonds.bonds[found]); }
+    memset(&bluetooth_request, 0, sizeof(bluetooth_request));
+    ble_hid_target_preferences_request_t *update = &bluetooth_request;
+    update->expected_bond_revision = request->bond_revision;
+    update->expected_revision = request->preferences_revision;
+    update->selected = controls.preference.selected;
+    update->target = controls.preference.target;
+    update->count = controls.bonds.count;
+    if (request->operation == APP_BLUETOOTH_TARGET_SELECT) { update->selected = true; update->target = owner_key(&controls.bonds.bonds[found]); }
     unsigned next = 0;
-    if (request->operation == APP_BLUETOOTH_TARGET_PREFER) update.order[next++] = owner_key(&controls.bonds.bonds[found]);
-    for (unsigned i = 0; i < controls.bonds.count; ++i) if (request->operation != APP_BLUETOOTH_TARGET_PREFER || (int)i != found) update.order[next++] = owner_key(&controls.bonds.bonds[i]);
-    esp_err_t error = ble_hid_target_preferences_request(&update, &controls.ble_request_id);
+    if (request->operation == APP_BLUETOOTH_TARGET_PREFER) update->order[next++] = owner_key(&controls.bonds.bonds[found]);
+    for (unsigned i = 0; i < controls.bonds.count; ++i) if (request->operation != APP_BLUETOOTH_TARGET_PREFER || (int)i != found) update->order[next++] = owner_key(&controls.bonds.bonds[i]);
+    esp_err_t error = ble_hid_target_preferences_request(update, &controls.ble_request_id);
+    volatile unsigned char *bytes = (volatile unsigned char *)update;
+    for (size_t i = 0; i < sizeof(*update); ++i) bytes[i] = 0;
     if (error == ESP_OK) { controls.ble_revision = controls.preference.revision; begin(P_BLE); }
     say(effect, error_text(error));
 }

@@ -66,6 +66,22 @@ typedef struct {
 } controls_t;
 /* Coordinator task only, after PSRAM initialization; no ISR/cache-disabled access. */
 static MEDIA_CONTROLS_TASK_BSS controls_t controls;
+/* Distinct from the retained controls: compare old and incoming observations
+ * before replacement. Only the serialized coordinator polls this scratch;
+ * no callback, nested request, ISR or cache-disabled path may reuse it. */
+typedef struct {
+    app_media_snapshot_t runtime;
+    app_recording_store_snapshot_t store;
+    bt_audio_bond_list_t bonds;
+    ae_record_metadata_t records[APP_MEDIA_ROWS];
+} poll_scratch_t;
+static MEDIA_CONTROLS_TASK_BSS poll_scratch_t poll_scratch;
+
+static void clear_poll_scratch(void)
+{
+    volatile unsigned char *bytes = (volatile unsigned char *)&poll_scratch;
+    for (size_t i = 0; i < sizeof(poll_scratch); ++i) bytes[i] = 0;
+}
 
 static void increase(uint64_t *value)
 {
@@ -880,33 +896,35 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
         effect_result(effect, AE_TIME_UNKNOWN); return;
     }
     controls.clock_known = true; controls.now_ms = now_ms;
-    app_media_snapshot_t runtime = {0}; app_recording_store_snapshot_t store = {0};
-    controls.runtime_known = app_media_runtime_snapshot(&runtime);
-    if (controls.runtime_known && runtime.audio_known) {
-        if (runtime.audio.capture_indicator_required) {
+    memset(&poll_scratch, 0, sizeof(poll_scratch));
+    app_media_snapshot_t *runtime = &poll_scratch.runtime;
+    app_recording_store_snapshot_t *store = &poll_scratch.store;
+    controls.runtime_known = app_media_runtime_snapshot(runtime);
+    if (controls.runtime_known && runtime->audio_known) {
+        if (runtime->audio.capture_indicator_required) {
             controls.capture_obligation = true;
-            controls.capture_generation = runtime.audio.audio_generation;
-        } else if (runtime.audio.hardware_off_confirmed) controls.capture_obligation = false;
+            controls.capture_generation = runtime->audio.audio_generation;
+        } else if (runtime->audio.hardware_off_confirmed) controls.capture_obligation = false;
     }
-    controls.store_known = app_recording_store_snapshot(&store);
+    controls.store_known = app_recording_store_snapshot(store);
     board_recording_flash_status_t physical = board_recording_flash_status();
-    bool storage_changed = store.initialized != controls.store.initialized || store.preparing != controls.store.preparing ||
-        store.error != controls.store.error || store.store.mounted != controls.store.store.mounted ||
-        store.store.storage_uncertain != controls.store.store.storage_uncertain ||
-        store.capabilities.quota_bytes != controls.store.capabilities.quota_bytes ||
-        store.capabilities.used_bytes != controls.store.capabilities.used_bytes ||
-        store.capabilities.reserved_bytes != controls.store.capabilities.reserved_bytes ||
-        store.capabilities.retention_time_known != controls.store.capabilities.retention_time_known ||
+    bool storage_changed = store->initialized != controls.store.initialized || store->preparing != controls.store.preparing ||
+        store->error != controls.store.error || store->store.mounted != controls.store.store.mounted ||
+        store->store.storage_uncertain != controls.store.store.storage_uncertain ||
+        store->capabilities.quota_bytes != controls.store.capabilities.quota_bytes ||
+        store->capabilities.used_bytes != controls.store.capabilities.used_bytes ||
+        store->capabilities.reserved_bytes != controls.store.capabilities.reserved_bytes ||
+        store->capabilities.retention_time_known != controls.store.capabilities.retention_time_known ||
         physical.state != controls.physical.state || physical.geometry_verified != controls.physical.geometry_verified;
     if (storage_changed) { increase(&controls.store_revision); increase(&controls.revision); }
-    if (runtime.audio.audio_generation != controls.old_audio_generation || runtime.audio.revision != controls.old_audio_revision ||
-        runtime.busy != controls.runtime.busy || runtime.audio_known != controls.runtime.audio_known) increase(&controls.revision);
-    if (runtime.speech.token != controls.old_speech_token || runtime.speech.state != controls.old_speech_state || runtime.speech.candidate != controls.old_candidate) {
+    if (runtime->audio.audio_generation != controls.old_audio_generation || runtime->audio.revision != controls.old_audio_revision ||
+        runtime->busy != controls.runtime.busy || runtime->audio_known != controls.runtime.audio_known) increase(&controls.revision);
+    if (runtime->speech.token != controls.old_speech_token || runtime->speech.state != controls.old_speech_state || runtime->speech.candidate != controls.old_candidate) {
         increase(&controls.speech_revision);
-        controls.old_speech_token = runtime.speech.token; controls.old_speech_state = runtime.speech.state; controls.old_candidate = runtime.speech.candidate;
+        controls.old_speech_token = runtime->speech.token; controls.old_speech_state = runtime->speech.state; controls.old_candidate = runtime->speech.candidate;
     }
-    controls.old_audio_generation = runtime.audio.audio_generation; controls.old_audio_revision = runtime.audio.revision;
-    controls.runtime = runtime; controls.store = store; controls.physical = physical;
+    controls.old_audio_generation = runtime->audio.audio_generation; controls.old_audio_revision = runtime->audio.revision;
+    controls.runtime = *runtime; controls.store = *store; controls.physical = physical;
     ae_codec_port_t codec = board_audio_mosaico_port();
     ae_codec_capabilities_t caps = {0};
     if (!codec.capabilities || codec.capabilities(codec.context, &caps) != AE_OK) caps = (ae_codec_capabilities_t){0};
@@ -916,10 +934,11 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
     if (bluetooth.generation != controls.bluetooth.generation || bluetooth.control_inflight != controls.bluetooth.control_inflight ||
         bluetooth.request_status != controls.bluetooth.request_status) increase(&controls.revision);
     controls.bluetooth = bluetooth;
-    bt_audio_bond_list_t bonds = bt_audio_bond_list();
-    if (bonds.revision != controls.bonds.revision || bonds.known != controls.bonds.known ||
-        bonds.refreshing != controls.bonds.refreshing || bonds.error != controls.bonds.error) increase(&controls.revision);
-    controls.bonds = bonds;
+    bt_audio_bond_list_t *bonds = &poll_scratch.bonds;
+    bt_audio_copy_bond_list(bonds);
+    if (bonds->revision != controls.bonds.revision || bonds->known != controls.bonds.known ||
+        bonds->refreshing != controls.bonds.refreshing || bonds->error != controls.bonds.error) increase(&controls.revision);
+    controls.bonds = *bonds;
     poll_voice_link(effect);
     for (unsigned i = 1; i < AE_ROUTE_COUNT; ++i) {
         ae_route_capabilities_t route = {0};
@@ -928,34 +947,34 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
         if (!same_route(&route, &controls.routes[i])) increase(&controls.revision);
         controls.routes[i] = route;
     }
-    if (controls.pending && runtime.result_ready && runtime.request_token == controls.pending_token) {
-        ae_result_t result = runtime.result;
+    if (controls.pending && runtime->result_ready && runtime->request_token == controls.pending_token) {
+        ae_result_t result = runtime->result;
         if (result == AE_OK && controls.pending_action == APP_MEDIA_QUERY_LIST) {
-            if (runtime.result_detail.count > APP_MEDIA_ROWS) result = AE_INTEGRITY;
+            if (runtime->result_detail.count > APP_MEDIA_ROWS) result = AE_INTEGRITY;
             else {
-                ae_record_metadata_t records[APP_MEDIA_ROWS] = {0};
+                ae_record_metadata_t *records = poll_scratch.records;
                 result = app_media_runtime_copy_records(controls.pending_token, records, APP_MEDIA_ROWS);
                 if (result == AE_OK) {
-                    memcpy(controls.records, records, sizeof(records)); controls.record_count = runtime.result_detail.count;
-                    controls.next_cursor = runtime.result_detail.next_cursor; controls.list_loaded = true;
+                    memcpy(controls.records, records, sizeof(controls.records)); controls.record_count = runtime->result_detail.count;
+                    controls.next_cursor = runtime->result_detail.next_cursor; controls.list_loaded = true;
                     increase(&controls.view.recordings.generation);
                 }
             }
         } else if (result == AE_OK && controls.pending_action == APP_MEDIA_QUERY_GET) {
-            const ae_record_metadata_t *record = &runtime.result_detail.metadata;
+            const ae_record_metadata_t *record = &runtime->result_detail.metadata;
             if (!same_ui_id(ui_id(record->object_id), controls.selected_request) || record->revision != controls.selected_revision) result = AE_STALE;
             else { controls.selected = *record; controls.selected_known = true; }
         } else if (result == AE_OK && controls.pending_action == APP_MEDIA_QUERY_DELETE) {
-            controls.selected.access_revoked = runtime.result_detail.access_revoked;
+            controls.selected.access_revoked = runtime->result_detail.access_revoked;
             controls.selected.state = AE_RECORD_DELETING;
-            if (runtime.result_detail.cleanup_complete) controls.selected_known = false;
+            if (runtime->result_detail.cleanup_complete) controls.selected_known = false;
             controls.list_loaded = false;
             controls.view.recordings.known = false;
             controls.view.recordings.row_count = 0;
             increase(&controls.view.recordings.generation);
         }
         uint64_t token; ae_result_t taken;
-        if (!app_media_runtime_take_result(&token, &taken) || token != controls.pending_token || taken != runtime.result) result = AE_UNCERTAIN;
+        if (!app_media_runtime_take_result(&token, &taken) || token != controls.pending_token || taken != runtime->result) result = AE_UNCERTAIN;
         controls.pending = false; controls.runtime.result_ready = false;
         controls.view.recordings.pending = false;
         if (result != AE_OK && controls.pending_action == APP_MEDIA_QUERY_LIST) {
@@ -971,6 +990,7 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
         if (result != AE_OK) effect_result(effect, result);
         rebuild();
     }
+    clear_poll_scratch();
 }
 
 void app_media_controls_fill(app_view_t *view)

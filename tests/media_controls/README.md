@@ -1,6 +1,6 @@
 # Native media product controls
 
-Run `python3 tests/media_controls/run.py`. Eighteen isolated cases compile the real
+Run `python3 tests/media_controls/run.py`. Twenty isolated cases compile the real
 `app_media_controls.c` and audio format arithmetic with strict warnings,
 AddressSanitizer and UndefinedBehaviorSanitizer. Cached codec, store, runtime and
 Bluetooth interfaces are substituted at their public boundaries; no production
@@ -25,3 +25,17 @@ substituted inside the production controls algorithm.
 These checks prove local request/admission behavior. They do not prove actual
 audio capture, transport readiness, flash publication, physical mute or host
 compatibility. Those remain the corresponding runtime/driver and device gates.
+
+The coordinator owns a distinct fixed PSRAM polling workspace for incoming
+runtime/store/Classic bond snapshots and query records. Old and new observations
+remain separate until comparisons complete; no scratch escapes to a callback
+or nested command. Temporary speech, recording and peer metadata is cleared
+before return. The target poll frame is 656 bytes (previously 5,072); its new
+4,488-byte workspace has no heap fallback. Bond lists use the copy-out API.
+
+Regressions cover changed/unchanged revisions across repeated snapshots,
+unavailable getters that leave their output untouched, capture-warning
+retention, full bond capacity, and a failed record copy that wrote partial data.
+Every poll path exercised by the suite verifies scratch cleanup; a failed query
+cannot publish its temporary rows or automatically retry. Stack measurements
+are compiler evidence, not device high-water measurements.

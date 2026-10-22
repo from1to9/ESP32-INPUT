@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 typedef struct test_i2s_channel *i2s_chan_handle_t;
-typedef struct { uint32_t dma_desc_num, dma_frame_num; bool auto_clear; } i2s_chan_config_t;
+typedef struct { uint32_t dma_desc_num, dma_frame_num; bool auto_clear, dma_buffer_in_psram; } i2s_chan_config_t;
 typedef struct { uint32_t rate; int mclk_multiple; } test_clock_t;
 typedef struct { int bits, mode; } test_slot_t;
 typedef struct { int mclk, bclk, ws, dout, din; } test_gpio_t;

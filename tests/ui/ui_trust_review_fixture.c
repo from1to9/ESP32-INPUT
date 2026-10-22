@@ -13,7 +13,7 @@ static uint64_t fixture_now = 1000;
 void app_wifi_get_snapshot(app_wifi_snapshot_t *out) { *out = (app_wifi_snapshot_t){0}; }
 void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out) { *out = (app_wifi_profiles_snapshot_t){0}; }
 ble_hid_snapshot_t ble_hid_snapshot(void) { return (ble_hid_snapshot_t){0}; }
-ble_hid_bond_list_t ble_hid_bond_list(void) { return (ble_hid_bond_list_t){0}; }
+void ble_hid_copy_bond_list(ble_hid_bond_list_t *out) { assert(out); *out = (ble_hid_bond_list_t){0}; }
 ble_hid_target_snapshot_t ble_hid_target_snapshot(void) { return (ble_hid_target_snapshot_t){0}; }
 void app_control_runtime_snapshot(app_control_runtime_snapshot_t *out) { *out = fixture_runtime; }
 void app_control_trust_snapshot(app_control_trust_snapshot_t *out) { *out = fixture_runtime.trust; }

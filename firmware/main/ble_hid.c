@@ -187,6 +187,9 @@ static struct {
     uint8_t target_order_count;
     bool target_order_configured;
     ble_hid_preferences_t target_candidate;
+    /* Select/order submission scratch is borrowed only while state_lock is
+     * held. The worker owns target_candidate after successful publication. */
+    ble_hid_target_preferences_request_t target_request_scratch;
     uint64_t target_expected_bond_mutation;
     bool classic_pairing_reserved;
     ble_hid_bond_forget_snapshot_t single_forget;
@@ -1095,10 +1098,11 @@ static void service_link_control(void)
     }
 }
 
+/* Worker-only backlog; callbacks use the separate FreeRTOS control queue. */
 static struct {
     control_command_t jobs[CONTROL_QUEUE_LENGTH];
     unsigned int count;
-} pending_subscriptions;
+} pending_subscriptions EXT_RAM_BSS_ATTR;
 
 static bool command_current_locked(const control_command_t *command)
 {
@@ -2270,24 +2274,25 @@ const char *ble_hid_failure_stage_name(void)
     return ble_hid_failure().stage;
 }
 
-ble_hid_bond_list_t ble_hid_bond_list(void)
+void ble_hid_copy_bond_list(ble_hid_bond_list_t *out)
 {
+    if (!out) return;
     portENTER_CRITICAL(&state_lock);
-    ble_hid_bond_list_t list = state.bond_list;
-    list.preferences_revision = state.target.revision;
-    list.capacity = PAIRING_BOND_CAPACITY;
+    *out = state.bond_list;
+    out->preferences_revision = state.target.revision;
+    out->capacity = PAIRING_BOND_CAPACITY;
     /* Matching requires successful authentication and resolution of this
      * connection's actual bond, not just an address seen during admission.
      * Do not guess when a private/pseudo address or type cannot be matched. */
-    bool verified = list.known && !list.updating && state.public.connected &&
+    bool verified = out->known && !out->updating && state.public.connected &&
         state.public.encrypted && !state.public.failed && !state.link_fault &&
         state.auth_complete && state.bonded && state.bond_resolved &&
         state.peer_address_type_known;
     unsigned int matches = 0;
     unsigned int matched = 0;
-    list.current_match_known = false;
-    for (unsigned int i = 0; i < list.count; ++i) {
-        ble_hid_bond_t *bond = &list.bonds[i];
+    out->current_match_known = false;
+    for (unsigned int i = 0; i < out->count; ++i) {
+        ble_hid_bond_t *bond = &out->bonds[i];
         bond->is_current = false;
         bond->is_selected = state.target.selected && target_key_matches(&state.target.target, bond);
         if (verified && bond->address_type_known &&
@@ -2298,10 +2303,16 @@ ble_hid_bond_list_t ble_hid_bond_list(void)
         }
     }
     if (matches == 1) {
-        list.current_match_known = true;
-        list.bonds[matched].is_current = true;
+        out->current_match_known = true;
+        out->bonds[matched].is_current = true;
     }
     portEXIT_CRITICAL(&state_lock);
+}
+
+ble_hid_bond_list_t ble_hid_bond_list(void)
+{
+    ble_hid_bond_list_t list;
+    ble_hid_copy_bond_list(&list);
     return list;
 }
 
@@ -2320,8 +2331,9 @@ static esp_err_t submit_preferences_locked(const ble_hid_target_preferences_requ
         request->expected_revision != state.target.revision || state.target.revision == UINT64_MAX ||
         state.target.request_id == UINT64_MAX) return ESP_ERR_INVALID_STATE;
     if (request->count != state.bond_list.count) return ESP_ERR_INVALID_ARG;
-    ble_hid_preferences_t candidate = {.revision = state.target.revision + 1U,
-        .selected = request->selected, .count = request->count};
+    /* Resolve every identity before touching the worker-owned candidate. A
+     * rejected or overlapping submission must preserve its complete contents. */
+    uint8_t order_indices[BLE_HID_MAX_BONDS];
     bool used[BLE_HID_MAX_BONDS] = {0};
     for (unsigned int i = 0; i < request->count; ++i) {
         bool found = false;
@@ -2329,18 +2341,20 @@ static esp_err_t submit_preferences_locked(const ble_hid_target_preferences_requ
             const ble_hid_bond_t *bond = &state.bond_list.bonds[j];
             if (!used[j] && target_key_matches(&request->order[i], bond)) {
                 if (!bond->address_type_known) return ESP_ERR_NOT_SUPPORTED;
-                candidate.order[i] = key_for_bond(bond); used[j] = true; found = true; break;
+                order_indices[i] = (uint8_t)j; used[j] = true; found = true; break;
             }
         }
         if (!found) return ESP_ERR_INVALID_ARG;
     }
+    unsigned int selected_index = 0;
+    bool preserve_selected = false;
     if (request->selected) {
         bool found = false;
         for (unsigned int j = 0; j < state.bond_list.count; ++j) {
             const ble_hid_bond_t *bond = &state.bond_list.bonds[j];
             if (target_key_matches(&request->target, bond)) {
                 if (!bond->selection_supported) return ESP_ERR_NOT_SUPPORTED;
-                candidate.target = key_for_bond(bond); found = true; break;
+                selected_index = j; found = true; break;
             }
         }
         /* Reordering may preserve a previously selected but now missing bond.
@@ -2349,11 +2363,19 @@ static esp_err_t submit_preferences_locked(const ble_hid_target_preferences_requ
             state.target.target.bond_id_known && request->target.address_type == state.target.target.address_type &&
             memcmp(request->target.address, state.target.target.address, 6) == 0 &&
             memcmp(request->target.bond_id, state.target.target.bond_id, BLE_HID_BOND_ID_BYTES) == 0) {
-            candidate.target = state.target.target; found = true;
+            preserve_selected = true; found = true;
         }
         if (!found) return ESP_ERR_NOT_FOUND;
     }
-    state.target_candidate = candidate;
+    memset(&state.target_candidate, 0, sizeof(state.target_candidate));
+    state.target_candidate.revision = state.target.revision + 1U;
+    state.target_candidate.selected = request->selected;
+    state.target_candidate.count = request->count;
+    for (unsigned int i = 0; i < request->count; ++i)
+        state.target_candidate.order[i] = key_for_bond(&state.bond_list.bonds[order_indices[i]]);
+    if (request->selected)
+        state.target_candidate.target = preserve_selected ? state.target.target :
+            key_for_bond(&state.bond_list.bonds[selected_index]);
     state.target_expected_bond_mutation = state.bond_mutation_revision;
     ++state.target.request_id;
     state.target.request_status = BLE_HID_TARGET_PENDING; state.target.request_error = ESP_OK;
@@ -2371,15 +2393,24 @@ esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_re
     return error;
 }
 
+static void clear_target_request_locked(void)
+{
+    volatile uint8_t *bytes = (volatile uint8_t *)&state.target_request_scratch;
+    for (size_t i = 0; i < sizeof(state.target_request_scratch); ++i) bytes[i] = 0;
+}
+
 esp_err_t ble_hid_target_select(uint64_t bond_revision, const ble_hid_target_t *target)
 {
     portENTER_CRITICAL(&state_lock);
-    ble_hid_target_preferences_request_t request = {.expected_bond_revision = bond_revision,
-        .expected_revision = state.target.revision, .selected = target != NULL,
-        .count = state.bond_list.count};
-    if (target) request.target = *target;
-    for (unsigned int i = 0; i < request.count; ++i) request.order[i] = key_for_bond(&state.bond_list.bonds[i]);
-    esp_err_t error = submit_preferences_locked(&request, NULL);
+    ble_hid_target_preferences_request_t *request = &state.target_request_scratch;
+    request->expected_bond_revision = bond_revision;
+    request->expected_revision = state.target.revision;
+    request->selected = target != NULL;
+    request->count = state.bond_list.count;
+    if (target) request->target = *target;
+    for (unsigned int i = 0; i < request->count; ++i) request->order[i] = key_for_bond(&state.bond_list.bonds[i]);
+    esp_err_t error = submit_preferences_locked(request, NULL);
+    clear_target_request_locked();
     portEXIT_CRITICAL(&state_lock);
     return error;
 }
@@ -2410,11 +2441,15 @@ esp_err_t ble_hid_target_order(uint64_t bond_revision, const ble_hid_target_t *o
 {
     if (count > BLE_HID_MAX_BONDS || (count && !ordered)) return ESP_ERR_INVALID_ARG;
     portENTER_CRITICAL(&state_lock);
-    ble_hid_target_preferences_request_t request = {.expected_bond_revision = bond_revision,
-        .expected_revision = state.target.revision, .selected = state.target.selected,
-        .target = state.target.target, .count = (uint8_t)count};
-    if (count) memcpy(request.order, ordered, count * sizeof(*ordered));
-    esp_err_t error = submit_preferences_locked(&request, NULL);
+    ble_hid_target_preferences_request_t *request = &state.target_request_scratch;
+    request->expected_bond_revision = bond_revision;
+    request->expected_revision = state.target.revision;
+    request->selected = state.target.selected;
+    request->target = state.target.target;
+    request->count = (uint8_t)count;
+    if (count) memmove(request->order, ordered, count * sizeof(*ordered));
+    esp_err_t error = submit_preferences_locked(request, NULL);
+    clear_target_request_locked();
     portEXIT_CRITICAL(&state_lock);
     return error;
 }

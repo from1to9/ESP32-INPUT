@@ -261,7 +261,8 @@ static void geometry_checks(void)
     row_geometry(grid3, 3);
     row_geometry(actions, 3);
     assert_rect(control("Menu"), 404, 8, 64, 48);
-    assert_rect(control("Touch"), 140, 8, 132, 48);
+    assert_rect(control("Touch"), 140, 8, 76, 48);
+    assert_rect(control("Keys"), 224, 8, 48, 48);
     assert_rect(control("Clear"), 372, 72, 88, 48);
     for (unsigned i = 0; i < 3; ++i) {
         lv_area_t a, b, c, utility, row;

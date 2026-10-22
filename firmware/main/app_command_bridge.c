@@ -61,10 +61,12 @@ static bool same_session(const cp_identity_t *a, const cp_identity_t *b)
         !memcmp(a->session_id, b->session_id, CP_ID_BYTES);
 }
 size_t app_command_bridge_bytes(void) { return sizeof(app_command_bridge_t); }
+size_t app_command_bridge_alignment(void) { return _Alignof(app_command_bridge_t); }
 cp_error_t app_command_bridge_init(void *memory, size_t bytes,
     const app_command_bridge_port_t *port, app_command_bridge_t **out)
 {
     if (!memory || bytes < sizeof(app_command_bridge_t) || !out || !port ||
+        (uintptr_t)memory % _Alignof(app_command_bridge_t) ||
         !port->lock || !port->unlock || !port->now_ms || !port->available ||
         !port->execute || !port->safety || !port->read || !port->complete) return CP_INVALID;
     app_command_bridge_t *b = memory;
