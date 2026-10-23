@@ -132,7 +132,9 @@ static app_view_t view(input_mode_t mode, bool dark)
         .wifi_state = APP_UI_WIFI_CONNECTED, .wifi_rssi_valid = true, .wifi_rssi_dbm = -50,
         .settings_save_state = APP_SAVE_SAVED, .brightness_available = true,
         .brightness_percent = 70, .screen_off_available = true, .idle_timeout_seconds = 300,
-        .firmware_version = "resource-fixture", .uptime_seconds = 60};
+        .firmware_version = "resource-fixture", .uptime_seconds = 60,
+        .developer = "from1to9", .repository_url = "https://github.com/from1to9/ESP32-INPUT",
+        .git_commit = "0123456789abcdef0123456789abcdef01234567", .git_state = APP_GIT_CLEAN};
     static const char *const cells[] = {"ABCD", "EFGH", "IJKL", "MNOP", "QRST", "UVWX", "YZ01", "2345", "6789"};
     for (size_t i = 0; i < 9; ++i) strcpy(state.keyboard_cells[i], cells[i]);
     strcpy(state.bluetooth_target_name, "Resource test peer");
@@ -201,6 +203,10 @@ static bool idle_case(app_view_t state, bool hidden_changes, bool covered_target
         if (hidden_changes) {
             state.uptime_seconds += 61;
             strcpy(state.firmware_version, elapsed % 200 ? "hidden-version-a" : "hidden-version-b");
+            strcpy(state.developer, elapsed % 200 ? "Hidden developer A" : "Hidden developer B with more");
+            strcpy(state.repository_url, elapsed % 200 ? "https://example.com/owner/a" : "https://example.com/longer-owner/longer-repository");
+            strcpy(state.git_commit, elapsed % 200 ? "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" : "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            state.git_state = elapsed % 200 ? APP_GIT_CLEAN : APP_GIT_DIRTY;
             strcpy(state.bluetooth_hosts[0].name, elapsed % 200 ? "Hidden peer A" : "Hidden peer B");
             strcpy(state.wifi_scan.rows[0].label, elapsed % 200 ? "Hidden Wi-Fi A" : "Hidden Wi-Fi B");
             strcpy(state.bluetooth_name.effective, elapsed % 200 ? "Hidden name A" : "Hidden name B");
@@ -310,6 +316,18 @@ int main(int argc, char **argv)
             for (unsigned hidden = 0; hidden < 2; ++hidden)
                 if (!idle_case(view((input_mode_t)mode, dark != 0), hidden != 0, false)) passed = false;
     for (unsigned dark = 0; dark < 2; ++dark) {
+        const app_git_state_t git_states[] = {APP_GIT_DIRTY, APP_GIT_UNKNOWN, (app_git_state_t)99};
+        for (unsigned i = 0; i < sizeof(git_states) / sizeof(git_states[0]); ++i) {
+            panel_case_t about = {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_ABOUT, APP_CONFIRM_NONE};
+            app_view_t metadata = panel_view(&about, dark != 0);
+            metadata.git_state = git_states[i];
+            if (i == 2) {
+                memset(metadata.developer, 'D', sizeof(metadata.developer));
+                memset(metadata.repository_url, 'R', sizeof(metadata.repository_url));
+                memset(metadata.git_commit, 'a', sizeof(metadata.git_commit));
+            }
+            if (!idle_case(metadata, false, false)) passed = false;
+        }
         for (unsigned reference = APP_REFERENCE_UNKNOWN; reference <= APP_REFERENCE_UNSTABLE; ++reference) {
             app_view_t grip = view(INPUT_MOUSE, dark != 0);
             grip.motion_reason = APP_MOTION_READY;

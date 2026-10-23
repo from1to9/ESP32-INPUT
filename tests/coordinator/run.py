@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 SUITE = Path(__file__).resolve().parent
@@ -19,12 +20,16 @@ def main():
     if not compiler:
         raise SystemExit("A C11 compiler with address/undefined sanitizers is required.")
     with tempfile.TemporaryDirectory(prefix="esp32-coordinator-test-") as temporary:
+        subprocess.run([sys.executable, str(ROOT / "tools/build_identity.py"),
+                        "--root", str(ROOT), "--output",
+                        str(Path(temporary) / "app_build_identity.h")], check=True)
         binary = Path(temporary) / "test_coordinator"
         command = [compiler, "-std=c11", "-D_POSIX_C_SOURCE=200809L",
                    "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wconversion", "-Wshadow", "-g",
                    "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                    "-I", str(SUITE / "stubs"),
+                   "-I", temporary,
                    "-I", str(ROOT / "components/hid_engine/include"),
                    "-I", str(ROOT / "components/input_core/include"),
                    "-I", str(ROOT / "components/interaction/include"),

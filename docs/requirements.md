@@ -146,6 +146,9 @@ These additions preserve the original Mouse / Keyboard / Audio workflows.
 | D06 | Consistent UI and device information | Use shared layout metrics, aligned text/control grids and both themes on every page. Separate Connectivity, Display, Input and About pages. Show firmware/board/capabilities without secrets; show actual audio/speech availability, session and fault state, with reasons for unavailable routes. |
 | D07 | Input transport selection | System settings offers Bluetooth and USB, independent of foreground mode. Standard USB composite mouse/keyboard retains diagnostics under one USB stack. Cancel queued input and complete old-host releases before switching; an already disconnected old host permits explicit switching without claiming release delivery. A connected, suspended or stalled host must recover or disconnect, otherwise the switch times out without changing selection. Require fresh zero reports on the new link. Never duplicate input to both hosts or automatically fall back after cable removal. Distinguish selection, physical connection, readiness, switching and unavailable capability. |
 | D08 | Startup identity | Show a lightweight ESP32-INPUT startup logo consistent with the dark/pale-blue design, then hand off to the normal Mouse workspace. No artificial startup delay, additional full-frame allocation, hidden fault or automatic microphone activation. |
+| D09 | Developer and source identity | About and startup diagnostics identify the developer, repository and build-time Git commit with Clean/Modified/Unknown state. Preserve the separate firmware version and ELF build fingerprint. Missing Git data is unknown, never a fabricated commit or clean claim. |
+
+Project attribution and source identity follow the [build identity contract](build-identity.md).
 
 ### Focused mode workspace revision
 

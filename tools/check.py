@@ -45,5 +45,6 @@ for suite in ("multitouch", "board_touch", "usb_audio", "bt_audio", "board_audio
               "remote_input", "remote_device", "device_restart", "remote_media", "control_runtime", "connectivity_controls"):
     subprocess.run([sys.executable, str(root / "tests" / suite / "run.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/toolchain/test_idf_patches.py")], check=True)
+subprocess.run([sys.executable, str(root / "tests/toolchain/test_build_identity.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/test_device_smoke.py")], check=True)
 print("Host logic/protocol checks passed; radio and host interoperability require device testing.")

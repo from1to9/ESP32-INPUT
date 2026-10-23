@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
+#include "app_build_identity.h"
 #include "app_presenter.h"
 #include "app_boot_ui.h"
 #include "app_media_runtime.h"
@@ -2601,6 +2602,11 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
         (storage.loaded || storage.saved_revision != 0) ? APP_SAVE_SAVED : APP_SAVE_DEFAULTS;
     (void)snprintf(view.firmware_version, sizeof(view.firmware_version), "%s", s_firmware_version);
     (void)snprintf(view.build_id, sizeof(view.build_id), "%s", s_build_id);
+    (void)snprintf(view.developer, sizeof(view.developer), "%s", APP_BUILD_DEVELOPER);
+    (void)snprintf(view.repository_url, sizeof(view.repository_url), "%s", APP_BUILD_REPOSITORY_URL);
+    (void)snprintf(view.git_commit, sizeof(view.git_commit), "%s", APP_BUILD_GIT_COMMIT);
+    view.git_state = !APP_BUILD_GIT_STATE_KNOWN ? APP_GIT_UNKNOWN :
+        APP_BUILD_GIT_DIRTY ? APP_GIT_DIRTY : APP_GIT_CLEAN;
     (void)snprintf(view.board_revision, sizeof(view.board_revision), "%s", capabilities.name);
     (void)snprintf(view.device_id, sizeof(view.device_id), "%s", s_device_id);
     view.uptime_seconds = s_now_ms / 1000U;
@@ -2824,6 +2830,9 @@ void app_main(void)
     (void)snprintf(s_firmware_version, sizeof(s_firmware_version), "%s", description->version);
     for (size_t i = 0; i < 6; ++i)
         (void)snprintf(s_build_id + i * 2, sizeof(s_build_id) - i * 2, "%02x", description->app_elf_sha256[i]);
+    ESP_LOGI(TAG, "Firmware identity: developer=%s repository=%s git=%s state=%s build=%s",
+             APP_BUILD_DEVELOPER, APP_BUILD_REPOSITORY_URL,
+             APP_BUILD_GIT_KNOWN ? APP_BUILD_GIT_COMMIT : "unknown", APP_BUILD_GIT_STATE, s_build_id);
     uint8_t mac[6];
     if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK)
         (void)snprintf(s_device_id, sizeof(s_device_id), "INPUT-%02X%02X%02X", mac[3], mac[4], mac[5]);

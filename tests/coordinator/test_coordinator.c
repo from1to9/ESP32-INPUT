@@ -5800,6 +5800,26 @@ static void consumed_event_workspace_does_not_retain_private_payloads(void)
     for (size_t i = 0; i < sizeof(event); ++i) assert(bytes[i] == 0);
 }
 
+static void build_identity_is_independent_of_link_and_artifact_version(void)
+{
+    transport_setup(INPUT_MOUSE, APP_INPUT_USB);
+    strcpy(s_firmware_version, "fixture-version");
+    strcpy(s_build_id, "012345abcdef");
+    test_link.connected = test_link.ready = false;
+    test_usb.mounted = test_usb.ready = false;
+    hid_engine_set_link(&s_engine, false, false);
+    render_view(&test_link, ESP_OK);
+    assert(strcmp(test_view.firmware_version, "fixture-version") == 0);
+    assert(strcmp(test_view.build_id, "012345abcdef") == 0);
+    assert(strcmp(test_view.developer, APP_BUILD_DEVELOPER) == 0);
+    assert(strcmp(test_view.repository_url, APP_BUILD_REPOSITORY_URL) == 0);
+    assert(strcmp(test_view.git_commit, APP_BUILD_GIT_COMMIT) == 0);
+    assert(test_view.git_state == (!APP_BUILD_GIT_STATE_KNOWN ? APP_GIT_UNKNOWN :
+        APP_BUILD_GIT_DIRTY ? APP_GIT_DIRTY : APP_GIT_CLEAN));
+    assert(!test_view.connected && !test_view.ready);
+    assert(test_storage_requests == 0 && trace_count == 0);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -5807,6 +5827,7 @@ int main(int argc, char **argv)
 #define RUN(test) do { if (argc == 1 || strcmp(argv[1], #test) == 0) { \
     test_case = #test; test(); ++passed; } } while (0)
     REMOTE_UPDATE_CASES(RUN);
+    RUN(build_identity_is_independent_of_link_and_artifact_version);
     RUN(applied_remote_receipt_survives_later_local_selection);
     RUN(cancelled_remote_receipt_cannot_hold_a_new_local_switch);
     REMOTE_DEVICE_CASES(RUN);

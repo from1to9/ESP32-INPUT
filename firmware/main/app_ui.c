@@ -78,7 +78,7 @@ static lv_obj_t *s_bond_names[4], *s_bond_ids[4], *s_bond_states[4], *s_bond_row
 static lv_obj_t *s_bond_empty, *s_bond_page, *s_bond_previous, *s_bond_next, *s_bond_add, *s_bond_disconnect;
 static lv_obj_t *s_wifi_state, *s_wifi_detail, *s_wifi_setup, *s_wifi_forget;
 static lv_obj_t *s_brightness, *s_brightness_text, *s_timeouts[5];
-static lv_obj_t *s_about_identity[4], *s_about_battery, *s_about_uptime;
+static lv_obj_t *s_about_identity[6], *s_about_repository, *s_about_battery, *s_about_uptime;
 static lv_obj_t *s_setup_state, *s_setup_ssid, *s_setup_passcode, *s_setup_url, *s_setup_stop;
 static lv_obj_t *s_confirm_title, *s_confirm_detail, *s_confirm_accept, *s_sleep_shield, *s_lock_shield;
 static bool s_wake_touch;
@@ -266,6 +266,66 @@ static size_t bounded_length(const char *value, size_t capacity)
     size_t length = 0;
     while (length < capacity && value[length]) ++length;
     return length;
+}
+
+static bool about_text_valid(const char *value, size_t capacity)
+{
+    size_t length = bounded_length(value, capacity);
+    if (!length || length == capacity) return false;
+    for (size_t i = 0; i < length; ++i)
+        if ((unsigned char)value[i] < 0x20 || (unsigned char)value[i] > 0x7e) return false;
+    return value[0] != ' ' && value[length - 1] != ' ';
+}
+
+static bool about_hex(char value)
+{
+    return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
+        (value >= 'A' && value <= 'F');
+}
+
+static bool about_commit_valid(const char value[41])
+{
+    if (bounded_length(value, 41) != 40) return false;
+    for (unsigned i = 0; i < 40; ++i) if (!about_hex(value[i])) return false;
+    return true;
+}
+
+static bool about_repository_valid(const char value[96])
+{
+    if (!about_text_valid(value, 96) || strncmp(value, "https://", 8)) return false;
+    size_t i = 8;
+    bool dot = false;
+    unsigned label_length = 0;
+    for (; value[i] && value[i] != '/' && value[i] != ':'; ++i) {
+        char c = value[i];
+        if (c == '.') {
+            if (!label_length || value[i - 1] == '-') return false;
+            dot = true; label_length = 0;
+        } else {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || (c == '-' && label_length))) return false;
+            if (++label_length > 63) return false;
+        }
+    }
+    if (!label_length || !dot || value[i - 1] == '-') return false;
+    if (value[i] == ':') {
+        unsigned port = 0, digits = 0;
+        for (++i; value[i] && value[i] != '/'; ++i) {
+            if (value[i] < '0' || value[i] > '9' || ++digits > 5) return false;
+            port = port * 10 + (unsigned)(value[i] - '0');
+        }
+        if (!digits || !port || port > 65535) return false;
+    }
+    if (value[i] != '/' || !value[i + 1]) return false;
+    for (++i; value[i]; ++i) {
+        char c = value[i];
+        if (c == '%') {
+            if (!value[i + 1] || !value[i + 2] || !about_hex(value[i + 1]) || !about_hex(value[i + 2])) return false;
+            i += 2;
+        } else if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || strchr("-._~!$&'()*+,;=:@/", c))) return false;
+    }
+    return true;
 }
 
 static void visible(lv_obj_t *object, bool show)
@@ -1300,15 +1360,20 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
     }
     if (page == APP_SETTINGS_ABOUT) {
         lv_obj_t *about = settings;
-        const char *identity_names[] = {"Firmware", "Build", "Board", "Device"};
-        for (unsigned i = 0; i < 4; ++i) {
-            metadata(about, identity_names[i], 0, (int)i * 28 + 2, 88);
-            s_about_identity[i] = label(about, "Unavailable", 96, (int)i * 28, 352, INK);
+        const char *identity_names[] = {"Firmware", "Build artifact ID", "Board", "Device", "Developer", "Git commit"};
+        for (unsigned i = 0; i < 6; ++i) {
+            metadata(about, identity_names[i], 0, (int)i * 24 + 2, 128);
+            s_about_identity[i] = label(about, "Unavailable", 136, (int)i * 24, 312, INK);
             single_line(s_about_identity[i]);
         }
-        s_about_battery = label(about, "Battery unavailable", 0, 132, 448, MUTED);
-        lv_obj_set_height(s_about_battery, 72);
-        s_about_uptime = metadata(about, "Uptime unavailable", 0, 224, 448);
+        metadata(about, "Repository", 0, 148, 448);
+        s_about_repository = label(about, "Unavailable", 0, 168, 448, INK);
+        lv_obj_set_style_text_font(s_about_repository, META_FONT, 0);
+        lv_label_set_long_mode(s_about_repository, LV_LABEL_LONG_WRAP);
+        lv_obj_set_height(s_about_repository, 68);
+        s_about_battery = label(about, "Battery unavailable", 0, 248, 448, MUTED);
+        lv_obj_set_height(s_about_battery, 40);
+        s_about_uptime = metadata(about, "Uptime unavailable", 0, 296, 448);
         return;
     }
 }
@@ -1372,6 +1437,7 @@ static void clear_panel_bindings(void)
     memset(&s_brightness_text, 0, sizeof(s_brightness_text));
     memset(&s_timeouts, 0, sizeof(s_timeouts));
     memset(&s_about_identity, 0, sizeof(s_about_identity));
+    s_about_repository = NULL;
     memset(&s_about_battery, 0, sizeof(s_about_battery));
     memset(&s_about_uptime, 0, sizeof(s_about_uptime));
     memset(&s_setup_state, 0, sizeof(s_setup_state));
@@ -1992,6 +2058,14 @@ static void render_device(const app_view_t *view, const char *link)
     }
     const char *identity[] = {view->firmware_version, view->build_id, view->board_revision, view->device_id};
     for (unsigned i = 0; i < 4; ++i) label_text(s_about_identity[i], *identity[i] ? identity[i] : "Unavailable");
+    if (s_about_identity[4]) {
+        label_text(s_about_identity[4], about_text_valid(view->developer, sizeof(view->developer)) ? view->developer : "Unknown");
+        if (about_commit_valid(view->git_commit))
+            label_format(s_about_identity[5], "%.12s / %s", view->git_commit,
+                view->git_state == APP_GIT_CLEAN ? "Clean" : view->git_state == APP_GIT_DIRTY ? "Modified" : "Unknown");
+        else label_text(s_about_identity[5], "Unknown");
+        label_text(s_about_repository, about_repository_valid(view->repository_url) ? view->repository_url : "Unavailable");
+    }
     if (!view->battery_supported) snprintf(summary, sizeof(summary), "Battery unavailable\nUSB power detection unavailable");
     else if (view->battery_percent_valid && view->battery_percent <= 100)
         snprintf(summary, sizeof(summary), "Battery  %u%% / %s\nUSB power detection unavailable", view->battery_percent, battery_state_name(view->battery_state));

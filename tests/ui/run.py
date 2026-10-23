@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--build-dir", type=Path, default=ROOT / ".build/ui-host")
     parser.add_argument("--output-dir", type=Path,
                         help="new or empty evidence directory; existing evidence is never overwritten")
-    parser.add_argument("--suite", choices=("all", "visual", "resources", "keys", "motion"), default="all",
+    parser.add_argument("--suite", choices=("all", "visual", "resources", "keys", "motion", "about"), default="all",
                         help="focused diagnosis only; complete acceptance requires the default all suites")
     args = parser.parse_args()
     if args.output_dir is None:
@@ -93,7 +93,7 @@ def main():
     log = args.build_dir / "build.log"
     with log.open("w") as stream:
         build = [cmake, "--build", str(args.build_dir), "-j", "4"]
-        if args.suite in ("keys", "motion"):
+        if args.suite in ("keys", "motion", "about"):
             build += ["--target", "ui_visual"]
         for command in [configure, build]:
             result = subprocess.run(command, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)
@@ -108,7 +108,7 @@ def main():
     commands = []
     if args.suite in ("all", "visual"):
         commands.append(("visual", [str(args.build_dir / "ui_visual"), str(args.output_dir)]))
-    if args.suite in ("keys", "motion"):
+    if args.suite in ("keys", "motion", "about"):
         commands.append((args.suite, [str(args.build_dir / "ui_visual"), str(args.output_dir), args.suite]))
     if args.suite in ("all", "resources"):
         commands.append(("resources", [str(args.build_dir / "ui_resources"),

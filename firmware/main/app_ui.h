@@ -83,6 +83,7 @@ typedef enum {
 } app_save_state_t;
 typedef enum { APP_INPUT_BLUETOOTH, APP_INPUT_USB } app_input_transport_t;
 typedef enum { APP_HOST_CTRL, APP_HOST_COMMAND } app_host_os_t;
+typedef enum { APP_GIT_UNKNOWN, APP_GIT_CLEAN, APP_GIT_DIRTY } app_git_state_t;
 typedef enum { APP_AUDIO_VOICE, APP_AUDIO_SPEAKER } app_audio_kind_t;
 typedef enum { APP_SURFACE_CONTROL, APP_SURFACE_TOUCHPAD } app_touch_surface_t;
 typedef enum {
@@ -497,6 +498,10 @@ typedef struct {
     app_media_view_t media;
     app_media_review_t media_review;
     bool motion_recenter_available; /* Coordinator admits a local Mouse Recenter request. */
+    char developer[32];
+    char repository_url[96];
+    char git_commit[41]; /* Full 40-digit hexadecimal commit, distinct from build_id. */
+    app_git_state_t git_state;
 } app_view_t;
 
 /* Call create/render while holding the display lock. Submit must only enqueue
