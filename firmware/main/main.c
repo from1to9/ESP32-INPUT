@@ -2162,6 +2162,8 @@ static int32_t motion_trace_fixed(float value)
     return isfinite(value) && fabsf(value) <= 2000000.0f ? (int32_t)(value * 1000.0f) : INT32_MIN;
 }
 
+#include "app_motion_capture.inc"
+
 static unsigned reference_float_bits(float value)
 {
     uint32_t bits;
@@ -2699,6 +2701,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         (void)process_priority();
         sync_interaction();
         process_motion();
+        service_motion_capture();
         if (!link.congested) {
             hid_engine_step_result_t step = hid_engine_step(&s_engine, send_report, &link.generation);
             if (step != previous_step &&

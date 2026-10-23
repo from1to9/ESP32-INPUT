@@ -15,6 +15,7 @@ SUITE = Path(__file__).resolve().parent
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", help="run one named coordinator case for diagnosis")
+    parser.add_argument("--capture", action="store_true", help="also exercise optional raw IMU observer")
     args = parser.parse_args()
     compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
     if not compiler:
@@ -52,6 +53,10 @@ def main():
         str(ROOT / "components/interaction/interaction_multitouch.c"),
                    str(ROOT / "components/device_settings/device_settings.c"),
                    "-lm", "-o", str(binary)]
+        if args.capture:
+            command += ["-DCONFIG_APP_IMU_CAPTURE=1",
+                        str(ROOT / "firmware/main/motion_capture.c"),
+                        str(ROOT / "firmware/main/board_imu_queue.c")]
         subprocess.run(command, check=True)
         subprocess.run([str(binary)] + ([args.case] if args.case else []), check=True)
 

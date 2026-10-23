@@ -588,6 +588,7 @@ static void reset(void)
     memset(&s_imu_config, 0, sizeof(s_imu_config));
     s_imu_accel_scale = s_imu_gyro_scale = 0;
     memset(&s_imu_sample, 0, sizeof(s_imu_sample));
+    memset(&s_imu_stream, 0, sizeof(s_imu_stream));
     s_imu_sample_valid = false;
     s_imu_error = ESP_ERR_INVALID_STATE;
     s_imu_status = (board_imu_status_t){
@@ -1777,8 +1778,219 @@ static void test_haptic_diagnostic_actual_receipts(void)
     assert(board_haptics_request(BOARD_HAPTIC_RECOVER, BOARD_FEEDBACK_CONFIRM, &request_id) == ESP_ERR_INVALID_STATE);
 }
 
+static board_imu_frame_t stream_frames[BOARD_IMU_STREAM_CAPACITY];
+static board_imu_batch_t stream_batch;
+static board_imu_consumer_t stream_consumer;
+static uint64_t stream_fenced_epoch;
+
+static void stream_drain(void)
+{
+    const unsigned reads = hw.gyro_reads;
+    assert(board_imu_stream_drain(stream_consumer, stream_frames, BOARD_IMU_STREAM_CAPACITY, &stream_batch) == ESP_OK);
+    assert(hw.gyro_reads == reads && hw.critical_depth == 0);
+    assert(stream_batch.count <= BOARD_IMU_STREAM_CAPACITY);
+}
+
+static void stream_start(void)
+{
+    reset();
+    assert(board_init(legacy_hold) == ESP_OK);
+    assert(board_imu_stream_attach(&stream_consumer) == ESP_OK);
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY &&
+        stream_batch.discontinuities == BOARD_IMU_DISCONTINUITY_ATTACH && stream_batch.latest_sequence == 1);
+}
+
+static void test_ordered_stream_preserves_cache_units_and_identity(void)
+{
+    reset();
+    board_imu_consumer_t untouched = 99;
+    assert(board_imu_stream_attach(&untouched) == ESP_ERR_INVALID_STATE && untouched == 99);
+    assert(board_imu_stream_attach(NULL) == ESP_ERR_INVALID_ARG);
+    stream_start();
+    assert(board_imu_stream_attach(&untouched) == ESP_ERR_INVALID_STATE && untouched == 99);
+    for (unsigned i = 0; i < 3; ++i) {
+        hw.time_us += 10000; hw.gyro[0] += 1; hw.accel[1] += 0.01f;
+        assert(imu_update() == ESP_OK);
+    }
+    board_imu_sample_t latest;
+    assert(board_imu_read(&latest) == ESP_OK);
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DATA && stream_batch.count == 3 && !stream_batch.dropped_frames);
+    for (unsigned i = 0; i < 3; ++i) {
+        assert(stream_frames[i].sequence == i + 2 && stream_frames[i].delivery_epoch == stream_batch.delivery_epoch);
+        if (i) assert(stream_frames[i].sample.timestamp_us > stream_frames[i-1].sample.timestamp_us);
+    }
+    assert(memcmp(&stream_frames[2].sample, &latest, sizeof(latest)) == 0);
+    stream_drain(); assert(stream_batch.state == BOARD_IMU_DELIVERY_EMPTY);
+    s_imu_status.sample_count = UINT64_MAX;
+    hw.time_us += 10000; assert(imu_update() == ESP_OK);
+    stream_drain();
+    assert(stream_batch.count == 1 && stream_frames[0].sequence == 5 && s_imu_status.sample_count_saturated);
+    /* Invalid queries must neither overwrite outputs nor latch source expiry. */
+    const board_imu_batch_t saved_batch = stream_batch;
+    const board_imu_frame_t saved_frame = stream_frames[0];
+    hw.time_us += 60000;
+    assert(board_imu_stream_drain(stream_consumer + 1, stream_frames, 8, &stream_batch) == ESP_ERR_INVALID_STATE);
+    assert(board_imu_stream_drain(stream_consumer, stream_frames, 0, &stream_batch) == ESP_ERR_INVALID_ARG);
+    assert(board_imu_stream_drain(stream_consumer, stream_frames, 9, &stream_batch) == ESP_ERR_INVALID_ARG);
+    assert(board_imu_stream_drain(stream_consumer, NULL, 8, &stream_batch) == ESP_ERR_INVALID_ARG);
+    assert(memcmp(&saved_batch, &stream_batch, sizeof(stream_batch)) == 0 &&
+        memcmp(&saved_frame, &stream_frames[0], sizeof(saved_frame)) == 0 && s_caps.imu);
+}
+
+static void fence_during_imu_read(void)
+{
+    assert(board_imu_stream_fence(stream_consumer, &stream_fenced_epoch) == ESP_OK);
+}
+
+static void replace_consumer_during_imu_read(void)
+{
+    const board_imu_consumer_t previous = stream_consumer;
+    assert(board_imu_stream_detach(previous) == ESP_OK);
+    assert(board_imu_stream_attach(&stream_consumer) == ESP_OK && stream_consumer != previous);
+    assert(board_imu_stream_detach(previous) == ESP_ERR_INVALID_STATE);
+}
+
+static void test_ordered_stream_inflight_fence_is_delivery_only(void)
+{
+    stream_start();
+    hw.time_us += 10000; assert(imu_update() == ESP_OK); /* Queued pre-fence frame. */
+    const uint64_t hardware_generation = s_imu_generation;
+    hw.time_us += 10000; hw.during_gyro_read = fence_during_imu_read;
+    assert(imu_update() == ESP_OK && s_caps.imu && s_imu_generation == hardware_generation);
+    board_imu_sample_t latest; assert(board_imu_read(&latest) == ESP_OK);
+    assert(latest.timestamp_us == hw.time_us && !s_imu_status.fault_latched);
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY && stream_batch.count == 0 &&
+        stream_batch.discontinuities == BOARD_IMU_DISCONTINUITY_FENCE && stream_batch.dropped_frames == 2);
+    assert(stream_batch.latest_sequence == 3 && stream_batch.delivery_epoch == stream_fenced_epoch);
+    stream_drain(); assert(stream_batch.state == BOARD_IMU_DELIVERY_EMPTY);
+    hw.time_us += 10000; assert(imu_update() == ESP_OK); stream_drain();
+    assert(stream_batch.count == 1 && stream_frames[0].sequence == 4 && stream_frames[0].delivery_epoch == stream_fenced_epoch);
+    hw.time_us += 10000; hw.during_gyro_read = replace_consumer_during_imu_read;
+    assert(imu_update() == ESP_OK); stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY && stream_batch.dropped_frames == 3 &&
+        (stream_batch.discontinuities & BOARD_IMU_DISCONTINUITY_ATTACH));
+    hw.time_us += 10000; assert(imu_update() == ESP_OK); stream_drain();
+    assert(stream_batch.count == 1 && stream_frames[0].sequence == 6);
+}
+
+static void test_ordered_stream_loss_and_hardware_health_are_distinct(void)
+{
+    stream_start();
+    for (unsigned i = 0; i < 9; ++i) { hw.time_us += 1000; assert(imu_update() == ESP_OK); }
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY &&
+        stream_batch.discontinuities == BOARD_IMU_DISCONTINUITY_OVERFLOW && stream_batch.dropped_frames == 9);
+    assert(s_caps.imu && !s_imu_status.fault_latched && !s_imu_generation && stream_batch.source_error == ESP_OK);
+    hw.time_us += 10000; assert(imu_update() == ESP_OK);
+    hw.time_us += 50001; assert(imu_update() == ESP_OK); /* Oldest stale, newest fresh. */
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY &&
+        stream_batch.discontinuities == BOARD_IMU_DISCONTINUITY_STALE && stream_batch.dropped_frames == 11);
+    assert(s_caps.imu && !s_imu_status.fault_latched && !s_imu_generation);
+    hw.time_us += 1000; hw.read_delay_us = 10001;
+    const uint64_t accepted = s_imu_status.sample_count;
+    assert(imu_update() == ESP_OK); /* Legacy cache is still fresh; source attempt was rejected. */
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY &&
+        stream_batch.discontinuities == BOARD_IMU_DISCONTINUITY_REJECTED && stream_batch.latest_sequence == accepted);
+    assert(s_caps.imu && !s_imu_status.fault_latched && stream_batch.source_error == ESP_OK);
+    hw.read_delay_us = 10; hw.ready_mask = BMI2_DRDY_ACC;
+    assert(imu_update() == ESP_OK); stream_drain();
+    assert(stream_batch.discontinuities == BOARD_IMU_DISCONTINUITY_REJECTED && s_caps.imu);
+    hw.ready_mask = BMI2_DRDY_GYR | BMI2_DRDY_ACC;
+    hw.gyro_error = ESP_FAIL;
+    assert(imu_update() == ESP_FAIL); stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY &&
+        (stream_batch.discontinuities & BOARD_IMU_DISCONTINUITY_SOURCE) && stream_batch.source_error == ESP_FAIL);
+    const uint64_t fault_us = s_imu_status.first_fault_us;
+    stream_drain(); assert(stream_batch.state == BOARD_IMU_DELIVERY_UNAVAILABLE && !stream_batch.count);
+    hw.gyro_error = ESP_OK; hw.time_us += 10000; assert(imu_update() == ESP_OK); stream_drain();
+    assert(stream_batch.count == 1 && stream_batch.source_error == ESP_OK && s_caps.imu);
+    assert(s_imu_status.first_fault_us == fault_us && s_imu_status.first_fault_error == ESP_FAIL);
+    /* Diagnostic stream observes expiry without latching production loss. */
+    hw.time_us = s_imu_sample.timestamp_us + 50001; stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_UNAVAILABLE && stream_batch.source_error == ESP_ERR_TIMEOUT && s_caps.imu);
+    assert(s_imu_status.first_fault_us == fault_us);
+}
+
+static void test_ordered_stream_stale_and_clock_observation_cannot_change_source(void)
+{
+    for (unsigned clock = 0; clock < 2; ++clock) {
+        stream_start();
+        hw.time_us += 10000; assert(imu_update() == ESP_OK);
+        board_imu_sample_t latest; assert(board_imu_read(&latest) == ESP_OK);
+        const board_capabilities_t caps = s_caps;
+        const board_imu_status_t status = s_imu_status;
+        const board_imu_sample_t cache = s_imu_sample;
+        const bool valid = s_imu_sample_valid;
+        const uint64_t generation = s_imu_generation;
+        const esp_err_t source_error = s_imu_error;
+        const unsigned reads = hw.gyro_reads;
+        hw.time_us = clock ? latest.timestamp_us - 1 : latest.timestamp_us + 50001;
+        stream_drain();
+        assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY && stream_batch.source_error == ESP_ERR_TIMEOUT && !stream_batch.count);
+        assert(stream_batch.discontinuities == (BOARD_IMU_DISCONTINUITY_SOURCE |
+            (clock ? BOARD_IMU_DISCONTINUITY_CLOCK : BOARD_IMU_DISCONTINUITY_STALE)));
+        stream_drain(); assert(stream_batch.state == BOARD_IMU_DELIVERY_UNAVAILABLE);
+        assert(memcmp(&caps, &s_caps, sizeof(caps)) == 0 && memcmp(&status, &s_imu_status, sizeof(status)) == 0);
+        assert(memcmp(&cache, &s_imu_sample, sizeof(cache)) == 0 && s_imu_sample_valid == valid);
+        assert(s_imu_error == source_error && s_imu_generation == generation && hw.gyro_reads == reads);
+        /* A subsequent legacy read independently owns its original transition. */
+        assert(board_imu_read(&latest) == ESP_ERR_TIMEOUT && !s_caps.imu && !s_imu_sample_valid);
+        assert(s_imu_status.phase == (clock ? BOARD_IMU_FATAL : BOARD_IMU_RECOVERING));
+        assert(s_imu_status.fault_latched && !strcmp(s_imu_status.first_fault_stage, "cache_age"));
+        assert(s_imu_status.first_fault_error == ESP_ERR_TIMEOUT);
+    }
+}
+
+static void test_ordered_stream_failed_source_and_delivery_exhaustion(void)
+{
+    reset(); hw.imu_init_error = ESP_FAIL;
+    assert(board_init(legacy_hold) == ESP_OK && board_imu_stream_attach(&stream_consumer) == ESP_OK);
+    stream_drain(); assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY && stream_batch.source_error == ESP_FAIL);
+    stream_drain(); assert(stream_batch.state == BOARD_IMU_DELIVERY_UNAVAILABLE);
+    stream_start();
+    s_imu_stream.latest_sequence = UINT64_MAX;
+    hw.time_us += 10000; assert(imu_update() == ESP_OK);
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_FAILED && stream_batch.source_error == ESP_OK &&
+        (stream_batch.discontinuities & BOARD_IMU_DISCONTINUITY_ID_EXHAUSTED));
+    assert(s_caps.imu && !s_imu_status.fault_latched && s_imu_status.sample_count == 2);
+    board_imu_sample_t latest; assert(board_imu_read(&latest) == ESP_OK);
+}
+
+static void observe_stale_during_imu_read(void)
+{
+    stream_drain();
+    assert(stream_batch.discontinuities == (BOARD_IMU_DISCONTINUITY_STALE | BOARD_IMU_DISCONTINUITY_SOURCE));
+    assert(stream_batch.source_error == ESP_ERR_TIMEOUT && s_caps.imu && !s_imu_status.fault_latched);
+}
+
+static void test_ordered_stream_observer_during_acquisition_preserves_cause(void)
+{
+    stream_start();
+    hw.time_us += 10000; assert(imu_update() == ESP_OK);
+    hw.time_us += 50001; hw.during_gyro_read = observe_stale_during_imu_read;
+    assert(imu_update() == ESP_OK && s_caps.imu && !s_imu_generation && !s_imu_status.fault_latched);
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY && stream_batch.dropped_frames == 2 &&
+        stream_batch.discontinuities == (BOARD_IMU_DISCONTINUITY_STALE | BOARD_IMU_DISCONTINUITY_SOURCE) &&
+        stream_batch.source_error == ESP_OK && stream_batch.latest_sequence == 3);
+    hw.time_us += 10000; assert(imu_update() == ESP_OK); stream_drain();
+    assert(stream_batch.count == 1 && stream_frames[0].sequence == 4);
+}
+
 int main(void)
 {
+    test_ordered_stream_preserves_cache_units_and_identity();
+    test_ordered_stream_inflight_fence_is_delivery_only();
+    test_ordered_stream_loss_and_hardware_health_are_distinct();
+    test_ordered_stream_stale_and_clock_observation_cannot_change_source();
+    test_ordered_stream_failed_source_and_delivery_exhaustion();
+    test_ordered_stream_observer_during_acquisition_preserves_cause();
     test_confirmed_upright_pose_uses_display_top_axis();
     test_board_to_model_flat_inclined_and_upright_axes();
     test_display_observer_installs_before_adapter();

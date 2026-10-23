@@ -1,5 +1,17 @@
 menu "Input device board resources"
 
+    config APP_IMU_CAPTURE
+        bool "Bounded raw IMU diagnostic capture"
+        default n
+        help
+            Observe accepted ordered board samples in a fixed PSRAM buffer.
+            A Mouse Motion rising edge begins a capture; disabling Motion or
+            filling 6000 records ends it. Records are formatted and dumped
+            later through the existing diagnostic console, at most one per
+            coordinator loop. The observer never changes motion policy or
+            reads the sensor. Full storage stops capture, not mouse input.
+            This is a diagnostic build option, not a new motion estimator.
+
     config APP_DISPLAY_SPI_QUEUE_DEPTH
         int "Mosaico display SPI transaction queue ceiling"
         range 1 2

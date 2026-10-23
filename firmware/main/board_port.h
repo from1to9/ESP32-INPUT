@@ -2,8 +2,10 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
+#include "board_imu_stream.h"
 #include "esp_err.h"
 #include "lvgl.h"
 
@@ -35,16 +37,6 @@ typedef enum {
 } board_button_event_t;
 
 typedef void (*board_button_event_callback_t)(board_button_event_t event, uint64_t timestamp_us);
-
-typedef struct {
-    float x_dps;
-    float y_dps;
-    float z_dps;
-    float x_g;
-    float y_g;
-    float z_g;
-    uint64_t timestamp_us;
-} board_imu_sample_t;
 
 typedef enum {
     BOARD_IMU_UNINITIALIZED,
@@ -182,6 +174,36 @@ esp_err_t board_imu_read(board_imu_sample_t *sample);
  * fields observe complete read spans and skipped/woken scheduling lateness.
  * last_read covers non-null cache reads. */
 board_imu_status_t board_imu_status(void);
+
+/* Optional sole-consumer ordered delivery from the existing sensor owner.
+ * Attach after IMU initialization was attempted (including failed startup).
+ * One nonzero token owns the stream until detach; attach/fence start a new
+ * delivery epoch and flush queued history. A pre-boundary acquisition cannot
+ * enter the new epoch. Neither action changes the legacy cache or hardware
+ * capability, recovery state, first-fault history or Motion intent.
+ * Drain is nonblocking, copies at most capacity [1,8], and performs no I2C.
+ * ESP_OK means a valid query: only DATA/count>0 delivers samples. All other
+ * states have count zero and leave frame storage untouched. A discontinuity
+ * is acknowledged before later DATA; reasons may combine across boundaries.
+ * Overflow drops the entire queued segment plus its incoming frame. Stale
+ * queued history (>50 ms) is dropped as one segment, even if latest is fresh.
+ * Sequence counts accepted publications separately from diagnostic counters;
+ * sequence/epoch are copied atomically with each unchanged native sample.
+ * Exhausted identifiers latch delivery FAILED rather than wrapping. A valid
+ * query still returns that state; source_error independently observes current
+ * cache/hardware availability and may be ESP_OK. Stale/future latest-cache
+ * observations return ESP_ERR_TIMEOUT without changing hardware capability,
+ * cache validity, recovery generation, fault history or legacy read markers.
+ * Only legacy consumption/acquisition latch source health. Invalid arguments
+ * or tokens leave outputs untouched.
+ * Use caller-owned persistent batch storage; model work belongs outside the
+ * lock. Recheck freshness and your control epoch before use/output. Fence does
+ * not retract a batch already copied by the caller. */
+esp_err_t board_imu_stream_attach(board_imu_consumer_t *consumer);
+esp_err_t board_imu_stream_fence(board_imu_consumer_t consumer, uint64_t *delivery_epoch);
+esp_err_t board_imu_stream_drain(board_imu_consumer_t consumer,
+    board_imu_frame_t *frames, size_t capacity, board_imu_batch_t *batch);
+esp_err_t board_imu_stream_detach(board_imu_consumer_t consumer);
 
 /* Nonblocking cache, polled once per second; stale after five seconds. Always
  * fills output, including unknown/invalid fields on error. Percent is the

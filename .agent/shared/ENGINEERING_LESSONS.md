@@ -247,3 +247,19 @@ inferred stillness does not distinguish every constant-speed movement. Preserve
 these limits when adopting the [new model](../../docs/motion-estimation.md).
 A completed benchmark or sanitizer pass is distinct from its movement criteria
 passing; retain the failed cases and label privileged analytic inputs explicitly.
+
+## 12. Keep diagnostic delivery faults out of hardware authority
+
+A diagnostic queue may report stale samples, overflow, canceled acquisitions
+and exhausted delivery identities without changing hardware capability or the
+production recovery generation. Reusing a legacy read helper that latches a
+hardware fault can make an observer change the failure it measures. Test both
+directions: the diagnostic drain leaves source state unchanged, and the later
+production read still independently applies its existing failure policy.
+
+Fence the producer ticket before acquisition as well as queued storage. If a
+discontinuity is acknowledged before an older acquisition completes, retain its
+actual cause; do not relabel source loss as an intentional user fence. Accepted
+publication sequence differs from hardware conversion sequence. A complete raw
+export, a continuous accepted-sample segment and useful physical input are
+separate claims. See the [capture contract](../../docs/motion-capture.md).

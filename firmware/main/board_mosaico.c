@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "board_port.h"
 #include "board_display_transfer.h"
+#include "board_imu_queue.h"
 
 #include <limits.h>
 #include <math.h>
@@ -87,6 +88,7 @@ static uint64_t s_imu_generation;
 static bsp_imu_config_t s_imu_config;
 static float s_imu_accel_scale, s_imu_gyro_scale;
 static board_imu_sample_t s_imu_sample;
+static board_imu_queue_t s_imu_stream; /* Serialized with cache/status by s_status_mux. */
 static bool s_imu_sample_valid;
 static esp_err_t s_imu_error = ESP_ERR_INVALID_STATE;
 static board_imu_status_t s_imu_status = {
@@ -397,6 +399,7 @@ static void imu_count_sample_locked(void)
 static esp_err_t imu_failure_locked(esp_err_t error, const char *stage, bool fatal, bool attempted)
 {
     if (s_imu_status.phase == BOARD_IMU_FATAL) return s_imu_error;
+    board_imu_queue_break(&s_imu_stream, BOARD_IMU_DISCONTINUITY_SOURCE);
     if (!fatal && s_imu_status.phase != BOARD_IMU_RECOVERING) {
         if (s_imu_generation == UINT64_MAX) {
             fatal = true;
@@ -535,6 +538,7 @@ static esp_err_t imu_update(void)
     esp_err_t result = s_imu_error;
     const bool fatal = s_imu_status.phase == BOARD_IMU_FATAL;
     const uint64_t generation = s_imu_generation;
+    const uint64_t delivery_ticket = board_imu_queue_ticket(&s_imu_stream);
     portEXIT_CRITICAL(&s_status_mux);
     if (fatal) {
         return result;
@@ -575,8 +579,10 @@ static esp_err_t imu_update(void)
             s_imu_error = ESP_OK;
             s_caps.imu = true;
             imu_count_sample_locked();
+            board_imu_queue_publish(&s_imu_stream, delivery_ticket, &candidate);
         }
     } else if (kind == IMU_READ_NOT_READY || kind == IMU_READ_LATE) {
+        board_imu_queue_break(&s_imu_stream, BOARD_IMU_DISCONTINUITY_REJECTED);
         /* Keep the original accepted cache only within its existing freshness
          * budget. No candidate publication, retimestamping or immediate retry. */
         const uint64_t time_us = (uint64_t)esp_timer_get_time();
@@ -678,6 +684,7 @@ static void init_optional_imu(void)
     portEXIT_CRITICAL(&s_status_mux);
     const uint64_t started_us = (uint64_t)esp_timer_get_time();
     board_imu_sample_t first;
+    uint64_t delivery_ticket = 0;
     const char *stage = "first_sample";
     imu_read_kind_t kind;
     do {
@@ -687,6 +694,9 @@ static void init_optional_imu(void)
             stage = "first_sample";
             break;
         }
+        portENTER_CRITICAL(&s_status_mux);
+        delivery_ticket = board_imu_queue_ticket(&s_imu_stream);
+        portEXIT_CRITICAL(&s_status_mux);
         result = imu_read_hardware(&first, &stage, &kind);
         if (result != ESP_OK && result != ESP_ERR_NOT_FOUND) {
             break;
@@ -715,6 +725,7 @@ static void init_optional_imu(void)
     s_imu_status.phase = BOARD_IMU_ACTIVE;
     s_imu_status.retry_delay_ms = IMU_POLL_MS;
     imu_count_sample_locked();
+    board_imu_queue_publish(&s_imu_stream, delivery_ticket, &first);
     s_caps.imu = s_imu_error == ESP_OK;
     portEXIT_CRITICAL(&s_status_mux);
 }
@@ -1061,6 +1072,21 @@ board_capabilities_t board_capabilities(void)
     return capabilities;
 }
 
+/* Both APIs observe the same freshness limit. Only legacy consumption owns
+ * source-loss latching; ordered diagnostic delivery must not change source
+ * capability, cache, recovery generation or fault history. Caller holds mux. */
+static esp_err_t imu_cached_error_locked(uint64_t time_us, bool latch_source_loss)
+{
+    esp_err_t result = s_imu_error;
+    if (result == ESP_OK && (!s_caps.imu || !s_imu_sample_valid)) result = ESP_ERR_INVALID_STATE;
+    if (result == ESP_OK && (time_us < s_imu_sample.timestamp_us ||
+            time_us - s_imu_sample.timestamp_us > IMU_MAX_AGE_US)) {
+        result = latch_source_loss ?
+            imu_failure_locked(ESP_ERR_TIMEOUT, "cache_age", time_us < s_imu_sample.timestamp_us, false) : ESP_ERR_TIMEOUT;
+    }
+    return result;
+}
+
 esp_err_t board_imu_read(board_imu_sample_t *sample)
 {
     if (!sample) {
@@ -1068,28 +1094,63 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
     }
     portENTER_CRITICAL(&s_status_mux);
     const uint64_t time_us = (uint64_t)esp_timer_get_time();
-    esp_err_t result = s_imu_error;
-    if (result == ESP_OK && (!s_caps.imu || !s_imu_sample_valid)) {
-        result = ESP_ERR_INVALID_STATE;
-    }
+    const esp_err_t result = imu_cached_error_locked(time_us, true);
     if (result == ESP_OK) {
-        if (time_us < s_imu_sample.timestamp_us || time_us - s_imu_sample.timestamp_us > IMU_MAX_AGE_US) {
-            result = ESP_ERR_TIMEOUT;
-            result = imu_failure_locked(result, "cache_age", time_us < s_imu_sample.timestamp_us, false);
-        } else {
-            *sample = s_imu_sample;
-            /* Flat and text-upright holds place native Z outward and native Y
-             * toward the screen top. Both vectors therefore use the native
-             * basis here. The factory UI's Euler Pitch/Roll remap does not
-             * define this three-dimensional body basis. Evidence and remaining
-             * physical checks: tests/board_port/README.md. */
-        }
+        *sample = s_imu_sample;
+        /* Flat and text-upright holds place native Z outward and native Y
+         * toward the screen top. Both vectors therefore use the native
+         * basis here. The factory UI's Euler Pitch/Roll remap does not
+         * define this three-dimensional body basis. Evidence and remaining
+         * physical checks: tests/board_port/README.md. */
     }
     s_imu_status.read_seen = true;
     s_imu_status.last_read_error = result;
     s_imu_status.last_read_us = time_us;
     portEXIT_CRITICAL(&s_status_mux);
     return result;
+}
+
+esp_err_t board_imu_stream_attach(board_imu_consumer_t *consumer)
+{
+    if (!consumer) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_status_mux);
+    const bool attached = s_imu_status.initialization_attempted && board_imu_queue_attach(&s_imu_stream, consumer);
+    portEXIT_CRITICAL(&s_status_mux);
+    return attached ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t board_imu_stream_fence(board_imu_consumer_t consumer, uint64_t *delivery_epoch)
+{
+    if (!delivery_epoch) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_status_mux);
+    const bool fenced = board_imu_queue_fence(&s_imu_stream, consumer, delivery_epoch);
+    portEXIT_CRITICAL(&s_status_mux);
+    return fenced ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t board_imu_stream_drain(board_imu_consumer_t consumer,
+    board_imu_frame_t *frames, size_t capacity, board_imu_batch_t *batch)
+{
+    if (!frames || !batch || !capacity || capacity > BOARD_IMU_STREAM_CAPACITY) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_status_mux);
+    if (!board_imu_queue_owns(&s_imu_stream, consumer)) {
+        portEXIT_CRITICAL(&s_status_mux);
+        return ESP_ERR_INVALID_STATE;
+    }
+    const uint64_t time_us = (uint64_t)esp_timer_get_time();
+    const esp_err_t source_error = imu_cached_error_locked(time_us, false);
+    const bool drained = board_imu_queue_drain(&s_imu_stream, consumer, frames, capacity,
+        time_us, source_error == ESP_OK, source_error, batch);
+    portEXIT_CRITICAL(&s_status_mux);
+    return drained ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t board_imu_stream_detach(board_imu_consumer_t consumer)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    const bool detached = board_imu_queue_detach(&s_imu_stream, consumer);
+    portEXIT_CRITICAL(&s_status_mux);
+    return detached ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 board_imu_status_t board_imu_status(void)

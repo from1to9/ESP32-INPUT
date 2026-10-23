@@ -33,13 +33,14 @@ subprocess.run([sys.executable, str(root / "tests/test_hid_contract.py")], check
 subprocess.run([sys.executable, str(root / "tests/ble_hid/run.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/usb_hid/run.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/coordinator/run.py")], check=True)
+subprocess.run([sys.executable, str(root / "tests/coordinator/run.py"), "--capture"], check=True)
 subprocess.run([sys.executable, str(root / "tests/board_port/run.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/settings_store/run.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/wifi/run.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/presenter/run.py")], check=True)
 # Domain and composition suites run production code at named SDK boundaries.
 # These commands never enumerate, open, flash or test a physical device.
-for suite in ("multitouch", "board_touch", "usb_audio", "bt_audio", "board_audio",
+for suite in ("motion_capture", "multitouch", "board_touch", "usb_audio", "bt_audio", "board_audio",
               "display_transfer", "boot_ui", "audio_engine", "spoken_letters",
               "media_runtime", "media_controls", "control_protocol", "command_bridge",
               "remote_input", "remote_device", "device_restart", "remote_media", "control_runtime", "connectivity_controls"):

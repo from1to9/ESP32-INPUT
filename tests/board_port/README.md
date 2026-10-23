@@ -8,6 +8,66 @@ driver doubles model the ESP-IDF/BSP boundary; they do not claim hardware or
 radio success. Task creation records ownership and allocation, while the sensor
 worker's recovery/fatal paths run against a deterministic clock.
 
+The optional ordered delivery API uses the same sole acquisition owner and
+unchanged native six-axis samples. The SDK-independent
+[`board_imu_stream.h`](../../firmware/main/board_imu_stream.h) defines frames,
+delivery states and discontinuity reason bits. The private portable
+[`board_imu_queue.c`](../../firmware/main/board_imu_queue.c) owns eight fixed
+slots; the adapter serializes queue, cache and status under its existing lock.
+There is no new task, allocation or bus reader. Native host measurements are
+32 bytes per sample, 48 per paired frame, 48 per batch result and 456 for the
+complete queue (384 bytes of frame payload). These are host layout measurements;
+the target build and device timing/stack margin require separate verification.
+
+Attach grants one nonzero consumer token. Every new attachment gets a distinct
+token; source loss and fences retain that ownership token but advance delivery
+epoch. The producer captures its epoch before acquisition, then pairs the
+sample, independent accepted-publication sequence and epoch under the same lock.
+An in-flight pre-fence/pre-attachment frame may refresh the legacy cache but
+cannot enter a new delivery epoch. Diagnostic sample-count saturation cannot
+repeat an operational sequence. Exhausted sequence/epoch/token identifiers fail
+delivery closed without wrapping or fabricating a hardware failure.
+
+Drain copies at most eight frames in order and acknowledges a pending
+discontinuity with zero frames before later data. `ESP_OK` confirms a valid
+query; only `BOARD_IMU_DELIVERY_DATA` with a positive count delivers samples.
+Empty, discontinuous, unavailable and permanently failed delivery are distinct.
+`source_error` independently observes current cache/hardware availability. Invalid
+arguments or ownership tokens leave caller outputs untouched. Overflow discards
+the entire buffered segment and incoming frame, reports an explicit reason and
+counts those accepted frames as lost. A stale prefix discards the whole segment
+even when its latest frame is fresh. Exactly 50 ms remains acceptable. Late or
+not-ready acquisition reports a delivery rejection even when the unchanged
+legacy cache is still usable. Queue loss alone never changes capability,
+recovery generation or first-fault history. Ordered drain is observational:
+even expiry of the latest cache or a backward clock only invalidates delivery,
+returning the observed timeout while leaving every legacy source field and
+read marker unchanged. Legacy consumption/acquisition independently retain
+their existing fail-closed hardware policy.
+
+Consumers should keep their bounded batch buffer in persistent storage, process
+real timestamps outside the adapter lock, and recheck freshness and their own
+control epoch before producing output. Fences do not retract already copied
+caller data. The queue cannot reconstruct missed ODR samples, prove uniform
+10 ms cadence or qualify an estimator. Intentional attach/fence reasons must
+remain distinguishable from source/overflow/stale/rejected loss. Lost-frame
+diagnostics count accepted frames canceled while subscribed (including detach),
+not rejected reads or publications while no subscriber exists; the lifetime
+total saturates independently of operational identity.
+
+The queue regression delivers 150,000 accepted frames exactly once with a
+100 Hz producer and a 66.7 Hz consumer. It also checks partial drains/ring wrap,
+unchanged float representations and timestamps, explicit whole-segment overflow,
+50 ms boundaries, a stale prefix with a fresh latest frame, clock/order loss,
+in-flight fences acknowledged before publication, detach/re-attach ownership,
+invalid-output preservation, unavailable source, diagnostic saturation and
+identifier exhaustion. Adapter regressions exercise the real publication path,
+cache/queue coexistence, in-flight fences and replacement consumers, startup
+failure, late/not-ready rejection, source loss/recovery, retained first-fault
+history, observational stale/clock rejection and delivery failure independent
+of source health. Driver doubles still
+reject sensor I/O inside the critical section.
+
 Display setup checks create the panel and install the first-party transfer
 observer before the adapter can register its callback/start rendering. A panel
 creation error stops setup; unavailable observation leaves the ordinary display

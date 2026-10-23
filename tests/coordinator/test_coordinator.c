@@ -577,7 +577,15 @@ esp_err_t settings_store_init(device_settings_t *settings)
 }
 esp_err_t app_wifi_init(void) { unexpected_boot_boundary(); }
 esp_err_t nvs_flash_init(void) { unexpected_boot_boundary(); }
-const esp_app_desc_t *esp_app_get_description(void) { unexpected_boot_boundary(); }
+const esp_app_desc_t *esp_app_get_description(void)
+{
+#if defined(CONFIG_APP_IMU_CAPTURE) && CONFIG_APP_IMU_CAPTURE
+    static const esp_app_desc_t description = {.version = "observer-fixture", .app_elf_sha256 = {1, 2, 3}};
+    return &description;
+#else
+    unexpected_boot_boundary();
+#endif
+}
 esp_err_t esp_read_mac(uint8_t *mac, esp_mac_type_t type)
 {
     (void)mac;
@@ -5820,6 +5828,10 @@ static void build_identity_is_independent_of_link_and_artifact_version(void)
     assert(test_storage_requests == 0 && trace_count == 0);
 }
 
+#if defined(CONFIG_APP_IMU_CAPTURE) && CONFIG_APP_IMU_CAPTURE
+#include "motion_capture_cases.inc"
+#endif
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -5827,6 +5839,11 @@ int main(int argc, char **argv)
 #define RUN(test) do { if (argc == 1 || strcmp(argv[1], #test) == 0) { \
     test_case = #test; test(); ++passed; } } while (0)
     REMOTE_UPDATE_CASES(RUN);
+#if defined(CONFIG_APP_IMU_CAPTURE) && CONFIG_APP_IMU_CAPTURE
+    RUN(raw_capture_observes_without_mutating_production_input);
+    RUN(raw_capture_full_and_dump_pause_do_not_stop_motion);
+    RUN(raw_capture_delivery_failure_is_not_a_hardware_or_input_failure);
+#endif
     RUN(build_identity_is_independent_of_link_and_artifact_version);
     RUN(applied_remote_receipt_survives_later_local_selection);
     RUN(cancelled_remote_receipt_cannot_hold_a_new_local_switch);

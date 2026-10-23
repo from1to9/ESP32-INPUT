@@ -135,3 +135,29 @@ cannot recover missing hardware samples or establish a regular cadence by
 itself. Sensor timing, gravity compensation, motion/rest inference and HID
 response require separate evidence. No new Mouse estimator is enabled or
 flashed by this research stage.
+
+## Ordered capture implementation
+
+The next diagnostic implementation adds a bounded ordered board stream and an
+optional deferred raw capture. It retains the existing production interaction
+path and does not enable an unqualified estimator. See the
+[capture contract and procedure](motion-capture.md) for lifecycle, data units,
+loss accounting, replay limits and device qualification boundaries.
+
+## Gyro-propagated translation candidate
+
+The separately frozen [candidate](../experiments/mouse_motion/gyro_candidate/README.md)
+uses quaternion gyro propagation after an explicit stationary alignment. It does
+not use movement acceleration to correct tilt, decay established coast velocity,
+or map angular rate directly to Mouse. A limited braking/stop prior follows a
+nearly canceled velocity estimate; it is an interaction hypothesis, not proof of
+physical rest. The implementation remains outside the firmware component list.
+
+All 28 original scenarios and their thresholds were retained. The first run
+satisfied 24 cases and 190 of 198 checks, but failed the overall gate. Noise and
+bias produced excessive rest drift, and combined movement/noise/bias produced
+large velocity errors. A doubled pointer gain also prevents treating total HID
+drift counts as a controlled comparison with the earlier candidate. The first
+run and its known state-observation inconsistency are retained without tuning
+or rewriting results. Full raw physical captures are still required before
+choosing or integrating a production estimator.

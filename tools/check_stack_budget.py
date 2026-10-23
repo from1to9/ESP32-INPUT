@@ -37,6 +37,8 @@ UNITS = {
     "control_runtime": "firmware/main/app_control_runtime.c",
     "board": "firmware/main/board_mosaico.c",
     "interaction": "components/interaction/interaction.c",
+    "imu_queue": "firmware/main/board_imu_queue.c",
+    "motion_capture": "firmware/main/motion_capture.c",
 }
 CORE = [("main", "app_main"), ("main", "coordinator_run")]
 DEVICE_SUBMIT = CORE + [("bridge", "app_command_bridge_service"),
@@ -51,6 +53,14 @@ MEDIA_INTENT = CORE + [("main", "handle_intent"),
 # Private helpers may be inlined; an omitted private frame is already charged to
 # its emitted caller. Public entries and the lifetime boundaries are required.
 PATHS = {
+    "raw_motion_capture": CORE + [("main", "service_motion_capture"),
+        ("main", "capture_observation"), ("motion_capture", "motion_capture_append")],
+    "raw_motion_drain": CORE + [("main", "service_motion_capture"),
+        ("board", "board_imu_stream_drain"), ("imu_queue", "board_imu_queue_drain"),
+        ("imu_queue", "board_imu_queue_break"), ("imu_queue", "advance_epoch"),
+        ("imu_queue", "fail_ids"), ("imu_queue", "clear_frames"), ("imu_queue", "count_dropped")],
+    "raw_motion_dump": CORE + [("main", "service_motion_capture"),
+        ("main", "capture_dump_step"), ("motion_capture", "motion_capture_row")],
     "runtime_diagnostics_wifi": CORE + [("main", "report_runtime_diagnostics"),
                                         ("wifi", "app_wifi_get_snapshot")],
     "scan_diagnostics_copy": CORE + [("main", "report_runtime_diagnostics"),
@@ -215,6 +225,7 @@ REQUIRED = set(CORE + [("main", "render_view"), ("main", "report_runtime_diagnos
     if step[1].startswith(("app_", "ble_", "bt_", "settings_", "device_settings_", "interaction_"))
 }
 CONSUMERS = [
+    "firmware/main/app_motion_capture.inc",
     "firmware/main/main.c", "firmware/main/app_remote_device_bindings.inc",
     "firmware/main/app_remote_device_maintenance.inc", "firmware/main/app_remote_device_read.inc",
     "firmware/main/app_remote_media_bindings.inc", "firmware/main/app_update_bindings.inc",
