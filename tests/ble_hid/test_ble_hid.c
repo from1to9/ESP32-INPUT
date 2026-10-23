@@ -38,9 +38,11 @@ static uint8_t copied_payload[8];
 static TickType_t fake_tick;
 static int64_t fake_uptime_us = -1;
 static unsigned uptime_reads;
+static unsigned advertising_heap_reads;
 static esp_err_t controller_init_result = ESP_OK;
 static bool task_create_fails;
 static void (*registration_hook)(void);
+static void (*advertising_start_hook)(void);
 static bool worker_step_mode;
 static unsigned worker_receive_count;
 static jmp_buf worker_exit;
@@ -55,6 +57,17 @@ static esp_err_t storage_result = ESP_OK, commit_result = ESP_OK, bond_result = 
 static esp_ble_bond_dev_t fake_bonds[SUBSCRIPTION_CAPACITY];
 static int fake_bond_count;
 static bool callback_active;
+size_t heap_caps_get_free_size(uint32_t capabilities) {
+    assert(!callback_active);
+    ++advertising_heap_reads;
+    return (capabilities & MALLOC_CAP_DMA) ? 9000U : 42000U;
+}
+size_t heap_caps_get_largest_free_block(uint32_t capabilities) {
+    assert(!callback_active);
+    ++advertising_heap_reads;
+    return (capabilities & MALLOC_CAP_DMA) ? 4000U : 25000U;
+}
+
 static void (*commit_hook)(void);
 static void (*bond_hook)(void);
 static void (*bond_count_hook)(void);
@@ -298,7 +311,7 @@ esp_err_t esp_ble_remove_bond_device(esp_bd_addr_t address) {
 }
 esp_err_t esp_ble_gatts_close(esp_gatt_if_t interface, uint16_t conn_id) { (void)interface; (void)conn_id; ++close_calls; ++sdk_calls; return ESP_OK; }
 esp_err_t esp_ble_gatts_send_response(esp_gatt_if_t interface, uint16_t conn_id, uint32_t transaction, esp_gatt_status_t status, esp_gatt_rsp_t *response) { (void)interface; (void)conn_id; (void)transaction; assert(response); last_response = *response; last_response_status = status; last_response_commit_count = commit_calls; ++response_calls; ++sdk_calls; return ESP_OK; }
-esp_err_t esp_ble_gap_start_advertising(esp_ble_adv_params_t *parameters) { assert(parameters); ++advertising_calls; return adv_start_result; }
+esp_err_t esp_ble_gap_start_advertising(esp_ble_adv_params_t *parameters) { assert(parameters); ++advertising_calls; if (advertising_start_hook) advertising_start_hook(); return adv_start_result; }
 esp_err_t esp_ble_gap_stop_advertising(void) { ++adv_stop_calls; ++sdk_calls; return adv_stop_result; }
 esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t interface, uint16_t conn_id, uint16_t handle, uint16_t length, uint8_t *value, bool confirmation) {
     assert(interface == 7 && conn_id == 3 && handle && length <= sizeof(copied_payload) && !confirmation);
@@ -319,6 +332,10 @@ static void worker_cycle(void) {
 static void drain(void) { control_command_t command; while (xQueueReceive(control_queue, &command, 0)) {} }
 static control_command_t pop(void) { control_command_t command; assert(xQueueReceive(control_queue, &command, 0)); return command; }
 static void reset(void) {
+    memset(&advertising_diagnostics, 0, sizeof(advertising_diagnostics));
+    advertising_trace_head = 0;
+    advertising_start_sequence = advertising_stop_sequence = 0;
+    advertising_heap_reads = 0;
     memset(&state, 0, sizeof(state));
     first_failure = (ble_hid_failure_t){.stage = "none", .error = ESP_OK};
     memset(&device_name, 0, sizeof(device_name));
@@ -338,6 +355,7 @@ static void reset(void) {
     controller_init_result = ESP_OK;
     task_create_fails = false;
     registration_hook = NULL;
+    advertising_start_hook = NULL;
     memset(&subscriptions, 0, sizeof(subscriptions));
     memset(&pending_subscriptions, 0, sizeof(pending_subscriptions));
     memset(fake_bonds, 0, sizeof(fake_bonds));
@@ -1751,7 +1769,7 @@ static void test_repeated_lifecycle(void) {
         gap_callback(ESP_GAP_BLE_ADV_START_COMPLETE_EVT, &p);
     }
     assert(notify_calls == 200000U && advertising_calls == 100000U);
-    assert(!ble_hid_failure().recorded && uptime_reads == 0);
+    assert(!ble_hid_failure().recorded && uptime_reads == advertising_diagnostics.total_events);
 }
 
 static void assert_same_failure(ble_hid_failure_t expected) {
@@ -1767,7 +1785,7 @@ static void test_first_failure_initialization(void) {
     ble_hid_failure_t none = ble_hid_failure();
     assert(!none.recorded && none.error == ESP_OK && strcmp(none.stage, "none") == 0);
     assert(!none.sdk_status_known && none.sdk_status == 0 && none.uptime_ms == 0);
-    assert(uptime_reads == 0);
+    assert(uptime_reads == advertising_diagnostics.total_events);
     fake_uptime_us = 1234567;
     nvs_result = ESP_ERR_NO_MEM;
     assert(ble_hid_init() == ESP_ERR_NO_MEM);
@@ -1779,7 +1797,7 @@ static void test_first_failure_initialization(void) {
     assert(ble_hid_init() == ESP_ERR_INVALID_STATE);
     fail_transport("Later failure", ESP_FAIL);
     assert_same_failure(first);
-    assert(uptime_reads == 1);
+    assert(uptime_reads == advertising_diagnostics.total_events + 1U);
 
     reset_startup(); controller_init_result = ESP_ERR_NO_MEM;
     assert(ble_hid_init() == ESP_ERR_NO_MEM);
@@ -1824,7 +1842,7 @@ static void test_first_failure_asynchronous_setup(void) {
     gap_callback(ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT, &gap);
     callback_active = false;
     assert_same_failure(first);
-    assert(uptime_reads == 1);
+    assert(uptime_reads == advertising_diagnostics.total_events + 1U);
 
     reset_startup(); assert(ble_hid_init() == ESP_OK);
     esp_ble_gatts_cb_param_t p = {0};
@@ -1869,7 +1887,7 @@ static void test_first_failure_recovery_and_observation(void) {
         assert(strcmp(ble_hid_failure_stage_name(), "none") == 0);
     }
     callback_active = false;
-    assert(memcmp(before, &state, sizeof(state)) == 0 && sdk_calls == calls && uptime_reads == 0);
+    assert(memcmp(before, &state, sizeof(state)) == 0 && sdk_calls == calls && uptime_reads == advertising_diagnostics.total_events);
     uint8_t report[8] = {0};
     notify_result = ESP_ERR_NO_MEM; fake_uptime_us = 22000999;
     uint64_t generation = state.public.generation;
@@ -1890,7 +1908,7 @@ static void test_first_failure_recovery_and_observation(void) {
     connect_peer(); drain(); subscribe();
     assert(state.public.ready && !state.public.failed && !state.link_fault);
     assert_same_failure(first);
-    assert(uptime_reads == 1);
+    assert(uptime_reads == advertising_diagnostics.total_events + 1U);
 }
 
 static void test_first_failure_authentication_and_deadline(void) {
@@ -1941,7 +1959,7 @@ static void test_first_failure_ignores_nonfaults_and_stale_jobs(void) {
     service_link_control(); disconnect_peer();
     connect_peer(); drain();
     fail_link_current(&old, 0, false, "Obsolete link error", ESP_ERR_NO_MEM);
-    assert(!state.public.failed && !ble_hid_failure().recorded && uptime_reads == 0);
+    assert(!state.public.failed && !ble_hid_failure().recorded && uptime_reads == advertising_diagnostics.total_events);
 }
 
 static void name_read_complete(int status, const char *value) {
@@ -2665,7 +2683,14 @@ static void test_quiet_forget_all_and_empty_durable_preferences(void) {
 }
 
 #include "native_management_cases.inc"
+#include "advertising_diagnostics_cases.inc"
+
 int main(void) {
+    test_advertising_diagnostics_first_fault_and_copy();
+    test_advertising_diagnostics_completion_before_api_return();
+    test_advertising_diagnostics_bounds_missing_and_benign_stop();
+    test_advertising_diagnostics_name_fault_classification();
+    test_advertising_diagnostics_name_benign_and_late_drain();
     native_management_selected_add_and_reconnect();
     native_management_all_and_single_removal();
     native_management_generation_and_replacement();

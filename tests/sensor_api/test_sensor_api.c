@@ -72,14 +72,14 @@ int main(void)
     assert(board_sensor_journal_init(&journal, storage, 256));
     assert(app_sensor_api_read("/api/v1/sensors/catalog", json, sizeof(json), &length) == CP_OK);
     assert(cj_parse(&document, json, length));
-    assert(strstr(json, "A \\\"test\\\" board") && strstr(json, "config_sha256"));
+    assert(strstr(json, "A \\\"test\\\" board") && strstr(json, "config_sha256") && strstr(json, "\"wire_version\":2"));
     assert(app_sensor_api_read("/api/v1/sensors/latest", json, sizeof(json), &length) == CP_OK);
     assert(cj_parse(&document, json, length));
     assert(strstr(json, "\"percent\":null") && strstr(json, "\"age_known\":false") && power_observations == 1);
     for (unsigned i = 0; i < 12; ++i) { board_sensor_record_t r = frame(i); assert(board_sensor_journal_append(&journal, &r)); }
     reenter = true;
     assert(app_sensor_api_read_batch(s_boot_hex, 0, 8, UINT64_MAX, raw, sizeof(raw), &length) == CP_OK);
-    assert(length == 764 && number(raw, 1) == 1 && raw[1] == 8 && number(raw + 2, 2) == 88);
+    assert(length == 764 && number(raw, 1) == SENSOR_WIRE_VERSION && raw[1] == 8 && number(raw + 2, 2) == 88);
     assert(number(raw + 4, 4) == SENSOR_PAGE_MORE && number(raw + 8, 8) == UINT64_MAX);
     assert(!memcmp(raw + 16, s_boot, 16) && number(raw + 40, 8) == 1 && number(raw + 48, 8) == 12);
     assert(number(raw + 56, 8) == 1 && number(raw + 112, 4) == UINT32_C(0x80000000));
@@ -91,6 +91,7 @@ int main(void)
     assert(length == same_length && !memcmp(raw, same, length));
     request(path, s_boot_hex, 0, 8);
     assert(app_sensor_api_read(path, json, sizeof(json), &length) == CP_OK && length < 1152);
+    assert(strstr(json, "\"encoding\":\"stj2-le-b64\""));
     assert(cj_parse(&document, json, length));
     char tiny[16]; memset(tiny, 'x', sizeof(tiny));
     assert(app_sensor_api_read(path, tiny, sizeof(tiny), &length) == CP_INTERNAL && length == 0 && !tiny[0]);
@@ -110,8 +111,9 @@ int main(void)
     }
     for (unsigned i = 12; i < 300; ++i) { board_sensor_record_t r = frame(i); assert(board_sensor_journal_append(&journal, &r)); }
     assert(app_sensor_api_read_batch(s_boot_hex, 0, 3, 7, raw, sizeof(raw), &length) == CP_OK);
-    assert(length == 60 && raw[1] == 0 && number(raw + 4, 4) == (SENSOR_PAGE_GAP | SENSOR_PAGE_MORE));
+    assert(length == 324 && raw[1] == 3 && number(raw + 4, 4) == (SENSOR_PAGE_GAP | SENSOR_PAGE_MORE));
     assert(number(raw + 40, 8) == 45 && number(raw + 48, 8) == 300);
+    assert(number(raw + 56, 8) == 45 && number(raw + 56 + 2U * SENSOR_WIRE_RECORD_BYTES, 8) == 47);
     assert(app_sensor_api_read_batch(s_boot_hex, 44, 3, 7, raw, sizeof(raw), &length) == CP_OK && raw[1] == 3);
     reenter = false;
     uint64_t previous = journal.latest_sequence;

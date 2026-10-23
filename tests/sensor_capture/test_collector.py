@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zlib
@@ -87,16 +88,19 @@ class FakeSerial:
                 self.is_open = False
                 return len(data)
         mode = "image" if self.fault == "image_changed" and self.catalog_requests > 1 else self.mode
-        wire = fixture(request, mode=mode)
+        wire = self.response(request, mode)
         if " READ " in request and self.fault in ("boot_changed", "schema", "bad_crc"):
             fields = wire.split()
             raw = base64.b64decode(fields[4])
             if self.fault == "boot_changed": raw = changed(raw, 16, b"\xff"*16)
-            elif self.fault == "schema": raw = changed(raw, 0, b"\x02")
+            elif self.fault == "schema": raw = changed(raw, 0, b"\x03")
             else: raw = raw[:-1] + bytes([raw[-1] ^ 1])
             wire = b"\n" + b" ".join(fields[:4] + [base64.b64encode(raw)]) + b"\n"
         self.buffer += b"ordinary log before frame\n" + wire + b"ordinary log after frame\n"
         return len(data)
+
+    def response(self, request, mode):
+        return fixture(request, mode=mode)
 
     def read(self, length):
         self.read_calls.append((length, len(self.buffer)))
@@ -118,6 +122,38 @@ class SerialModule:
     def Serial(self, **kwargs):
         assert kwargs["port"] is None and not any(kwargs[x] for x in ("rtscts", "dsrdtr", "xonxoff"))
         return self.device
+
+
+class LiveSerial(FakeSerial):
+    """Persistent real journal/codec process; only acquisition and serial I/O are substituted."""
+    def __init__(self, clock, *, slow=False):
+        super().__init__(clock)
+        self.step_seconds = 0.16 if slow else 0.04
+        self.process = subprocess.Popen([FIXTURE, "live-slow" if slow else "live", "usb", "-"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def response(self, request, mode):
+        del mode
+        self.clock.now += self.step_seconds if " READ " in request else 0.02
+        self.process.stdin.write(request.encode() + b"\n")
+        self.process.stdin.flush()
+        parts = []
+        while True:
+            line = self.process.stdout.readline()
+            if not line:
+                raise AssertionError("Persistent production fixture ended before a complete response")
+            parts.append(line)
+            if line.startswith((b"ST1 R ", b"ST1 END ")):
+                return b"".join(parts)
+
+    def close(self):
+        super().close()
+        self.process.stdin.close()
+        self.process.wait(timeout=5)
+        errors = self.process.stderr.read()
+        self.process.stdout.close(); self.process.stderr.close()
+        if self.process.returncode or errors:
+            raise AssertionError("Persistent production fixture failed: " + errors.decode(errors="replace"))
 
 
 class CollectorTests(unittest.TestCase):
@@ -215,7 +251,7 @@ class CollectorTests(unittest.TestCase):
         raw = batch()
         damaged = bytearray(raw); damaged[90] ^= 1
         with self.assertRaisesRegex(collector.CaptureError, "batch_crc"): self.decode(bytes(damaged))
-        for offset, value, error in [(0, b"\x02", "unsupported_batch_schema"), (2, b"\x59\x00", "unsupported_batch_schema"),
+        for offset, value, error in [(0, b"\x03", "unsupported_batch_schema"), (2, b"\x59\x00", "unsupported_batch_schema"),
             (4, struct.pack("<I", 16), "unsupported_batch_schema"), (8, b"\x00" * 8, "batch_request_id"),
             (16, b"\xff" * 16, "boot_changed"), (32, struct.pack("<Q", 1), "cursor_mismatch"),
             (56, struct.pack("<Q", 2), "record_sequence_gap"), (96, struct.pack("<H", 9), "unsupported_record_kind")]:
@@ -225,12 +261,57 @@ class CollectorTests(unittest.TestCase):
 
     def test_gap_unavailable_and_counter_exhaustion_are_explicit(self):
         result = self.decode(batch(mode="gap"))
-        self.assertEqual(result["lost_records"], "4"); self.assertEqual(result["next_after"], "4")
-        self.assertEqual(result["records"], [])
+        self.assertEqual(result["lost_records"], "4"); self.assertEqual(result["next_after"], "7")
+        self.assertEqual([r["sequence"] for r in result["records"]], ["5", "6", "7"])
         self.assertEqual(self.decode(batch(4, mode="gap"), 4)["records"][0]["sequence"], "5")
         result = self.decode(batch(mode="unavailable")); self.assertEqual(result["flags"], 8)
         result = self.decode(batch(collector.U64_MAX - 2, mode="max"), collector.U64_MAX - 2)
         self.assertEqual(result["next_after"], str(collector.U64_MAX)); self.assertEqual(result["flags"], 4)
+
+    def test_http_gap_uses_same_atomic_retained_prefix_and_bound(self):
+        wrapper = json.loads(fixture(collector.SENSOR_ROOT + f"samples?boot={BOOT}&after=0&limit=8", mode="gap", transport="http"))
+        self.assertEqual(wrapper["encoding"], "stj2-le-b64")
+        page = collector.decode_batch(base64.b64decode(wrapper["data"]), BOOT, 0, 0, 8, wire_version=2)
+        usb = self.decode(batch(mode="gap"))
+        self.assertEqual(page["lost_records"], usb["lost_records"])
+        self.assertEqual(page["records"][:3], usb["records"])
+        self.assertEqual(page["next_after"], "8"); self.assertEqual(page["flags"], 1)
+
+    def test_http_encoding_label_cannot_disagree_with_binary_version(self):
+        wrapper = json.loads(fixture(collector.SENSOR_ROOT + f"samples?boot={BOOT}&after=0&limit=8", transport="http"))
+        transport = collector.LANTransport(None, SimpleNamespace(raw=lambda raw: None))
+        transport.session = SimpleNamespace(login={"session_token": "synthetic-test-token"})
+        transport.transport = SimpleNamespace(sensor_get_raw=lambda path, token: (200, json.dumps(wrapper).encode()))
+        self.assertEqual(transport.get("samples", BOOT, 0, 8, 1)[0], "binary")
+        wrapper["encoding"] = "stj1-le-b64"
+        with self.assertRaisesRegex(collector.CaptureError, "http_encoding_version_mismatch"):
+            transport.get("samples", BOOT, 0, 8, 1)
+
+    def test_legacy_v1_and_atomic_v2_gap_contracts_do_not_mix(self):
+        normal = batch()
+        self.assertEqual(len(self.decode(changed(normal, 0, b"\x01"))["records"]), 3)
+        raw = batch(mode="gap")
+        legacy = bytearray(raw[:56] + b"\x00" * 4)
+        legacy[0] = 1; legacy[1] = 0
+        legacy[-4:] = struct.pack("<I", zlib.crc32(legacy[:-4]))
+        old = self.decode(bytes(legacy))
+        self.assertEqual(old["lost_records"], "4"); self.assertEqual(old["next_after"], "4"); self.assertEqual(old["records"], [])
+        with self.assertRaisesRegex(collector.CaptureError, "invalid_gap_page"):
+            self.decode(changed(raw, 0, b"\x01"))
+        with self.assertRaisesRegex(collector.CaptureError, "invalid_gap_page"):
+            self.decode(changed(bytes(legacy), 0, b"\x02"))
+        with self.assertRaisesRegex(collector.CaptureError, "record_sequence_gap"):
+            self.decode(changed(raw, 56, struct.pack("<Q", 6)))
+        with self.assertRaisesRegex(collector.CaptureError, "batch_wire_version_changed"):
+            collector.decode_batch(normal, BOOT, 0, int(RID, 16), 3, wire_version=1)
+        catalog = json.loads(fixture(collector.SENSOR_ROOT + "catalog", transport="http"))
+        self.assertEqual(collector.identity(catalog)["wire_version"], 2)
+        del catalog["wire_version"]
+        self.assertEqual(collector.identity(catalog)["wire_version"], 1)
+        for invalid in (True, 0, 3, "2"):
+            catalog["wire_version"] = invalid
+            with self.assertRaisesRegex(collector.CaptureError, "unsupported_catalog_wire_version"):
+                collector.identity(catalog)
 
     def test_zero_hardware_generation_and_unknown_clock_duration_preserved(self):
         records = self.decode(batch(mode="zero_epoch"))["records"]
@@ -330,6 +411,40 @@ class CollectorTests(unittest.TestCase):
             values = [json.loads(line) for line in (Path(directory) / "evidence.jsonl").read_text().splitlines()]
             self.assertEqual(sum(x["type"] == "record" for x in values), 4)
             self.assertEqual(sum(x["type"] == "gap" for x in values), 1)
+
+    def test_advancing_production_journal_delivers_data_and_counts_every_gap(self):
+        for slow in (False, True):
+            with self.subTest(slow=slow), tempfile.TemporaryDirectory() as directory:
+                clock = Clock(); sink = collector.Evidence(Path(directory) / "evidence", 1024 * 1024); sink.open()
+                serial = LiveSerial(clock, slow=slow)
+                transport = collector.USBTransport("named-live-producer", sink, serial_module=SerialModule(serial), clock=clock)
+                try:
+                    result = collector.collect(transport, sink, 1, clock=clock, sleep=clock.sleep)
+                finally:
+                    sink.close()
+                self.assertTrue(result["collection_completed"], result)
+                self.assertGreater(result["record_count"], 0, "Active overwrite must deliver retained records, not gap-only livelock")
+                values = [json.loads(line) for line in (Path(directory) / "evidence.jsonl").read_text().splitlines()]
+                pages = [x for x in values if x["type"] == "page_commit"]
+                records = [x for x in values if x["type"] == "record"]
+                gaps = [x for x in values if x["type"] == "gap"]
+                self.assertGreater(len(gaps), 1)
+                self.assertEqual(len(gaps), len(pages)); self.assertEqual(len(pages), serial.sample_requests)
+                self.assertEqual(len(records), len(pages) * 3)
+                self.assertEqual(sum(int(x["lost_records"]) for x in gaps) + len(records), int(result["cursor"]))
+                self.assertEqual(result["issues"]["retention_gap_records"], sum(int(x["lost_records"]) for x in gaps))
+                for page, group in zip(pages, [records[i:i+3] for i in range(0, len(records), 3)]):
+                    self.assertEqual(int(group[0]["sequence"]), int(page["oldest"]))
+                    self.assertEqual(group[-1]["sequence"], page["next_after"])
+                    self.assertEqual(int(page["latest"]) - int(page["oldest"]) + 1, 256)
+                self.assertFalse(result["journal_contiguous"]); self.assertFalse(result["data_usable"])
+                self.assertEqual(result["transport_anomalies"], {})
+                self.assertTrue(result["records_available"]); self.assertFalse(result["retention_contiguous"])
+                self.assertEqual(result["retention_gap_records"]["initial"], int(gaps[0]["lost_records"]))
+                self.assertEqual(result["retention_gap_records"]["ongoing"], sum(int(x["lost_records"]) for x in gaps[1:]))
+                print("Persistent production journal:", "160ms" if slow else "40ms",
+                    "records", result["record_count"], "cursor", result["cursor"],
+                    "loss", result["retention_gap_records"], "transport_anomalies", result["transport_anomalies"])
 
     def test_exclusive_files_and_total_output_bound(self):
         with tempfile.TemporaryDirectory() as directory:

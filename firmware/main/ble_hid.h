@@ -82,6 +82,51 @@ typedef struct {
     uint64_t uptime_ms;
 } ble_hid_failure_t;
 
+#define BLE_HID_ADVERTISING_TRACE_CAPACITY 8U
+typedef enum {
+    BLE_HID_ADV_START_REQUEST = 1, BLE_HID_ADV_START_RETURN, BLE_HID_ADV_START_COMPLETE,
+    BLE_HID_ADV_STOP_REQUEST, BLE_HID_ADV_STOP_RETURN, BLE_HID_ADV_STOP_COMPLETE,
+    BLE_HID_ADV_CONNECT_ACCEPTED, BLE_HID_ADV_CONNECT_REJECTED, BLE_HID_ADV_DISCONNECT,
+    BLE_HID_ADV_DATA_COMPLETE, BLE_HID_ADV_SCAN_COMPLETE
+} ble_hid_advertising_event_t;
+enum {
+    BLE_HID_ADV_INITIALIZED = 1U << 0, BLE_HID_ADV_FAILED = 1U << 1,
+    BLE_HID_ADV_CONNECTED = 1U << 2, BLE_HID_ADV_ACTIVE = 1U << 3,
+    BLE_HID_ADV_START_PENDING = 1U << 4, BLE_HID_ADV_STOP_PENDING = 1U << 5,
+    BLE_HID_ADV_REJECT_PENDING = 1U << 6, BLE_HID_ADV_NOTIFY_PENDING = 1U << 7,
+    BLE_HID_ADV_SUBMITTING = 1U << 8, BLE_HID_ADV_BONDS_LOADED = 1U << 9,
+    BLE_HID_ADV_PAIRING_OPEN = 1U << 10, BLE_HID_ADV_NAME_BLOCKED = 1U << 11,
+    BLE_HID_ADV_TARGET_BLOCKED = 1U << 12, BLE_HID_ADV_TARGET_SELECTED = 1U << 13,
+    BLE_HID_ADV_FORGETTING = 1U << 14, BLE_HID_ADV_STOPPED_BY_CONNECT = 1U << 15
+};
+typedef struct {
+    bool known;
+    uint64_t sampled_uptime_ms;
+    size_t free_internal, largest_internal, free_dma, largest_dma;
+} ble_hid_advertising_memory_t;
+typedef struct {
+    uint64_t sequence, command_sequence, uptime_ms, generation;
+    ble_hid_advertising_event_t event;
+    uint32_t flags, status;
+    bool status_known;
+    ble_hid_advertising_memory_t memory;
+} ble_hid_advertising_observation_t;
+typedef struct {
+    bool frozen, overflowed, sequence_exhausted;
+    uint64_t total_events;
+    size_t count;
+    ble_hid_advertising_observation_t events[BLE_HID_ADVERTISING_TRACE_CAPACITY];
+} ble_hid_advertising_diagnostics_t;
+/* Task/callback-only observations, no identities or report payloads. Requests
+ * sample host heap before the API; callbacks carry their own later uptime.
+ * Neither observation establishes which allocator/controller produced a status.
+ * command_sequence identifies the latest reservation, not an SDK callback token.
+ * The bounded chronological tail freezes on the first policy-classified
+ * advertising fault; benign connect-stopped completions remain observations.
+ * Overflow/missing status/missing memory are explicit. Copy performs no SDK I/O. */
+void ble_hid_copy_advertising_diagnostics(ble_hid_advertising_diagnostics_t *out);
+const char *ble_hid_advertising_event_name(ble_hid_advertising_event_t event);
+
 typedef enum {
     BLE_HID_FORGET_IDLE,
     BLE_HID_FORGET_RUNNING,

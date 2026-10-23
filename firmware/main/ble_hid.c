@@ -9,6 +9,7 @@
 #include "esp_gatts_api.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -147,6 +148,9 @@ typedef struct {
 
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static ble_hid_failure_t first_failure = {.stage = "none", .error = ESP_OK};
+static EXT_RAM_BSS_ATTR ble_hid_advertising_diagnostics_t advertising_diagnostics;
+static size_t advertising_trace_head;
+static uint64_t advertising_start_sequence, advertising_stop_sequence;
 typedef enum {
     NAME_IDLE, NAME_QUIET, NAME_WAIT_STOP, NAME_GET_PREVIOUS, NAME_WAIT_PREVIOUS,
     NAME_SET, NAME_WAIT_VALUE, NAME_ADV, NAME_WAIT_ADV, NAME_SCAN, NAME_WAIT_SCAN,
@@ -553,6 +557,90 @@ static void name_fail_locked(const char *stage, esp_err_t error, bool raw_known,
     } else {
         device_name.phase = NAME_RESTART;
     }
+}
+
+static uint32_t advertising_flags_locked(void)
+{
+    return (state.public.initialized ? BLE_HID_ADV_INITIALIZED : 0U) |
+        (state.public.failed ? BLE_HID_ADV_FAILED : 0U) |
+        (state.public.connected ? BLE_HID_ADV_CONNECTED : 0U) |
+        (state.advertising ? BLE_HID_ADV_ACTIVE : 0U) |
+        (state.adv_pending ? BLE_HID_ADV_START_PENDING : 0U) |
+        (state.adv_stop_pending ? BLE_HID_ADV_STOP_PENDING : 0U) |
+        (state.rejected_pending ? BLE_HID_ADV_REJECT_PENDING : 0U) |
+        (state.notification_pending ? BLE_HID_ADV_NOTIFY_PENDING : 0U) |
+        (state.submitting ? BLE_HID_ADV_SUBMITTING : 0U) |
+        (state.bonds_loaded ? BLE_HID_ADV_BONDS_LOADED : 0U) |
+        (state.public.pairing_open ? BLE_HID_ADV_PAIRING_OPEN : 0U) |
+        (device_name.blocked ? BLE_HID_ADV_NAME_BLOCKED : 0U) |
+        (target_blocked_locked() ? BLE_HID_ADV_TARGET_BLOCKED : 0U) |
+        (state.target.selected ? BLE_HID_ADV_TARGET_SELECTED : 0U) |
+        (single_forget_busy_locked() || state.public.bond_forget_state == BLE_HID_FORGET_RUNNING ? BLE_HID_ADV_FORGETTING : 0U) |
+        (state.adv_stopped_by_connect ? BLE_HID_ADV_STOPPED_BY_CONNECT : 0U);
+}
+
+static uint64_t advertising_trace_locked(ble_hid_advertising_event_t event,
+    uint64_t now_ms, uint64_t command, bool status_known, uint32_t status,
+    const ble_hid_advertising_memory_t *memory)
+{
+    if (advertising_diagnostics.frozen) return 0;
+    if (advertising_diagnostics.total_events == UINT64_MAX) {
+        advertising_diagnostics.sequence_exhausted = true;
+        advertising_diagnostics.frozen = true;
+        return 0;
+    }
+    size_t index = (advertising_trace_head + advertising_diagnostics.count) % BLE_HID_ADVERTISING_TRACE_CAPACITY;
+    if (advertising_diagnostics.count == BLE_HID_ADVERTISING_TRACE_CAPACITY) {
+        advertising_trace_head = (advertising_trace_head + 1) % BLE_HID_ADVERTISING_TRACE_CAPACITY;
+        advertising_diagnostics.overflowed = true;
+    } else ++advertising_diagnostics.count;
+    const uint64_t sequence = ++advertising_diagnostics.total_events;
+    ble_hid_advertising_observation_t *entry = &advertising_diagnostics.events[index];
+    *entry = (ble_hid_advertising_observation_t){.sequence = sequence,
+        .command_sequence = command, .uptime_ms = now_ms, .generation = state.public.generation,
+        .event = event, .flags = advertising_flags_locked(), .status_known = status_known, .status = status};
+    if (event == BLE_HID_ADV_START_REQUEST || event == BLE_HID_ADV_STOP_REQUEST)
+        entry->command_sequence = sequence;
+    if (memory) entry->memory = *memory;
+    return sequence;
+}
+
+/* Request resources are captured by the worker outside state_lock. Callbacks
+ * capture only their clock before locking. Pre-command host heap observations
+ * do not identify the later HCI allocator or controller heap. */
+static bool advertising_observing(void)
+{
+    portENTER_CRITICAL(&state_lock);
+    bool observing = !advertising_diagnostics.frozen;
+    portEXIT_CRITICAL(&state_lock);
+    return observing;
+}
+
+static uint64_t advertising_request_observation(ble_hid_advertising_event_t event)
+{
+    if (!advertising_observing()) return 0;
+    ble_hid_advertising_memory_t memory = {.known = true,
+        .sampled_uptime_ms = (uint64_t)esp_timer_get_time() / 1000U,
+        .free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        .largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        .free_dma = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+        .largest_dma = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)};
+    portENTER_CRITICAL(&state_lock);
+    uint64_t sequence = advertising_trace_locked(event, memory.sampled_uptime_ms, 0, false, 0, &memory);
+    if (event == BLE_HID_ADV_START_REQUEST) advertising_start_sequence = sequence;
+    else advertising_stop_sequence = sequence;
+    portEXIT_CRITICAL(&state_lock);
+    return sequence;
+}
+
+static void advertising_return_observation(ble_hid_advertising_event_t event, uint64_t command, esp_err_t error)
+{
+    if (!command || !advertising_observing()) return;
+    uint64_t now_ms = (uint64_t)esp_timer_get_time() / 1000U;
+    portENTER_CRITICAL(&state_lock);
+    (void)advertising_trace_locked(event, now_ms, command, true, (uint32_t)error, NULL);
+    if (error != ESP_OK) advertising_diagnostics.frozen = true;
+    portEXIT_CRITICAL(&state_lock);
 }
 
 static void fail_transport(const char *operation, esp_err_t error)
@@ -1077,13 +1165,17 @@ static void service_link_control(void)
         }
     }
     if (stop_adv) {
+        uint64_t command = advertising_request_observation(BLE_HID_ADV_STOP_REQUEST);
         esp_err_t error = esp_ble_gap_stop_advertising();
+        advertising_return_observation(BLE_HID_ADV_STOP_RETURN, command, error);
         if (error != ESP_OK) {
             fail_transport("Stop advertising", error);
         }
     }
     if (start_adv) {
+        uint64_t command = advertising_request_observation(BLE_HID_ADV_START_REQUEST);
         esp_err_t error = esp_ble_gap_start_advertising(&advertising_parameters);
+        advertising_return_observation(BLE_HID_ADV_START_RETURN, command, error);
         if (error != ESP_OK) {
             portENTER_CRITICAL(&state_lock);
             bool owned_name = device_name.ack == NAME_ACK_START;
@@ -1262,10 +1354,13 @@ static void service_device_name(void)
     esp_err_t error = ESP_OK;
     const char *stage = "Device name operation";
     switch (action) {
-    case NAME_WAIT_STOP:
+    case NAME_WAIT_STOP: {
         stage = "Device name advertising stop";
+        uint64_t command = advertising_request_observation(BLE_HID_ADV_STOP_REQUEST);
         error = esp_ble_gap_stop_advertising();
+        advertising_return_observation(BLE_HID_ADV_STOP_RETURN, command, error);
         break;
+    }
     case NAME_GET_PREVIOUS:
         stage = "Device name previous read";
         error = esp_ble_gap_get_device_name();
@@ -1364,7 +1459,10 @@ static bool name_gap_completion_locked(esp_gap_ble_cb_event_t event,
         raw = (uint32_t)parameter->adv_start_cmpl.status;
         stage = "Device name advertising restart completion";
     }
-    if (raw != ESP_BT_STATUS_SUCCESS) name_fail_locked(stage, ESP_FAIL, true, raw);
+    if (raw != ESP_BT_STATUS_SUCCESS) {
+        advertising_diagnostics.frozen = true;
+        name_fail_locked(stage, ESP_FAIL, true, raw);
+    }
     else if (ack == NAME_ACK_STOP) device_name.phase = NAME_GET_PREVIOUS;
     else if (ack == NAME_ACK_ADV) device_name.phase = NAME_SCAN;
     else if (ack == NAME_ACK_SCAN) device_name.phase = NAME_RESTART;
@@ -1863,21 +1961,31 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
     const char *failure_stage = "Advertising configuration";
     uint32_t failure_status = 0;
     TickType_t now = xTaskGetTickCount();
+    bool trace_event = event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT ||
+        event == ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT ||
+        event == ESP_GAP_BLE_ADV_START_COMPLETE_EVT || event == ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT;
+    uint64_t trace_ms = trace_event && advertising_observing() ? (uint64_t)esp_timer_get_time() / 1000U : 0;
     portENTER_CRITICAL(&state_lock);
     switch (event) {
     case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
+        (void)advertising_trace_locked(BLE_HID_ADV_DATA_COMPLETE, trace_ms, 0, true,
+            (uint32_t)parameter->adv_data_cmpl.status, NULL);
         state.adv_configured = parameter->adv_data_cmpl.status == ESP_BT_STATUS_SUCCESS;
         failure = !state.adv_configured;
         failure_stage = "Advertising data completion";
         failure_status = (uint32_t)parameter->adv_data_cmpl.status;
         break;
     case ESP_GAP_BLE_SCAN_RSP_DATA_SET_COMPLETE_EVT:
+        (void)advertising_trace_locked(BLE_HID_ADV_SCAN_COMPLETE, trace_ms, 0, true,
+            (uint32_t)parameter->scan_rsp_data_cmpl.status, NULL);
         state.scan_configured = parameter->scan_rsp_data_cmpl.status == ESP_BT_STATUS_SUCCESS;
         failure = !state.scan_configured;
         failure_stage = "Scan response completion";
         failure_status = (uint32_t)parameter->scan_rsp_data_cmpl.status;
         break;
     case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+        (void)advertising_trace_locked(BLE_HID_ADV_START_COMPLETE, trace_ms, advertising_start_sequence, true,
+            (uint32_t)parameter->adv_start_cmpl.status, NULL);
         state.adv_pending = false;
         state.advertising = parameter->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS;
         failure = !state.advertising;
@@ -1885,6 +1993,8 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
         failure_status = (uint32_t)parameter->adv_start_cmpl.status;
         break;
     case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+        (void)advertising_trace_locked(BLE_HID_ADV_STOP_COMPLETE, trace_ms, advertising_stop_sequence, true,
+            (uint32_t)parameter->adv_stop_cmpl.status, NULL);
         if (parameter->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS || state.adv_stopped_by_connect) {
             /* A legacy connect already stopped advertising in the controller. */
             state.adv_stop_pending = false;
@@ -2001,7 +2111,10 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
     }
     bool name_owned = name_gap_completion_locked(event, parameter);
     if (name_owned) failure = false;
-    if (failure) record_failure_locked(failure_stage, ESP_FAIL, true, failure_status);
+    if (failure) {
+        advertising_diagnostics.frozen = true;
+        record_failure_locked(failure_stage, ESP_FAIL, true, failure_status);
+    }
     refresh_locked();
     portEXIT_CRITICAL(&state_lock);
     if (failure) {
@@ -2026,6 +2139,8 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
 static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
                            esp_ble_gatts_cb_param_t *parameter)
 {
+    bool trace_event = event == ESP_GATTS_CONNECT_EVT || event == ESP_GATTS_DISCONNECT_EVT;
+    uint64_t trace_ms = trace_event && advertising_observing() ? (uint64_t)esp_timer_get_time() / 1000U : 0;
     if (event == ESP_GATTS_REG_EVT) {
         if (parameter->reg.app_id != HID_APP_ID) {
             return;
@@ -2118,6 +2233,9 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
             command.generation = state.connection_generation;
         }
         refresh_locked();
+        (void)advertising_trace_locked(command.kind == COMMAND_REJECT_CONNECTION ?
+            BLE_HID_ADV_CONNECT_REJECTED : BLE_HID_ADV_CONNECT_ACCEPTED,
+            trace_ms, 0, false, 0, NULL);
         portEXIT_CRITICAL(&state_lock);
         post_control(&command);
         break;
@@ -2133,6 +2251,7 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
             reset_link_locked();
         }
         refresh_locked();
+        (void)advertising_trace_locked(BLE_HID_ADV_DISCONNECT, trace_ms, 0, false, 0, NULL);
         portEXIT_CRITICAL(&state_lock);
         break;
     case ESP_GATTS_CONGEST_EVT:
@@ -2267,6 +2386,39 @@ ble_hid_failure_t ble_hid_failure(void)
     ble_hid_failure_t failure = first_failure;
     portEXIT_CRITICAL(&state_lock);
     return failure;
+}
+
+void ble_hid_copy_advertising_diagnostics(ble_hid_advertising_diagnostics_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&state_lock);
+    memset(out, 0, sizeof(*out));
+    out->frozen = advertising_diagnostics.frozen;
+    out->overflowed = advertising_diagnostics.overflowed;
+    out->sequence_exhausted = advertising_diagnostics.sequence_exhausted;
+    out->total_events = advertising_diagnostics.total_events;
+    out->count = advertising_diagnostics.count;
+    for (size_t i = 0; i < out->count; ++i)
+        out->events[i] = advertising_diagnostics.events[(advertising_trace_head + i) % BLE_HID_ADVERTISING_TRACE_CAPACITY];
+    portEXIT_CRITICAL(&state_lock);
+}
+
+const char *ble_hid_advertising_event_name(ble_hid_advertising_event_t event)
+{
+    switch (event) {
+    case BLE_HID_ADV_START_REQUEST: return "start_request";
+    case BLE_HID_ADV_START_RETURN: return "start_api_return";
+    case BLE_HID_ADV_START_COMPLETE: return "start_complete";
+    case BLE_HID_ADV_STOP_REQUEST: return "stop_request";
+    case BLE_HID_ADV_STOP_RETURN: return "stop_api_return";
+    case BLE_HID_ADV_STOP_COMPLETE: return "stop_complete";
+    case BLE_HID_ADV_CONNECT_ACCEPTED: return "connect_accepted";
+    case BLE_HID_ADV_CONNECT_REJECTED: return "connect_rejected";
+    case BLE_HID_ADV_DISCONNECT: return "disconnect";
+    case BLE_HID_ADV_DATA_COMPLETE: return "data_complete";
+    case BLE_HID_ADV_SCAN_COMPLETE: return "scan_complete";
+    default: return "unknown";
+    }
 }
 
 const char *ble_hid_failure_stage_name(void)

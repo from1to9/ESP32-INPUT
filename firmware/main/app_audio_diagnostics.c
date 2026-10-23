@@ -135,8 +135,11 @@ static bool codec_changed(const board_audio_status_t *a, const board_audio_statu
         a->probe_result != b->probe_result || a->hardware_observed != b->hardware_observed ||
         a->prepared != b->prepared || a->capture_running != b->capture_running ||
         a->playback_running != b->playback_running || a->speaker_muted != b->speaker_muted ||
+        a->speaker_mute_confirmed != b->speaker_mute_confirmed || a->tx_clock_running != b->tx_clock_running ||
         a->cleanup_uncertain != b->cleanup_uncertain || a->generation != b->generation || a->roles != b->roles ||
-        !ae_format_equal(&a->format, &b->format) || a->last_result != b->last_result || a->last_sdk_error != b->last_sdk_error;
+        !ae_format_equal(&a->format, &b->format) || a->last_result != b->last_result || a->last_sdk_error != b->last_sdk_error ||
+        a->last_sdk_operation != b->last_sdk_operation || a->first_sdk_error != b->first_sdk_error ||
+        a->first_sdk_operation != b->first_sdk_operation;
 }
 static void log_audio(const diagnostic_observation_t *audio)
 {
@@ -189,12 +192,17 @@ static void log_codec(const board_audio_status_t *codec)
         return;
     }
     ESP_LOGI(TAG, "Audio diag codec known=1 probe_complete=%d probe_result=%d hardware_observed=%d prepared=%d"
-        " capture_running=%d playback_running=%d speaker_muted=%d cleanup_uncertain=%d generation=%" PRIu64
-        " roles=%u rate=%u channels=%u frame_ms=%u encoding=%u last_result=%d sdk_error=%d",
+        " capture_running=%d playback_running=%d speaker_muted=%d speaker_mute_confirmed=%d tx_clock_running=%d"
+        " cleanup_uncertain=%d generation=%" PRIu64
+        " roles=%u rate=%u channels=%u frame_ms=%u encoding=%u last_result=%d sdk_error=%d sdk_operation=%s"
+        " first_sdk_error=%d first_sdk_operation=%s",
         codec->probe_complete, (int)codec->probe_result, codec->hardware_observed, codec->prepared,
-        codec->capture_running, codec->playback_running, codec->speaker_muted, codec->cleanup_uncertain,
+        codec->capture_running, codec->playback_running, codec->speaker_muted, codec->speaker_mute_confirmed,
+        codec->tx_clock_running, codec->cleanup_uncertain,
         codec->generation, codec->roles, (unsigned)codec->format.sample_rate_hz, codec->format.channels,
-        codec->format.frame_ms, (unsigned)codec->format.encoding, (int)codec->last_result, codec->last_sdk_error);
+        codec->format.frame_ms, (unsigned)codec->format.encoding, (int)codec->last_result, codec->last_sdk_error,
+        board_audio_sdk_operation_name(codec->last_sdk_operation), codec->first_sdk_error,
+        board_audio_sdk_operation_name(codec->first_sdk_operation));
 }
 void app_audio_diagnostics_poll(uint64_t now_ms)
 {

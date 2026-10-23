@@ -64,6 +64,10 @@ UNITS = {
     "lvgl_timer": "firmware/managed_components/lvgl__lvgl/src/misc/lv_timer.c",
     "lvgl_indev": "firmware/managed_components/lvgl__lvgl/src/indev/lv_indev.c",
     "sdk_timer": ".tools/esp-idf/components/esp_timer/src/esp_timer.c",
+    "btc_thread": ".tools/esp-idf/components/bt/common/btc/core/btc_task.c",
+    "osi_thread": ".tools/esp-idf/components/bt/common/osi/thread.c",
+    "btc_gap": ".tools/esp-idf/components/bt/host/bluedroid/btc/profile/std/gap/btc_gap_ble.c",
+    "btc_gatts": ".tools/esp-idf/components/bt/host/bluedroid/btc/profile/std/gatt/btc_gatts.c",
 }
 CORE = [("main", "app_main"), ("main", "coordinator_run")]
 DEVICE_SUBMIT = CORE + [("bridge", "app_command_bridge_service"),
@@ -361,6 +365,8 @@ for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_change
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_comparison}"] = AUDIO_OBSERVER + [("audio_diagnostics", _comparison)]
 AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_format"] = AUDIO_OBSERVER + [
     ("audio_diagnostics", "codec_changed"), ("audio_helpers", "ae_format_equal")]
+AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_operation"] = AUDIO_OBSERVER + [
+    ("audio_diagnostics", "log_codec"), ("audio_diagnostics", "board_audio_sdk_operation_name")]
 PATHS.update(AUDIO_DIAGNOSTIC_PATHS)
 AUDIO_ADAPTER_PATHS = {
     "audio_select_connection_ready": MANAGEMENT_PATHS["audio_select_connection_resolve"] + [("media_controls", "route_ready")],
@@ -504,8 +510,63 @@ for _name, _prefix in {
         TOUCH_REMOTE_CANCEL_PATHS[f"touch_remote_cancel_sync_{_name}_{_leaf}"] = _prefix + _tail
 TOUCH_PATHS.update(TOUCH_REMOTE_CANCEL_PATHS)
 PATHS.update(TOUCH_PATHS)
+BOARD_AUDIO_SERVICE = [("board_audio", "worker"), ("board_audio", "service")]
+BOARD_AUDIO_EXECUTE = BOARD_AUDIO_SERVICE + [("board_audio", "execute")]
+BOARD_AUDIO_PATHS = {
+    "board_audio_pcm_error": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_pcm"), ("board_audio", "remember")],
+    "board_audio_prepare_error": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_prepare"), ("board_audio", "remember")],
+    "board_audio_unmute_error": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_unmute"), ("board_audio", "remember")],
+    "board_audio_status_publish": BOARD_AUDIO_SERVICE + [("board_audio", "publish")],
+}
+# Codec SDK calls stay on the existing board worker. Clock enable/disable and
+# offline DMA purge are sibling calls; they never run on the submitting task.
+for _name, (_prefix, _can_start) in {
+    "unmute": (BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_unmute")], True),
+    "unmute_cleanup": (BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_unmute"), ("board_audio", "hardware_mute")], True),
+    "mute": (BOARD_AUDIO_SERVICE + [("board_audio", "hardware_mute")], True),
+    "stop": (BOARD_AUDIO_SERVICE + [("board_audio", "hardware_stop"), ("board_audio", "hardware_mute")], False),
+    "execute_stop": (BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_stop"), ("board_audio", "hardware_mute")], False),
+    "prepare_cleanup": (BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_prepare"),
+        ("board_audio", "hardware_stop"), ("board_audio", "hardware_mute")], False),
+}.items():
+    for _helper in (("start_tx_clock", "stop_tx_clock") if _can_start else ("stop_tx_clock",)):
+        BOARD_AUDIO_PATHS[f"board_audio_{_name}_{_helper}_purge"] = _prefix + [
+            ("board_audio", _helper), ("board_audio", "flush_tx"), ("board_audio", "remember")]
+        BOARD_AUDIO_PATHS[f"board_audio_{_name}_{_helper}_sdk"] = _prefix + [
+            ("board_audio", _helper), ("board_audio", "remember")]
+    BOARD_AUDIO_PATHS[f"board_audio_{_name}_stop_guard"] = _prefix + [("board_audio", "interrupted")]
+PATHS.update(BOARD_AUDIO_PATHS)
+BTC_DISPATCH = [("osi_thread", "osi_thread_run"), ("osi_thread", "osi_thread_run_item"),
+    ("btc_thread", "btc_thread_handler")]
+BLE_ADVERTISING_PATHS = {
+    "ble_advertising_replay_copy": ("main", CORE + [("main", "report_bluetooth_advertising_diagnostics"),
+        ("ble", "ble_hid_copy_advertising_diagnostics")]),
+    "ble_advertising_replay_name": ("main", CORE + [("main", "report_bluetooth_advertising_diagnostics"),
+        ("ble", "ble_hid_advertising_event_name")]),
+    "ble_advertising_replay_log": ("main", CORE + [("main", "report_bluetooth_advertising_diagnostics")]),
+}
+for _name, (_owner, _prefix) in {
+    "link_request": ("ble_control", [("ble", "control_worker"), ("ble", "service_link_control"), ("ble", "advertising_request_observation")]),
+    "link_return": ("ble_control", [("ble", "control_worker"), ("ble", "service_link_control"), ("ble", "advertising_return_observation")]),
+    "name_request": ("ble_control", [("ble", "control_worker"), ("ble", "service_device_name"), ("ble", "advertising_request_observation")]),
+    "name_return": ("ble_control", [("ble", "control_worker"), ("ble", "service_device_name"), ("ble", "advertising_return_observation")]),
+    "gap_callback": ("btc", BTC_DISPATCH + [("btc_gap", "btc_gap_ble_cb_handler"),
+        ("btc_gap", "btc_gap_ble_cb_to_app"), ("ble", "gap_callback")]),
+    "gatts_callback": ("btc", BTC_DISPATCH + [("btc_gatts", "btc_gatts_cb_handler"),
+        ("btc_gatts", "btc_gatts_cb_to_app"), ("ble", "gatts_callback")]),
+}.items():
+    for _leaf, _tail in {
+        "observing": [("ble", "advertising_observing")],
+        "target_flags": [("ble", "advertising_trace_locked"), ("ble", "advertising_flags_locked"), ("ble", "target_blocked_locked")],
+        "forget_flags": [("ble", "advertising_trace_locked"), ("ble", "advertising_flags_locked"), ("ble", "single_forget_busy_locked")],
+    }.items():
+        BLE_ADVERTISING_PATHS[f"ble_advertising_{_name}_{_leaf}"] = (_owner, _prefix + _tail)
+for _label, (_owner, _steps) in BLE_ADVERTISING_PATHS.items():
+    PATHS[_label] = _steps
 PATH_OWNERS = {label: "main" for label in PATHS}
 PATH_OWNERS.update({label: owner for label, (owner, _) in AUDIO_RUNTIME_PATHS.items()})
+PATH_OWNERS.update({label: "board_audio" for label in BOARD_AUDIO_PATHS})
+PATH_OWNERS.update({label: owner for label, (owner, _) in BLE_ADVERTISING_PATHS.items()})
 SENSOR = [("board", "sensor_worker"), ("board", "imu_update")]
 STARTUP_IMU = [("main", "app_main"), ("board", "board_init"), ("board", "init_optional_imu")]
 APPEND = [("sensor_journal", "board_sensor_journal_append")]
@@ -594,6 +655,9 @@ for _label, (_owner, _steps) in SENSOR_PATHS.items():
     PATHS[_label] = _steps
     PATH_OWNERS[_label] = _owner
 
+# This header function is file-static inline, despite its public-looking name.
+# Missing emission is charged to log_codec/poll; emitted bodies/clones still count.
+INLINABLE_HEADER_HELPERS = {("audio_diagnostics", "board_audio_sdk_operation_name")}
 REQUIRED = set(CORE + [("main", "render_view"), ("main", "report_runtime_diagnostics"),
                        ("main", "report_motion_diagnostics"), ("main", "observe_motion_sample"),
                        ("main", "report_scan_observation"), ("main", "report_reference_diagnostics"),
@@ -602,7 +666,7 @@ REQUIRED = set(CORE + [("main", "render_view"), ("main", "report_runtime_diagnos
                        ("interaction", "recenter_reference")]) | {
     step for path in PATHS.values() for step in path
     if step[1].startswith(("app_", "ble_", "bt_", "settings_", "device_settings_", "interaction_",
-                           "board_", "sensor_wire_", "cp_"))
+                           "board_", "sensor_wire_", "cp_")) and step not in INLINABLE_HEADER_HELPERS
 }
 # LVGL's lv_ prefix also names file-static helpers. In the pinned optimized
 # object lv_timer_exec is inlined into lv_timer_handler (including its timer
@@ -628,6 +692,10 @@ REQUIRED.update(step for path in TOUCH_PATHS.values() for step in path
     if step[0] == "input_core" or (step[0] == "hid_engine" and step[1].startswith("hid_engine_")))
 REQUIRED.update({("main", "send_report"), ("main", "remote_changed"), ("main", "remote_observe"),
     ("usb_hid", "usb_hid_send_generation"), ("usb_hid", "usb_hid_snapshot")})
+REQUIRED.add(("board_audio", "worker"))
+REQUIRED.update({("ble", "control_worker"), ("ble", "gap_callback"), ("ble", "gatts_callback"),
+    ("main", "report_bluetooth_advertising_diagnostics"), ("osi_thread", "osi_thread_run"),
+    ("btc_thread", "btc_thread_handler"), ("btc_gap", "btc_gap_ble_cb_handler"), ("btc_gatts", "btc_gatts_cb_handler")})
 CONSUMERS = [
     "firmware/main/app_motion_capture.inc",
     "firmware/main/main.c", "firmware/main/app_remote_device_bindings.inc",
@@ -642,6 +710,12 @@ BUDGET_FILES = {
     "main": "firmware/main/main.c",
     "runtime": "firmware/main/app_control_runtime.c",
     "media_runtime": "firmware/main/app_media_runtime.c",
+    "board_audio": UNITS["board_audio"],
+    "ble": UNITS["ble"],
+    "bt_common": ".tools/esp-idf/components/bt/common/include/bt_common.h",
+    "bt_user_config": ".tools/esp-idf/components/bt/common/include/bt_user_config.h",
+    "btc_thread": UNITS["btc_thread"],
+    "osi_thread": UNITS["osi_thread"],
     "server": "firmware/main/app_control_server.c",
     "bsp_display": "third_party/esp-mosaico-bsp/components/esp-mosaico-bsp/onboard/display.c",
     "bsp_display_header": "third_party/esp-mosaico-bsp/components/esp-mosaico-bsp/include/bsp/display.h",
@@ -728,11 +802,24 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         match("board", rf"xTaskCreate\s*\(\s*{entry}\s*,\s*\"{name}\"\s*,\s*{symbol}\s*,")
         board[owner] = (size, symbol)
     runtime = integer_expression(single("runtime", r"xTaskCreate\s*\(\s*worker\s*,\s*\"control_runtime\"\s*,\s*(\d+)\s*,")[1])
-    media_stacks = re.findall(r"xTaskCreate(?:WithCaps)?\s*\(\s*worker\s*,\s*\"media_control\"\s*,\s*(\d+)\s*,",
-        text["media_runtime"])
-    if not media_stacks or len(set(media_stacks)) != 1:
-        raise RuntimeError("Cannot verify the media_control worker stack across allocation branches")
-    media_stack = integer_expression(media_stacks[0])
+    def conditional_worker_stack(key, task):
+        sizes = re.findall(r"xTaskCreate(?:WithCaps)?\s*\(\s*worker\s*,\s*\"" + re.escape(task) + r"\"\s*,\s*(\d+)\s*,", text[key])
+        if not sizes or len(set(sizes)) != 1:
+            raise RuntimeError(f"Cannot verify the {task} worker stack across allocation branches")
+        return integer_expression(sizes[0])
+
+    media_stack = conditional_worker_stack("media_runtime", "media_control")
+    audio_stack = conditional_worker_stack("board_audio", "board_audio")
+    ble_stack = integer_expression(single("ble", r"^#define CONTROL_TASK_STACK\s+([^\n]+)")[1])
+    match("ble", r"xTaskCreate\s*\(\s*control_worker\s*,\s*\"ble_hid_control\"\s*,\s*CONTROL_TASK_STACK\s*,")
+    btc_stack = configured("CONFIG_BT_BTC_TASK_STACK_SIZE")
+    match("sdk_tasks", r"#define BT_TASK_EXTRA_STACK_SIZE\s+TASK_EXTRA_STACK_SIZE")
+    match("bt_user_config", r"#ifdef CONFIG_BT_BTC_TASK_STACK_SIZE\s*#define UC_BTC_TASK_STACK_SIZE\s+CONFIG_BT_BTC_TASK_STACK_SIZE")
+    match("bt_common", r"#define BT_BTC_TASK_STACK_SIZE\s+UC_BTC_TASK_STACK_SIZE")
+    match("btc_thread", r"#define BTC_TASK_STACK_SIZE\s+\(BT_BTC_TASK_STACK_SIZE\s*\+\s*BT_TASK_EXTRA_STACK_SIZE\)")
+    match("btc_thread", r"osi_thread_create\s*\(BTC_TASK_NAME,\s*BTC_TASK_STACK_SIZE,\s*BTC_TASK_PRIO,\s*BTC_TASK_PINNED_TO_CORE,\s*"
+        r"BTC_TASK_WORKQUEUE_NUM,\s*workqueue_len,\s*false\s*\)")
+    match("osi_thread", r"xTaskCreatePinnedToCore\s*\(\s*osi_thread_run\s*,\s*name\s*,\s*stack_size\s*,")
     https = integer_expression(single("server", r"config\.httpd\.stack_size\s*=\s*([^;]+);")[1])
     match("server", r"httpd_ssl_start\s*\(\s*&s->listener\s*,\s*&config\s*\)")
     match("main", r"board_button_events_register\s*\(\s*physical_button\s*\)")
@@ -766,6 +853,11 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         "control_runtime": budget("control_runtime", runtime, ["runtime"], ["xTaskCreate(worker, control_runtime)"]),
         "media_control": budget("media_control", media_stack, ["media_runtime"],
             ["xTaskCreate[WithCaps](worker, media_control)"]),
+        "board_audio": budget("board_audio", audio_stack, ["board_audio"],
+            ["xTaskCreate[WithCaps](worker, board_audio)"]),
+        "ble_control": budget("ble_hid_control", ble_stack, ["ble"], ["CONTROL_TASK_STACK"]),
+        "btc": budget("BTC_TASK", btc_stack, ["sdk_tasks", "bt_user_config", "bt_common", "btc_thread", "osi_thread"],
+            ["CONFIG_BT_BTC_TASK_STACK_SIZE", "BTC_TASK_STACK_SIZE", "osi_thread_create", "xTaskCreatePinnedToCore"], extra),
         "https": budget("HTTPS request task", https, ["server"], ["config.httpd.stack_size", "httpd_ssl_start"]),
         "lvgl": budget("lvgl", lvgl, ["board", "bsp_display", "bsp_display_header", "lvgl_header", "lvgl_adapter"],
             ["BSP_DISPLAY_DEFAULT_CONFIG", "ESP_LV_ADAPTER_DEFAULT_STACK_SIZE"]),

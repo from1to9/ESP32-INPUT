@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import check_stack_budget as stack  # noqa: E402
 
-CONFIG = "#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192\n#define CONFIG_ESP_TIMER_TASK_STACK_SIZE 3584\n"
+CONFIG = "#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192\n#define CONFIG_ESP_TIMER_TASK_STACK_SIZE 3584\n#define CONFIG_BT_BTC_TASK_STACK_SIZE 3072\n"
 
 
 class StackBudgets(unittest.TestCase):
@@ -33,14 +33,17 @@ class StackBudgets(unittest.TestCase):
         budgets = stack.task_budgets(CONFIG)
         self.assertEqual({key: value["budget_bytes"] for key, value in budgets.items()}, {
             "main": 8192, "esp_timer": 3584, "sensor": 4096, "power": 3072,
-            "control_runtime": 12288, "media_control": 6144, "https": 12288, "lvgl": 8192})
+            "control_runtime": 12288, "media_control": 6144, "board_audio": 6144,
+            "ble_control": 6144, "btc": 3072, "https": 12288, "lvgl": 8192})
         self.assertEqual(budgets["main"]["allocated_bytes"], 8704)
         self.assertEqual(budgets["esp_timer"]["allocated_bytes"], 4096)
+        self.assertEqual(budgets["btc"]["allocated_bytes"], 3584)
         self.assertEqual(stack.PATH_OWNERS["sensor_power_journal"], "sensor")
         self.assertEqual(stack.PATH_OWNERS["brightness_worker"], "power")
         self.assertEqual(stack.PATH_OWNERS["sensor_button_down_publish"], "esp_timer")
         nano = stack.task_budgets(CONFIG + "#define CONFIG_LIBC_NEWLIB_NANO_FORMAT 1\n")
         self.assertEqual(nano["esp_timer"]["allocated_bytes"], 3584)
+        self.assertEqual(nano["btc"]["allocated_bytes"], 3072)
         self.assertEqual(nano["main"]["budget_bytes"], 8192)
 
     def test_small_task_fails_when_same_frames_fit_main(self):
@@ -75,6 +78,8 @@ class StackBudgets(unittest.TestCase):
     def test_missing_or_changed_ownership_fails_closed(self):
         with self.assertRaises(RuntimeError):
             stack.task_budgets("#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192\n")
+        with self.assertRaises(RuntimeError):
+            stack.task_budgets(CONFIG.replace("#define CONFIG_BT_BTC_TASK_STACK_SIZE 3072\n", ""))
         root = self.fixture()
         path = root / stack.BUDGET_FILES["board"]
         path.write_text(path.read_text().replace('"board_sensor", SENSOR_STACK_BYTES', '"board_sensor", unknown_budget'))
@@ -196,14 +201,107 @@ class StackBudgets(unittest.TestCase):
         errors = stack.evaluate_paths(frames, stack.task_budgets(CONFIG), {label: steps}, {label: "main"})[1]
         self.assertTrue(any("audio_helpers:ae_format_equal" in error for error in errors))
 
-    def test_media_worker_allocation_branches_must_agree(self):
-        root = self.fixture()
-        path = root / stack.BUDGET_FILES["media_runtime"]
-        source = path.read_text()
-        self.assertIn('worker, "media_control", 6144', source)
-        path.write_text(source.replace('worker, "media_control", 6144', 'worker, "media_control", 4096', 1))
-        with self.assertRaises(RuntimeError):
-            stack.task_budgets(CONFIG, root)
+    def test_worker_allocation_branches_must_agree(self):
+        for key, task in (("media_runtime", "media_control"), ("board_audio", "board_audio")):
+            with self.subTest(worker=task):
+                root = self.fixture()
+                path = root / stack.BUDGET_FILES[key]
+                source = path.read_text()
+                allocation = f'worker, "{task}", 6144'
+                self.assertIn(allocation, source)
+                path.write_text(source.replace(allocation, f'worker, "{task}", 4096', 1))
+                with self.assertRaises(RuntimeError):
+                    stack.task_budgets(CONFIG, root)
+
+    def test_board_clock_worker_uses_its_allocation_and_not_the_submitting_task(self):
+        label = "board_audio_unmute_start_tx_clock_purge"
+        steps = stack.BOARD_AUDIO_PATHS[label]
+        frames = {"board_audio": {name: self.frame(32) for _, name in steps}}
+        frames["board_audio"]["service"] = self.frame(4096)
+        frames["board_audio"]["hardware_unmute.part.0"] = self.frame(64)
+        budgets = stack.task_budgets(CONFIG)
+        chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, {label: "board_audio"})
+        self.assertTrue(errors)
+        self.assertEqual(chains[label]["budget_bytes"], 6144)
+        self.assertEqual(chains[label]["reserve_bytes"], 2048)
+        self.assertFalse(stack.evaluate_paths(frames, budgets, {label: steps}, {label: "main"})[1])
+        del frames["board_audio"]["worker"]
+        errors = stack.evaluate_paths(frames, budgets, {label: steps}, {label: "board_audio"})[1]
+        self.assertTrue(any("Required emitted frame missing: board_audio:worker" in error for error in errors))
+        for label, steps in stack.BOARD_AUDIO_PATHS.items():
+            self.assertEqual(stack.PATH_OWNERS[label], "board_audio", label)
+            self.assertNotIn(("main", "app_main"), steps, label)
+            self.assertNotIn(("audio_manager", "worker"), steps, label)
+            self.assertFalse({("board_audio", "start_tx_clock"), ("board_audio", "stop_tx_clock")} <= set(steps), label)
+
+    def test_static_inline_codec_operation_name_counts_emission_without_requiring_it(self):
+        label = "audio_diagnostics_codec_operation"
+        steps = stack.AUDIO_DIAGNOSTIC_PATHS[label]
+        helper = ("audio_diagnostics", "board_audio_sdk_operation_name")
+        frames = {}
+        for module, name in steps:
+            if (module, name) != helper:
+                frames.setdefault(module, {})[name] = self.frame(32)
+        owners = {label: "main"}; budgets = stack.task_budgets(CONFIG)
+        chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, owners)
+        self.assertFalse(errors)
+        known = chains[label]["known_bytes"]
+        frames[helper[0]][helper[1]] = self.frame(16)
+        frames[helper[0]][helper[1] + ".constprop.0"] = self.frame(32)
+        chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, owners)
+        self.assertFalse(errors)
+        self.assertEqual(chains[label]["known_bytes"], known + 48)
+        del frames["audio_diagnostics"]["app_audio_diagnostics_poll"]
+        self.assertTrue(any("Required emitted frame missing: audio_diagnostics:app_audio_diagnostics_poll" in error
+            for error in stack.evaluate_paths(frames, budgets, {label: steps}, owners)[1]))
+
+    def test_advertising_callback_uses_btc_base_without_spending_sdk_extra(self):
+        label = "ble_advertising_gap_callback_target_flags"
+        owner, steps = stack.BLE_ADVERTISING_PATHS[label]
+        frames = {}
+        for module, name in steps:
+            frames.setdefault(module, {})[name] = self.frame(32)
+        frames["ble"]["gap_callback"] = self.frame(900)
+        budgets = stack.task_budgets(CONFIG)
+        chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, {label: owner})
+        self.assertEqual(owner, "btc")
+        self.assertTrue(errors)
+        self.assertEqual(chains[label]["budget_bytes"], 3072)
+        self.assertEqual(chains[label]["allocated_bytes"], 3584)
+        self.assertLess(chains[label]["known_bytes"] + 2048, 3584)
+        self.assertFalse(stack.evaluate_paths(frames, budgets, {label: steps}, {label: "main"})[1])
+
+    def test_advertising_inline_dispatch_and_synchronous_observation_boundaries(self):
+        label = "ble_advertising_gap_callback_forget_flags"
+        owner, steps = stack.BLE_ADVERTISING_PATHS[label]
+        inline = ("btc_gap", "btc_gap_ble_cb_to_app")
+        frames = {}
+        for module, name in steps:
+            frames.setdefault(module, {})
+            if (module, name) != inline:
+                frames[module][name] = self.frame(32)
+        frames["ble"]["advertising_trace_locked.part.0"] = self.frame(64)
+        budgets = stack.task_budgets(CONFIG)
+        chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, {label: owner})
+        self.assertFalse(errors)
+        self.assertEqual(chains[label]["known_bytes"], 32 * (len(steps) - 1) + 64)
+        for module, name in (("ble", "gap_callback"), ("btc_thread", "btc_thread_handler")):
+            with self.subTest(required_callback=name):
+                saved = frames[module].pop(name)
+                errors = stack.evaluate_paths(frames, budgets, {label: steps}, {label: owner})[1]
+                self.assertTrue(any(f"Required emitted frame missing: {module}:{name}" in error for error in errors))
+                frames[module][name] = saved
+        for label, (owner, steps) in stack.BLE_ADVERTISING_PATHS.items():
+            self.assertEqual(stack.PATH_OWNERS[label], owner)
+            if owner == "btc":
+                self.assertNotIn(("ble", "control_worker"), steps)
+                self.assertNotIn(("ble", "advertising_request_observation"), steps)
+            if label.endswith("_observing"):
+                self.assertNotIn(("ble", "advertising_trace_locked"), steps)
+            else:
+                self.assertNotIn(("ble", "advertising_observing"), steps)
+        self.assertNotIn(("ble", "ble_hid_advertising_event_name"), stack.PATHS["ble_advertising_replay_copy"])
+        self.assertNotIn(("ble", "ble_hid_copy_advertising_diagnostics"), stack.PATHS["ble_advertising_replay_name"])
 
     def test_async_audio_execution_uses_media_budget_and_admission_uses_main(self):
         label = "audio_worker_start_submit"

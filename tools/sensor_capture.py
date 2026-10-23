@@ -282,8 +282,10 @@ class LANTransport:
         data = strict_json(raw)
         if operation != "samples":
             return "json", raw, 0
-        require(set(data) == {"schema", "encoding", "data"} and type(data["schema"]) is int and data["schema"] == 1 and data["encoding"] == "stj1-le-b64", "unsupported_http_batch")
-        return "binary", unbase64(data["data"]), 0
+        require(set(data) == {"schema", "encoding", "data"} and type(data["schema"]) is int and data["schema"] == 1 and data["encoding"] in ("stj1-le-b64", "stj2-le-b64"), "unsupported_http_batch")
+        raw = unbase64(data["data"])
+        require(raw and raw[0] == (1 if data["encoding"] == "stj1-le-b64" else 2), "http_encoding_version_mismatch")
+        return "binary", raw, 0
 
     def close(self):
         if self.session is not None:
@@ -360,11 +362,12 @@ def decode_record(raw):
     return record
 
 
-def decode_batch(raw, boot, after, request_id, limit):
+def decode_batch(raw, boot, after, request_id, limit, *, wire_version=None):
     require(60 <= len(raw) <= 764, "batch_bound")
     require(zlib.crc32(raw[:-4]) == struct.unpack_from("<I", raw, len(raw) - 4)[0], "batch_crc")
     version, count, size, flags, rid, raw_boot, cursor, oldest, latest = HEADER.unpack_from(raw)
-    require(version == 1 and size == RECORD_BYTES and not flags & ~15, "unsupported_batch_schema")
+    require(version in (1, 2) and size == RECORD_BYTES and not flags & ~15, "unsupported_batch_schema")
+    require(wire_version is None or version == wire_version, "batch_wire_version_changed")
     require(count <= limit and len(raw) == HEADER.size + size * count + 4, "batch_length")
     require(rid == request_id, "batch_request_id")
     require(raw_boot.hex() == boot, "boot_changed")
@@ -378,15 +381,15 @@ def decode_batch(raw, boot, after, request_id, limit):
     records = [decode_record(raw[56 + i * size:56 + (i + 1) * size]) for i in range(count)]
     next_after, lost = after, 0
     if flags & 1:
-        require(not count and oldest > 0 and after < oldest - 1, "invalid_gap_page")
+        require((not count if version == 1 else count > 0) and oldest > 0 and after < oldest - 1, "invalid_gap_page")
         lost, next_after = oldest - after - 1, oldest - 1
-    elif records:
+    if records:
         require(oldest > 0 and int(records[0]["sequence"]) >= oldest, "record_before_retention")
         for record in records:
             require(next_after < U64_MAX and int(record["sequence"]) == next_after + 1, "record_sequence_gap")
             next_after += 1
         require(next_after <= latest, "record_after_latest")
-    else:
+    elif not flags & 1:
         require(after == latest, "missing_page_records")
     require(bool(flags & 2) == (next_after < latest), "more_flag_mismatch")
     return {"boot": boot, "after": str(after), "next_after": str(next_after), "oldest": str(oldest),
@@ -481,7 +484,12 @@ def identity(catalog):
         (catalog.get("elf_sha256") is None or isinstance(catalog["elf_sha256"], str) and HEX64.fullmatch(catalog["elf_sha256"])), "invalid_image_identity")
     require(catalog.get("config_sha256") is None or isinstance(catalog["config_sha256"], str) and HEX64.fullmatch(catalog["config_sha256"]), "invalid_config_identity")
     require(type(catalog.get("capacity")) is int and catalog["capacity"] == 256, "unsupported_catalog_capacity")
-    return {key: catalog.get(key) for key in ["schema", "boot", "git_commit", "git_state", "elf_sha256", "config_sha256", "record_bytes", "capacity", "max_http_records", "max_usb_records"]}
+    # Catalogs before atomic gap/data pages omitted the field and used v1.
+    version = catalog.get("wire_version", 1)
+    require(type(version) is int and version in (1, 2), "unsupported_catalog_wire_version")
+    result = {key: catalog.get(key) for key in ["schema", "boot", "git_commit", "git_state", "elf_sha256", "config_sha256", "record_bytes", "capacity", "max_http_records", "max_usb_records"]}
+    result["wire_version"] = version
+    return result
 
 
 def get_json(transport, operation, boot, after, limit, deadline):
@@ -496,11 +504,13 @@ def collect(transport, sink, seconds, *, after=0, interval=0.02, snapshot_second
     started = clock()
     receipt = {"schema": 1, "collection_completed": False, "physical_motion_qualified": False,
         "requested_poll_seconds": seconds, "wire_verified_responses": 0, "record_count": 0, "cursor": str(after), "issues": {},
-        "raw_format": "usb_rx_bytes" if transport.limit == 3 else "length_be32_prefixed_https_sensor_bodies"}
+        "raw_format": "usb_rx_bytes" if transport.limit == 3 else "length_be32_prefixed_https_sensor_bodies",
+        "retention_gap_records": {"initial": 0, "ongoing": 0}}
     issues = collections.Counter()
     source_last = None
     kind_counts = collections.Counter()
     opened = False
+    sample_pages = 0
     try:
         transport.open()
         opened = True
@@ -532,10 +542,11 @@ def collect(transport, sink, seconds, *, after=0, interval=0.02, snapshot_second
             if kind == "json":
                 strict_json(raw)
                 raise CaptureError("remote_sensor_error")
-            batch = decode_batch(raw, boot, after, rid, transport.limit)
+            batch = decode_batch(raw, boot, after, rid, transport.limit, wire_version=expected["wire_version"])
             receipt["wire_verified_responses"] += 1
             if int(batch["lost_records"]):
                 issues["retention_gap_records"] += int(batch["lost_records"])
+                receipt["retention_gap_records"]["initial" if not sample_pages else "ongoing"] += int(batch["lost_records"])
                 sink.event({"type": "gap", **{k: v for k, v in batch.items() if k != "records"}})
             for record in batch["records"]:
                 kind_counts[record["kind"]] += 1
@@ -553,6 +564,7 @@ def collect(transport, sink, seconds, *, after=0, interval=0.02, snapshot_second
             after = int(batch["next_after"])
             receipt["cursor"] = str(after)
             receipt["record_count"] += len(batch["records"])
+            sample_pages += 1
             if batch["flags"] & 8:
                 issues["journal_unavailable"] += 1
             if batch["flags"] & 4 and not batch["flags"] & 2:
@@ -585,6 +597,8 @@ def collect(transport, sink, seconds, *, after=0, interval=0.02, snapshot_second
         receipt["issues"] = dict(issues)
         receipt["records_by_kind"] = dict(kind_counts)
         receipt["transport_anomalies"] = dict(transport.anomalies)
+        receipt["records_available"] = receipt["record_count"] > 0
+        receipt["retention_contiguous"] = not issues.get("retention_gap_records", 0)
         receipt["journal_contiguous"] = not issues and receipt["record_count"] > 0
         receipt["data_usable"] = receipt["collection_completed"] and receipt["journal_contiguous"]
         receipt["status"] = "failed" if not receipt["collection_completed"] else ("complete" if receipt["data_usable"] else "complete_with_issues")

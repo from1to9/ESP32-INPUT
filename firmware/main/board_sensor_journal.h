@@ -126,6 +126,8 @@ typedef struct {
 } board_sensor_journal_t;
 bool board_sensor_journal_init(board_sensor_journal_t *, board_sensor_record_t *, size_t);
 bool board_sensor_journal_append(board_sensor_journal_t *, const board_sensor_record_t *);
+/* A GAP includes the exact missing prefix and the first bounded retained
+ * records in one copy. next_after acknowledges only the final copied record. */
 bool board_sensor_journal_copy(const board_sensor_journal_t *, uint64_t after,
     board_sensor_record_t *, size_t capacity, uint64_t observed_us, board_sensor_batch_t *);
 bool board_sensor_journal_bounds(const board_sensor_journal_t *, uint64_t observed_us, board_sensor_batch_t *);

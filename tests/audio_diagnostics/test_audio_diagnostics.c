@@ -124,13 +124,21 @@ static void test_transport_and_codec_errors(void)
     setup(); poll_at(0);
     usb.suspended = true; usb.prepared = false; ++usb.link_generation;
     codec.last_result = AE_IO_ERROR; codec.last_sdk_error = 1234; codec.cleanup_uncertain = true;
+    codec.last_sdk_operation = BOARD_AUDIO_SDK_I2C_READ;
+    codec.first_sdk_error = 1234; codec.first_sdk_operation = BOARD_AUDIO_SDK_I2C_READ;
     size_t prior = line_count; poll_at(100);
     assert(line_count == prior + 2 && contains_since(prior, "suspended=1") &&
-        contains_since(prior, "cleanup_uncertain=1") && contains_since(prior, "sdk_error=1234"));
+        contains_since(prior, "cleanup_uncertain=1") && contains_since(prior, "sdk_error=1234") &&
+        contains_since(prior, "sdk_operation=i2c_master_transmit_receive"));
     owner.audio.error = AE_UNCERTAIN; prior = line_count; poll_at(200);
     assert(line_count == prior + 1 && contains_since(prior, "audio known=1"));
     codec.probe_result = AE_TIMEOUT; codec.format.sample_rate_hz = 16000; prior = line_count; poll_at(300);
     assert(line_count == prior + 1 && contains_since(prior, "rate=16000"));
+    codec.tx_clock_running = true; codec.speaker_muted = codec.speaker_mute_confirmed = true;
+    codec.last_result = AE_OK; codec.cleanup_uncertain = false; prior = line_count; poll_at(400);
+    assert(line_count == prior + 1 && contains_since(prior, "tx_clock_running=1") &&
+        contains_since(prior, "playback_running=0 speaker_muted=1 speaker_mute_confirmed=1") &&
+        contains_since(prior, "first_sdk_error=1234 first_sdk_operation=i2c_master_transmit_receive"));
 }
 static void test_private_metadata_wiped(void)
 {

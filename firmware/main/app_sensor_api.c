@@ -126,7 +126,7 @@ static cp_error_t catalog(char *json, size_t capacity, size_t *length)
     if (!cj_escape(caps.name ? caps.name : "Unknown", s_work.board_name, sizeof(s_work.board_name))) return CP_INTERNAL;
     int n = snprintf(json, capacity,
         "{\"schema\":1,\"boot\":\"%s\",\"board\":%s,\"git_commit\":\"%s\",\"git_state\":\"%s\","
-        "\"elf_sha256\":%s%s%s,\"config_sha256\":%s%s%s,\"record_bytes\":88,\"capacity\":256,"
+        "\"elf_sha256\":%s%s%s,\"config_sha256\":%s%s%s,\"wire_version\":%u,\"record_bytes\":88,\"capacity\":256,"
         "\"max_http_records\":8,\"max_usb_records\":3,\"clock\":\"monotonic_microseconds\","
         "\"source_time\":\"acquisition_completion_not_conversion\",\"sources\":["
         "{\"kind\":1,\"name\":\"imu\",\"available\":%s,\"nominal_hz\":100,"
@@ -142,7 +142,7 @@ static cp_error_t catalog(char *json, size_t capacity, size_t *length)
         s_boot_hex, s_work.board_name, APP_BUILD_GIT_COMMIT, APP_BUILD_GIT_STATE,
         s_elf_known ? "\"" : "", s_elf_known ? s_elf_hex : "null", s_elf_known ? "\"" : "",
         APP_BUILD_CONFIG_KNOWN ? "\"" : "", APP_BUILD_CONFIG_KNOWN ? APP_BUILD_CONFIG_SHA256 : "null",
-        APP_BUILD_CONFIG_KNOWN ? "\"" : "", caps.imu ? "true" : "false", caps.battery ? "true" : "false",
+        APP_BUILD_CONFIG_KNOWN ? "\"" : "", SENSOR_WIRE_VERSION, caps.imu ? "true" : "false", caps.battery ? "true" : "false",
         caps.touch ? "true" : "false", caps.lock_button ? "true" : "false");
     if (n < 0 || (size_t)n >= capacity) return CP_INTERNAL;
     *length = (size_t)n;
@@ -221,7 +221,7 @@ cp_error_t app_sensor_api_read(const char *resource, char *json, size_t capacity
         result = read_page(boot, after, (unsigned)count, 0, s_work.raw, sizeof(s_work.raw), &raw_length);
         if (result != CP_OK) goto done;
         if (!sensor_wire_base64(s_work.raw, raw_length, s_work.base64, sizeof(s_work.base64))) { result = CP_INTERNAL; goto done; }
-        int n = snprintf(json, capacity, "{\"schema\":1,\"encoding\":\"stj1-le-b64\",\"data\":\"%s\"}", s_work.base64);
+        int n = snprintf(json, capacity, "{\"schema\":1,\"encoding\":\"stj2-le-b64\",\"data\":\"%s\"}", s_work.base64);
         if (n < 0 || (size_t)n >= capacity) { result = CP_INTERNAL; goto done; }
         *length = (size_t)n;
     }

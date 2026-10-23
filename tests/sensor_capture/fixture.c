@@ -16,7 +16,7 @@
 #include "control_sensor_usb.h"
 
 static board_sensor_journal_t fixture_journal;
-static board_sensor_record_t fixture_storage[8];
+static board_sensor_record_t fixture_storage[BOARD_SENSOR_JOURNAL_CAPACITY];
 static bool unavailable;
 static bool partial;
 static bool zero_epoch, clock_failure;
@@ -131,6 +131,40 @@ static void append(unsigned number)
     assert(board_sensor_journal_append(&fixture_journal, &r));
 }
 
+/* Persistent acquisition boundary: the journal, encoders and USB responder are
+ * unchanged production code. Four records per 40 ms model a 100 Hz producer;
+ * the slow-reader case advances sixteen per 160 ms, without pausing it. */
+static void live_producer(unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i) {
+        const uint64_t sequence = fixture_journal.latest_sequence + 1U;
+        board_sensor_record_t r = {.kind = BOARD_SENSOR_IMU_SAMPLE,
+            .source_sequence = sequence, .source_epoch = 9,
+            .sample_us = sequence * 10000U, .observed_us = sequence * 10000U + 100U,
+            .flags = BOARD_SENSOR_FLAG_SOURCE_SEQ | BOARD_SENSOR_FLAG_SOURCE_EPOCH |
+                BOARD_SENSOR_FLAG_SAMPLE_TIME | BOARD_SENSOR_FLAG_OBSERVED_TIME,
+            .validity = BOARD_SENSOR_VALID_IMU_AXES, .payload = {0, 0, 0, 0, 0, UINT32_C(0x3f800000)}};
+        assert(board_sensor_journal_append(&fixture_journal, &r));
+    }
+}
+static void live_requests(unsigned advance)
+{
+    assert(board_sensor_journal_init(&fixture_journal, fixture_storage, BOARD_SENSOR_JOURNAL_CAPACITY));
+    live_producer(300);
+    cp_sensor_usb_t usb = {0};
+    const cp_sensor_usb_port_t port = {.allowed = allowed, .read = read_resource, .batch = read_batch, .write = wire_write};
+    char command[192]; uint64_t now = 1000;
+    while (fgets(command, sizeof(command), stdin)) {
+        command[strcspn(command, "\r\n")] = 0;
+        if (!strncmp(command, "ST1 READ ", 9)) { live_producer(advance); now += advance * 10U; }
+        else now += 20;
+        assert(cp_sensor_usb_receive(&usb, command, now, &port));
+        for (unsigned poll = 0; usb.pending && poll < 32; ++poll) cp_sensor_usb_service(&usb, now + poll * 20U, &port);
+        assert(!usb.pending);
+        assert(fflush(stdout) == 0);
+    }
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 4);
@@ -140,6 +174,9 @@ int main(int argc, char **argv)
     clock_failure = !strcmp(argv[1], "clock");
     if (!strcmp(argv[1], "image")) memset(description.app_elf_sha256, 17, sizeof description.app_elf_sha256);
     app_sensor_api_init();
+    if (!strcmp(argv[1], "live") || !strcmp(argv[1], "live-slow")) {
+        live_requests(!strcmp(argv[1], "live") ? 4U : 16U); return 0;
+    }
     assert(board_sensor_journal_init(&fixture_journal, fixture_storage, !strcmp(argv[1], "gap") ? 4 : 8));
     if (!strcmp(argv[1], "max")) {
         fixture_journal.latest_sequence = UINT64_MAX - 2U;

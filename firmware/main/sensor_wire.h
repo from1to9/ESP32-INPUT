@@ -2,7 +2,7 @@
 #pragma once
 #include "board_sensor_journal.h"
 
-#define SENSOR_WIRE_VERSION 1U
+#define SENSOR_WIRE_VERSION 2U
 #define SENSOR_WIRE_HEADER_BYTES 56U
 #define SENSOR_WIRE_RECORD_BYTES 88U
 enum {

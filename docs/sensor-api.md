@@ -52,7 +52,7 @@ export; bytes already transmitted cannot be recalled.
 
 ## Record and transport format
 
-The version-1 `stj1-le-b64` representation uses explicit little-endian encoding,
+The version-2 `stj2-le-b64` representation uses explicit little-endian encoding,
 not native C struct copies. Float values retain their exact IEEE-754 bits;
 validity remains separate from numeric zero. The shared page header is 56 bytes:
 
@@ -75,12 +75,24 @@ generations are not HTTP sessions or actuation subscriber epochs.
 
 The canonical field, validity-bit and typed-payload definitions are in
 [board_sensor_journal.h](../firmware/main/board_sensor_journal.h).
-Page flags are GAP=1, MORE=2, EXHAUSTED=4 and UNAVAILABLE=8. A GAP page has no
-records: resume at `oldest - 1` and record exactly `oldest - after - 1` missing
-journal IDs. Otherwise advance only to the final verified record, or retain
-the cursor on an empty page. EXHAUSTED does not discard retained observations.
+Page flags are GAP=1, MORE=2, EXHAUSTED=4 and UNAVAILABLE=8. A version-2 GAP page
+reports exactly `oldest - after - 1` missing journal IDs and includes the first
+bounded retained records starting at `oldest`. Bounds, loss and records are copied
+under the same journal lock. Advance only to the final verified record, including
+on a GAP page; retain the cursor on an empty page. This guarantees retained-record
+progress even when the full ring advances between every read. A slower reader
+can still lose records, and every subsequent missing prefix remains explicit.
+EXHAUSTED does not discard retained observations.
 
-HTTP returns a compact JSON wrapper with `schema`, `encoding` and base64 `data`.
+The catalog advertises `wire_version: 2`; the header/record sizes, limits, request
+syntax and JSON envelope schema remain unchanged. The host also decodes legacy
+version-1 pages and catalogs without `wire_version` (which mean version 1).
+Legacy GAP pages contain no records and resume at `oldest - 1`; this old contract
+can repeatedly chase the advancing retention boundary. Version 1 and 2 GAP shapes
+cannot be mixed, and catalog/header/HTTP encoding disagreement fails closed.
+Older collectors reject the new wire version instead of misreading it.
+
+HTTP returns a compact JSON wrapper with `schema: 1`, `encoding: stj2-le-b64` and base64 `data`.
 USB requests `ST1 READ <16hex-id> <32hex-boot> <after> <1..3>` and returns one
 `ST1 R <id> <raw-length> <base64>` line. Three records plus header/CRC occupy
 324 bytes before base64, keeping a response below the 480-byte frame ceiling.
@@ -132,7 +144,11 @@ snapshot options. The tool does not commission an untrusted LAN service. Follow 
 Validation covers independent cursors, retention overwrite, counter exhaustion,
 typed rejection without losing preceding raw data, readonly power observation,
 lock/import/disconnect races, short writes and interleaved logs, truncated or
-conflicting fragments, numeric boundaries and corrupted payloads. Target stack,
+conflicting fragments, numeric boundaries and corrupted payloads. A persistent
+production journal/encoder/USB/collector regression advances a 100 Hz producer
+between every 40 ms or 160 ms read; each gap delivers actual retained records
+and all missing IDs remain accounted for. The same regression returns zero
+records on the old gap-only implementation. Target stack,
 heap and input timing must be measured with both active and stalled readers.
 Physical USB and authenticated LAN runs remain required before declaring either
 transport qualified. The earlier diagnostic captures and failed Motion behavior

@@ -674,6 +674,106 @@ rediscovery, Windows pointer latency, physical sensor-export throughput or
 powered endurance. The existing angular Motion algorithm remains unqualified;
 this candidate does not enable the experimental handheld-translation estimator.
 
+### Combined candidate device failure: 2026-10-23
+
+The clean `495a8e1` image was written to the application partition and verified
+independently. Settings, PHY data and the partition table were preserved; no new
+full backup was made. A read-only USB sensor response subsequently confirmed
+that exact clean Git identity and the packaged ELF identity on the device.
+
+The 90-second health capture failed. It retained two duplicate GPIO ISR-service
+installation errors during startup and a later media fault. During USB audio
+startup, the codec reported prepared at 48 kHz, mono, with both roles supported.
+A capture job entered Starting, then the engine entered `AE_FAULT` with
+`AE_TIMEOUT`. Capture and playback had no first frame and zero delivered bytes.
+The codec retained SDK error 263; cleanup confirmed audio off and retained
+quarantine. The user also observed Timeout in USB mode. The diagnostic did not
+identify the failing SDK operation, so this record does not uniquely attribute
+the timeout to I2S, codec control or the host. Host output callbacks alone do not
+establish audible playback, and a host-selected capture interface does not
+establish a microphone grant.
+
+The same capture observed advancing, fresh IMU samples, connected Wi-Fi and
+ready Bluetooth HID. These observations do not resolve physical Motion,
+pointer latency, iPad discovery or audio compatibility. The authenticated LAN
+control service remained unprovisioned and stopped.
+
+A separate 30-second read-only USB sensor collection verified 684 responses
+and the running image identity but exported zero sensor records. Every sample
+page reported a retention gap while the producer advanced; the collector
+retained the gaps and marked the data unusable. This is failed physical
+sensor-export evidence, not successful Motion data collection.
+
+The user later reported that Add host was disabled. A further 45-second capture
+confirmed `ble_failed=1`, disconnected and not ready, while preserving the first
+failure: Advertising start completion, `ESP_FAIL`, SDK status 263, at uptime
+660,845 ms. Earlier samples from this same boot had shown ready Bluetooth HID.
+This is a real transport failure, not merely an inactive button. The Bluetooth
+completion status belongs to its own SDK status domain: the pinned SDK maps
+263 to `ESP_BT_STATUS_HCI_MEMORY_FULL` (HCI Memory Capacity Exceeded), not an
+audio or generic SDK timeout. The pinned host command path also synthesizes this
+HCI status when command-buffer allocation fails, before sending to the
+controller. The retained status therefore identifies the advertising command
+failure, not which side exhausted a resource or its triggering lifecycle. No bond records
+were deleted, and no restart was used to replace the failed observation.
+
+### Audio clock and live sensor-read repairs: 2026-10-23
+
+The cold-microphone regression reproduces a lifecycle defect in the preceding
+production adapter: the pinned SDK configures duplex RX as a slave, but the
+adapter enabled RX while its TX master remained stopped. The clock-aware
+hardware boundary returned zero bytes and SDK timeout 263 before the repair.
+The repaired adapter starts a silent TX clock before capture, tracks it
+separately from speaker permission and preserves it when only the speaker
+stops. Playback data is purged before a later speaker start. Named SDK failure
+operations remain observable after cleanup. These source and host observations
+do not uniquely attribute the earlier physical timeout or establish audible
+playback; the exact image still requires physical first-frame checks.
+The board suite passes across the default and six alternative memory/interrupt
+configurations with the pinned codec implementation. Production engine/adapter
+tests cover cold Speaker without a capture consumer, both duplex start orders,
+independent stops and restarts, stale PCM purging and failure cleanup. Seven
+audio-diagnostic tests pass with first/last named SDK failures retained. No
+startup, I/O or cleanup timeout was extended.
+
+The sensor repair atomically returns the missing-prefix metadata and the first
+bounded retained records from the same locked journal snapshot. The wire format
+is explicitly version 2; the new collector retains strict version-1 decoding.
+The fixed 256-record journal, 88-byte records, HTTP/USB page capacities and USB
+frame limit remain unchanged. The actual journal, API, encoder, USB responder
+and collector execute in a persistent advancing-producer regression. Using the
+same final fixture and collector, the old production owner returns zero records
+at both 40-ms and 160-ms read intervals. The repaired owner returns 72 records
+plus 71 reported losses through cursor 143, and 21 records plus 138 losses
+through cursor 159, respectively. Both remain marked discontinuous and unusable
+for an unqualified continuous-data claim. The 25 collector tests and related
+board, API and USB host checks pass; hardware throughput remains unqualified.
+
+Bluetooth adds an eight-entry chronological advertising trace that freezes at
+the first policy-classified fault. It records command and callback ordering,
+explicit status domains, preceding host-memory observations and unknown or
+overwritten context without recording host identities. Existing health logging
+can replay this observation to a later USB reader. Independent review found and
+closed a missing freeze in name-owned advertising completion errors; regressions
+also preserve benign connection-stopped and late-drain behavior. The three BLE
+host configurations pass their 100,000-cycle lifecycle checks, and the actual
+coordinator replay checks pass. This is diagnostic support, not a repair for the
+unresolved physical advertising resource failure. Pairing admission, retry,
+rollback and fault retention policies are unchanged.
+
+The resulting combined source passes the full host suite, target build and all
+346 declared stack paths across 46 measured units. Input hashes remain stable
+through these checks. Startup remains 336 bytes under the 512-byte limit;
+task allocations and the 2-KiB SDK/ISR reserve are unchanged. New board-audio,
+BLE-control and BTC callback paths use their actual owning task budgets; the
+BTC SDK stack supplement is reported but excluded from the application budget.
+An earlier successful target build is superseded by the reviewed diagnostic
+correction. Product UI source is unchanged, so these checks do not claim new
+visual or physical UI qualification. Independent component source/host reviews
+approve the repairs and diagnostics; audible playback, microphone operation,
+advertising recovery and physical sensor throughput remain pending a new image
+and device observations.
+
 ## Historical evidence
 
 Evidence date: 2026-10-21. The pinned S31 toolchain has built the minimal composite HID firmware. Portable behavior, report layout and production BLE callback logic have executable host coverage. The physical development board is identified as Mosaico v1.2 (eFuse `0x0102`) with 16 MB flash, and its original flash contents have been backed up locally. Runtime deployment and host compatibility evidence are recorded separately below; a build does not establish a working HID device or long-term reliability.

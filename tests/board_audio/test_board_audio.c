@@ -20,6 +20,9 @@ static struct test_i2s_channel tx_channel, rx_channel;
 static unsigned calls, notifications, task_creations, io_calls;
 static unsigned channel_allocations;
 static unsigned dma_init_calls, fail_dma_channel;
+static unsigned fail_enable_channel, fail_disable_channel;
+static unsigned tx_enables, rx_enables;
+static bool stop_on_enable;
 static unsigned lock_depth, rail_calls, pa_level;
 static int fail_register = -1;
 static bool fail_read, fail_write, fail_disable, fail_delete, fail_new, fail_task;
@@ -30,6 +33,7 @@ static size_t transfer_limit = SIZE_MAX;
 static int references[CODEC_REF_STAGE_NUM];
 static uint8_t registers[256];
 static uint8_t emitted[WIRE_BYTES_MAX];
+static uint8_t dma_storage[DMA_BYTES];
 static size_t emitted_bytes;
 static ae_codec_port_t port;
 static unsigned completion_wakes;
@@ -135,6 +139,7 @@ esp_err_t i2s_new_channel(const i2s_chan_config_t *config, i2s_chan_handle_t *tx
     assert(!tx_channel.allocated && !rx_channel.allocated);
     tx_channel = (struct test_i2s_channel){.allocated = true};
     rx_channel = (struct test_i2s_channel){.allocated = true};
+    memset(dma_storage, 0, sizeof(dma_storage));
     *tx = &tx_channel; *rx = &rx_channel; return ESP_OK;
 }
 esp_err_t i2s_channel_init_std_mode(i2s_chan_handle_t channel, const i2s_std_config_t *config)
@@ -149,12 +154,17 @@ esp_err_t i2s_channel_init_std_mode(i2s_chan_handle_t channel, const i2s_std_con
 }
 esp_err_t i2s_channel_enable(i2s_chan_handle_t channel)
 {
-    sdk(); assert(channel->initialized && !channel->enabled); channel->enabled = true; return ESP_OK;
+    sdk(); assert(channel->initialized && !channel->enabled);
+    if (fail_enable_channel == (channel == &tx_channel ? 1U : 2U)) return ESP_ERR_TIMEOUT;
+    channel->enabled = true;
+    if (channel == &tx_channel) ++tx_enables; else ++rx_enables;
+    if (stop_on_enable) { stop_on_enable = false; assert(port.stop(NULL, s.generation) == AE_AGAIN); }
+    return ESP_OK;
 }
 esp_err_t i2s_channel_disable(i2s_chan_handle_t channel)
 {
     sdk(); assert(channel->initialized && channel->enabled);
-    if (fail_disable) return ESP_FAIL;
+    if (fail_disable || fail_disable_channel == (channel == &tx_channel ? 1U : 2U)) return ESP_FAIL;
     channel->enabled = false; channel->preload = 0; return ESP_OK;
 }
 esp_err_t i2s_del_channel(i2s_chan_handle_t channel)
@@ -171,6 +181,7 @@ esp_err_t i2s_channel_preload_data(i2s_chan_handle_t channel, const void *data, 
     for (size_t i = 0; i < bytes; ++i) assert(pcm[i] == 0);
     size_t available = DMA_BYTES - channel->preload;
     *actual = bytes < available ? bytes : available;
+    memcpy(dma_storage + channel->preload, data, *actual);
     channel->preload += *actual;
     return ESP_OK;
 }
@@ -178,6 +189,9 @@ esp_err_t i2s_channel_read(i2s_chan_handle_t channel, void *data, size_t bytes, 
 {
     sdk(); ++io_calls; assert(channel == &rx_channel && channel->enabled && timeout == 20);
     assert(data == buffers.wire);
+    /* Pinned SDK initializes TX first as master and RX second as its slave.
+     * Enabled RX cannot complete a DMA buffer without the TX clock source. */
+    if (!tx_channel.enabled) { *actual = 0; return ESP_ERR_TIMEOUT; }
     *actual = bytes < transfer_limit ? bytes : transfer_limit;
     uint8_t *output = data;
     for (size_t i = 0; i < *actual; ++i) output[i] = (uint8_t)(i + 1U);
@@ -191,6 +205,7 @@ esp_err_t i2s_channel_write(i2s_chan_handle_t channel, const void *data, size_t 
     assert(data == buffers.wire);
     *actual = bytes < transfer_limit ? bytes : transfer_limit;
     assert(*actual <= sizeof(emitted)); memcpy(emitted, data, *actual); emitted_bytes = *actual;
+    memcpy(dma_storage, data, *actual);
     return transfer_error;
 }
 

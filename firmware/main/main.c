@@ -2261,6 +2261,30 @@ static void __attribute__((noinline)) report_reference_diagnostics(void)
     }
 }
 
+static void __attribute__((noinline)) report_bluetooth_advertising_diagnostics(void)
+{
+    static EXT_RAM_BSS_ATTR ble_hid_advertising_diagnostics_t observation;
+    ble_hid_copy_advertising_diagnostics(&observation);
+    if (!observation.frozen) return;
+    ESP_LOGI(TAG, "BLEAdv frozen=%d count=%u total=%llu overflowed=%d sequence_exhausted=%d",
+        observation.frozen, (unsigned)observation.count, (unsigned long long)observation.total_events,
+        observation.overflowed, observation.sequence_exhausted);
+    for (size_t i = 0; i < observation.count; ++i) {
+        const ble_hid_advertising_observation_t *event = &observation.events[i];
+        const char *domain = !event->status_known ? "none" :
+            (event->event == BLE_HID_ADV_START_RETURN || event->event == BLE_HID_ADV_STOP_RETURN) ? "esp_err" : "bt_status";
+        ESP_LOGI(TAG, "BLEAdvEvent sequence=%llu command=%llu event=%s uptime_ms=%llu generation=%llu "
+            "flags=0x%08x status_known=%d status_domain=%s status=%u memory_known=%d memory_uptime_ms=%llu "
+            "free_internal=%u largest_internal=%u free_dma=%u largest_dma=%u",
+            (unsigned long long)event->sequence, (unsigned long long)event->command_sequence,
+            ble_hid_advertising_event_name(event->event), (unsigned long long)event->uptime_ms,
+            (unsigned long long)event->generation, (unsigned)event->flags, event->status_known, domain,
+            (unsigned)event->status, event->memory.known, (unsigned long long)event->memory.sampled_uptime_ms,
+            (unsigned)event->memory.free_internal, (unsigned)event->memory.largest_internal,
+            (unsigned)event->memory.free_dma, (unsigned)event->memory.largest_dma);
+    }
+}
+
 static void __attribute__((noinline)) report_motion_diagnostics(const input_link_t *link)
 {
     static EXT_RAM_BSS_ATTR board_imu_status_t imu;
@@ -2770,6 +2794,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
             last_health_us = now;
             report_memory_diagnostics();
             report_runtime_diagnostics();
+            report_bluetooth_advertising_diagnostics();
             app_presenter_status_t presentation = app_presenter_status();
             report_motion_diagnostics(&link);
             ESP_LOGI(TAG, "UI published=%llu applied=%llu pending=%d pending_age_ms=%llu "

@@ -326,3 +326,56 @@ expiry: an unheld contact can still own queued movement after a partial report.
 Ending a contact may drain accepted movement; canceling it must discard the
 remaining movement through the owning neutral-release lifecycle.
 These conservation checks do not establish physical pointer latency or smoothness.
+
+## 16. Shared audio clocks are independent from speaker permission
+
+On the pinned Mosaico SDK, initializing both I2S directions makes the later
+initialized RX a slave of TX. The ES8311 is also a slave. Enabling RX alone can
+succeed while every PCM read times out because the master is stopped. A codec
+probe that prepares and closes hardware never exercises this data path. Host
+substitutes must model the clock dependency rather than synthesize received
+frames whenever RX is enabled.
+
+Manage clock ownership separately from microphone and speaker grants. A clock
+needed by capture must not imply speaker playback, DAC unmute or amplifier
+permission. Stopping the speaker must preserve an active microphone's clock
+while preventing buffered playback from resurfacing on a later start. Exercise
+cold single-role startup, both duplex orderings, independent mute and failure
+cleanup through the production adapter and pinned codec implementation.
+
+A retained generic SDK error identifies a failed operation class only when its
+operation is recorded. Keep the originating failure through successful cleanup
+and distinguish it from subsequent cleanup errors. Host regressions establish
+the lifecycle defect; physical first-frame and acoustic checks remain separate.
+See the [failed device record](../../docs/validation.md#combined-candidate-device-failure-2026-10-23).
+
+## 17. A retention gap response must permit progress with a live producer
+
+Returning only `oldest - 1` after a journal overrun can livelock: the producer
+advances before the next request, making that cursor stale again. A larger ring
+or faster retry does not repair that contract. A static fixture that reconstructs
+the same ring on every request cannot expose it.
+
+Copy the missing-prefix metadata and a bounded page of retained observations
+from one owner snapshot. Advance the cursor only through verified delivered
+records, retain exact loss accounting, and make wire compatibility explicit.
+Test a persistent journal whose producer advances between every consumer page,
+including a consumer slower than production. Positive delivery, continuous
+delivery and usable physical data are distinct results; do not hide loss by
+jumping to the latest record or treating a completed capture as qualified data.
+See the [sensor API contract](../../docs/sensor-api.md).
+
+## 18. Decode errors in their owning API domain
+
+Equal numeric errors need not have equal meanings. In the pinned SDK, audio
+`esp_err_t` 263 means timeout, while BLE advertising completion 263 means
+`ESP_BT_STATUS_HCI_MEMORY_FULL`. The host HCI command path can synthesize that
+Bluetooth status when allocating a command buffer fails, before contacting the
+controller. The status name alone does not establish which resource failed.
+
+Retain the first failure together with the operation and preceding lifecycle
+events. Label resource snapshots with their actual observation point; free heap
+measured later cannot explain the earlier allocation. Diagnostic trace loss or
+unknown observations must remain explicit. Keep tracing separate from retries,
+recovery, admission policy and fault clearing. See the
+[device failure record](../../docs/validation.md#combined-candidate-device-failure-2026-10-23).

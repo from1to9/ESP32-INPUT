@@ -64,12 +64,15 @@ static void test_overwrite_gap_future_and_output_integrity(void)
         assert(board_sensor_journal_append(&journal, &record));
     }
     memset(out, 0x5a, sizeof(out));
-    const board_sensor_record_t sentinel = out[0];
+    const board_sensor_record_t sentinel = out[4];
     assert(board_sensor_journal_copy(&journal, 3, out, 8, 999, &batch));
-    assert(batch.state == BOARD_SENSOR_READ_GAP && batch.count == 0 && batch.oldest_sequence == 9 &&
-        batch.latest_sequence == 12 && batch.lost_records == 5 && batch.next_after == 8);
-    assert(memcmp(&out[0], &sentinel, sizeof(sentinel)) == 0);
-    assert(board_sensor_journal_copy(&journal, batch.next_after, out, 8, 999, &batch));
+    assert(batch.state == BOARD_SENSOR_READ_GAP && batch.count == 4 && batch.oldest_sequence == 9 &&
+        batch.latest_sequence == 12 && batch.lost_records == 5 && batch.next_after == 12);
+    assert(memcmp(&out[4], &sentinel, sizeof(sentinel)) == 0);
+    assert(out[0].sequence == 9 && out[3].sequence == 12);
+    /* A second independent cursor reads the same retained records without
+     * consuming the first reader's snapshot or the journal. */
+    assert(board_sensor_journal_copy(&journal, 8, out, 8, 999, &batch));
     assert(batch.count == 4 && out[0].sequence == 9 && out[3].sequence == 12 && batch.next_after == 12);
     assert(board_sensor_journal_copy(&journal, 12, out, 8, 999, &batch));
     assert(batch.state == BOARD_SENSOR_READ_EMPTY && !batch.count);
@@ -98,11 +101,37 @@ static void test_empty_unavailable_and_identifier_exhaustion(void)
     assert(board_sensor_journal_append(&journal, &record));
     assert(journal.state == BOARD_SENSOR_JOURNAL_EXHAUSTED && journal.latest_sequence == UINT64_MAX);
     assert(!board_sensor_journal_append(&journal, &record));
+    assert(board_sensor_journal_copy(&journal, 0, out, 8, 10, &batch));
+    assert(batch.state == BOARD_SENSOR_READ_GAP && batch.lost_records == UINT64_MAX - 2U &&
+        batch.count == 2 && batch.next_after == UINT64_MAX && out[1].sequence == UINT64_MAX);
     assert(board_sensor_journal_copy(&journal, UINT64_MAX - 2, out, 8, 10, &batch));
     assert(batch.state == BOARD_SENSOR_READ_DATA && batch.count == 2 && out[1].sequence == UINT64_MAX &&
         batch.journal_state == BOARD_SENSOR_JOURNAL_EXHAUSTED && batch.next_after == UINT64_MAX);
     assert(board_sensor_journal_copy(&journal, UINT64_MAX, out, 8, 10, &batch));
     assert(batch.state == BOARD_SENSOR_READ_EMPTY && batch.journal_state == BOARD_SENSOR_JOURNAL_EXHAUSTED);
+}
+
+static void test_advancing_full_ring_and_independent_gap_cursors(void)
+{
+    board_sensor_journal_t journal = {0};
+    assert(board_sensor_journal_init(&journal, storage, BOARD_SENSOR_JOURNAL_CAPACITY));
+    uint64_t cursor = 0, lost = 0, delivered = 0;
+    for (uint64_t i = 1; i <= 300; ++i) { board_sensor_record_t r = observation(i); assert(board_sensor_journal_append(&journal, &r)); }
+    for (unsigned read = 0; read < 32; ++read) {
+        for (unsigned i = 0; i < 4; ++i) {
+            board_sensor_record_t r = observation(journal.latest_sequence + 1U);
+            assert(board_sensor_journal_append(&journal, &r));
+        }
+        const board_sensor_journal_t before = journal;
+        assert(board_sensor_journal_copy(&journal, cursor, out, 3, 1000000, &batch));
+        assert(batch.state == BOARD_SENSOR_READ_GAP && batch.count == 3 && batch.lost_records > 0);
+        assert(out[0].sequence == batch.oldest_sequence && out[2].sequence == batch.next_after);
+        lost += batch.lost_records; delivered += batch.count; cursor = batch.next_after;
+        assert(lost + delivered == cursor && !memcmp(&before, &journal, sizeof(journal)));
+        assert(board_sensor_journal_copy(&journal, 0, out, 8, 1000000, &batch));
+        assert(batch.state == BOARD_SENSOR_READ_GAP && batch.count == 8 && batch.next_after > cursor &&
+            batch.lost_records == batch.oldest_sequence - 1U && !memcmp(&before, &journal, sizeof(journal)));
+    }
 }
 
 static void test_input_whitelist_and_redaction(void)
@@ -134,6 +163,7 @@ int main(void)
     test_preservation_rejection_and_independent_clients();
     test_overwrite_gap_future_and_output_integrity();
     test_empty_unavailable_and_identifier_exhaustion();
+    test_advancing_full_ring_and_independent_gap_cursors();
     test_input_whitelist_and_redaction();
     printf("Sensor journal: independent cursors, preservation, overwrite gaps, immutable reads, exhaustion and input whitelist passed; record=%zu ring=%zu bytes\n",
         sizeof(board_sensor_record_t), sizeof(storage));

@@ -31,10 +31,13 @@ size_t sensor_wire_encode(const uint8_t boot[16], uint64_t request_id, uint64_t 
         after > page->latest_sequence) : (page->oldest_sequence || after)) return 0;
     if ((page->journal_state == BOARD_SENSOR_JOURNAL_UNAVAILABLE) !=
         (page->state == BOARD_SENSOR_READ_UNAVAILABLE)) return 0;
-    if (page->state == BOARD_SENSOR_READ_DATA) {
-        if (!page->count || after == UINT64_MAX || page->lost_records ||
+    if (page->state == BOARD_SENSOR_READ_DATA || page->state == BOARD_SENSOR_READ_GAP) {
+        bool gap = page->state == BOARD_SENSOR_READ_GAP;
+        if (!page->count || after == UINT64_MAX ||
             page->journal_state == BOARD_SENSOR_JOURNAL_UNAVAILABLE) return 0;
-        uint64_t previous = after;
+        if (gap ? (!page->oldest_sequence || after >= page->oldest_sequence - 1U ||
+                page->lost_records != page->oldest_sequence - after - 1U) : page->lost_records != 0) return 0;
+        uint64_t previous = gap ? page->oldest_sequence - 1U : after;
         for (uint32_t i = 0; i < page->count; ++i) {
             if (previous == UINT64_MAX || records[i].sequence != previous + 1U ||
                 records[i].sequence < page->oldest_sequence || records[i].sequence > page->latest_sequence) return 0;
@@ -42,10 +45,6 @@ size_t sensor_wire_encode(const uint8_t boot[16], uint64_t request_id, uint64_t 
         }
         if (page->next_after != previous) return 0;
     } else if (page->count) return 0;
-    if (page->state == BOARD_SENSOR_READ_GAP &&
-        (!page->oldest_sequence || after >= page->oldest_sequence - 1U ||
-         page->next_after != page->oldest_sequence - 1U ||
-         page->lost_records != page->oldest_sequence - after - 1U)) return 0;
     if (page->state == BOARD_SENSOR_READ_EMPTY &&
         (page->next_after != after || after != page->latest_sequence || page->lost_records)) return 0;
     if (page->state == BOARD_SENSOR_READ_UNAVAILABLE &&

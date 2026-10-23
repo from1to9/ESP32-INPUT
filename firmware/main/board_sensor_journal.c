@@ -55,13 +55,18 @@ bool board_sensor_journal_copy(const board_sensor_journal_t *journal, uint64_t a
     (void)board_sensor_journal_bounds(journal, observed_us, batch);
     batch->next_after = after;
     if (!journal->count) return true;
+    uint64_t retained_after = after;
     if (after < batch->oldest_sequence - 1U) {
         batch->state = BOARD_SENSOR_READ_GAP;
         batch->lost_records = batch->oldest_sequence - 1U - after;
-        batch->next_after = batch->oldest_sequence - 1U;
-    } else if (after < journal->latest_sequence) {
-        batch->state = BOARD_SENSOR_READ_DATA;
-        const size_t offset = (size_t)(after + 1U - batch->oldest_sequence);
+        retained_after = batch->oldest_sequence - 1U;
+    }
+    if (retained_after < journal->latest_sequence) {
+        if (!batch->lost_records) batch->state = BOARD_SENSOR_READ_DATA;
+        /* Bounds, loss and retained records belong to the same locked copy.
+         * A gap-only resume at oldest-1 would already be stale on the next
+         * request whenever the full ring advances between reads. */
+        const size_t offset = (size_t)(retained_after + 1U - batch->oldest_sequence);
         const size_t remaining = journal->count - offset;
         batch->count = (uint32_t)(remaining < capacity ? remaining : capacity);
         for (uint32_t i = 0; i < batch->count; ++i) records[i] = journal->records[(journal->head + offset + i) % journal->capacity];

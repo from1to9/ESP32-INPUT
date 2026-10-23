@@ -49,7 +49,10 @@ checks uniqueness and the actual codec prepare/stop path for each. A composition
 test uses the real audio manager and board capabilities for USB mono48k/10ms
 capture/playback and local recognition mono16k/10ms admission. USB selection and
 authority are explicit boundary inputs; the test does not claim a connected
-host or completed media execution. Codec completion notifications run outside
+host or acoustic output. Actual engine/board/pinned-codec execution additionally
+checks cold Speaker without a capture consumer, Speaker-first and Mic-first
+duplex, independent role stops/restarts and completed synthetic PCM frames.
+Codec completion notifications run outside
 the adapter lock and let the manager retire/enqueue frames at media cadence.
 
 Prepare leaves PA/DAC muted and RX/TX DMA disabled. Capture mute stops RX DMA
@@ -60,6 +63,26 @@ resources. It leaves the shared display supply enabled. Failed teardown stays
 uncertain. Pinned codec enable/suspend failures can leave reference counts
 ambiguous; the adapter retains the codec identity and quarantines it until
 reboot instead of inventing reference repair or a successful restart.
+
+The pinned SDK makes the second initialized RX channel a slave of the TX
+master. Capture therefore starts zero-preloaded TX clocks before RX, while
+keeping DAC mute, PA low and the playback permission gate closed. Status
+separates `tx_clock_running` from acknowledged `speaker_muted` and actual
+`playback_running`. Stopping Speaker first acknowledges DAC/PA mute, briefly
+stops TX to overwrite all old speaker DMA with zeros, and resumes the master
+only for an independently active RX. Stopping Mic preserves an active Speaker;
+the last role stops both channels. No IO, stop or startup deadline is extended.
+The physical capture timing effect of the clock pause still needs device
+qualification.
+
+`--clock-only` runs the focused cold-Mic and shared-clock lifecycle regression.
+The I2S boundary now models the pinned TX-master/RX-slave dependency: RX alone
+returns timeout with zero bytes. This reproduces the former production failure
+instead of fabricating samples. Regressions cover clock-only privacy, TX/RX
+enable and disable failures, old DMA purge, next-generation cleanup and a stop
+during clock enable. First and last named SDK errors remain in cached status
+through successful teardown; the observer distinguishes I2S read/write,
+I2C control and resource operations without logging PCM or identities.
 
 Tests cover actual left-slot PCM extraction, stereo downmix including signed
 limits, copied write identity, zero/partial/misaligned SDK transfers, exact

@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Exercise the production board adapter and pinned ES8311 driver on the host."""
 from pathlib import Path
+import argparse
 import os
 import shutil
 import subprocess
 import tempfile
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--clock-only", action="store_true", help="Run the shared-clock regression only")
+args = parser.parse_args()
 
 os.environ.setdefault("UBSAN_OPTIONS", "halt_on_error=1:print_stacktrace=1")
 root = Path(__file__).resolve().parents[2]
@@ -34,6 +39,11 @@ with tempfile.TemporaryDirectory(prefix="esp32-board-audio-") as temp:
         objects.append(str(output))
     binary = str(Path(temp) / "board_audio")
     subprocess.run(common + objects + ["-lm", "-o", binary], check=True)
+    clock_binary = str(Path(temp) / "audio_clock")
+    subprocess.run(common + ["-pedantic", str(suite / "test_audio_clock.c")] + objects[1:] + ["-lm", "-o", clock_binary], check=True)
+    subprocess.run([clock_binary], check=True)
+    if args.clock_only:
+        raise SystemExit(0)
     subprocess.run([binary], check=True)
     nand_binary = str(Path(temp) / "nand_probe")
     subprocess.run(common + ["-pedantic", str(suite / "test_nand_probe.c"), "-o", nand_binary], check=True)

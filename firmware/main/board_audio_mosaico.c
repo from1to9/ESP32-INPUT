@@ -75,6 +75,8 @@ static struct {
     i2s_chan_handle_t rx;
     bool tx_running;
     bool rx_running;
+    bool speaker_unmuted;
+    bool speaker_mute_known;
     bool tx_initialized;
     bool tx_dirty;
     bool power_owned;
@@ -133,12 +135,17 @@ static ae_result_t sdk_result(esp_err_t error)
     return AE_IO_ERROR;
 }
 
-static void remember(esp_err_t error)
+static void remember(esp_err_t error, board_audio_sdk_operation_t operation)
 {
     if (error == ESP_OK) return;
     if (s.control.first_error == ESP_OK) s.control.first_error = error;
     portENTER_CRITICAL(&s.lock);
     s.status.last_sdk_error = error;
+    s.status.last_sdk_operation = operation;
+    if (s.status.first_sdk_operation == BOARD_AUDIO_SDK_NONE) {
+        s.status.first_sdk_error = error;
+        s.status.first_sdk_operation = operation;
+    }
     portEXIT_CRITICAL(&s.lock);
 }
 
@@ -152,13 +159,13 @@ static int ctrl_read(const audio_codec_ctrl_if_t *base, int reg, int reg_len,
 {
     control_t *c = (control_t *)base;
     if (!c->device || reg_len != 1 || reg < 0 || reg > 255 || !data || data_len != 1) {
-        remember(ESP_ERR_INVALID_ARG);
+        remember(ESP_ERR_INVALID_ARG, BOARD_AUDIO_SDK_I2C_READ);
         return ESP_ERR_INVALID_ARG;
     }
     uint8_t address = (uint8_t)reg;
     esp_err_t error = i2c_master_transmit_receive(c->device, &address, 1,
         data, (size_t)data_len, CONTROL_TIMEOUT_MS);
-    remember(error);
+    remember(error, BOARD_AUDIO_SDK_I2C_READ);
     return error;
 }
 
@@ -167,12 +174,12 @@ static int ctrl_write(const audio_codec_ctrl_if_t *base, int reg, int reg_len,
 {
     control_t *c = (control_t *)base;
     if (!c->device || reg_len != 1 || reg < 0 || reg > 255 || !data || data_len != 1) {
-        remember(ESP_ERR_INVALID_ARG);
+        remember(ESP_ERR_INVALID_ARG, BOARD_AUDIO_SDK_I2C_WRITE);
         return ESP_ERR_INVALID_ARG;
     }
     uint8_t bytes[2] = {(uint8_t)reg, *(uint8_t *)data};
     esp_err_t error = i2c_master_transmit(c->device, bytes, sizeof(bytes), CONTROL_TIMEOUT_MS);
-    remember(error);
+    remember(error, BOARD_AUDIO_SDK_I2C_WRITE);
     if (error == ESP_OK && reg == 0x32) { c->volume_written = bytes[1]; c->volume_write_observed = true; }
     return error;
 }
@@ -219,7 +226,10 @@ static ae_result_t codec_enable(bool on)
 
 static ae_result_t pa(bool on)
 {
-    return s.pa_owned ? sdk_result(gpio_set_level(BSP_AUDIO_PA_CTRL, on ? 1 : 0)) : AE_OK;
+    if (!s.pa_owned) return AE_OK;
+    esp_err_t error = gpio_set_level(BSP_AUDIO_PA_CTRL, on ? 1 : 0);
+    remember(error, BOARD_AUDIO_SDK_PA_WRITE);
+    return sdk_result(error);
 }
 
 static ae_result_t flush_tx(void)
@@ -232,7 +242,7 @@ static ae_result_t flush_tx(void)
         if (requested > sizeof(buffers.wire)) requested = sizeof(buffers.wire);
         size_t loaded = 0;
         esp_err_t error = i2s_channel_preload_data(s.tx, buffers.wire, requested, &loaded);
-        remember(error);
+        remember(error, BOARD_AUDIO_SDK_I2S_PRELOAD_TX);
         if (error != ESP_OK || loaded == 0 || loaded > requested || loaded % 4U) return AE_IO_ERROR;
         total += loaded;
     }
@@ -240,26 +250,56 @@ static ae_result_t flush_tx(void)
     return AE_OK;
 }
 
+static ae_result_t start_tx_clock(void)
+{
+    if (s.tx_running) return AE_OK;
+    ae_result_t result = flush_tx();
+    if (result != AE_OK) return result;
+    esp_err_t error = i2s_channel_enable(s.tx);
+    remember(error, BOARD_AUDIO_SDK_I2S_ENABLE_TX);
+    if (error == ESP_OK) s.tx_running = true;
+    return sdk_result(error);
+}
+
+static ae_result_t stop_tx_clock(void)
+{
+    if (s.tx_running) {
+        esp_err_t error = i2s_channel_disable(s.tx);
+        remember(error, BOARD_AUDIO_SDK_I2S_DISABLE_TX);
+        if (error != ESP_OK) return sdk_result(error);
+        s.tx_running = false;
+    }
+    return flush_tx();
+}
+
+static bool interrupted(void);
+
 static ae_result_t hardware_mute(ae_role_t role)
 {
     ae_result_t result = AE_OK;
     if (role == AE_MICROPHONE) {
         if (s.rx_running) {
             esp_err_t error = i2s_channel_disable(s.rx);
-            remember(error);
+            remember(error, BOARD_AUDIO_SDK_I2S_DISABLE_RX);
             if (error == ESP_OK) s.rx_running = false;
             else result = AE_UNCERTAIN;
         }
+        if (!s.rx_running && !s.speaker_unmuted && stop_tx_clock() != AE_OK) result = AE_UNCERTAIN;
     } else {
-        if (pa(false) != AE_OK) result = AE_UNCERTAIN;
-        if (dac_mute(true) != AE_OK) result = AE_UNCERTAIN;
-        if (s.tx_running) {
-            esp_err_t error = i2s_channel_disable(s.tx);
-            remember(error);
-            if (error == ESP_OK) s.tx_running = false;
-            else result = AE_UNCERTAIN;
+        bool mute_acknowledged = pa(false) == AE_OK;
+        if (dac_mute(true) != AE_OK) mute_acknowledged = false;
+        if (mute_acknowledged) {
+            s.speaker_unmuted = false;
+            if (s.pa_owned && s.codec) s.speaker_mute_known = true;
+        } else {
+            s.speaker_mute_known = false;
+            result = AE_UNCERTAIN;
         }
-        if (!s.tx_running && flush_tx() != AE_OK) result = AE_UNCERTAIN;
+        /* TX is also the master clock for slave RX. Pause it only long enough
+         * to purge old speaker DMA, then resume zero-filled clocks for an
+         * independently active microphone. DAC/PA remain acknowledged muted. */
+        if (stop_tx_clock() != AE_OK) result = AE_UNCERTAIN;
+        if (result == AE_OK && s.rx_running && !interrupted() && start_tx_clock() != AE_OK) result = AE_UNCERTAIN;
     }
     memset(buffers.wire, 0, sizeof(buffers.wire));
     return result;
@@ -283,25 +323,25 @@ static ae_result_t hardware_stop(void)
     }
     if (s.tx && !s.tx_running) {
         esp_err_t error = i2s_del_channel(s.tx);
-        remember(error);
+        remember(error, BOARD_AUDIO_SDK_I2S_DELETE_TX);
         if (error == ESP_OK) { s.tx = NULL; s.tx_initialized = s.tx_dirty = false; }
         else result = AE_UNCERTAIN;
     }
     if (s.rx && !s.rx_running) {
         esp_err_t error = i2s_del_channel(s.rx);
-        remember(error);
+        remember(error, BOARD_AUDIO_SDK_I2S_DELETE_RX);
         if (error == ESP_OK) s.rx = NULL;
         else result = AE_UNCERTAIN;
     }
     if (s.power_owned) {
         esp_err_t error = bsp_power_set_codec_3v3(false);
-        remember(error);
+        remember(error, BOARD_AUDIO_SDK_POWER_CODEC);
         if (error == ESP_OK) s.power_owned = false;
         else result = AE_UNCERTAIN;
     }
     if (s.control.device && !s.codec) {
         esp_err_t error = i2c_master_bus_rm_device(s.control.device);
-        remember(error);
+        remember(error, BOARD_AUDIO_SDK_DEVICE_REMOVE);
         if (error == ESP_OK) s.control.device = NULL;
         else result = AE_UNCERTAIN;
     }
@@ -326,21 +366,26 @@ static ae_result_t hardware_prepare(const request_t *request)
 #endif
     /* Claim I2S before touching power/PA. A preexisting BSP audio owner fails. */
     esp_err_t error = i2s_new_channel(&channels, &s.tx, &s.rx);
-    remember(error);
+    remember(error, BOARD_AUDIO_SDK_I2S_ALLOCATE);
     if (error != ESP_OK) return sdk_result(error);
     gpio_config_t gpio = { .pin_bit_mask = UINT64_C(1) << BSP_AUDIO_PA_CTRL,
         .mode = GPIO_MODE_OUTPUT };
     error = gpio_config(&gpio);
+    remember(error, BOARD_AUDIO_SDK_PA_CONFIG);
     if (error != ESP_OK) goto fail;
     s.pa_owned = true;
     error = gpio_set_level(BSP_AUDIO_PA_CTRL, 0);
+    remember(error, BOARD_AUDIO_SDK_PA_WRITE);
     if (error != ESP_OK) goto fail;
     error = bsp_i2c_init();
+    remember(error, BOARD_AUDIO_SDK_BUS_INIT);
     if (error != ESP_OK) goto fail;
     error = bsp_power_set_vcc_3v3(true);
+    remember(error, BOARD_AUDIO_SDK_POWER_VCC);
     if (error != ESP_OK) goto fail;
     s.power_owned = true;
     error = bsp_power_set_codec_3v3(true);
+    remember(error, BOARD_AUDIO_SDK_POWER_CODEC);
     if (error != ESP_OK) goto fail;
     vTaskDelay(pdMS_TO_TICKS(10));
     i2s_std_config_t config = {
@@ -351,14 +396,17 @@ static ae_result_t hardware_prepare(const request_t *request)
     };
     config.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
     error = i2s_channel_init_std_mode(s.tx, &config);
+    remember(error, BOARD_AUDIO_SDK_I2S_INIT_TX);
     if (error != ESP_OK) goto fail;
     s.tx_initialized = true;
     s.tx_dirty = true;
     error = i2s_channel_init_std_mode(s.rx, &config);
+    remember(error, BOARD_AUDIO_SDK_I2S_INIT_RX);
     if (error != ESP_OK) goto fail;
     i2c_device_config_t device = { .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = BSP_AUDIO_CODEC_I2C_ADDR >> 1, .scl_speed_hz = 100000 };
     error = i2c_master_bus_add_device(bsp_i2c_get_handle(), &device, &s.control.device);
+    remember(error, BOARD_AUDIO_SDK_DEVICE_ADD);
     if (error != ESP_OK) goto fail;
     s.control.base = (audio_codec_ctrl_if_t) { .is_open = ctrl_open, .read_reg = ctrl_read,
         .write_reg = ctrl_write, .get_info = ctrl_info };
@@ -377,13 +425,15 @@ static ae_result_t hardware_prepare(const request_t *request)
     s.roles = request->roles;
     s.generation = request->generation;
     s.prepared = true;
+    s.speaker_unmuted = false;
+    s.speaker_mute_known = true;
     s.hardware_observed = true;
     return AE_OK;
-fail:
-    remember(error);
+fail: {
     ae_result_t failure = sdk_result(error);
     if (hardware_stop() != AE_OK) return AE_UNCERTAIN;
     return failure;
+}
 }
 
 static bool interrupted(void)
@@ -400,21 +450,37 @@ static ae_result_t hardware_unmute(ae_role_t role)
     esp_err_t error;
     if (role == AE_MICROPHONE) {
         if (s.rx_running) return AE_OK;
+        /* TX was initialized first and is the full-duplex master. Enabling
+         * slave RX alone cannot produce BCLK/WS or any capture DMA frames.
+         * Clock-only TX never opens DAC/PA or the playback permission gate. */
+        bool clock_was_running = s.tx_running;
+        ae_result_t clock_result = start_tx_clock();
+        if (clock_result != AE_OK) return clock_result;
+        if (interrupted()) {
+            if (!clock_was_running && !s.speaker_unmuted && stop_tx_clock() != AE_OK) return AE_UNCERTAIN;
+            return AE_STALE;
+        }
         error = i2s_channel_enable(s.rx);
-        remember(error);
-        if (error != ESP_OK) return sdk_result(error);
+        remember(error, BOARD_AUDIO_SDK_I2S_ENABLE_RX);
+        if (error != ESP_OK) {
+            if (!clock_was_running && !s.speaker_unmuted && stop_tx_clock() != AE_OK) return AE_UNCERTAIN;
+            return sdk_result(error);
+        }
         s.rx_running = true;
     } else {
-        if (!s.tx_running) {
-            error = i2s_channel_enable(s.tx);
-            remember(error);
-            if (error != ESP_OK) return sdk_result(error);
-            s.tx_running = true;
+        ae_result_t clock_result = start_tx_clock();
+        if (clock_result != AE_OK) return clock_result;
+        if (interrupted()) {
+            if (!s.rx_running && stop_tx_clock() != AE_OK) return AE_UNCERTAIN;
+            return AE_STALE;
         }
         if (dac_mute(false) != AE_OK || pa(true) != AE_OK) {
+            s.speaker_mute_known = false;
             (void)hardware_mute(AE_SPEAKER);
             return AE_UNCERTAIN;
         }
+        s.speaker_unmuted = true;
+        s.speaker_mute_known = true;
     }
     return AE_OK;
 }
@@ -453,7 +519,7 @@ static ae_result_t hardware_pcm(const request_t *request, size_t *actual)
     if (!reading) s.tx_dirty = true;
     esp_err_t error = reading ? i2s_channel_read(s.rx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS) :
         i2s_channel_write(s.tx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS);
-    remember(error);
+    remember(error, reading ? BOARD_AUDIO_SDK_I2S_READ : BOARD_AUDIO_SDK_I2S_WRITE);
     if (transferred > wire_bytes || transferred % 4U) return AE_INTEGRITY;
     frames = transferred / 4U;
     if (reading) {
@@ -510,8 +576,10 @@ static void publish(ae_result_t result)
     s.status.probe_result = s.probe_result;
     s.status.hardware_observed = s.hardware_observed;
     s.status.capture_running = s.rx_running;
-    s.status.playback_running = s.tx_running;
-    s.status.speaker_muted = !s.tx_running;
+    s.status.playback_running = s.tx_running && s.speaker_mute_known && s.speaker_unmuted;
+    s.status.speaker_muted = s.speaker_mute_known && !s.speaker_unmuted;
+    s.status.speaker_mute_confirmed = s.speaker_mute_known;
+    s.status.tx_clock_running = s.tx_running;
     s.status.generation = s.generation;
     s.status.format = s.format;
     s.status.roles = s.roles;

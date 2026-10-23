@@ -25,6 +25,11 @@ The full copied runtime snapshot is held in fixed PSRAM scratch and wiped
 before return. Retained observations and logs exclude job/session/peer IDs,
 tokens, PCM and speech candidates.
 
+Codec summaries distinguish a running TX clock from an unmuted Speaker and
+include acknowledged speaker mute. Retained first/last named SDK error
+operations identify failed I2S reads/writes, I2C control or resource calls even
+after a successful cleanup; clock-only capture does not appear as playback.
+
 Tests cover unavailable-to-known recovery, getters that leave output untouched,
 failed jobs retained after aggregate OFF, first-frame transitions, counter-only
 updates waiting for the summary, USB/codec errors and generations, private

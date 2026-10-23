@@ -34,11 +34,16 @@ the host immediately follows available data and sleeps only after an empty page.
 
 `--after` is a canonical decimal unsigned 64-bit journal cursor, default `0`
 (request history from record 1). Retention overwrite returns an explicit GAP
-with the exact unavailable count. The tool records that event before adopting
-`oldest-1` and continuing. It never interpolates, sorts, filters, drops a rejected
+with the exact unavailable count. Version 2 returns that missing prefix and
+bounded retained records atomically; the tool records the gap and every record
+before advancing to the final verified record. It never interpolates, sorts, filters, drops a rejected
 record or substitutes a zero measurement. Wrong boot, conflicting data, unknown
 schema, invalid checksum or incomplete response cannot advance the cursor.
 Each read retry uses a fresh transport ID and the same application cursor.
+The catalog's `wire_version` binds every page. Existing version-1 captures and
+devices remain readable; their gap-only pages still resume at `oldest-1` and can
+starve behind a continuously advancing full ring. New devices use version 2.
+Unknown or conflicting catalog/header/HTTP encoding versions are rejected.
 
 Four new files are reserved exclusively with mode 0600 before opening a device:
 
@@ -68,6 +73,14 @@ touch observations may be explicitly redacted with no invented coordinates.
 Retention gaps, source rejection, generation changes, invalid measurements and
 unknown identity are visible separately in the receipt. Exit zero means the
 bounded collection completed, even if its data-quality receipt has issues.
+`records_available` distinguishes delivered records from a completed empty
+collection. `retention_contiguous` reports only retention loss; the nested
+`retention_gap_records.initial` and `.ongoing` count missing IDs on the first
+sample page and later pages separately. The original total in `issues` and each
+JSONL gap remain intact. `journal_contiguous` and `data_usable` retain their strict
+whole-capture quality checks: actual records can be present while both are false.
+Transport anomalies and `collection_completed` remain separate from these source
+and retention conditions.
 `physical_motion_qualified` is always false. Neither wire completeness nor an
 available sensor establishes pointer direction, accuracy or human usability.
 
@@ -93,4 +106,7 @@ frames, retries, disconnects and identity changes. The serial substitute models
 pyserial's wait-for-count behavior; the collector waits for one byte and then
 reads only a bounded available snapshot. The HTTPS tests use the real pinned
 transport/session with synthetic private credentials and a socket substitute.
+A persistent production journal/codec process also models a 100 Hz producer
+between every 40 ms and 160 ms read, proving actual record delivery with exact
+initial/ongoing loss accounting instead of relying on a frozen gap fixture.
 No test opens an actual device, network connection or user Keychain.
