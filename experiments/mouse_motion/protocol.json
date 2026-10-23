@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "purpose": "Frozen synthetic feasibility benchmark, not product or device qualification",
+  "fusion_commit": "a8d7224f36a0ec82345ef49a3db50e65f8d3bab8",
+  "fusion_settings": {
+    "sample_rate_hz": 100,
+    "convention": "NWU",
+    "gain": 0.5,
+    "gyroscope_range_dps": 2000,
+    "acceleration_rejection_degrees": 10,
+    "magnetic_rejection_degrees": 0,
+    "rejection_timeout_seconds": 5
+  },
+  "estimator_settings": {
+    "candidates": ["integrate", "leaky"],
+    "leak_time_constant_seconds": 1.0,
+    "gravity_mps2": 9.80665,
+    "pointer_gain_counts_per_meter": 1000,
+    "pointer_speed_deadband_mps": 0.01,
+    "pointer_rate_limit_counts_per_second": 2000,
+    "cadence_interval_seconds": [0.0095, 0.0105],
+    "warmup_seconds": 5,
+    "arming": "Explicit operator rest/recenter frame after real Fusion startup/recovery; no motion-onset detector",
+    "fault_policy": "Clear velocity, fractional HID carry and arming on nonfinite data, invalid cadence, startup, overrange or acceleration recovery; cadence/data faults also restart Fusion; require explicit recenter to rearm",
+    "normal_motion_time_limit": null,
+    "angular_pointer_term": null,
+    "keyboard": "Not instantiated or modified"
+  },
+  "fixture_contract": {
+    "seed": 20261023,
+    "input": "Causal ordered samples with analytic interval-mean world translation acceleration, endpoint specific force and interval-mean body angular rate; ideal gravity and fixed scale unless explicitly perturbed",
+    "orientation_oracle": "Same C estimator and Fusion flags/gates, replacing only compensated acceleration by analytic ground truth; privileged diagnostic, never firmware evidence",
+    "warmup": "Static physical pose, no pointer output, no skipped Fusion startup",
+    "axis_mapping": "Freeze estimated grip-to-world matrix at explicit rest/recenter, rotate earth acceleration back into that grip; X/Y map to pointer X/Y",
+    "limits": ["No device noise model is established", "Perfect interval-mean acceleration is favorable to integration", "No physical position state or endpoint-position criterion", "No automatic zero-velocity claim from low acceleration", "No retrospective correction or future data in C estimator", "Pure rotation means rotation about sensor center, not a displaced wrist pivot"]
+  },
+  "acceptance": {
+    "moving_speed_floor_mps": 0.05,
+    "moving_velocity_nrmse_max": 0.25,
+    "direction_agreement_min": 0.95,
+    "each_half_wave_active_fraction_min": 0.9,
+    "reversal_delay_seconds_max": 0.08,
+    "motion_to_first_hid_seconds_max": 0.08,
+    "coast_speed_ratio_range": [0.75, 1.25],
+    "braking_early_opposite_seconds_max": 0.0,
+    "stop_speed_mps_max": 0.01,
+    "stationary_pointer_path_counts_max": 5,
+    "pure_rotation_pointer_path_counts_max": 5,
+    "first_impulse_retention_ratio_range": [0.9, 1.1],
+    "startup_elapsed_seconds_range": [2.98, 3.03],
+    "overrange_recovery_elapsed_seconds_range": [2.98, 3.03],
+    "acceleration_recovery_elapsed_seconds_range": [5.0, 5.03],
+    "gated_integer_pointer_counts_max": 0,
+    "gated_velocity_mps_max": 0,
+    "fault_frame_pointer_counts_max": 0,
+    "fault_requires_explicit_recenter": true,
+    "all_required_checks_must_pass": true
+  },
+  "execution_policy": "Freeze protocol, generator, estimator, dependency hashes and generated input SHA before compiling/running the estimator. Preserve the first run and every failure. Never change expectations or parameters in response to observed outcomes. Any defect repair needs a separate revision and retains the first run."
+}

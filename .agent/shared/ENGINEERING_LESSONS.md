@@ -224,3 +224,26 @@ gain tuning and repeated calibration must not compensate for an incorrect
 physical basis. A common proper rotation leaves reference-estimator norms and
 dot products invariant, so an axis correction and reference-loss repair require
 separate evidence. See the [physical observations](../../docs/validation.md#reference-loss-and-physical-axis-observations-2026-10-23).
+
+## 11. Reproduce the first rejected observation before changing the model
+
+Retained first-rejection and terminal frames can establish which predicates ran
+and why a reference expired. A later timing gap cannot explain an earlier
+failure. Short-circuited checks are unobserved, not passed; independently retained
+frames do not reconstruct missing intermediate motion. Preserve successful
+parser checks separately from a user's failed pointer experience.
+
+A coherent angular reference policy can still reject real translational
+acceleration. Changing the desired input model is a product revision, not proof
+that the former model was repaired. Do not hide the old failure by raising its
+thresholds. See the [candidate replay](../../docs/validation.md#grip-candidate-device-result-and-causal-replay-2026-10-23).
+
+AHRS libraries estimate orientation, not mouse intent or trustworthy velocity.
+Check the pinned implementation's timing: an exposed sample-period setter may
+retime integration while startup/recovery still count samples. A live producer
+with a latest-value consumer does not preserve every acceleration impulse.
+Offline future-endpoint correction cannot be copied into a causal input path;
+inferred stillness does not distinguish every constant-speed movement. Preserve
+these limits when adopting the [new model](../../docs/motion-estimation.md).
+A completed benchmark or sanitizer pass is distinct from its movement criteria
+passing; retain the failed cases and label privileged analytic inputs explicitly.

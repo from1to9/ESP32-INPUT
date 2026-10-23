@@ -11,7 +11,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 ## Confirmed decisions
 
 1. Three primary modes: mouse, keyboard and microphone/speaker. Cold boot enters mouse mode with motion disabled.
-2. A click toggles mouse motion. Once enabled, wrist rotation continuously controls relative movement without holding a button.
+2. A click toggles mouse motion. Once enabled, handheld waving controls relative movement without holding a button. Use inertial sensor data and holding orientation to estimate natural direction and speed; direct wrist-rotation pointer control is superseded by the 2026-10-23 user revision.
 3. Motion character selection, touch selection and spoken English letters belong to keyboard mode.
 4. Prioritize iPhone, iPad, Windows and macOS. No proprietary target client is required for basic HID, but pairing, input layout and accessibility settings may still be necessary.
 5. Prefer concurrent mouse and microphone operation. Deliver independent modes first if concurrency cannot be made stable.
@@ -27,7 +27,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 
 | ID | Feature | Acceptance |
 | --- | --- | --- |
-| M01 | Motion mouse | No continuous stationary drift after calibration; rotation gives relative movement; no stale movement burst |
+| M01 | Motion mouse | Handheld waving gives intuitive relative movement; stopping holds the pointer; no braking reversal, unexplained timeout or stale burst |
 | M02 | Touch fine control | Relative single-finger movement; quarter/eighth gain; touch priority and a short release freeze |
 | M03 | Mouse buttons | Left/right click, explicit drag and separate scroll; interruptions release drag |
 | M04 | Touchpad gestures | Configurable tap-to-click: single tap, double tap and double-tap-and-hold drag; movement-only when disabled |
@@ -43,15 +43,26 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 
 ### Mouse behavior
 
-Convert calibrated angular velocity to relative HID movement using actual monotonic sample intervals and fractional carry. Automatically adapt horizontal motion to both screen-up and tilted screen-facing grips using a validated gravity reference; posture changes must not cause pointer jumps. Horizontal and vertical gains are independently configurable, alongside axis directions, deadzone, filtering and click freeze. The current physical feedback reports fast vertical motion but slow horizontal motion, so raising a shared gain is not an adequate correction. Initial proposals are a 150 ms freeze and quarter-speed fine control; actual values need hardware tuning. HID units are not screen pixels.
+The requested behavior uses the accelerometer/gravity and gyro observations to
+estimate handheld movement. Holding orientation compensates gravity and maps
+left/right and up/down. The user specifies the intended interaction, not a raw
+acceleration-to-speed formula or exact absolute displacement. Gyro data may
+contribute to orientation; rotation itself must not directly drive the Mouse
+pointer. Keyboard angular selection is unchanged.
 
-Normal hand-held use follows a remote-control grip: turning left/right moves
-horizontally, and pitching up/down moves vertically. Starting Motion establishes
-a grip reference from actual stable observations. Automatic reference recovery
-after a changed grip or invalid reference must not replay old movement or emit
-a recovery jump. Tracking during valid rotation must not continually redefine
-the user's gesture as stationary. This is relative pointer control, not an
-absolute heading or screen-position calibration.
+Movement should respond continuously to intentional waving, brake without an
+immediate direction reversal, and remain still after the hand stops. Do not
+introduce an arbitrary short movement timeout to conceal estimator drift. Keep
+independent horizontal/vertical sensitivity, inversion, filtering and touch
+freeze configurable with explicit units. A new estimator must migrate old
+HID/degree settings rather than reinterpret them. HID units are not screen pixels.
+
+The [algorithm investigation](motion-estimation.md) records candidate open-source
+libraries, sampling constraints and the validation boundary. The installed
+angular candidate has not passed user acceptance. A replacement remains a local
+prototype until mathematical, causal replay and physical hand tests establish
+usable behavior. Enabling Motion and Recenter retain their acknowledged grip
+acquisition flow; changes in reference must never produce pointer jumps.
 
 Expose manual **Recenter** separately from **Calibrate sensor**. Recenter preserves
 the established gyro bias and settings, clears pending motion carry, and waits

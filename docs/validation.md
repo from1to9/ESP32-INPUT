@@ -440,6 +440,55 @@ The changed adapter, automatic grip recovery, pointer directions and fast-motion
 response still need validation on the resulting image. No physical Motion,
 intermittent scan, audio or endurance qualification is claimed by these captures.
 
+### Grip candidate device result and causal replay: 2026-10-23
+
+Published candidate `7572c1f8d0e394ee5dc7e5cf46c3b401f508a6d8`, application
+SHA-256 `f6a3f52d9fd21ac02aa4f98149a442816560cbce8729f1fc2fef8b63bb7fb8eb`
+(4,658,768 bytes), was app-only flashed and independently digest-verified.
+Partition table and NVS/PHY remained unchanged; no new backup was made.
+
+The immediate 90-second capture failed on retained GPIO ISR-service errors.
+Its eight observations had Motion off, so healthy acquisition did not qualify
+pointer behavior. A later 120-second capture passed bounded serial checks but
+retained six active reference losses. The user reported uncontrolled, unintuitive
+movement: the product Motion gate remains failed. The user's successful
+Recenter without a jump was a separate observation after that capture, whose
+Recenter counter remained zero.
+
+Exact first-rejection and terminal frames were replayed through the published
+reference function with strict compilation and sanitizers. The first frame
+failed near-one-g and gyro-compensated acceleration-change predicates; the
+terminal frame passed near-one-g but failed acceleration change and reached a
+250,313 microsecond trusted-correction age. Innovation was not evaluated on
+those two paths. A later 50,871 microsecond consumed-sample gap occurred after
+the terminal frame and cannot explain the first loss. The fourteen intermediate
+frames were not retained, so the replay does not reconstruct the full gesture.
+
+The observed predicates match the implementation; the physical cause of the
+acceleration changes remains unproven. The new [handheld movement requirement](motion-estimation.md)
+replaces direct angular Mouse output. It does not convert the failed candidate
+into a repaired or qualified device.
+
+### Developer and Git identity source checkpoint: 2026-10-23
+
+Reviewed source `62117195f5934e7789ef6b45a8ba91d110441091`, tree
+`21434f0511fb1fc5522c761de83a68668fb5ed90`, was published and verified against
+GitHub main. Its clean rebuild embeds that commit, clean state, project developer
+and repository in startup diagnostics and About. The frozen application is
+4,659,984 bytes, SHA-256
+`eb0f67d6f965580e66f58a9d71582a72e1c9d2a1ca8699aaacbb0bdbb4c73fb3`.
+It has not been flashed or physically inspected.
+
+Full host checks passed before a URL-validation correction; the affected seven
+generator tests and 159 coordinator cases passed again afterward. Independent
+review closed the build/UI URL grammar mismatch using 84 shared boundary cases.
+Native validation passed 102 renders/hit-test scenes, 116 resource cases and
+1,000 navigation cycles per theme without retained allocations. Actual ESP-IDF
+build and no-op checks passed; an isolated exact CMake dependency block also
+passed eight real-Git transition stages. Stack budgets passed with the unchanged
+2 KiB SDK/ISR reserve. These are source/host/target results only: metadata does
+not alter or qualify Motion, audio, Wi-Fi failure recovery or endurance.
+
 ## Historical evidence
 
 Evidence date: 2026-10-21. The pinned S31 toolchain has built the minimal composite HID firmware. Portable behavior, report layout and production BLE callback logic have executable host coverage. The physical development board is identified as Mosaico v1.2 (eFuse `0x0102`) with 16 MB flash, and its original flash contents have been backed up locally. Runtime deployment and host compatibility evidence are recorded separately below; a build does not establish a working HID device or long-term reliability.

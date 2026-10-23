@@ -8,7 +8,7 @@ Show the foreground mode and a compact selected-input/target cue in its context.
 
 ### Mouse
 
-Provide a motion toggle, compact fine-gain chooser, much larger touchpad, separate scroll controls, clicks and explicit drag/release. No edge swipe or navigation gesture crosses the pad: pointer deltas must not be emitted before deciding to navigate. Any touch suppresses motion; release starts a short freeze. Menus and mode changes cancel drag. Motion follows wrist rotation, not absolute device tilt.
+Provide a motion toggle, compact fine-gain chooser, much larger touchpad, separate scroll controls, clicks and explicit drag/release. No edge swipe or navigation gesture crosses the pad: pointer deltas must not be emitted before deciding to navigate. Any touch suppresses motion; release starts a short freeze. Menus and mode changes cancel drag. Mouse Motion follows handheld waving using orientation-compensated inertial estimates; direct angular pointer control is superseded. The new estimator is still under [investigation](motion-estimation.md); this requirement does not establish current device support.
 
 Enabling Motion automatically establishes a stable grip reference; losing that reference enters automatic recovery. The existing pad hint asks the user to hold still while acquiring or restoring it. The toggle shows **Motion / waiting** while the request is enabled but the reference is not ready, and remains available to stop. Sensor, calibration and connection blockers take priority over grip guidance. Ordinary touch pauses and samples with no output do not imply a lost reference.
 
