@@ -66,6 +66,32 @@ static void count(uint64_t *value)
 {
     if (*value != UINT64_MAX) ++*value;
 }
+static void add_count(uint64_t *value, uint16_t amount)
+{
+    *value = *value > UINT64_MAX - amount ? UINT64_MAX : *value + amount;
+}
+
+bool tud_audio_rx_done_isr(uint8_t rhport, uint16_t bytes, uint8_t function, uint8_t endpoint, uint8_t alternate)
+{
+    (void)rhport; (void)alternate;
+    if (function != 0 || endpoint != 0x04) return true;
+    portENTER_CRITICAL_ISR(&s_lock);
+    count(&s_status.out_callbacks); add_count(&s_status.out_callback_bytes, bytes);
+    if (!bytes) count(&s_status.out_zero_callbacks);
+    portEXIT_CRITICAL_ISR(&s_lock);
+    return true;
+}
+
+bool tud_audio_tx_done_isr(uint8_t rhport, uint16_t bytes, uint8_t function, uint8_t endpoint, uint8_t alternate)
+{
+    (void)rhport; (void)alternate;
+    if (function != 0 || endpoint != 0x84) return true;
+    portENTER_CRITICAL_ISR(&s_lock);
+    count(&s_status.in_callbacks); add_count(&s_status.in_callback_bytes, bytes);
+    if (!bytes) count(&s_status.in_zero_callbacks);
+    portEXIT_CRITICAL_ISR(&s_lock);
+    return true;
+}
 
 static void request_flush_locked(void)
 {
@@ -321,6 +347,11 @@ usb_audio_snapshot_t usb_audio_snapshot(void)
 {
     portENTER_CRITICAL(&s_lock);
     usb_audio_snapshot_t result = s_status;
+    result.playback_bound = s_consumer_generation != 0;
+    result.playback_flush_pending = s_rx_flush_requested != s_rx_flush_completed;
+    result.queued_playback_frames = (uint16_t)s_rx_count;
+    result.partial_playback_bytes = (uint16_t)s_input_bytes;
+    result.queued_capture_frames = (uint16_t)s_tx_count;
     portEXIT_CRITICAL(&s_lock);
     return result;
 }
@@ -376,9 +407,11 @@ static void service_io(void)
         }
     }
     const uint64_t active_flush = s_flush_requested;
+    if (output) count(&s_status.capture_write_calls);
     portEXIT_CRITICAL(&s_lock);
     uint16_t written = output ? tud_audio_write(s_memory->output, output_bytes) : 0;
     portENTER_CRITICAL(&s_lock);
+    add_count(&s_status.capture_write_bytes, written);
     if (active_flush == s_flush_requested && output && s_tx_count) {
         queued_frame_t *slot = &s_memory->tx[s_tx_head];
         if (written > output_bytes || (written & 1U)) {
@@ -404,10 +437,12 @@ static void service_io(void)
     const uint64_t consumer = s_consumer_generation;
     const uint64_t input_flush = s_rx_flush_requested;
     unsigned offset = s_input_bytes;
+    if (input) count(&s_status.playback_read_calls);
     portEXIT_CRITICAL(&s_lock);
     if (!input) return;
     uint16_t received = tud_audio_read(s_memory->input + offset, (uint16_t)(UAC_FRAME_BYTES - offset));
     portENTER_CRITICAL(&s_lock);
+    add_count(&s_status.playback_read_bytes, received);
     if (active_flush == s_flush_requested && s_status.prepared &&
         consumer == s_consumer_generation && input_flush == s_rx_flush_requested) {
         if (received > UAC_FRAME_BYTES - offset || (received & 1U)) {
@@ -435,6 +470,7 @@ static void service_io(void)
                     memcpy(frame->data, s_memory->input, UAC_FRAME_BYTES);
                     slot->admitted_us = now;
                     ++s_rx_count;
+                    count(&s_status.playback_frames_enqueued);
                     }
                 }
                 memset(s_memory->input, 0, sizeof(s_memory->input));

@@ -127,7 +127,8 @@ static bool usb_changed(const usb_audio_snapshot_t *a, const usb_audio_snapshot_
         a->suspended != b->suspended || a->playback_selected != b->playback_selected ||
         a->capture_selected != b->capture_selected || a->prepared != b->prepared ||
         a->cleanup_pending != b->cleanup_pending || a->link_generation != b->link_generation ||
-        a->audio_generation != b->audio_generation || a->error != b->error;
+        a->audio_generation != b->audio_generation || a->error != b->error ||
+        a->playback_bound != b->playback_bound || a->playback_flush_pending != b->playback_flush_pending;
 }
 static bool codec_changed(const board_audio_status_t *a, const board_audio_status_t *b)
 {
@@ -179,10 +180,19 @@ static void log_usb(const usb_audio_snapshot_t *usb)
     }
     ESP_LOGI(TAG, "Audio diag USB known=1 stack_ready=%d mounted=%d suspended=%d playback_selected=%d capture_selected=%d"
         " prepared=%d cleanup=%d link_generation=%" PRIu64 " audio_generation=%" PRIu64
-        " dropped_playback=%" PRIu64 " rejected_capture=%" PRIu64 " error=%d",
+        " dropped_playback=%" PRIu64 " rejected_capture=%" PRIu64 " error=%d"
+        " out_cb=%" PRIu64 " out_bytes=%" PRIu64 " out_zero=%" PRIu64
+        " in_cb=%" PRIu64 " in_bytes=%" PRIu64 " in_zero=%" PRIu64
+        " read_calls=%" PRIu64 " read_bytes=%" PRIu64 " enqueued=%" PRIu64
+        " bound=%d flush=%d queued=%u partial=%u c_calls=%" PRIu64 " c_bytes=%" PRIu64 " c_queued=%u",
         usb->stack_ready, usb->mounted, usb->suspended, usb->playback_selected, usb->capture_selected,
         usb->prepared, usb->cleanup_pending, usb->link_generation, usb->audio_generation,
-        usb->dropped_playback_frames, usb->rejected_capture_frames, (int)usb->error);
+        usb->dropped_playback_frames, usb->rejected_capture_frames, (int)usb->error,
+        usb->out_callbacks, usb->out_callback_bytes, usb->out_zero_callbacks,
+        usb->in_callbacks, usb->in_callback_bytes, usb->in_zero_callbacks,
+        usb->playback_read_calls, usb->playback_read_bytes, usb->playback_frames_enqueued,
+        usb->playback_bound, usb->playback_flush_pending, usb->queued_playback_frames, usb->partial_playback_bytes,
+        usb->capture_write_calls, usb->capture_write_bytes, usb->queued_capture_frames);
 }
 static void log_codec(const board_audio_status_t *codec)
 {

@@ -63,6 +63,17 @@ def setup(python):
     print("Local toolchain ready. Run: python3 tools/idf.py build")
 
 
+def verify_tinyusb_generated(python, *, allow_missing=False):
+    output = ROOT / "firmware/build/generated/tinyusb_audio/audio_device.c"
+    if allow_missing and not output.exists() and not output.is_symlink():
+        # First configuration generates the checked copy after resolving the
+        # managed component. Existing copies must pass before compilation.
+        return
+    run([python, ROOT / "tools/tinyusb_audio_patch.py", "--source-root",
+         ROOT / "firmware/managed_components/espressif__tinyusb",
+         "--output", output, "--check"])
+
+
 def build(action):
     if not SDK.exists():
         raise SystemExit("SDK missing. Run: python3 tools/idf.py setup --python <python3.11-or-newer>")
@@ -71,11 +82,13 @@ def build(action):
     candidates = list((TOOLS / "python_env").glob("idf6.2_py*_env/bin/python"))
     if len(candidates) != 1:
         raise SystemExit("Expected one project-local IDF Python environment; rerun setup or resolve duplicates.")
+    verify_tinyusb_generated(candidates[0], allow_missing=True)
     env = base_environment(candidates[0])
     script = ('source "$IDF_PATH/export.sh" >/dev/null && '
               'exec "$IDF_PYTHON_ENV_PATH/bin/python" "$IDF_PATH/tools/idf.py" '
               '--preview -C "$1" "$2"')
     run(["bash", "-c", script, "esp32-input-idf", ROOT / "firmware", action], env=env)
+    verify_tinyusb_generated(candidates[0])
 
 
 def main():

@@ -54,6 +54,33 @@ AUDIO_RESULTS = ("AE_OK", "AE_AGAIN", "AE_INVALID", "AE_UNAVAILABLE", "AE_NOT_SU
                  "AE_BUSY", "AE_STALE", "AE_DENIED", "AE_PRIVACY", "AE_QUOTA", "AE_OVERFLOW",
                  "AE_IO_ERROR", "AE_UNCERTAIN", "AE_TIMEOUT", "AE_NOT_FOUND", "AE_TOO_LATE",
                  "AE_INTEGRITY", "AE_TIME_UNKNOWN", "AE_EXHAUSTED")
+AUDIO_JOB_KINDS = ("AE_CAPTURE_LIVE", "AE_CAPTURE_RECORDING", "AE_CAPTURE_RECOGNITION",
+                   "AE_PLAYBACK_STREAM", "AE_PLAYBACK_RECORDING")
+AUDIO_JOB_STATES = ("AE_JOB_EMPTY", "AE_JOB_STARTING", "AE_JOB_RUNNING", "AE_JOB_STOPPING",
+                    "AE_JOB_FINALIZING", "AE_JOB_COMPLETED", "AE_JOB_PARTIAL", "AE_JOB_ERROR")
+AUDIO_STOP_REASONS = ("AE_STOP_REQUESTED", "AE_STOP_CANCEL_KEEP", "AE_STOP_CANCEL_DISCARD",
+                      "AE_STOP_DURATION", "AE_STOP_BYTES", "AE_STOP_OWNER_LOST", "AE_STOP_CONSENT",
+                      "AE_STOP_PRIVACY", "AE_STOP_INDICATOR", "AE_STOP_OVERFLOW", "AE_STOP_IO",
+                      "AE_STOP_START_TIMEOUT", "AE_STOP_UNDERRUN", "AE_STOP_TIME", "AE_STOP_MAINTENANCE")
+AUDIO_CAPTURE_SLOTS = 3
+AUDIO_JOB_ENUMS = {"kind": AUDIO_JOB_KINDS, "state": AUDIO_JOB_STATES,
+                   "stop_reason": AUDIO_STOP_REASONS, "error": AUDIO_RESULTS}
+AUDIO_JOB_BOOLEANS = ("first_frame", "cleanup")
+AUDIO_JOB_COUNTERS = ("first_frame_ms", "deadline_ms", "received_bytes", "delivered_bytes",
+                      "sample_frames", "discarded_frames")
+AUDIO_JOB_FIELDS = ("slot", *AUDIO_JOB_ENUMS, *AUDIO_JOB_BOOLEANS, *AUDIO_JOB_COUNTERS)
+# ae_stop/ae_safety_stop can end a job before its first frame with ERROR, or
+# after media with PARTIAL. Neither state alone proves a failed operation.
+# Keep expected policy/limit outcomes narrow so a cleanup error still fails.
+AUDIO_EXPECTED_ENDINGS = {
+    "AE_STOP_REQUESTED": ("stopped", ("AE_OK", "AE_PRIVACY")),
+    "AE_STOP_CANCEL_KEEP": ("cancelled", ("AE_OK", "AE_PRIVACY")),
+    "AE_STOP_CANCEL_DISCARD": ("cancelled", ("AE_OK", "AE_PRIVACY")),
+    "AE_STOP_DURATION": ("limit_reached", ("AE_OK", "AE_TIMEOUT")),
+    "AE_STOP_BYTES": ("limit_reached", ("AE_OK", "AE_QUOTA")),
+    "AE_STOP_PRIVACY": ("cancelled", ("AE_OK", "AE_PRIVACY")),
+    "AE_STOP_MAINTENANCE": ("cancelled", ("AE_OK", "AE_PRIVACY")),
+}
 SPEECH_STATES = ("SL_UNAVAILABLE", "SL_IDLE", "SL_LISTENING", "SL_CANDIDATE",
                  "SL_REJECTED", "SL_TIMED_OUT", "SL_CANCELLED", "SL_FAULT")
 WIFI_STATES = ("APP_WIFI_UNAVAILABLE", "APP_WIFI_IDLE", "APP_WIFI_CONNECTING", "APP_WIFI_CONNECTED",
@@ -122,6 +149,7 @@ class HealthCapture:
         self.last_locked = None
         self.bluetooth = {}
         self.runtime = {}
+        self.audio_jobs = None
         self.motion = None
         self.log_truncated = False
         self._stopped = False
@@ -147,6 +175,10 @@ class HealthCapture:
         for code, pattern in FAULT_PATTERNS.items():
             if pattern.search(line):
                 self.fail(code)
+        audio_job = re.search(r"\bAudio diag job(?:\s+(.*))?$", line)
+        if audio_job:
+            self._parse_audio_job(audio_job.group(1) or "")
+            return
         runtime = re.search(r"\bRuntime\s+(Wi-Fi|media|control)(?:\s+(.*))?$", line)
         if runtime:
             component = "wifi" if runtime.group(1) == "Wi-Fi" else runtime.group(1)
@@ -216,6 +248,70 @@ class HealthCapture:
                 self._range(self.stack, field, values[field])
         self._range(self.queue, "occupancy", values["queue"])
         self.last_locked = values["locked"]
+
+    def _parse_audio_job(self, payload):
+        if self.audio_jobs is None:
+            self.audio_jobs = {"records": 0, "valid_reports": 0, "slots": {}}
+        observed = self.audio_jobs
+        observed["records"] += 1
+        values = {}
+        for token in payload.split():
+            match = RUNTIME_FIELD.fullmatch(token)
+            if not match or match.group(1) in values or len(match.group(2).lstrip("-")) > 20:
+                self.fail("malformed_audio_job")
+                return
+            value = int(match.group(2))
+            if value > (1 << 64) - 1 or value < -(1 << 63):
+                self.fail("malformed_audio_job")
+                return
+            values[match.group(1)] = value
+        if not set(AUDIO_JOB_FIELDS) <= values.keys():
+            self.fail("malformed_audio_job")
+            return
+        invalid = not 0 <= values["slot"] <= AUDIO_CAPTURE_SLOTS
+        invalid |= any(values[key] not in (0, 1) for key in AUDIO_JOB_BOOLEANS)
+        invalid |= any(values[key] < 0 for key in AUDIO_JOB_COUNTERS)
+        invalid |= any(not 0 <= values[key] < len(domain) for key, domain in AUDIO_JOB_ENUMS.items())
+        if invalid:
+            self.fail("invalid_audio_job_values")
+            return
+        names = {key: domain[values[key]] for key, domain in AUDIO_JOB_ENUMS.items()}
+        if names["state"] != "AE_JOB_EMPTY":
+            slot, kind = values["slot"], values["kind"]
+            if (slot < AUDIO_CAPTURE_SLOTS and kind != slot) or (slot == AUDIO_CAPTURE_SLOTS and kind < AUDIO_CAPTURE_SLOTS):
+                self.fail("invalid_audio_job_values")
+                return
+        assessment = self._audio_job_assessment(values, names)
+        observed["valid_reports"] += 1
+        # Four fixed slots, no job IDs or arbitrary columns. Repeated terminal
+        # snapshots count as reports, never as distinct jobs or failure events.
+        slot = observed["slots"].setdefault(str(values["slot"]), {
+            "valid_reports": 0, "failed_reports": 0, "first_failure": None})
+        slot["valid_reports"] += 1
+        report = {"values": {key: values[key] for key in AUDIO_JOB_FIELDS},
+                  "enum_names": names, "assessment": assessment}
+        slot["last_report"] = report
+        if assessment == "failed":
+            self.fail("audio_job_failed")
+            slot["failed_reports"] += 1
+            if slot["first_failure"] is None:
+                slot["first_failure"] = report
+
+    @staticmethod
+    def _audio_job_assessment(values, names):
+        state, error, reason = names["state"], names["error"], names["stop_reason"]
+        if state == "AE_JOB_EMPTY":
+            return "empty" if error == "AE_OK" else "failed"
+        if state in ("AE_JOB_STARTING", "AE_JOB_RUNNING"):
+            return "in_progress" if error in ("AE_OK", "AE_AGAIN") else "failed"
+        ending, expected_errors = AUDIO_EXPECTED_ENDINGS.get(reason, ("failed", ()))
+        if error not in expected_errors:
+            return "failed"
+        if state in ("AE_JOB_STOPPING", "AE_JOB_FINALIZING"):
+            return "ending"
+        if state == "AE_JOB_COMPLETED" and reason == "AE_STOP_REQUESTED" and error == "AE_OK" and values["first_frame"]:
+            return "completed"
+        return ending
 
     def _parse_runtime(self, component, payload):
         schema = RUNTIME_SCHEMAS[component]
@@ -461,6 +557,7 @@ class HealthCapture:
             "last_locked": self.last_locked,
             "bluetooth": self.bluetooth,
             "runtime_observations": self.runtime,
+            "audio_jobs": self.audio_jobs,
             "motion": motion,
             "log_bytes": len(self.log),
             "log_limit_bytes": MAX_LOG_BYTES,
@@ -468,6 +565,8 @@ class HealthCapture:
             "failure_codes": sorted(failures),
             "qualification": "Serial health, reported Motion sampling and runtime-field integrity checks only; valid idle, unavailable "
                              "or unprovisioned observations do not qualify service readiness. "
+                             "Audio job reports retain observed failures; absent reports remain unobserved, "
+                             "and stopped/cancelled/limited jobs do not prove successful media delivery. "
                              "Host input and long-duration stability are unverified.",
         }
 

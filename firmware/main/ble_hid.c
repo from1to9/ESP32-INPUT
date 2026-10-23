@@ -1105,17 +1105,11 @@ static void service_link_control(void)
     bool stop_adv = false;
     bool report_timeout = false;
     bool report_subscription_timeout = false;
-    uint16_t conn_id;
-    esp_gatt_if_t interface;
     control_command_t identity = {0};
-    uint32_t revision;
     portENTER_CRITICAL(&state_lock);
-    conn_id = state.conn_id;
-    interface = state.interface;
-    identity.conn_id = conn_id;
+    identity.conn_id = state.conn_id;
     identity.generation = state.connection_generation;
     memcpy(identity.address, state.address, sizeof(identity.address));
-    revision = state.auth_revision;
     if (state.notification_timed_out && !state.timeout_reported) {
         state.timeout_reported = true;
         report_timeout = true;
@@ -1159,9 +1153,23 @@ static void service_link_control(void)
         ESP_LOGE(TAG, "Subscription persistence timeout; reboot required (bonds preserved)");
     }
     if (close_link) {
-        esp_err_t error = esp_ble_gatts_close(interface, conn_id);
-        if (error != ESP_OK) {
-            fail_link_current(&identity, revision, true, "Close connection", error);
+        portENTER_CRITICAL(&state_lock);
+        /* Authentication can finish while the same physical close is reserved;
+         * it does not replace that connection or release its closing ownership. */
+        bool current = state.public.connected && state.conn_id == identity.conn_id &&
+            state.connection_generation == identity.generation &&
+            memcmp(state.address, identity.address, ESP_BD_ADDR_LEN) == 0;
+        bool peer_known = state.public.peer_known;
+        portEXIT_CRITICAL(&state_lock);
+        if (current) {
+            /* GATTS close reports a logical fixed-channel disconnect before the
+             * LE ACL is gone. GAP disconnect keeps GATT until actual ACL cleanup;
+             * only then may the existing disconnect callback reopen advertising.
+             * Use this live callback address, including its privacy alias, never
+             * a saved target identity. SDK submission remains outside the lock. */
+            esp_err_t error = peer_known ? esp_ble_gap_disconnect(identity.address) : ESP_ERR_INVALID_STATE;
+            if (error != ESP_OK)
+                fail_link_current(&identity, 0, false, "Close connection", error);
         }
     }
     if (stop_adv) {
@@ -1787,7 +1795,7 @@ static void control_worker(void *argument)
                     state.rejected_conn_id == command.conn_id &&
                     memcmp(state.rejected_address, command.address, ESP_BD_ADDR_LEN) == 0;
                 portEXIT_CRITICAL(&state_lock);
-                if (reject_current) error = esp_ble_gatts_close(interface, command.conn_id);
+                if (reject_current) error = esp_ble_gap_disconnect(command.address);
                 break;
             case COMMAND_CCCD:
                 if (pending_subscriptions.count == CONTROL_QUEUE_LENGTH) {

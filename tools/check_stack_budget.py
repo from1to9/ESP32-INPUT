@@ -68,7 +68,20 @@ UNITS = {
     "osi_thread": ".tools/esp-idf/components/bt/common/osi/thread.c",
     "btc_gap": ".tools/esp-idf/components/bt/host/bluedroid/btc/profile/std/gap/btc_gap_ble.c",
     "btc_gatts": ".tools/esp-idf/components/bt/host/bluedroid/btc/profile/std/gatt/btc_gatts.c",
+    "tinyusb_audio": "firmware/build/generated/tinyusb_audio/audio_device.c",
+    "tinyusb_fifo": "firmware/managed_components/espressif__tinyusb/src/common/tusb_fifo.c",
+    "tinyusb_usbd": "firmware/managed_components/espressif__tinyusb/src/device/usbd.c",
+    "tinyusb_dcd": "firmware/managed_components/espressif__tinyusb/src/portable/synopsys/dwc2/dcd_dwc2.c",
 }
+PROVENANCE_FILES = [
+    "tools/tinyusb_audio_patch.py", "patches/tinyusb-audio-streams.json",
+    "patches/tinyusb-audio-streams.patch", "firmware/tinyusb_audio_patch.cmake",
+    "firmware/dependencies.lock",
+    "firmware/managed_components/espressif__tinyusb/src/class/audio/audio_device.c",
+    "firmware/managed_components/espressif__tinyusb/src/class/audio/audio_device.h",
+    "firmware/managed_components/espressif__tinyusb/src/common/tusb_fifo.h",
+    "firmware/managed_components/espressif__tinyusb/src/device/dcd.h",
+]
 CORE = [("main", "app_main"), ("main", "coordinator_run")]
 DEVICE_SUBMIT = CORE + [("bridge", "app_command_bridge_service"),
                         ("bridge", "execute_flight"), ("main", "command_execute"),
@@ -563,10 +576,36 @@ for _name, (_owner, _prefix) in {
         BLE_ADVERTISING_PATHS[f"ble_advertising_{_name}_{_leaf}"] = (_owner, _prefix + _tail)
 for _label, (_owner, _steps) in BLE_ADVERTISING_PATHS.items():
     PATHS[_label] = _steps
+USB_AUDIO_WORKER = [("usb_audio", "worker"), ("usb_audio", "service_io")]
+USB_AUDIO_WORKER_PATHS = {
+    "usb_audio_worker_count": USB_AUDIO_WORKER + [("usb_audio", "count")],
+    "usb_audio_worker_add_count": USB_AUDIO_WORKER + [("usb_audio", "add_count")],
+}
+for _operation in ("read", "write"):
+    USB_AUDIO_WORKER_PATHS[f"usb_audio_worker_fifo_{_operation}"] = USB_AUDIO_WORKER + [
+        ("usb_audio", f"tud_audio_{_operation}"), ("tinyusb_audio", f"tud_audio_n_{_operation}"),
+        ("tinyusb_audio", f"tu_fifo_{_operation}_n"), ("tinyusb_fifo", f"tu_fifo_{_operation}_n_access_mode")]
+# The pinned read implementation retains its frame while calling this leaf.
+USB_AUDIO_WORKER_PATHS["usb_audio_worker_fifo_read"].append(("tinyusb_fifo", "tu_fifo_peek_n_access_mode"))
+PATHS.update(USB_AUDIO_WORKER_PATHS)
 PATH_OWNERS = {label: "main" for label in PATHS}
 PATH_OWNERS.update({label: owner for label, (owner, _) in AUDIO_RUNTIME_PATHS.items()})
 PATH_OWNERS.update({label: "board_audio" for label in BOARD_AUDIO_PATHS})
 PATH_OWNERS.update({label: owner for label, (owner, _) in BLE_ADVERTISING_PATHS.items()})
+PATH_OWNERS.update({label: "usb_audio" for label in USB_AUDIO_WORKER_PATHS})
+# These execute on the hardware interrupt stack. They are an explicitly
+# unqualified inventory, never task paths and never assigned the task reserve.
+INTERRUPT_PATHS = {}
+for _direction, _endpoint in (("rx", "epout"), ("tx", "epin")):
+    for _counter in ("count", "add_count"):
+        INTERRUPT_PATHS[f"usb_audio_{_direction}_{_counter}"] = [
+            ("tinyusb_dcd", "dcd_int_handler"), ("tinyusb_dcd", "handle_ep_irq"),
+            ("tinyusb_dcd", f"handle_{_endpoint}_dma"), ("tinyusb_dcd", "dcd_event_xfer_complete"),
+            ("tinyusb_usbd", "dcd_event_handler"), ("tinyusb_audio", "audiod_xfer_isr"),
+            ("tinyusb_audio", f"audiod_{_direction}_xfer_isr"),
+            ("usb_audio", f"tud_audio_{_direction}_done_isr"), ("usb_audio", _counter)]
+INTERRUPT_REQUIRED = {("tinyusb_dcd", "dcd_int_handler"), ("tinyusb_usbd", "dcd_event_handler"),
+    ("tinyusb_audio", "audiod_xfer_isr"), ("usb_audio", "tud_audio_rx_done_isr"), ("usb_audio", "tud_audio_tx_done_isr")}
 SENSOR = [("board", "sensor_worker"), ("board", "imu_update")]
 STARTUP_IMU = [("main", "app_main"), ("board", "board_init"), ("board", "init_optional_imu")]
 APPEND = [("sensor_journal", "board_sensor_journal_append")]
@@ -696,6 +735,9 @@ REQUIRED.add(("board_audio", "worker"))
 REQUIRED.update({("ble", "control_worker"), ("ble", "gap_callback"), ("ble", "gatts_callback"),
     ("main", "report_bluetooth_advertising_diagnostics"), ("osi_thread", "osi_thread_run"),
     ("btc_thread", "btc_thread_handler"), ("btc_gap", "btc_gap_ble_cb_handler"), ("btc_gatts", "btc_gatts_cb_handler")})
+REQUIRED.update({("usb_audio", "worker"), ("tinyusb_audio", "tud_audio_n_read"), ("tinyusb_audio", "tud_audio_n_write"),
+    ("tinyusb_fifo", "tu_fifo_read_n_access_mode"), ("tinyusb_fifo", "tu_fifo_peek_n_access_mode"),
+    ("tinyusb_fifo", "tu_fifo_write_n_access_mode")})
 CONSUMERS = [
     "firmware/main/app_motion_capture.inc",
     "firmware/main/main.c", "firmware/main/app_remote_device_bindings.inc",
@@ -716,6 +758,10 @@ BUDGET_FILES = {
     "bt_user_config": ".tools/esp-idf/components/bt/common/include/bt_user_config.h",
     "btc_thread": UNITS["btc_thread"],
     "osi_thread": UNITS["osi_thread"],
+    "usb_audio": UNITS["usb_audio"],
+    "isr_config": ".tools/esp-idf/components/freertos/config/riscv/include/freertos/FreeRTOSConfig_arch.h",
+    "isr_port": ".tools/esp-idf/components/freertos/FreeRTOS-Kernel/portable/riscv/port.c",
+    "isr_type": ".tools/esp-idf/components/freertos/FreeRTOS-Kernel/portable/riscv/include/freertos/portmacro.h",
     "server": "firmware/main/app_control_server.c",
     "bsp_display": "third_party/esp-mosaico-bsp/components/esp-mosaico-bsp/onboard/display.c",
     "bsp_display_header": "third_party/esp-mosaico-bsp/components/esp-mosaico-bsp/include/bsp/display.h",
@@ -820,6 +866,7 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
     match("btc_thread", r"osi_thread_create\s*\(BTC_TASK_NAME,\s*BTC_TASK_STACK_SIZE,\s*BTC_TASK_PRIO,\s*BTC_TASK_PINNED_TO_CORE,\s*"
         r"BTC_TASK_WORKQUEUE_NUM,\s*workqueue_len,\s*false\s*\)")
     match("osi_thread", r"xTaskCreatePinnedToCore\s*\(\s*osi_thread_run\s*,\s*name\s*,\s*stack_size\s*,")
+    usb_audio_stack = integer_expression(single("usb_audio", r"xTaskCreate\s*\(\s*worker\s*,\s*\"usb_audio\"\s*,\s*(\d+)\s*,")[1])
     https = integer_expression(single("server", r"config\.httpd\.stack_size\s*=\s*([^;]+);")[1])
     match("server", r"httpd_ssl_start\s*\(\s*&s->listener\s*,\s*&config\s*\)")
     match("main", r"board_button_events_register\s*\(\s*physical_button\s*\)")
@@ -858,6 +905,7 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         "ble_control": budget("ble_hid_control", ble_stack, ["ble"], ["CONTROL_TASK_STACK"]),
         "btc": budget("BTC_TASK", btc_stack, ["sdk_tasks", "bt_user_config", "bt_common", "btc_thread", "osi_thread"],
             ["CONFIG_BT_BTC_TASK_STACK_SIZE", "BTC_TASK_STACK_SIZE", "osi_thread_create", "xTaskCreatePinnedToCore"], extra),
+        "usb_audio": budget("usb_audio", usb_audio_stack, ["usb_audio"], ["xTaskCreate(worker, usb_audio)"]),
         "https": budget("HTTPS request task", https, ["server"], ["config.httpd.stack_size", "httpd_ssl_start"]),
         "lvgl": budget("lvgl", lvgl, ["board", "bsp_display", "bsp_display_header", "lvgl_header", "lvgl_adapter"],
             ["BSP_DISPLAY_DEFAULT_CONFIG", "ESP_LV_ADAPTER_DEFAULT_STACK_SIZE"]),
@@ -906,20 +954,106 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def input_snapshot(build, database):
+def measurement_units(build):
+    units = dict(UNITS)
+    generated = build.resolve() / "generated/tinyusb_audio/audio_device.c"
+    units["tinyusb_audio"] = str(generated.relative_to(ROOT)) if generated.is_relative_to(ROOT) else str(generated)
+    return units
+
+
+def verify_generated_audio_source(build, database):
+    """Bind proof to the compiled generated copy, never a managed fallback."""
+    source = ROOT / measurement_units(build)["tinyusb_audio"]
+    manifest_path = ROOT / "patches/tinyusb-audio-streams.json"
+    manifest = json.loads(manifest_path.read_text())
+    if source.is_symlink() or not source.is_file() or digest(source) != manifest["output_sha256"]:
+        raise RuntimeError(f"Generated TinyUSB audio source missing or differs from reviewed postimage: {source}")
+    entries = [entry for entry in database if Path(entry["file"]).resolve() == source.resolve()]
+    upstream = ROOT / "firmware/managed_components/espressif__tinyusb/src/class/audio/audio_device.c"
+    if len(entries) != 1 or any(Path(entry["file"]).resolve() == upstream.resolve() for entry in database):
+        raise RuntimeError("Expected exactly one generated TinyUSB audio compile input and no managed audio compile input")
+    return {"source": str(source), "sha256": digest(source), "manifest": str(manifest_path),
+            "manifest_sha256": digest(manifest_path), "managed_source": str(upstream),
+            "managed_source_sha256": digest(upstream), "generated_compile_entries": len(entries)}
+
+
+def verify_generated_audio_snapshot(proof, snapshot):
+    for path_key, hash_key in (("source", "sha256"), ("manifest", "manifest_sha256"),
+                               ("managed_source", "managed_source_sha256")):
+        path = Path(proof[path_key])
+        key = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+        if snapshot.get(key) != proof[hash_key]:
+            raise RuntimeError(f"Generated audio proof input changed while being read: {path}")
+
+
+def interrupt_stack_budget(config, root=ROOT):
+    found = re.findall(r"^#define CONFIG_FREERTOS_ISR_STACKSIZE ([^\n]+)$", config, re.M)
+    if len(found) != 1:
+        raise RuntimeError("Configured interrupt stack unavailable: CONFIG_FREERTOS_ISR_STACKSIZE")
+    checks = {
+        "isr_config": r"#define configISR_STACK_SIZE\s+\(\s*CONFIG_FREERTOS_ISR_STACKSIZE\s*\)",
+        "isr_type": r"#define portSTACK_TYPE\s+uint8_t",
+        "isr_port": r"StackType_t xIsrStack\[portNUM_PROCESSORS\]\[configISR_STACK_SIZE\]",
+    }
+    for key, pattern in checks.items():
+        if not re.search(pattern, (root / BUDGET_FILES[key]).read_text()):
+            raise RuntimeError(f"Cannot verify interrupt stack allocation in {BUDGET_FILES[key]}")
+    return integer_expression(found[0])
+
+
+def interrupt_frame_inventory(frames, config, paths=INTERRUPT_PATHS):
+    """Non-qualifying interrupt evidence, independent of task reserve/gates."""
+    capacity = interrupt_stack_budget(config)
+    entries_by_path, errors = {}, []
+    for label, steps in paths.items():
+        entries, complete, application_complete = [], True, True
+        for module, function in steps:
+            variants = variants_for(frames, module, function)
+            missing = not variants and (module, function) in INTERRUPT_REQUIRED
+            dynamic = any(value["kind"] != "static" for value in variants.values())
+            if missing or dynamic:
+                complete = False
+                if module == "usb_audio":
+                    application_complete = False
+                errors.append(f"Interrupt inventory incomplete: {module}:{function}")
+            entries.append({"module": module, "function": function,
+                "bytes": None if missing else sum(value["bytes"] for value in variants.values()),
+                "variants": variants, "note": "required emitted frame missing" if missing else
+                    ("" if variants else "private helper inlined/not emitted")})
+        measured = sum(entry["bytes"] or 0 for entry in entries)
+        application = sum(entry["bytes"] or 0 for entry in entries if entry["module"] == "usb_audio")
+        exceeded = (application_complete and application > capacity) or (complete and measured > capacity)
+        if exceeded:
+            errors.append(f"{label}: known interrupt frames exceed configured {capacity}-byte stack; review required")
+        entries_by_path[label] = {"context": "hardware DCD ISR", "qualification": "BLOCKED_KNOWN_FRAMES" if exceeded else "PENDING",
+            "configured_stack_bytes": capacity, "known_application_bytes": application if application_complete else None,
+            "known_added_application_bytes": application if application_complete else None,
+            "known_selected_chain_bytes": measured if complete else None, "frames": entries,
+            "task_reserve_applied": False, "safety_pass_claimed": False,
+            "pre_change_application_bytes": None, "application_delta_bytes": None}
+    return {"status": "BLOCKED" if errors else "UNQUALIFIED", "configured_stack_bytes": capacity,
+        "paths": entries_by_path, "task_reserve_applied": False, "safety_pass_claimed": False,
+        "unmeasured_costs": ["interrupt entry and RTOS context", "SDK paths outside the selected chain", "interrupt nesting"],
+        "pre_post_limit": "No comparable pre-change hook-chain measurement is inferred from absent symbols; current added application frames only.",
+        "limits": "Fitting known frames alone does not qualify interrupt safety. Physical high-water and nesting remain unmeasured."}, errors
+
+
+def input_snapshot(build, database, units=None):
     """Hash the bounded first-party/configuration inputs, including file sets."""
+    units = units or measurement_units(build)
     paths = {Path(__file__).resolve(), build / "compile_commands.json",
              build / "config/sdkconfig.h", ROOT / "firmware/sdkconfig"}
     for directory in (ROOT / "firmware/main", ROOT / "components"):
         paths.update(path for path in directory.rglob("*")
                      if path.is_file() and path.suffix in (".c", ".h", ".inc", ".S"))
-    paths.update(ROOT / path for path in UNITS.values())
+    paths.update(ROOT / path for path in units.values())
     paths.update(ROOT / path for path in BUDGET_FILES.values())
+    paths.update(ROOT / path for path in PROVENANCE_FILES)
     paths.update(path for path in (build / "toolchain").glob("*") if path.is_file())
     # Forced headers and response files can live outside the first-party tree.
-    measured_sources = {ROOT / path for path in UNITS.values()}
+    measured_sources = {ROOT / path for path in units.values()}
     for entry in database:
-        if Path(entry["file"]) not in measured_sources:
+        if Path(entry["file"]).resolve() not in measured_sources:
             continue
         pending = shlex.split(entry["command"])
         visited = set()
@@ -953,7 +1087,7 @@ def input_snapshot(build, database):
 def compile_unit(unit, database, output):
     name, relative = unit
     source = ROOT / relative
-    entry = next((item for item in database if Path(item["file"]) == source), None)
+    entry = next((item for item in database if Path(item["file"]).resolve() == source.resolve()), None)
     if entry is None:
         raise RuntimeError(f"No target compile command for {relative}")
     command = shlex.split(entry["command"])
@@ -992,7 +1126,16 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     database_bytes = (build / "compile_commands.json").read_bytes()
     database = json.loads(database_bytes)
-    before = input_snapshot(build, database)
+    units = measurement_units(build)
+    try:
+        generated_audio = verify_generated_audio_source(build, database)
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+    before = input_snapshot(build, database, units)
+    try:
+        verify_generated_audio_snapshot(generated_audio, before)
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
     config_bytes = (build / "config/sdkconfig.h").read_bytes()
     for path, content in ((build / "compile_commands.json", database_bytes),
                           (build / "config/sdkconfig.h", config_bytes)):
@@ -1005,36 +1148,42 @@ def main():
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     stack_bytes = budgets["main"]["budget_bytes"]
-    paths = set(UNITS.values()) | set(CONSUMERS) | set(BUDGET_FILES.values())
+    paths = set(units.values()) | set(CONSUMERS) | set(BUDGET_FILES.values()) | set(PROVENANCE_FILES)
     legacy = [path for path in CONSUMERS if re.search(
         r"\b(?:ble_hid_bond_list|bt_audio_bond_list)\s*\(", (ROOT / path).read_text())]
     with ThreadPoolExecutor(max_workers=3) as pool:
-        frames = dict(pool.map(lambda unit: compile_unit(unit, database, output), UNITS.items()))
+        frames = dict(pool.map(lambda unit: compile_unit(unit, database, output), units.items()))
     chains, errors = evaluate_paths(frames, budgets)
+    interrupt_inventory, interrupt_errors = interrupt_frame_inventory(frames, config)
     if legacy:
         errors.append("Large by-value bond getter remains in: " + ", ".join(sorted(legacy)))
     startup_variants = variants_for(frames, "main", "app_main")
     startup = sum(frame["bytes"] for frame in startup_variants.values()) if startup_variants else None
     if startup is None or startup > STARTUP_FRAME_LIMIT_BYTES:
         errors.append(f"Startup frame {startup} exceeds {STARTUP_FRAME_LIMIT_BYTES} bytes")
-    after = input_snapshot(build, database)
+    after = input_snapshot(build, database, units)
     changed = [path for path in before.keys() | after.keys()
                if before.get(path) != after.get(path)]
     if changed:
         errors.append("Compilation inputs changed during measurement: " + ", ".join(sorted(changed)))
+    task_gate_status = "FAIL" if errors else "PASS"
+    errors.extend(interrupt_errors)
     report = {"status": "FAIL" if errors else "PASS", "configured_stack_bytes": stack_bytes,
+              "task_gate_status": task_gate_status, "interrupt_safety_qualified": False,
               "task_budgets": budgets,
               "sdk_isr_reserve_bytes": SDK_ISR_RESERVE_BYTES,
               "startup_frame_limit_bytes": STARTUP_FRAME_LIMIT_BYTES,
+              "generated_audio_source": generated_audio, "interrupt_frame_inventory": interrupt_inventory,
               "source_hashes": {path: after[path] for path in sorted(paths)},
               "input_hashes": after, "changed_during_measurement": sorted(changed),
               "input_scope": "First-party firmware/main and components C/headers/includes, "
                              "measured vendor/SDK translation units and task-ownership budget sources, "
                              "this checker, compile database, sdkconfig, generated config header, "
-                             "toolchain files, command response files and forced headers. "
+                             "toolchain files, command response files, forced headers and generated TinyUSB audio provenance. "
                              "Other SDK/vendor dependencies are not covered by this drift check.",
               "paths": chains, "all_frames": frames, "errors": errors,
-              "limits": "Declared task/callback paths only, including named measured vendor wrappers. "
+              "limits": "Task PASS covers declared task paths only. Interrupt inventory remains explicitly unqualified. "
+                        "Declared task/callback paths include named measured vendor wrappers. "
                         "Main/timer SDK libc stack supplements are reported but excluded from the checked "
                         "application budget. Clone sums are conservative; no "
                         "SDK/binary/ISR high-water proof or device qualification is claimed."}
@@ -1043,7 +1192,9 @@ def main():
         print(f"{label}: {chain['known_bytes']} known + {SDK_ISR_RESERVE_BYTES} reserved "
               f"/ {chain['budget_bytes']} bytes ({chain['task_owner']}; "
               f"allocated {chain['allocated_bytes']})")
-    print(f"{report['status']}: stack budget; evidence {output}")
+    print(f"Interrupt inventory: {interrupt_inventory['status']}; "
+          f"configured {interrupt_inventory['configured_stack_bytes']} bytes; no ISR safety PASS")
+    print(f"{report['status']}: stack budget (task gates only; interrupt safety unqualified); evidence {output}")
     if errors:
         raise SystemExit("\n".join(errors))
 

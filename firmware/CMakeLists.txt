@@ -17,3 +17,7 @@ project(esp32_input)
 idf_component_get_property(input_tinyusb_lib espressif__tinyusb COMPONENT_LIB)
 target_compile_options(${input_tinyusb_lib} PUBLIC
     "-include${CMAKE_CURRENT_LIST_DIR}/main/usb_audio_config.h")
+
+# Keep the managed dependency pristine and compile only the exact reviewed
+# generated audio-class repair with the existing TinyUSB target configuration.
+include("${CMAKE_CURRENT_LIST_DIR}/tinyusb_audio_patch.cmake")

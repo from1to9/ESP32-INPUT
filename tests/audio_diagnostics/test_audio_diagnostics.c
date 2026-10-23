@@ -140,6 +140,33 @@ static void test_transport_and_codec_errors(void)
         contains_since(prior, "playback_running=0 speaker_muted=1 speaker_mute_confirmed=1") &&
         contains_since(prior, "first_sdk_error=1234 first_sdk_operation=i2c_master_transmit_receive"));
 }
+static void test_usb_observation_boundaries(void)
+{
+    setup(); poll_at(0); size_t prior = line_count;
+    usb.out_callbacks = 2; usb.out_callback_bytes = 96; usb.out_zero_callbacks = 1;
+    usb.in_callbacks = 3; usb.in_callback_bytes = 192; usb.in_zero_callbacks = 1;
+    usb.playback_read_calls = 4; usb.playback_read_bytes = 96; usb.playback_frames_enqueued = 0;
+    usb.capture_write_calls = 5; usb.capture_write_bytes = 392;
+    usb.queued_playback_frames = 1; usb.partial_playback_bytes = 96; usb.queued_capture_frames = 2;
+    poll_at(100); assert(line_count == prior); /* Counter/queue samples wait for the summary. */
+    usb.playback_bound = true; usb.playback_flush_pending = true; poll_at(200);
+    assert(line_count == prior + 1 && contains_since(prior, "out_cb=2 out_bytes=96 out_zero=1") &&
+        contains_since(prior, "in_cb=3 in_bytes=192 in_zero=1") &&
+        contains_since(prior, "read_calls=4 read_bytes=96 enqueued=0") &&
+        contains_since(prior, "bound=1 flush=1 queued=1 partial=96 c_calls=5 c_bytes=392 c_queued=2"));
+    prior = line_count; usb.playback_flush_pending = false; poll_at(300);
+    assert(line_count == prior + 1 && contains_since(prior, "bound=1 flush=0"));
+    usb.link_generation = usb.audio_generation = UINT64_MAX;
+    usb.dropped_playback_frames = usb.rejected_capture_frames = UINT64_MAX;
+    usb.out_callbacks = usb.out_callback_bytes = usb.out_zero_callbacks = UINT64_MAX;
+    usb.in_callbacks = usb.in_callback_bytes = usb.in_zero_callbacks = UINT64_MAX;
+    usb.playback_read_calls = usb.playback_read_bytes = usb.playback_frames_enqueued = UINT64_MAX;
+    usb.capture_write_calls = usb.capture_write_bytes = UINT64_MAX;
+    usb.queued_playback_frames = usb.partial_playback_bytes = usb.queued_capture_frames = UINT16_MAX;
+    prior = line_count; poll_at(10000);
+    assert(contains_since(prior, "out_cb=18446744073709551615") &&
+        contains_since(prior, "c_bytes=18446744073709551615 c_queued=65535"));
+}
 static void test_private_metadata_wiped(void)
 {
     setup();
@@ -163,9 +190,9 @@ static void test_clock_regression_is_observer_only(void)
 int main(int argc, char **argv)
 {
     const char *names[] = {"unknown_is_not_success", "idle_throttle_and_counter_summary", "failed_job_retained_and_replaced",
-        "availability_recovery", "transport_and_codec_errors", "private_metadata_wiped", "clock_regression_is_observer_only"};
+        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "private_metadata_wiped", "clock_regression_is_observer_only"};
     void (*cases[])(void) = {test_unknown_is_not_success, test_idle_throttle_and_counter_summary, test_failed_job_retained_and_replaced,
-        test_availability_recovery, test_transport_and_codec_errors, test_private_metadata_wiped, test_clock_regression_is_observer_only};
+        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_private_metadata_wiped, test_clock_regression_is_observer_only};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)

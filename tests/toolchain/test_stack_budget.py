@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise task ownership/accounting without running a target compiler."""
 import hashlib
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -11,15 +12,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import check_stack_budget as stack  # noqa: E402
 
-CONFIG = "#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192\n#define CONFIG_ESP_TIMER_TASK_STACK_SIZE 3584\n#define CONFIG_BT_BTC_TASK_STACK_SIZE 3072\n"
+CONFIG = "#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192\n#define CONFIG_ESP_TIMER_TASK_STACK_SIZE 3584\n#define CONFIG_BT_BTC_TASK_STACK_SIZE 3072\n#define CONFIG_FREERTOS_ISR_STACKSIZE 1536\n"
 
 
 class StackBudgets(unittest.TestCase):
     def fixture(self):
         temporary = tempfile.TemporaryDirectory(prefix="esp32-stack-policy-")
         self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        for relative in set(stack.BUDGET_FILES.values()):
+        root = Path(temporary.name).resolve()
+        for relative in set(stack.BUDGET_FILES.values()) | set(stack.PROVENANCE_FILES):
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((ROOT / relative).read_bytes())
@@ -34,7 +35,7 @@ class StackBudgets(unittest.TestCase):
         self.assertEqual({key: value["budget_bytes"] for key, value in budgets.items()}, {
             "main": 8192, "esp_timer": 3584, "sensor": 4096, "power": 3072,
             "control_runtime": 12288, "media_control": 6144, "board_audio": 6144,
-            "ble_control": 6144, "btc": 3072, "https": 12288, "lvgl": 8192})
+            "ble_control": 6144, "btc": 3072, "usb_audio": 3072, "https": 12288, "lvgl": 8192})
         self.assertEqual(budgets["main"]["allocated_bytes"], 8704)
         self.assertEqual(budgets["esp_timer"]["allocated_bytes"], 4096)
         self.assertEqual(budgets["btc"]["allocated_bytes"], 3584)
@@ -302,6 +303,119 @@ class StackBudgets(unittest.TestCase):
                 self.assertNotIn(("ble", "advertising_observing"), steps)
         self.assertNotIn(("ble", "ble_hid_advertising_event_name"), stack.PATHS["ble_advertising_replay_copy"])
         self.assertNotIn(("ble", "ble_hid_copy_advertising_diagnostics"), stack.PATHS["ble_advertising_replay_name"])
+
+    def test_usb_worker_is_gated_separately_from_main_and_interrupt_inventory(self):
+        label = "usb_audio_worker_count"
+        steps = stack.USB_AUDIO_WORKER_PATHS[label]
+        frames = {"usb_audio": {name: self.frame(32) for _, name in steps}}
+        frames["usb_audio"]["service_io"] = self.frame(1056)
+        budgets = stack.task_budgets(CONFIG)
+        chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, {label: "usb_audio"})
+        self.assertTrue(errors)
+        self.assertEqual(chains[label]["budget_bytes"], 3072)
+        self.assertEqual(chains[label]["reserve_bytes"], 2048)
+        self.assertFalse(stack.evaluate_paths(frames, budgets, {label: steps}, {label: "main"})[1])
+        for label, steps in stack.USB_AUDIO_WORKER_PATHS.items():
+            self.assertEqual(stack.PATH_OWNERS[label], "usb_audio")
+            self.assertFalse(any(name.endswith("_done_isr") for _, name in steps))
+        self.assertFalse(set(stack.INTERRUPT_PATHS) & set(stack.PATHS))
+
+    def test_usb_fifo_read_counts_nested_peek_and_missing_emission_fails_closed(self):
+        label = "usb_audio_worker_fifo_read"
+        paths = {label: stack.USB_AUDIO_WORKER_PATHS[label]}
+        owners = {label: "usb_audio"}
+        budgets = stack.task_budgets(CONFIG)
+        frames = {"usb_audio": {"worker": self.frame(112)},
+            "tinyusb_audio": {"tud_audio_n_read": self.frame(0)},
+            "tinyusb_fifo": {"tu_fifo_read_n_access_mode": self.frame(32),
+                "tu_fifo_peek_n_access_mode": self.frame(64)}}
+        chains, errors = stack.evaluate_paths(frames, budgets, paths, owners)
+        self.assertFalse(errors)
+        self.assertEqual(chains[label]["known_bytes"], 208)
+        self.assertEqual(chains[label]["remaining_after_reserve_bytes"], 816)
+        # The read frame remains live during peek; omitting peek hides overflow.
+        frames["usb_audio"]["worker"] = self.frame(960)
+        chains, errors = stack.evaluate_paths(frames, budgets, paths, owners)
+        self.assertEqual(chains[label]["known_bytes"], 1056)
+        self.assertLess(chains[label]["remaining_after_reserve_bytes"], 0)
+        self.assertTrue(errors)
+        del frames["tinyusb_fifo"]["tu_fifo_peek_n_access_mode"]
+        errors = stack.evaluate_paths(frames, budgets, paths, owners)[1]
+        self.assertTrue(any("Required emitted frame missing: tinyusb_fifo:tu_fifo_peek_n_access_mode" in error
+            for error in errors))
+
+    def test_interrupt_inventory_never_qualifies_and_known_oversize_blocks(self):
+        label = "usb_audio_rx_count"
+        steps = stack.INTERRUPT_PATHS[label]
+        frames = {}
+        for module, name in steps:
+            frames.setdefault(module, {})[name] = self.frame(32)
+        frames["usb_audio"]["count.part.0"] = self.frame(16)
+        inventory, errors = stack.interrupt_frame_inventory(frames, CONFIG, {label: steps})
+        self.assertFalse(errors)
+        self.assertEqual(inventory["status"], "UNQUALIFIED")
+        self.assertFalse(inventory["safety_pass_claimed"])
+        self.assertFalse(inventory["task_reserve_applied"])
+        self.assertEqual(inventory["configured_stack_bytes"], 1536)
+        entry = inventory["paths"][label]
+        self.assertEqual(entry["known_application_bytes"], 80)
+        self.assertEqual(entry["known_selected_chain_bytes"], 32 * len(steps) + 16)
+        self.assertIsNone(entry["pre_change_application_bytes"])
+        frames["usb_audio"]["tud_audio_rx_done_isr"] = self.frame(1600)
+        inventory, errors = stack.interrupt_frame_inventory(frames, CONFIG, {label: steps})
+        self.assertTrue(errors)
+        self.assertEqual(inventory["status"], "BLOCKED")
+        self.assertEqual(inventory["paths"][label]["qualification"], "BLOCKED_KNOWN_FRAMES")
+        del frames["usb_audio"]["tud_audio_rx_done_isr"]
+        inventory, errors = stack.interrupt_frame_inventory(frames, CONFIG, {label: steps})
+        self.assertTrue(errors)
+        self.assertIsNone(inventory["paths"][label]["known_application_bytes"])
+        self.assertEqual(stack.SDK_ISR_RESERVE_BYTES, 2048)
+        with self.assertRaises(RuntimeError):
+            stack.interrupt_stack_budget(CONFIG.replace("#define CONFIG_FREERTOS_ISR_STACKSIZE 1536\n", ""))
+
+    def test_generated_audio_is_bound_to_selected_build_and_wrong_source_fails_closed(self):
+        root = self.fixture()
+        for relative in stack.UNITS.values():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text("/* fixture */\n")
+        build = root / "alternate-build"
+        (build / "config").mkdir(parents=True)
+        (build / "compile_commands.json").write_text("[]\n")
+        (build / "config/sdkconfig.h").write_text(CONFIG)
+        (root / "firmware/sdkconfig").write_text("CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192\n")
+        generated = build / "generated/tinyusb_audio/audio_device.c"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("/* reviewed generated fixture */\n")
+        manifest_path = root / "patches/tinyusb-audio-streams.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["output_sha256"] = hashlib.sha256(generated.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+        database = [{"file": str(generated)}]
+        upstream = root / "firmware/managed_components/espressif__tinyusb/src/class/audio/audio_device.c"
+        with patch.object(stack, "ROOT", root):
+            units = stack.measurement_units(build)
+            self.assertEqual(root / units["tinyusb_audio"], generated)
+            proof = stack.verify_generated_audio_source(build, database)
+            self.assertEqual(proof["sha256"], manifest["output_sha256"])
+            with self.assertRaises(RuntimeError):
+                stack.verify_generated_audio_source(build, database + [{"file": str(upstream)}])
+            with self.assertRaises(RuntimeError):
+                stack.compile_unit(("tinyusb_audio", units["tinyusb_audio"]), [{"file": str(upstream)}], root / "unused")
+            before = stack.input_snapshot(build, [])
+            stack.verify_generated_audio_snapshot(proof, before)
+            conflicting = dict(before)
+            conflicting["patches/tinyusb-audio-streams.json"] = "changed during proof read"
+            with self.assertRaises(RuntimeError):
+                stack.verify_generated_audio_snapshot(proof, conflicting)
+            generated.write_text("/* changed generated fixture */\n")
+            after = stack.input_snapshot(build, [])
+            self.assertEqual({key for key in before if before[key] != after[key]},
+                {"alternate-build/generated/tinyusb_audio/audio_device.c"})
+            with self.assertRaises(RuntimeError):
+                stack.verify_generated_audio_source(build, database)
 
     def test_async_audio_execution_uses_media_budget_and_admission_uses_main(self):
         label = "audio_worker_start_submit"

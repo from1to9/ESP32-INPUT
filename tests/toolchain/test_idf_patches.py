@@ -8,11 +8,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 from idf_patches import verify_sdk  # noqa: E402
 from idf import verify_revision  # noqa: E402
+import idf  # noqa: E402
 
 
 class PatchPolicy(unittest.TestCase):
@@ -112,6 +114,87 @@ class PatchPolicy(unittest.TestCase):
         (self.sdk / "api.h").write_text(self.after["api.h"])
         with self.assertRaises(SystemExit):
             verify_revision(self.sdk, self.pin)
+
+
+class GeneratedSourceBuildGate(unittest.TestCase):
+    """The wrapper must reject changed generated code before invoking IDF."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="esp32-generated-build-gate-")
+        self.root = Path(self.temporary.name)
+        self.sdk = self.root / "sdk"
+        self.sdk.mkdir()
+        self.tools = self.root / "toolchain"
+        self.python = self.tools / "python_env/idf6.2_pytest_env/bin/python"
+        self.python.parent.mkdir(parents=True)
+        self.python.touch()
+        self.output = self.root / "firmware/build/generated/tinyusb_audio/audio_device.c"
+        self.output.parent.mkdir(parents=True)
+        self.actions = []
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def invoke(self, *, compiled_output="reviewed", fail_build=False):
+        def boundary(args, **kwargs):
+            if args[0] == "bash":
+                self.actions.append("build")
+                if fail_build:
+                    raise subprocess.CalledProcessError(1, args)
+                if compiled_output is not None:
+                    self.output.write_text(compiled_output)
+            else:
+                self.actions.append("check")
+                self.assertEqual(args, [self.python, self.root / "tools/tinyusb_audio_patch.py",
+                                       "--source-root", self.root / "firmware/managed_components/espressif__tinyusb",
+                                       "--output", self.output, "--check"])
+                # The production helper owns digest verification; substitute
+                # only its rejection boundary to test build sequencing.
+                if self.output.is_symlink() or not self.output.is_file() or self.output.read_text() != "reviewed":
+                    raise SystemExit("Unverified generated source")
+
+        with patch.multiple(idf, ROOT=self.root, SDK=self.sdk, TOOLS=self.tools), \
+                patch.object(idf, "verify_sdk"), patch.object(idf, "verify_revision"), \
+                patch.object(idf, "run", side_effect=boundary):
+            idf.build("build")
+
+    def test_existing_copy_is_checked_before_and_after_build(self):
+        self.output.write_text("reviewed")
+        self.invoke()
+        self.assertEqual(self.actions, ["check", "build", "check"])
+
+    def test_unknown_existing_copy_never_reaches_build(self):
+        self.output.write_text("unrelated work")
+        with self.assertRaises(SystemExit):
+            self.invoke()
+        self.assertEqual(self.actions, ["check"])
+        self.assertEqual(self.output.read_text(), "unrelated work")
+
+    def test_first_configuration_requires_checked_output_after_build(self):
+        self.invoke()
+        self.assertEqual(self.actions, ["build", "check"])
+
+    def test_missing_or_changed_build_output_does_not_pass(self):
+        for output in (None, "unreviewed"):
+            with self.subTest(output=output):
+                self.actions.clear()
+                self.output.unlink(missing_ok=True)
+                with self.assertRaises(SystemExit):
+                    self.invoke(compiled_output=output)
+                self.assertEqual(self.actions, ["build", "check"])
+
+    def test_dangling_symlink_is_not_a_pristine_first_build(self):
+        self.output.symlink_to(self.root / "missing")
+        with self.assertRaises(SystemExit):
+            self.invoke()
+        self.assertEqual(self.actions, ["check"])
+        self.assertTrue(self.output.is_symlink())
+
+    def test_failed_build_remains_failed_without_postcheck_success(self):
+        self.output.write_text("reviewed")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.invoke(fail_build=True)
+        self.assertEqual(self.actions, ["check", "build"])
 
 
 if __name__ == "__main__":

@@ -15,10 +15,12 @@ static void (*during_write)(void), (*during_read)(void);
 static uint32_t feedback_value = 48U << 16;
 static bool high_speed;
 tusb_speed_t tud_speed_get(void) { return high_speed ? TUSB_SPEED_HIGH : TUSB_SPEED_FULL; }
+#ifndef USB_AUDIO_REAL_STACK
 uint16_t tud_audio_n_available(uint8_t function)
 { assert(!lock_depth && function == 0); return (uint16_t)(input_bytes - input_offset); }
 bool tud_audio_n_fb_set(uint8_t function, uint32_t feedback)
 { assert(!lock_depth && function == 0); feedback_value = feedback; return true; }
+#endif
 
 void usb_test_enter(portMUX_TYPE *lock) { (void)lock; assert(!lock_depth); ++lock_depth; }
 void usb_test_leave(portMUX_TYPE *lock) { (void)lock; assert(lock_depth == 1); --lock_depth; }
@@ -41,6 +43,7 @@ BaseType_t xTaskCreate(TaskFunction_t function, const char *name, uint32_t stack
     return fail_worker ? 0 : pdPASS;
 }
 void vTaskDelay(TickType_t timeout) { (void)timeout; abort(); } /* Never run an unbounded worker. */
+#ifndef USB_AUDIO_REAL_STACK
 bool tud_audio_n_clear_ep_in_ff(uint8_t function)
 {
     assert(!lock_depth && function == 0);
@@ -90,6 +93,7 @@ bool tud_audio_buffer_and_schedule_control_xfer(uint8_t rhport, const tusb_contr
     memcpy(control_data, buffer, control_bytes);
     return true;
 }
+#endif
 
 static void select_interface(uint16_t interface, uint16_t alternate)
 {

@@ -9,6 +9,15 @@ typedef struct {
     bool cleanup_pending;
     uint64_t link_generation, audio_generation;
     uint64_t dropped_playback_frames, rejected_capture_frames;
+    /* Class completion hooks run after successful endpoint rearm; these are
+     * observed callbacks, not a count of unreported DCD/rearm failures. */
+    uint64_t out_callbacks, out_callback_bytes, out_zero_callbacks;
+    uint64_t in_callbacks, in_callback_bytes, in_zero_callbacks;
+    uint64_t playback_read_calls, playback_read_bytes, playback_frames_enqueued;
+    uint64_t capture_write_calls, capture_write_bytes;
+    bool playback_bound, playback_flush_pending;
+    uint16_t queued_playback_frames, partial_playback_bytes;
+    uint16_t queued_capture_frames;
     esp_err_t error;
 } usb_audio_snapshot_t;
 

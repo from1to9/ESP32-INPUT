@@ -774,6 +774,147 @@ approve the repairs and diagnostics; audible playback, microphone operation,
 advertising recovery and physical sensor throughput remain pending a new image
 and device observations.
 
+### Clock-repair deployment and remaining stream failures: 2026-10-23
+
+The reviewed clean `279e654` application was written and independently verified.
+The 4,695,072-byte image SHA-256 is
+`6dd50e6e2445ba8e7e0a503a64a7bae85b4b9397a782482ea0932d143b6369bc`.
+The installed partition table and NVS/PHY bytes remained unchanged; no new
+backup was performed. Runtime diagnostics confirmed that Git identity and the
+packaged ELF identity. USB HID and mono 48-kHz audio input/output enumerated.
+
+The 90-second capture retained eight increasing health observations and the two
+startup duplicate GPIO ISR-service errors. The clock repair now allowed a
+microphone job to deliver its first PCM frame; codec diagnostics reported no
+SDK operation error. This is progress beyond the previous cold-start failure,
+not a successful microphone qualification: the job subsequently ended Partial
+with `AE_STOP_OVERFLOW / AE_OVERFLOW`, 278,400 received bytes, 270,720 delivered
+bytes and eight discarded frames. USB capture rejection counts also increased.
+No acoustic-fidelity or continuous-capture claim is established.
+
+Three observed Speaker starts, including a cold Speaker-only start with capture
+off, received zero playback bytes and timed out waiting for the first frame.
+The USB interface remained selected and its connection generation was stable
+during those attempts. Codec playback and its TX clock started without a named
+SDK error, then stopped cleanly. The user confirmed a brief start followed by
+Timeout. The output-only host probe rendered 4,646,912 frames, which proves host
+callback activity rather than USB packet delivery or audible playback. Global
+Audio OFF/OK after cleanup does not erase the retained failed playback and
+partial capture jobs; the existing summary parser did not classify those job
+failures, so raw per-job evidence remains authoritative.
+
+During a later capture, the user selected a new Bluetooth host and disconnected
+the current one. Advertising start completed with status 263 and the interface
+became unavailable. The frozen trace retained the disconnect, start request,
+successful API return and failed completion. An HCI command-response log for
+opcode `0x200a`, status `0x07`, narrows this occurrence beyond the older generic
+retained status. Neither available host heap nor the later printed disconnect
+message proves the controller's resource or teardown state at the failure;
+the pinned handler emits that message after invoking disconnect processing.
+The underlying advertising failure remains unresolved in this image.
+
+A separate 30-second USB sensor capture verified 660 responses and delivered
+1,893 real records, including 1,870 IMU samples. This confirms that the repaired
+gap response makes progress on hardware. Exact accounting retains 19,056 initial
+and 1,137 ongoing missing records through cursor 22,086. The observed delivery
+rate of approximately 63 records per second remains below the approximately
+101-record producer rate. All 628 source-sequence skips are covered by explicit
+retention gaps; no source epoch change or wire anomaly was observed. The data
+remains discontinuous and unsuitable for a continuous-motion qualification.
+
+### Physical disconnect and USB stream repair candidate: 2026-10-23
+
+The Bluetooth repair replaces logical GATT closure with the public GAP physical
+disconnect operation for owned current and rejected connections. The observed
+live peer address is copied with the connection ID and generation; saved bond
+identities do not substitute for that address. The pinned SDK's physical cleanup
+and subsequent advertising messages are serialized by its owner thread. API
+enqueue success still does not establish disconnect completion, and a missing
+callback cannot reopen advertising or report successful management completion.
+
+The production regression reproduces early advertising and failure through the
+old logical-close boundary, then verifies that the new path waits for physical
+completion. Independent review caught a new reservation race: authentication on
+the same link could change its authentication revision and skip submission while
+leaving Closing reserved. Physical-close ownership now follows only the live
+connection identity. Deterministic callback interleavings cover authentication
+success/error and a new connection reusing the old ID/address. All three native
+BLE configurations pass their retained 100,000-cycle suites, including existing
+failure, admission and bond-preservation cases. Physical pairing recovery and
+the controller's underlying status-0x07 resource cause remain unqualified.
+
+The actual pinned TinyUSB DMA class and FIFO reproduce a separate OUT stall:
+an empty packet returns zero from FIFO append, and the original class exits
+before rearming reception. The repaired class skips append for that empty
+packet, still rearms, and emits no invented PCM. Normal bytes subsequently pass
+through the actual adapter's consent, consumer-generation and complete-frame
+boundaries. Positive-write and endpoint-submission failures remain observable.
+
+A second real-driver regression confirms that the upstream IN FIFO overwrites
+unread capture data. Twenty worker calls accept 1,920 bytes into a 392-byte FIFO
+without an IN completion. Configuring only function 1's IN FIFO as non-overwritable
+makes the same calls accept 392 bytes and preserve the remaining producer data
+under the existing short-write, queue and age policies. Full/high-speed tests
+exercise actual completion callbacks and 94/96/98-byte flow-control packets;
+each step checks byte content and the separate FIFO, scheduled and completed
+amounts. Of 3,840 accepted bytes, 3,836 complete and four remain queued, with no
+padding or false completion. Rejected IN rearm accounting and OUT overwrite
+behavior are not repaired by this change. Neither these host tests nor the
+new bounded USB counters establish physical host receipt or acoustic quality.
+
+A supplemental single-frame case then exposed another upstream defect: while
+flow-control blackout selected 96 bytes, the FIFO held only 94. The driver ignored
+the actual read count and scheduled two extra stale bytes. The final repair uses
+the FIFO's returned count as the DMA submission length. Separate full/high-speed
+comparisons preserve the failing intermediate image and verify exactly 960 bytes
+for a single frame, followed by empty transfers, with no padding or repeated tail.
+The earlier four-frame/jitter result remains valid for its original tested scope;
+it did not establish this finite-frame boundary.
+
+The build generates an exact-hash copy of the patched class in its output
+directory and replaces one translation unit on the existing TinyUSB target.
+The managed component, original license and shared class configuration remain
+intact. Source, dependency lock, patch and existing output mismatches fail
+closed. Incremental builds check the generated copy before compilation; final
+artifact inspection must verify that precisely this copy was compiled.
+
+The health parser now retains failed audio jobs independently from global
+route cleanup. All 69 parser tests pass, including the original 54. Replaying
+the same late portion of the device log changes a false passing result into
+`audio_job_failed`, preserving both capture Overflow and playback Start timeout.
+Normal cancellation and duration/byte limits remain distinct from a fault or
+successful media delivery. Absent job observations remain unknown. These
+source/host repairs do not establish physical qualification.
+
+The initial integrated target build passed without drift across 633 repository
+entries. Its compile database contains exactly one audio-class translation unit,
+the generated postimage, with the shared UAC configuration retained. The managed
+upstream class still matches its original digest. This development-identity
+build is 4,695,920 bytes. Its image and generated source are
+retained locally, superseded by the subsequent finite-frame repair. It was not
+deployed and is not device qualification.
+
+The final finite-frame repair passed the complete host suite and pinned target
+build. The 633-entry repository inventory remained unchanged through the combined
+host and stack checks. The final generated class matches the reviewed postimage
+`a776472ab1863cf78e7cef4f8af279a256b2ccbf7df258156e45a9e4fd1c0fbc`,
+with exactly one generated compile input and no managed-source fallback. The
+development application is 4,695,920 bytes; a clean published identity and
+artifact review remain required before deployment.
+
+All 350 declared task paths across 50 measured translation units pass the
+unchanged stack budgets and 2 KiB reserve. The USB worker retains its 3,072-byte
+allocation; its largest selected path uses 208 known bytes, leaving 816 bytes
+after the reserve. Review corrected an omitted nested FIFO peek frame before
+the final measurement; the checker now rejects that required frame's absence,
+with all 26 focused checker tests passing. Four actual DCD interrupt paths are reported separately:
+each has 16 known application bytes and a 304-byte selected chain against the
+configured 1,536-byte interrupt stack. This inventory is explicitly unqualified:
+interrupt entry, other SDK paths and nesting remain unmeasured, and fitting the
+known frames does not prove interrupt safety. No prior hook contribution or
+before/after delta is inferred from absent symbols. Physical pairing, audio
+delivery and long-duration operation still require device evidence.
+
 ## Historical evidence
 
 Evidence date: 2026-10-21. The pinned S31 toolchain has built the minimal composite HID firmware. Portable behavior, report layout and production BLE callback logic have executable host coverage. The physical development board is identified as Mosaico v1.2 (eFuse `0x0102`) with 16 MB flash, and its original flash contents have been backed up locally. Runtime deployment and host compatibility evidence are recorded separately below; a build does not establish a working HID device or long-term reliability.

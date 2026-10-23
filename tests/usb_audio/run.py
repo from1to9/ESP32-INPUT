@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 SUITE = Path(__file__).resolve().parent
@@ -25,3 +26,5 @@ with tempfile.TemporaryDirectory(prefix="esp32-uac-test-") as directory:
     ], check=True)
     for case in range(13):
         subprocess.run([binary, str(case)], check=True)
+subprocess.run([sys.executable, str(SUITE / "test_patch.py")], check=True)
+subprocess.run([sys.executable, str(SUITE / "run_pinned.py")], check=True)

@@ -1,6 +1,6 @@
 # Cached audio diagnostics observer
 
-Run `python3 tests/audio_diagnostics/run.py` from the repository root. Seven
+Run `python3 tests/audio_diagnostics/run.py` from the repository root. Eight
 isolated cases compile the actual `app_audio_diagnostics.c` observer and format
 comparison code with strict C11 warnings, AddressSanitizer and fail-fast UBSan.
 Only the cached media/USB/codec getters and logger are substituted. Exact
@@ -30,9 +30,21 @@ include acknowledged speaker mute. Retained first/last named SDK error
 operations identify failed I2S reads/writes, I2C control or resource calls even
 after a successful cleanup; clock-only capture does not appear as playback.
 
+USB summaries include observed OUT/IN class callbacks, their byte and empty-packet
+counts, worker FIFO reads/writes, completed playback frames, consumer binding,
+pending playback flush and queue/partial sizes. Binding and flush changes log
+immediately on the next admitted observation; counters and queue sizes wait for
+the summary. The class hooks execute after successful rearm, so absent callbacks
+do not distinguish a controller failure from no completion. FIFO write acceptance
+does not establish host delivery. The generated class preserves unread capture
+bytes with short-write backpressure; IN rearm failure accounting remains a
+separate limitation. No counter is a fabricated first PCM frame or proof of
+audible output.
+
 Tests cover unavailable-to-known recovery, getters that leave output untouched,
 failed jobs retained after aggregate OFF, first-frame transitions, counter-only
-updates waiting for the summary, USB/codec errors and generations, private
+updates waiting for the summary, USB/codec errors and generations,
+USB binding/flush changes, full-width counter formatting, private
 metadata wiping, unchanged owner inputs, forbidden mutation calls, throttle
 and idle logging bounds, and monotonic-time regression/overflow boundaries.
 These are observer guarantees, not proof of microphone capture, speaker sound,

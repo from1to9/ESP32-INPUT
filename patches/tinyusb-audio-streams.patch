@@ -1,0 +1,15 @@
+--- a/src/class/audio/audio_device.c
++++ b/src/class/audio/audio_device.c
+@@ -471 +471,4 @@
+-  TU_VERIFY(0 < tu_fifo_write_n(&audio->ep_out_ff, audio->lin_buf_out, n_bytes_received));
++  // An empty OUT packet still needs the next receive scheduled.
++  if (n_bytes_received != 0) {
++    TU_VERIFY(0 < tu_fifo_write_n(&audio->ep_out_ff, audio->lin_buf_out, n_bytes_received));
++  }
+@@ -545 +548 @@
+-  tu_fifo_read_n(&audio->ep_in_ff, audio->lin_buf_in, n_bytes_tx);
++  n_bytes_tx = tu_fifo_read_n(&audio->ep_in_ff, audio->lin_buf_in, n_bytes_tx);
+@@ -688 +691,2 @@
+-        tu_fifo_config(&audio->ep_in_ff, ep_in_sw_buf.buf_1, CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ, true);
++        // Preserve unread capture data; the producer must handle short writes.
++        tu_fifo_config(&audio->ep_in_ff, ep_in_sw_buf.buf_1, CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ, false);

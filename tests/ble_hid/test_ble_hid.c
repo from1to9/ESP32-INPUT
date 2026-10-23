@@ -83,6 +83,24 @@ static bool last_security_accept;
 static char fake_sdk_name[33] = BLE_HID_DEFAULT_NAME;
 static char configured_adv_name[33], configured_scan_name[33];
 static unsigned name_set_calls, name_get_calls, name_reads_pending, close_calls, adv_stop_calls;
+/* Model the documented SDK distinction: logical GATT close can notify before
+ * its physical ACL is gone; GAP disconnect waits for that actual completion. */
+static bool model_acl_lifecycle, model_acl_present, model_acl_closing;
+static unsigned gatts_close_calls, gap_disconnect_calls, premature_advertising_calls;
+static esp_err_t model_gap_disconnect_result;
+static esp_bd_addr_t model_acl_address, last_gap_disconnect_address;
+static void model_logical_disconnect(void);
+static unsigned model_lock_depth, model_reservation_hooks;
+static void (*model_after_close_reservation)(void);
+void test_port_enter_critical(portMUX_TYPE *lock) { (void)lock; ++model_lock_depth; }
+void test_port_exit_critical(portMUX_TYPE *lock) {
+    (void)lock; assert(model_lock_depth); --model_lock_depth;
+    if (!model_lock_depth && model_after_close_reservation && state.closing && state.public.connected) {
+        void (*hook)(void) = model_after_close_reservation;
+        model_after_close_reservation = NULL; ++model_reservation_hooks; hook();
+    }
+}
+
 static esp_err_t name_set_result = ESP_OK, name_get_result = ESP_OK;
 static esp_err_t adv_data_result = ESP_OK, scan_data_result = ESP_OK;
 static esp_err_t adv_start_result = ESP_OK, adv_stop_result = ESP_OK;
@@ -309,9 +327,19 @@ esp_err_t esp_ble_remove_bond_device(esp_bd_addr_t address) {
     ++remove_calls;
     return remove_request_result;
 }
-esp_err_t esp_ble_gatts_close(esp_gatt_if_t interface, uint16_t conn_id) { (void)interface; (void)conn_id; ++close_calls; ++sdk_calls; return ESP_OK; }
+esp_err_t esp_ble_gatts_close(esp_gatt_if_t interface, uint16_t conn_id) {
+    (void)interface; (void)conn_id; ++close_calls; ++gatts_close_calls; ++sdk_calls;
+    if (model_acl_lifecycle) { model_acl_closing = true; model_logical_disconnect(); }
+    return ESP_OK;
+}
+esp_err_t esp_ble_gap_disconnect(esp_bd_addr_t address) {
+    assert(!callback_active); ++close_calls; ++gap_disconnect_calls; ++sdk_calls;
+    memcpy(last_gap_disconnect_address,address,ESP_BD_ADDR_LEN);
+    if (model_gap_disconnect_result == ESP_OK && model_acl_lifecycle) model_acl_closing = true;
+    return model_gap_disconnect_result;
+}
 esp_err_t esp_ble_gatts_send_response(esp_gatt_if_t interface, uint16_t conn_id, uint32_t transaction, esp_gatt_status_t status, esp_gatt_rsp_t *response) { (void)interface; (void)conn_id; (void)transaction; assert(response); last_response = *response; last_response_status = status; last_response_commit_count = commit_calls; ++response_calls; ++sdk_calls; return ESP_OK; }
-esp_err_t esp_ble_gap_start_advertising(esp_ble_adv_params_t *parameters) { assert(parameters); ++advertising_calls; if (advertising_start_hook) advertising_start_hook(); return adv_start_result; }
+esp_err_t esp_ble_gap_start_advertising(esp_ble_adv_params_t *parameters) { assert(parameters); ++advertising_calls; if (model_acl_lifecycle && model_acl_present) ++premature_advertising_calls; if (advertising_start_hook) advertising_start_hook(); return adv_start_result; }
 esp_err_t esp_ble_gap_stop_advertising(void) { ++adv_stop_calls; ++sdk_calls; return adv_stop_result; }
 esp_err_t esp_ble_gatts_send_indicate(esp_gatt_if_t interface, uint16_t conn_id, uint16_t handle, uint16_t length, uint8_t *value, bool confirmation) {
     assert(interface == 7 && conn_id == 3 && handle && length <= sizeof(copied_payload) && !confirmation);
@@ -356,6 +384,12 @@ static void reset(void) {
     task_create_fails = false;
     registration_hook = NULL;
     advertising_start_hook = NULL;
+    model_acl_lifecycle = model_acl_present = model_acl_closing = false;
+    gatts_close_calls = gap_disconnect_calls = premature_advertising_calls = 0;
+    model_gap_disconnect_result = ESP_OK;
+    model_lock_depth = model_reservation_hooks = 0; model_after_close_reservation = NULL;
+    memset(model_acl_address,0,sizeof model_acl_address);
+    memset(last_gap_disconnect_address,0,sizeof last_gap_disconnect_address);
     memset(&subscriptions, 0, sizeof(subscriptions));
     memset(&pending_subscriptions, 0, sizeof(pending_subscriptions));
     memset(fake_bonds, 0, sizeof(fake_bonds));
@@ -2684,8 +2718,14 @@ static void test_quiet_forget_all_and_empty_durable_preferences(void) {
 
 #include "native_management_cases.inc"
 #include "advertising_diagnostics_cases.inc"
+#include "physical_disconnect_cases.inc"
 
 int main(void) {
+    physical_disconnect_reservation_auth_and_replacement();
+    physical_disconnect_add_waits_for_acl();
+    physical_disconnect_missing_error_and_identity();
+    physical_disconnect_stale_duplicate_and_rejected_peers();
+    physical_disconnect_reused_ids_and_obsolete_reject();
     test_advertising_diagnostics_first_fault_and_copy();
     test_advertising_diagnostics_completion_before_api_return();
     test_advertising_diagnostics_bounds_missing_and_benign_stop();

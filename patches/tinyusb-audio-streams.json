@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "component": "espressif/tinyusb",
+  "version": "0.21.0~2",
+  "component_hash": "16c8d774dab1f484d3e0c0f61105624d2424bbae864efd19818baf7b451b41e7",
+  "source_path": "src/class/audio/audio_device.c",
+  "source_sha256": "347ac32ce077f8b34b6b21069afb1959f6eb89d8dc32d80c4a672a19ecabc8bc",
+  "output_sha256": "a776472ab1863cf78e7cef4f8af279a256b2ccbf7df258156e45a9e4fd1c0fbc",
+  "patch_file": "patches/tinyusb-audio-streams.patch",
+  "patch_sha256": "db9eefaa8a9fbf6e2dab8710f046e31ec5f4597bc90fbd0b06f18af4a487ae6a",
+  "license": "MIT; original source license and copyright remain in generated copy",
+  "purpose": "Rearm DMA OUT after empty packets without fabricating PCM, preserve function-1 unread IN PCM with FIFO backpressure, and schedule only actual DMA IN bytes read."
+}

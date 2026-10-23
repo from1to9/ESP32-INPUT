@@ -29,6 +29,210 @@ def result(capture, completed=True):
     return capture.summary(35.0, 35, completed)
 
 
+def audio_job(**overrides):
+    values = dict(slot=3, kind=3, state=1, stop_reason=0, error=0, first_frame=0,
+                  first_frame_ms=0, deadline_ms=0, cleanup=0, received_bytes=0,
+                  delivered_bytes=0, sample_frames=0, discarded_frames=0)
+    values.update(overrides)
+    return ("I (34296) audio_diag: Audio diag job " +
+            " ".join(f"{key}={value}" for key, value in values.items()) + "\r\n").encode()
+
+
+class AudioJobParserTests(unittest.TestCase):
+    def capture(self, records):
+        capture = smoke.HealthCapture()
+        for data in records:
+            for start in range(0, len(data), 7):
+                feed(capture, data[start:start + 7])
+        for uptime in (10, 20, 30):
+            feed(capture, health(uptime))
+        return capture
+
+    def test_historical_absence_and_empty_slots_are_not_media_success(self):
+        summary = result(self.capture([]))
+        self.assertEqual(summary["status"], "passed")
+        self.assertIsNone(summary["audio_jobs"])
+        summary = result(self.capture([audio_job(slot=slot, kind=0, state=0) for slot in range(4)]))
+        self.assertEqual(summary["failure_codes"], [])
+        self.assertEqual(len(summary["audio_jobs"]["slots"]), 4)
+        self.assertTrue(all(slot["last_report"]["assessment"] == "empty"
+                            for slot in summary["audio_jobs"]["slots"].values()))
+        self.assertIn("absent reports remain unobserved", summary["qualification"])
+
+    def test_start_timeout_survives_cleanup_off_and_new_successful_job(self):
+        # Sanitized production-shaped sequence: no error-level log is needed.
+        failed = audio_job(state=7, stop_reason=11, error=13, cleanup=1)
+        summary = result(self.capture([
+            audio_job(), failed, audio_job(state=7, stop_reason=11, error=13),
+            b"I (38415) audio_diag: Audio diag audio known=1 state=0 route=4 error=0 generation=8 off_confirmed=1\r\n",
+            runtime("media"), audio_job(),
+            audio_job(state=2, first_frame=1, first_frame_ms=40000, deadline_ms=50000,
+                      received_bytes=960, delivered_bytes=960, sample_frames=480),
+            audio_job(state=5, first_frame=1, first_frame_ms=40000, deadline_ms=50000,
+                      received_bytes=960, delivered_bytes=960, sample_frames=480),
+        ]))
+        self.assertEqual(summary["failure_codes"], ["audio_job_failed"])
+        slot = summary["audio_jobs"]["slots"]["3"]
+        self.assertEqual(slot["failed_reports"], 2)
+        first = slot["first_failure"]
+        self.assertEqual(first["enum_names"], {"kind": "AE_PLAYBACK_STREAM", "state": "AE_JOB_ERROR",
+                                               "stop_reason": "AE_STOP_START_TIMEOUT", "error": "AE_TIMEOUT"})
+        self.assertEqual(first["values"]["cleanup"], 1)
+        self.assertEqual(first["values"]["first_frame"], 0)
+        self.assertEqual(first["values"]["first_frame_ms"], 0)
+        self.assertEqual(slot["last_report"]["assessment"], "completed")
+        self.assertNotIn("generation", first["values"])
+
+    def test_late_capture_retained_failure_needs_no_start_or_global_snapshot(self):
+        summary = result(self.capture([audio_job(state=7, stop_reason=11, error=13)]))
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["failure_codes"], ["audio_job_failed"])
+        self.assertEqual(summary["runtime_observations"], {})
+
+    def test_real_capture_overflow_retains_partial_delivery_evidence(self):
+        overflow = audio_job(slot=0, kind=0, state=6, stop_reason=9, error=10, first_frame=1,
+                             first_frame_ms=30687, deadline_ms=3630687, received_bytes=278400,
+                             delivered_bytes=270720, sample_frames=135360, discarded_frames=8)
+        summary = result(self.capture([overflow, runtime("media"), overflow,
+                                       audio_job(slot=0, kind=0, state=0)]))
+        self.assertEqual(summary["failure_codes"], ["audio_job_failed"])
+        slot = summary["audio_jobs"]["slots"]["0"]
+        self.assertEqual(slot["failed_reports"], 2)
+        self.assertEqual(slot["last_report"]["assessment"], "empty")
+        failure = slot["first_failure"]
+        self.assertEqual(failure["enum_names"]["state"], "AE_JOB_PARTIAL")
+        self.assertEqual(failure["enum_names"]["stop_reason"], "AE_STOP_OVERFLOW")
+        self.assertEqual(failure["enum_names"]["error"], "AE_OVERFLOW")
+        for field, expected in (("first_frame_ms", 30687), ("received_bytes", 278400),
+                                ("delivered_bytes", 270720), ("sample_frames", 135360), ("discarded_frames", 8)):
+            self.assertEqual(failure["values"][field], expected)
+
+    def test_normal_stop_cancel_guard_and_limit_endings_are_not_failures(self):
+        cases = [
+            ({"state": 7}, "stopped"),
+            ({"state": 7, "error": 8}, "stopped"),  # Shutdown safety guard before first frame.
+            ({"state": 6, "stop_reason": 1, "first_frame": 1}, "cancelled"),
+            ({"slot": 1, "kind": 1, "state": 6, "stop_reason": 2, "first_frame": 1}, "cancelled"),
+            ({"state": 6, "stop_reason": 3, "error": 13, "first_frame": 1}, "limit_reached"),
+            ({"state": 6, "stop_reason": 4, "error": 9, "first_frame": 1}, "limit_reached"),
+            ({"state": 7, "stop_reason": 7, "error": 8}, "cancelled"),
+            ({"state": 6, "stop_reason": 14, "error": 8, "first_frame": 1}, "cancelled"),
+            ({"state": 7, "stop_reason": 7, "error": 0}, "cancelled"),  # Explicit ae_stop.
+            ({"state": 6, "stop_reason": 14, "error": 0, "first_frame": 1}, "cancelled"),
+        ]
+        for values, assessment in cases:
+            with self.subTest(values=values):
+                summary = result(self.capture([audio_job(**values)]))
+                self.assertEqual(summary["failure_codes"], [])
+                slot = summary["audio_jobs"]["slots"][str(values.get("slot", 3))]
+                self.assertEqual(slot["last_report"]["assessment"], assessment)
+                self.assertIsNone(slot["first_failure"])
+
+    def test_active_and_finalizing_reports_do_not_claim_completed_delivery(self):
+        for state, cleanup, expected in ((1, 0, "in_progress"), (2, 0, "in_progress"),
+                                         (3, 1, "ending"), (4, 1, "ending")):
+            with self.subTest(state=state):
+                summary = result(self.capture([audio_job(state=state, cleanup=cleanup)]))
+                self.assertEqual(summary["failure_codes"], [])
+                self.assertEqual(summary["audio_jobs"]["slots"]["3"]["last_report"]["assessment"], expected)
+
+    def test_failure_reasons_and_cleanup_errors_cannot_be_hidden_by_normal_stops(self):
+        for reason in (5, 6, 8, 9, 10, 11, 12, 13):
+            for state in (3, 4, 6, 7):
+                with self.subTest(reason=reason, state=state):
+                    summary = result(self.capture([audio_job(state=state, stop_reason=reason, error=13)]))
+                    self.assertEqual(summary["failure_codes"], ["audio_job_failed"])
+        for reason in (0, 1, 2, 3, 4, 7, 14):
+            for error in (11, 12, 16, 18):  # IO, uncertain cleanup, integrity and exhausted.
+                with self.subTest(reason=reason, error=error):
+                    summary = result(self.capture([audio_job(state=6, stop_reason=reason, error=error)]))
+                    self.assertEqual(summary["failure_codes"], ["audio_job_failed"])
+        for reason in (7, 14):
+            summary = result(self.capture([audio_job(state=7, stop_reason=reason, error=1)]))
+            self.assertEqual(summary["failure_codes"], ["audio_job_failed"])
+
+    def test_failure_can_be_observed_during_finalization_or_after_partial_media(self):
+        for state, first_frame in ((4, 1), (6, 1), (7, 0), (5, 1), (2, 1)):
+            with self.subTest(state=state):
+                summary = result(self.capture([audio_job(slot=0, kind=0, state=state, stop_reason=9,
+                                                        error=10, first_frame=first_frame)]))
+                self.assertEqual(summary["failure_codes"], ["audio_job_failed"])
+                self.assertEqual(summary["audio_jobs"]["slots"]["0"]["first_failure"]["enum_names"]["error"], "AE_OVERFLOW")
+
+    def test_enum_boolean_slot_and_counter_domains_reject_poison(self):
+        domains = {"slot": (-1, 4, 4294967295), "kind": (-1, 5), "state": (-1, 8, 4294967295),
+                   "stop_reason": (-1, 15), "error": (-1, 19, -1515870811),
+                   "first_frame": (-1, 2, 165), "cleanup": (-1, 2, 165)}
+        for field in smoke.AUDIO_JOB_COUNTERS:
+            domains[field] = (-1,)
+        for field, invalid in domains.items():
+            for value in invalid:
+                with self.subTest(field=field, value=value):
+                    summary = result(self.capture([audio_job(**{field: value})]))
+                    self.assertEqual(summary["failure_codes"], ["invalid_audio_job_values"])
+                    self.assertEqual(summary["audio_jobs"]["valid_reports"], 0)
+                    self.assertEqual(summary["audio_jobs"]["slots"], {})
+
+    def test_nonempty_capture_and_playback_slot_kinds_match_owner_layout(self):
+        for slot, kind in ((0, 3), (1, 0), (2, 1), (3, 0), (3, 2)):
+            with self.subTest(slot=slot, kind=kind):
+                summary = result(self.capture([audio_job(slot=slot, kind=kind)]))
+                self.assertEqual(summary["failure_codes"], ["invalid_audio_job_values"])
+        for slot, kind in ((0, 0), (1, 1), (2, 2), (3, 3), (3, 4)):
+            self.assertEqual(result(self.capture([audio_job(slot=slot, kind=kind)]))["failure_codes"], [])
+
+    def test_missing_duplicate_malformed_and_overflow_fields_preserve_prior_failure(self):
+        good = audio_job(state=7, stop_reason=11, error=13)
+        malformed = [b"Audio diag job\n", good.replace(b"error=13", b"error=1.3"),
+                     good.replace(b"error=13", b"error=0x0d"), good.replace(b"slot=3", b"slot=3 slot=0"),
+                     good.replace(b"slot=3", b"slot=3 extra=1 extra=2"),
+                     good.replace(b"received_bytes=0", b"received_bytes=18446744073709551616"),
+                     good.replace(b"received_bytes=0", b"received_bytes=" + b"9" * 100)]
+        for field in smoke.AUDIO_JOB_FIELDS:
+            malformed.append(re.sub(rb"\b" + field.encode() + rb"=-?[0-9]+[ \t]*", b"", good))
+        for line in malformed:
+            with self.subTest(line=line):
+                summary = result(self.capture([good, line]))
+                self.assertEqual(summary["failure_codes"], ["audio_job_failed", "malformed_audio_job"])
+                self.assertEqual(summary["audio_jobs"]["records"], 2)
+                self.assertEqual(summary["audio_jobs"]["valid_reports"], 1)
+                self.assertEqual(summary["audio_jobs"]["slots"]["3"]["last_report"]["enum_names"]["error"], "AE_TIMEOUT")
+
+    def test_uint64_counters_remain_exact(self):
+        maximum = (1 << 64) - 1
+        counters = {field: maximum for field in smoke.AUDIO_JOB_COUNTERS}
+        summary = result(self.capture([audio_job(state=2, first_frame=1, **counters)]))
+        self.assertEqual(summary["failure_codes"], [])
+        values = summary["audio_jobs"]["slots"]["3"]["last_report"]["values"]
+        self.assertEqual({field: values[field] for field in counters}, counters)
+
+    def test_repeated_reports_are_bounded_observations_not_distinct_job_counts(self):
+        lines = [audio_job(slot=slot, kind=slot, state=7, stop_reason=11, error=13,
+                           private_identifier=9321) for slot in range(4)] * 60
+        summary = result(self.capture(lines))
+        self.assertEqual(summary["failure_codes"], ["audio_job_failed"])
+        self.assertEqual(summary["audio_jobs"]["valid_reports"], 240)
+        self.assertEqual(len(summary["audio_jobs"]["slots"]), 4)
+        for slot in summary["audio_jobs"]["slots"].values():
+            self.assertEqual(slot["failed_reports"], 60)
+        encoded = json.dumps(summary["audio_jobs"])
+        self.assertLess(len(encoded), 8000)
+        self.assertNotIn("private_identifier", encoded)
+        self.assertNotIn("9321", encoded)
+
+    def test_partial_last_report_still_records_failure_without_qualifying_capture(self):
+        capture = self.capture([])
+        line = audio_job(state=7, stop_reason=11, error=13).rstrip(b"\r\n")
+        feed(capture, line)
+        summary = result(capture)
+        self.assertEqual(summary["failure_codes"], ["audio_job_failed", "unterminated_line"])
+
+    def test_new_job_parsing_preserves_other_fault_gates(self):
+        summary = result(self.capture([audio_job(state=7), b"E (12) other: ESP_ERR_TIMEOUT\n",
+                                       runtime("media", audio_state=-1515870811)]))
+        self.assertEqual(summary["failure_codes"], ["esp_error", "invalid_runtime_media_values"])
+
+
 RUNTIME_VALUES = {
     "media": {"snapshot_available": 1, "initialized": 1, "audio_known": 1, "audio_state": 0,
               "audio_error": 0, "off_confirmed": 1, "speech_known": 1, "speech_state": 1,
@@ -321,6 +525,9 @@ class RuntimeParserTests(unittest.TestCase):
     def test_enum_domains_match_the_owning_firmware_types(self):
         contracts = [
             ("components/audio_engine/include/audio_engine.h", "ae_state_t", smoke.AUDIO_STATES),
+            ("components/audio_engine/include/audio_engine.h", "ae_job_kind_t", smoke.AUDIO_JOB_KINDS),
+            ("components/audio_engine/include/audio_engine.h", "ae_job_state_t", smoke.AUDIO_JOB_STATES),
+            ("components/audio_engine/include/audio_engine.h", "ae_stop_reason_t", smoke.AUDIO_STOP_REASONS),
             ("components/audio_engine/include/audio_io.h", "ae_result_t", smoke.AUDIO_RESULTS),
             ("components/spoken_letters/include/spoken_letters.h", "sl_state_t", smoke.SPEECH_STATES),
             ("firmware/main/app_wifi.h", "app_wifi_state_t", smoke.WIFI_STATES),
@@ -335,6 +542,9 @@ class RuntimeParserTests(unittest.TestCase):
                 self.assertIsNotNone(match)
                 names = tuple(word.strip() for word in match.group(1).split(",") if word.strip())
                 self.assertEqual(names, expected)  # Explicit values also require a reviewed parser update.
+        audio_io = (ROOT / "components/audio_engine/include/audio_io.h").read_text()
+        self.assertEqual(int(re.search(r"#define\s+AE_CONSUMERS_MAX\s+(\d+)U", audio_io).group(1)),
+                         smoke.AUDIO_CAPTURE_SLOTS)
 
     def test_fragmented_idle_and_unprovisioned_observations_are_not_readiness_claims(self):
         summary = result(self.capture(*(runtime(component) for component in RUNTIME_VALUES)))

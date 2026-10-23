@@ -379,3 +379,69 @@ measured later cannot explain the earlier allocation. Diagnostic trace loss or
 unknown observations must remain explicit. Keep tracing separate from retries,
 recovery, admission policy and fault clearing. See the
 [device failure record](../../docs/validation.md#combined-candidate-device-failure-2026-10-23).
+
+## 19. Successful cleanup does not turn a failed media job into success
+
+A playback first-frame timeout or partial capture overflow can end between
+periodic global health reports. The route may subsequently report OFF/OK after
+successful cleanup while its job still records the failure. Parse the retained
+job result independently and keep its first observed failure across later
+cleanup, empty slots and new jobs. Missing job reports remain unobserved.
+
+Do not classify every terminal ERROR/PARTIAL state or nonzero result as a fault.
+The owning engine also uses those states for explicit cancellation and normal
+duration/byte limits. Match the documented reason/result combinations, retain
+pending cleanup separately, and never allow an uncertain cleanup result to hide
+behind a normal stop reason. Repeated snapshots count as reports, not distinct
+jobs or failures when the log has no job identity. Compare the same captured
+failure stream before and after a parser repair; do not remove error lines or
+weaken the surrounding health gate.
+
+Evidence: [health parser](../../tools/device_smoke.py),
+[regressions](../../tests/test_device_smoke.py) and the
+[device record](../../docs/validation.md#clock-repair-deployment-and-remaining-stream-failures-2026-10-23).
+
+## 20. A protocol close callback may precede physical connection release
+
+In the pinned Bluedroid implementation, closing GATT can notify the application
+after requesting an ACL disconnect but before that connection is released.
+Starting replacement advertising from that logical callback can therefore race
+the old link. Trace the owning SDK call chain and serialized callback/message
+execution, rather than relying on a later printed disconnect line's timestamp.
+Use the public physical-disconnect operation with the observed live address,
+including a privacy alias, instead of a saved bond identity.
+
+A physical-close reservation belongs to the connection generation, ID and live
+address. Authentication revision can change on that same connection; using it
+to skip an already reserved close can strand the reservation forever. Cover
+authentication completion between reservation and submission, immediate SDK
+rejection, and a replacement link reusing the old ID/address. API enqueue
+acceptance is not physical completion: if the later callback never arrives,
+preserve the pending/failure state and do not start replacement advertising.
+See the [Bluetooth lifecycle regressions](../../tests/ble_hid/README.md).
+
+## 21. Test stream progress and capacity with the actual class driver
+
+A FIFO substitute can miss a class-driver stall. The pinned TinyUSB DMA OUT
+path verifies a positive FIFO write before rearming reception; a valid empty
+packet returns zero from that write and leaves the endpoint unarmed. An empty
+packet must preserve receive progress without fabricating a PCM frame. Keep
+real positive-write and endpoint-submission failures observable.
+
+A requested packet size is not the number of bytes a FIFO actually returns.
+Flow-control blackout can select a nominal packet larger than the finite tail;
+schedule only the bytes read, never stale buffer contents. Test a single finite
+frame and subsequent empty completions as well as sustained multi-frame traffic.
+
+The pinned upstream driver configures its IN FIFO to overwrite. A successful write
+therefore need not mean either preserved queued data or transmission to a host.
+Exercise the actual FIFO and completion callbacks with distinct byte content,
+short and zero writes, a stalled consumer and resumed consumption. Account for
+application queues, FIFO contents, scheduled transfers and completed transfers
+separately; include tails that flow control has not yet scheduled. Do not infer
+host delivery from accepted bytes, or infer error-path conservation when a
+driver removes bytes before a failed endpoint submission. These checks do not
+establish acoustic quality or all-direction lossless transport.
+
+Evidence: [USB audio regressions](../../tests/usb_audio/README.md) and the
+[reviewed upstream patch manifest](../../patches/tinyusb-audio-streams.json).
