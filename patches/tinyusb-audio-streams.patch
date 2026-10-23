@@ -1,15 +1,24 @@
 --- a/src/class/audio/audio_device.c
 +++ b/src/class/audio/audio_device.c
-@@ -471 +471,4 @@
+@@ -62,0 +63 @@
++#include "usb_audio_transport.h"
+@@ -471 +472,4 @@
 -  TU_VERIFY(0 < tu_fifo_write_n(&audio->ep_out_ff, audio->lin_buf_out, n_bytes_received));
 +  // An empty OUT packet still needs the next receive scheduled.
 +  if (n_bytes_received != 0) {
 +    TU_VERIFY(0 < tu_fifo_write_n(&audio->ep_out_ff, audio->lin_buf_out, n_bytes_received));
 +  }
-@@ -545 +548 @@
+@@ -474 +478,3 @@
+-  TU_VERIFY(usbd_edpt_xfer(rhport, audio->ep_out, audio->lin_buf_out, audio->ep_out_sz, true));
++  bool queued = usbd_edpt_xfer(rhport, audio->ep_out, audio->lin_buf_out, audio->ep_out_sz, true);
++  input_usb_audio_class_out(true, queued, XFER_RESULT_SUCCESS, n_bytes_received);
++  TU_VERIFY(queued);
+@@ -545 +551 @@
 -  tu_fifo_read_n(&audio->ep_in_ff, audio->lin_buf_in, n_bytes_tx);
 +  n_bytes_tx = tu_fifo_read_n(&audio->ep_in_ff, audio->lin_buf_in, n_bytes_tx);
-@@ -688 +691,2 @@
+@@ -688 +694,2 @@
 -        tu_fifo_config(&audio->ep_in_ff, ep_in_sw_buf.buf_1, CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ, true);
 +        // Preserve unread capture data; the producer must handle short writes.
 +        tu_fifo_config(&audio->ep_in_ff, ep_in_sw_buf.buf_1, CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ, false);
+@@ -1524,0 +1532 @@
++      input_usb_audio_class_out(false, false, (uint8_t) result, (uint16_t) xferred_bytes);

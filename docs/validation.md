@@ -915,6 +915,126 @@ known frames does not prove interrupt safety. No prior hook contribution or
 before/after delta is inferred from absent symbols. Physical pairing, audio
 delivery and long-duration operation still require device evidence.
 
+### Stream-repair deployment and remaining transport failures: 2026-10-23
+
+The reviewed clean source `c99a103bff361453c98e891b6b2d0ebe7b73d5bf`
+was published and its 4,695,920-byte application was flashed and independently
+verified. Application SHA-256 is
+`15a376ed880701639cb62b0b5aade6d21d0335beef05f2a7ec5309e3f25eed0a`.
+The partition table, NVS and PHY region were preserved; no new backup or
+whole-chip erase was performed. The runtime identity matched the package.
+Host tests, the target build and independent source/package review passed, but
+the following physical results do not qualify the image for release.
+
+The initial 90-second capture observed Bluetooth input ready and LAN connected.
+Health still failed on retained GPIO initialization errors and an IMU batch-time
+fault. Source and earlier-image logs establish that the duplicate GPIO ISR-service
+installation messages predate this image; they do not establish the cause of
+the audio or pairing failures. The IMU recovered and continued sampling, but
+the delayed batch's cause and physical Motion behavior remain unqualified.
+
+With an existing host attempting reconnection, a 120-second pairing capture
+contained 115 accepted connections and disconnects, with no input-ready
+connection. The earlier advertising-start failure did not recur in this
+capture. Disabling that host's Bluetooth stopped the visible reconnect loop,
+but an isolated iPad attempt still failed authentication. The user subsequently
+restarted the device and reported a successful iPad connection; a fresh capture
+also observed Bluetooth connected and ready. This does not qualify Add host
+during an existing session. The device displayed its new name while iPad
+displayed the former name. Actual advertised and GATT names were not captured,
+so an iPad cache explanation remains unverified.
+
+An independent naming gap remains: the [Classic audio contract](bt-audio.md)
+requires the shared settings owner to supply the Classic device name, but the
+current first-party name-update path sets only the BLE name. The pinned SDK
+keeps BLE and BR/EDR names separately. This missing Classic integration does
+not establish which name the iPad displayed or explain its pairing failure.
+
+Authentication reason **decimal 86** maps to SMP reason 9 in the pinned SDK.
+Both a locally rejected security grant and a peer failure can produce that
+result. It does not prove repeated user attempts, peer cooldown or corrupted
+durable bonds. Likewise, a negative long-term-key reply establishes the missing
+local encryption-key flag in the current SDK record, not absence of all keys
+in durable storage. No bond-forgetting operation was performed as a workaround.
+
+The USB Speaker retest failed with a first-frame timeout. The Mac rendered an
+output-only test stream to the selected device; this proves host callback
+progress, not bus delivery or audible output. The device's observed USB link
+was high speed. Its OUT callback counters stopped at two packets and 192 bytes;
+the application made 2,012 reads returning zero bytes. The playback job retained
+zero received/delivered bytes and no first frame. The codec entered playback
+with its transmit clock running and no reported SDK error, then closed during
+timeout cleanup. Callback counters occur after rearming, and IN callback counts
+can include failed transfer events without distinguishing completion status;
+they cannot establish successful host polling
+or localize the stall to the host, controller or class driver. Further endpoint
+and feedback evidence is required. The timeout remains a failure even though
+the global audio route subsequently reports OFF/OK.
+
+
+### Transport-phase candidate: local validation only
+
+This follow-up enables the pinned controller's Periodic Transfer Interrupt
+mode only for the ESP32-S31 Buffer DMA profile, preserving the production
+one-millisecond audio interval. The forced configuration header loads the SDK
+configuration before selecting the profile. The audio owner requires an
+observed valid controller mode; unknown mode, reset or mode loss cannot reuse
+an earlier session's authority. The mode lifecycle is separate from diagnostic
+collection and does not change HID admission.
+
+Both the audio class and DWC2 controller compile from hash-checked generated
+copies. The source preimages, patches, outputs and actual compile inputs are
+verified; managed third-party sources remain unchanged. New observations
+separate attempted/accepted endpoint submissions, successful/failed completions,
+empty packets and audio-class rearming. Feedback values retain their format and
+reset epoch. Cached register snapshots come only from active controller paths;
+the diagnostic getter does not access a possibly powered-down controller.
+
+Bluetooth diagnostics retain the first failed authentication context plus
+bounded admission history. They observe existing policy decisions rather than
+changing acceptance, timing or bond storage. A bounded replay in the regular
+health report makes an earlier failure visible to a later log reader. Raw peer
+identifiers and keys are excluded. These observations do not themselves repair
+or qualify the remaining live pairing failure. Source review found the BLE
+advertising builder and standard GATT Device Name read use the same confirmed
+BLE name as the effective-name display. That does not establish what was
+transmitted or what iPad read; fresh protocol observations remain necessary to
+distinguish payload propagation from host presentation.
+
+The final complete host suite passed with no changes across 645 repository
+entries between its before/after snapshots. It includes the original USB
+adapter regressions, the required-profile isolation case, 13 generator checks,
+six forced-include configuration rows and the real class/FIFO regressions.
+The controller matrix retains 100 baseline/candidate outcomes with the same
+positive progress and PCM-content oracle: all 50 candidate outcomes pass,
+while 17 specifically identified baseline counterexamples remain reproducible.
+The first integration run exposed a duplicate raw-class link input in the new
+test runner; it was removed without weakening assertions or dropping scenarios,
+and the complete suite was rerun successfully. Review also closed the
+check-only generator race with deterministic file-disappearance/replacement
+cases. Failed runs remain in local evidence.
+
+The pinned target build passed with all production inputs unchanged. The
+4,702,544-byte development application compiled exactly one generated audio
+class and one generated DCD source, with no managed-source fallback. Both raw
+preimages and generated postimages matched their reviewed digests.
+
+The corrected stack checker passed all 455 declared task paths across 54
+measured translation units, retaining the existing allocations and 2 KiB
+reserve. Its 201-input measurement reported no drift. The narrowest selected
+task margin after that reserve is 624 bytes. Review added an omitted optional
+control-request helper and a regression for emitted helper/clone frames; it
+was inlined in this build, so the correction did not alter the measured sums.
+The separate 30-path interrupt inventory remains unqualified: its largest
+selected chain is 512 bytes against the configured 1,536-byte interrupt stack,
+without a measured bound on interrupt entry, other SDK work or nesting.
+
+The requested delivery boundary for this candidate is local tests, target
+compilation, independent review and source publication. It has not been flashed
+or tested on a device. Acoustic output, live iPad pairing/name display, Motion
+behavior and powered endurance remain unqualified; the prior physical failures
+above are retained rather than superseded by software-only checks.
+
 ## Historical evidence
 
 Evidence date: 2026-10-21. The pinned S31 toolchain has built the minimal composite HID firmware. Portable behavior, report layout and production BLE callback logic have executable host coverage. The physical development board is identified as Mosaico v1.2 (eFuse `0x0102`) with 16 MB flash, and its original flash contents have been backed up locally. Runtime deployment and host compatibility evidence are recorded separately below; a build does not establish a working HID device or long-term reliability.

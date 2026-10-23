@@ -129,13 +129,14 @@ class GeneratedSourceBuildGate(unittest.TestCase):
         self.python.parent.mkdir(parents=True)
         self.python.touch()
         self.output = self.root / "firmware/build/generated/tinyusb_audio/audio_device.c"
+        self.dcd_output = self.output.with_name("dcd_dwc2.c")
         self.output.parent.mkdir(parents=True)
         self.actions = []
 
     def tearDown(self):
         self.temporary.cleanup()
 
-    def invoke(self, *, compiled_output="reviewed", fail_build=False):
+    def invoke(self, *, compiled_output="reviewed", compiled_dcd="reviewed", fail_build=False):
         def boundary(args, **kwargs):
             if args[0] == "bash":
                 self.actions.append("build")
@@ -143,6 +144,8 @@ class GeneratedSourceBuildGate(unittest.TestCase):
                     raise subprocess.CalledProcessError(1, args)
                 if compiled_output is not None:
                     self.output.write_text(compiled_output)
+                if compiled_dcd is not None:
+                    self.dcd_output.write_text(compiled_dcd)
             else:
                 self.actions.append("check")
                 self.assertEqual(args, [self.python, self.root / "tools/tinyusb_audio_patch.py",
@@ -150,7 +153,8 @@ class GeneratedSourceBuildGate(unittest.TestCase):
                                        "--output", self.output, "--check"])
                 # The production helper owns digest verification; substitute
                 # only its rejection boundary to test build sequencing.
-                if self.output.is_symlink() or not self.output.is_file() or self.output.read_text() != "reviewed":
+                if any(path.is_symlink() or not path.is_file() or path.read_text() != "reviewed"
+                       for path in (self.output, self.dcd_output)):
                     raise SystemExit("Unverified generated source")
 
         with patch.multiple(idf, ROOT=self.root, SDK=self.sdk, TOOLS=self.tools), \
@@ -160,6 +164,7 @@ class GeneratedSourceBuildGate(unittest.TestCase):
 
     def test_existing_copy_is_checked_before_and_after_build(self):
         self.output.write_text("reviewed")
+        self.dcd_output.write_text("reviewed")
         self.invoke()
         self.assertEqual(self.actions, ["check", "build", "check"])
 
@@ -179,6 +184,7 @@ class GeneratedSourceBuildGate(unittest.TestCase):
             with self.subTest(output=output):
                 self.actions.clear()
                 self.output.unlink(missing_ok=True)
+                self.dcd_output.unlink(missing_ok=True)
                 with self.assertRaises(SystemExit):
                     self.invoke(compiled_output=output)
                 self.assertEqual(self.actions, ["build", "check"])
@@ -192,9 +198,38 @@ class GeneratedSourceBuildGate(unittest.TestCase):
 
     def test_failed_build_remains_failed_without_postcheck_success(self):
         self.output.write_text("reviewed")
+        self.dcd_output.write_text("reviewed")
         with self.assertRaises(subprocess.CalledProcessError):
             self.invoke(fail_build=True)
         self.assertEqual(self.actions, ["check", "build"])
+
+    def test_surviving_dcd_cannot_bypass_precheck_when_audio_is_missing(self):
+        for contents in ("reviewed", "unrelated work", None):
+            with self.subTest(contents=contents):
+                self.actions.clear()
+                self.dcd_output.unlink(missing_ok=True)
+                if contents is None:
+                    self.dcd_output.symlink_to(self.root / "missing-dcd")
+                else:
+                    self.dcd_output.write_text(contents)
+                with self.assertRaises(SystemExit):
+                    self.invoke()
+                self.assertEqual(self.actions, ["check"])
+                self.assertFalse(self.output.exists())
+                if contents is None:
+                    self.assertTrue(self.dcd_output.is_symlink())
+                else:
+                    self.assertEqual(self.dcd_output.read_text(), contents)
+
+    def test_postcheck_requires_both_generated_sources(self):
+        for dcd in (None, "unreviewed"):
+            with self.subTest(dcd=dcd):
+                self.actions.clear()
+                self.output.unlink(missing_ok=True)
+                self.dcd_output.unlink(missing_ok=True)
+                with self.assertRaises(SystemExit):
+                    self.invoke(compiled_dcd=dcd)
+                self.assertEqual(self.actions, ["build", "check"])
 
 
 if __name__ == "__main__":

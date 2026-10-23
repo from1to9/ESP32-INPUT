@@ -2285,6 +2285,72 @@ static void __attribute__((noinline)) report_bluetooth_advertising_diagnostics(v
     }
 }
 
+static void __attribute__((noinline)) report_bluetooth_admission_event(
+    const char *origin, const ble_hid_admission_observation_t *event)
+{
+    const char *domain = !event->status_known ? "none" :
+        event->status_domain == BLE_HID_ADMISSION_STATUS_ESP_ERROR ? "esp_err" :
+        event->status_domain == BLE_HID_ADMISSION_STATUS_AUTH_REASON ? "auth_reason" : "unknown";
+    ESP_LOGI(TAG, "BLEAuthEvent origin=%s sequence=%llu event=%s live_generation=%llu public_generation=%llu "
+        "conn_id=%u auth_revision=%u command_known=%d command_generation=%llu command_conn_id=%u "
+        "command_auth_revision=%u command_rejected=%d tick_known=%d tick_low32=%u tick_domain=freertos_low32",
+        origin, (unsigned long long)event->sequence, ble_hid_admission_event_name(event->event),
+        (unsigned long long)event->live_generation, (unsigned long long)event->public_generation,
+        (unsigned)event->conn_id, (unsigned)event->auth_revision, event->command_known,
+        (unsigned long long)event->command_generation, (unsigned)event->command_conn_id,
+        (unsigned)event->command_auth_revision, event->command_is_rejected, event->tick_known,
+        (unsigned)event->tick_low32);
+    ESP_LOGI(TAG, "BLEAuthPolicy origin=%s sequence=%llu flags=0x%08x rejected=0x%08x "
+        "window_known=%d window_allowed=%d window_remaining_ms=%u saved_known=%d saved=%d "
+        "current_known=%d current=%d address_match_known=%d address_match=%d "
+        "bond_count=%u bond_capacity=%u shared_known=%d shared_count=%d",
+        origin, (unsigned long long)event->sequence, (unsigned)event->flags,
+        (unsigned)event->rejected_predicates, event->window_known, event->window_allowed,
+        (unsigned)event->window_remaining_ms, event->subject_saved_known, event->subject_saved,
+        event->current_known, event->current, event->address_match_known, event->address_match,
+        (unsigned)event->bond_count, (unsigned)event->bond_capacity,
+        event->shared_count_known, (int)event->shared_count);
+    ESP_LOGI(TAG, "BLEAuthResult origin=%s sequence=%llu deadline_known=%d deadline_ok=%d "
+        "committed=%d retry=%d result_known=%d accepted=%d status_known=%d status_domain=%s status=%d "
+        "refresh_known=%d refresh_error=%d auth_reason_origin=unknown",
+        origin, (unsigned long long)event->sequence, event->deadline_known, event->deadline_ok,
+        event->committed, event->retry, event->result_known, event->accepted,
+        event->status_known, domain, event->status_known ? (int)event->status : 0,
+        event->refresh_known, (int)event->refresh_error);
+}
+
+static void __attribute__((noinline)) report_bluetooth_admission_diagnostics(void)
+{
+    static EXT_RAM_BSS_ATTR ble_hid_admission_diagnostics_t observation;
+    static size_t cursor;
+    ble_hid_copy_admission_diagnostics(&observation);
+    if (!observation.frozen) { cursor = 0; return; }
+    const bool count_valid = observation.count <= BLE_HID_ADMISSION_TRACE_CAPACITY;
+    const size_t count = count_valid ? observation.count : 0;
+    const size_t slots = 4U + count;
+    ESP_LOGI(TAG, "BLEAuth frozen=1 count=%u count_valid=%d total=%llu overflowed=%d sequence_exhausted=%d "
+        "open_known=%d connect_known=%d admission_known=%d failure_known=%d",
+        (unsigned)observation.count, count_valid, (unsigned long long)observation.total_events,
+        observation.overflowed, observation.sequence_exhausted, observation.open_known,
+        observation.connect_known, observation.admission_known, observation.first_failure_known);
+    /* Replay at most two records per health interval, so a frozen trace cannot
+     * add an unbounded serial burst. The failure and decision anchors precede
+     * the chronological tail; repeating the cycle supports a late log reader.
+     * This cursor belongs only to presentation and never consumes the trace. */
+    for (size_t visited = 0, emitted = 0; visited < slots && emitted < 2U; ++visited) {
+        const size_t index = cursor % slots;
+        cursor = (index + 1U) % slots;
+        const ble_hid_admission_observation_t *event = NULL;
+        const char *origin = "tail";
+        if (index == 0) { origin = "failure"; if (observation.first_failure_known) event = &observation.first_failure; }
+        else if (index == 1) { origin = "open"; if (observation.open_known) event = &observation.last_open; }
+        else if (index == 2) { origin = "connect"; if (observation.connect_known) event = &observation.connect; }
+        else if (index == 3) { origin = "admission"; if (observation.admission_known) event = &observation.first_admission; }
+        else event = &observation.events[index - 4U];
+        if (event) { report_bluetooth_admission_event(origin, event); ++emitted; }
+    }
+}
+
 static void __attribute__((noinline)) report_motion_diagnostics(const input_link_t *link)
 {
     static EXT_RAM_BSS_ATTR board_imu_status_t imu;
@@ -2795,6 +2861,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
             report_memory_diagnostics();
             report_runtime_diagnostics();
             report_bluetooth_advertising_diagnostics();
+            report_bluetooth_admission_diagnostics();
             app_presenter_status_t presentation = app_presenter_status();
             report_motion_diagnostics(&link);
             ESP_LOGI(TAG, "UI published=%llu applied=%llu pending=%d pending_age_ms=%llu "

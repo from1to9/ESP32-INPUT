@@ -22,6 +22,7 @@ static report_t trace[1024];
 static size_t trace_count;
 static ble_hid_snapshot_t test_link;
 static ble_hid_advertising_diagnostics_t test_advertising_trace;
+static ble_hid_admission_diagnostics_t test_admission_trace;
 static bool test_haptics_enabled;
 static bool test_haptic_active;
 static unsigned test_sensor_buttons, test_sensor_contacts;
@@ -723,6 +724,10 @@ void ble_hid_copy_advertising_diagnostics(ble_hid_advertising_diagnostics_t *out
 { if (out) *out = test_advertising_trace; }
 const char *ble_hid_advertising_event_name(ble_hid_advertising_event_t event)
 { (void)event; return "unknown"; }
+void ble_hid_copy_admission_diagnostics(ble_hid_admission_diagnostics_t *out)
+{ if (out) *out = test_admission_trace; }
+const char *ble_hid_admission_event_name(ble_hid_admission_event_t event)
+{ (void)event; return "unknown"; }
 bool ble_hid_disconnect_generation(uint64_t generation)
 {
     ++test_disconnects;
@@ -943,6 +948,7 @@ static void setup(input_mode_t mode)
     test_selection_lifetime_ms = 300000;
     test_diagnostic_logs_enabled = test_heap_observation_enabled = false;
     memset(&test_advertising_trace, 0, sizeof(test_advertising_trace));
+    memset(&test_admission_trace, 0, sizeof(test_admission_trace));
     test_diagnostic_log_count = test_heap_observation_count = 0;
     memset(test_diagnostic_logs, 0, sizeof test_diagnostic_logs);
     test_heap_free_internal = test_heap_largest_internal = 0;
@@ -5868,6 +5874,7 @@ static void sensor_observers_preserve_input_queue_and_redact_non_pad_context(voi
 }
 
 #include "ble_advertising_diagnostics_cases.inc"
+#include "ble_admission_diagnostics_cases.inc"
 
 int main(int argc, char **argv)
 {
@@ -5876,6 +5883,7 @@ int main(int argc, char **argv)
 #define RUN(test) do { if (argc == 1 || strcmp(argv[1], #test) == 0) { \
     test_case = #test; test(); ++passed; } } while (0)
     RUN(advertising_failure_replay_preserves_domains_and_input);
+    RUN(admission_failure_replay_is_bounded_repeatable_and_observation_only);
     REMOTE_UPDATE_CASES(RUN);
 #if defined(CONFIG_APP_IMU_CAPTURE) && CONFIG_APP_IMU_CAPTURE
     RUN(raw_capture_observes_without_mutating_production_input);

@@ -1,0 +1,116 @@
+--- a/src/portable/synopsys/dwc2/dcd_dwc2.c
++++ b/src/portable/synopsys/dwc2/dcd_dwc2.c
+@@ -48,0 +49 @@
++#include "usb_audio_transport.h"
+@@ -92,0 +94,65 @@
++
++// Application lifecycle and observations leave DCD scheduling unchanged.
++TU_ATTR_WEAK void input_usb_audio_dcd_mode(uint32_t epoch, bool known, uint32_t reject, bool in_isr) {
++  (void) epoch; (void) known; (void) reject; (void) in_isr;
++}
++TU_ATTR_WEAK void input_usb_audio_dcd_transfer(uint32_t epoch, uint8_t ep, bool completion,
++    uint8_t result, uint16_t bytes, uint32_t value, uint8_t length, bool in_isr) {
++  (void) epoch; (void) ep; (void) completion; (void) result; (void) bytes; (void) value; (void) length; (void) in_isr;
++}
++TU_ATTR_WEAK void input_usb_audio_dcd_registers(const usb_audio_dcd_registers_t* sample, bool in_isr) {
++  (void) sample; (void) in_isr;
++}
++static uint32_t input_usb_epoch, input_usb_out_activation, input_usb_irq_count;
++static bool input_usb_pending_sampled;
++static void input_usb_mode_begin(bool in_isr) {
++  if (input_usb_epoch != UINT32_MAX) input_usb_epoch++;
++  input_usb_audio_dcd_mode(input_usb_epoch, false,
++      input_usb_epoch == UINT32_MAX ? USB_AUDIO_MODE_EPOCH_EXHAUSTED : 0, in_isr);
++}
++static uint32_t input_usb_mode_reject(dwc2_regs_t const* dwc2) {
++  dwc2_ghwcfg2_t const hw = {.value = dwc2->ghwcfg2};
++  dwc2_dcfg_t const config = {.value = dwc2->dcfg};
++  uint32_t reject = 0;
++  if (hw.arch != GHWCFG2_ARCH_INTERNAL_DMA) reject |= USB_AUDIO_MODE_NOT_INTERNAL_DMA;
++  if (!(dwc2->gahbcfg & GAHBCFG_DMAEN)) reject |= USB_AUDIO_MODE_DMA_DISABLED;
++  if (config.dma_desc) reject |= USB_AUDIO_MODE_DESCRIPTOR_DMA;
++  if (!(dwc2->dctl & DCTL_IGNRFRMNUM)) reject |= USB_AUDIO_MODE_PTI_NOT_ACTIVE;
++  if (dwc2->dthrctl & (DTHRCTL_NONISOTHREN | DTHRCTL_ISOTHREN | DTHRCTL_RXTHREN)) reject |= USB_AUDIO_MODE_THRESHOLD_ACTIVE;
++  if (input_usb_epoch == UINT32_MAX) reject |= USB_AUDIO_MODE_EPOCH_EXHAUSTED;
++  return reject;
++}
++static void input_usb_register_sample(uint8_t rhport, uint8_t point, bool in_isr) {
++  dwc2_regs_t const* dwc2 = DWC2_REG(rhport);
++  usb_audio_dcd_registers_t sample = {0};
++  sample.epoch_before = input_usb_epoch; sample.frame_before = dwc2->dsts;
++  sample.out_activation = input_usb_out_activation; sample.point = point;
++  sample.core_id = dwc2->gsnpsid; sample.hwcfg2 = dwc2->ghwcfg2;
++  sample.gahbcfg = dwc2->gahbcfg; sample.dcfg = dwc2->dcfg;
++  sample.dctl = dwc2->dctl; sample.dthrctl = dwc2->dthrctl;
++  sample.gintsts = dwc2->gintsts; sample.gintmsk = dwc2->gintmsk; sample.daint = dwc2->daint;
++  sample.out_ctl = dwc2->epout[4].ctl; sample.out_int = dwc2->epout[4].intr; sample.out_size = dwc2->epout[4].tsiz;
++  sample.frame_after = dwc2->dsts; sample.epoch_after = input_usb_epoch;
++  input_usb_audio_dcd_registers(&sample, in_isr);
++}
++static void input_usb_mode_end(uint8_t rhport, bool in_isr) {
++  input_usb_audio_dcd_mode(input_usb_epoch, true, input_usb_mode_reject(DWC2_REG(rhport)), in_isr);
++  input_usb_register_sample(rhport, USB_AUDIO_REG_MODE, in_isr);
++}
++static void input_usb_transfer_trace(uint8_t rhport, uint8_t ep, bool completion,
++    uint8_t result, uint16_t bytes, bool in_isr) {
++  (void) rhport;
++  if (ep != 0x04 && ep != 0x84 && ep != 0x85) return;
++  xfer_ctl_t const* xfer = XFER_CTL_BASE(tu_edpt_number(ep), tu_edpt_dir(ep));
++  uint8_t length = 0; uint32_t value = 0;
++  if (ep == 0x85 && result == XFER_RESULT_SUCCESS && xfer->buffer && (bytes == 3 || bytes == 4)) {
++    length = (uint8_t) bytes;
++    for (uint8_t i = 0; i < length; ++i) value |= (uint32_t) xfer->buffer[i] << (8 * i);
++  }
++  input_usb_audio_dcd_transfer(input_usb_epoch, ep, completion, result, bytes, value, length, in_isr);
++}
++static void input_usb_dcd_complete(uint8_t rhport, uint8_t ep, uint32_t bytes, xfer_result_t result, bool in_isr) {
++  input_usb_transfer_trace(rhport, ep, true, (uint8_t) result, (uint16_t) bytes, in_isr);
++  dcd_event_xfer_complete(rhport, ep, bytes, result, in_isr);
++}
++
+@@ -480,0 +547 @@
++  input_usb_mode_begin(false);
+@@ -527,0 +595 @@
++  input_usb_mode_end(rhport, false);
+@@ -531,0 +600 @@
++  input_usb_mode_begin(false);
+@@ -671,0 +741,4 @@
++  if (p_endpoint_desc->bEndpointAddress == 0x04) {
++    if (input_usb_out_activation != UINT32_MAX) input_usb_out_activation++;
++    input_usb_pending_sampled = false;
++  }
+@@ -704,0 +778,5 @@
++  input_usb_transfer_trace(rhport, ep_addr, false, ret ? XFER_RESULT_SUCCESS : XFER_RESULT_FAILED, total_bytes, is_isr);
++  if (ep_addr == 0x04 && ret) {
++    input_usb_pending_sampled = false;
++    input_usb_register_sample(rhport, USB_AUDIO_REG_OUT_SUBMIT, is_isr);
++  }
+@@ -771,0 +850 @@
++  input_usb_mode_begin(true);
+@@ -840,0 +920 @@
++  input_usb_mode_end(rhport, true);
+@@ -1011 +1091 @@
+-        dcd_event_xfer_complete(rhport, epnum, xfer->total_len, XFER_RESULT_SUCCESS, true);
++        input_usb_dcd_complete(rhport, epnum, xfer->total_len, XFER_RESULT_SUCCESS, true);
+@@ -1030 +1110 @@
+-      dcd_event_xfer_complete(rhport, epnum | TUSB_DIR_IN_MASK, xfer->total_len, XFER_RESULT_SUCCESS, true);
++      input_usb_dcd_complete(rhport, epnum | TUSB_DIR_IN_MASK, xfer->total_len, XFER_RESULT_SUCCESS, true);
+@@ -1088 +1168 @@
+-          dcd_event_xfer_complete(rhport, epnum, 0, XFER_RESULT_FAILED, true);
++          input_usb_dcd_complete(rhport, epnum, 0, XFER_RESULT_FAILED, true);
+@@ -1115 +1195 @@
+-        dcd_event_xfer_complete(rhport, epnum, xfer->total_len, XFER_RESULT_SUCCESS, true);
++        input_usb_dcd_complete(rhport, epnum, xfer->total_len, XFER_RESULT_SUCCESS, true);
+@@ -1130 +1210 @@
+-      dcd_event_xfer_complete(rhport, epnum | TUSB_DIR_IN_MASK, xfer->total_len, XFER_RESULT_SUCCESS, true);
++      input_usb_dcd_complete(rhport, epnum | TUSB_DIR_IN_MASK, xfer->total_len, XFER_RESULT_SUCCESS, true);
+@@ -1210 +1290 @@
+-        dcd_event_xfer_complete(rhport, epnum | TUSB_DIR_IN_MASK, 0, XFER_RESULT_FAILED, true);
++        input_usb_dcd_complete(rhport, epnum | TUSB_DIR_IN_MASK, 0, XFER_RESULT_FAILED, true);
+@@ -1231,0 +1312,6 @@
++  input_usb_irq_count = (input_usb_irq_count + 1U) & 127U;
++  if (!input_usb_pending_sampled && !(input_usb_irq_count & 127U) &&
++      XFER_CTL_BASE(4, TUSB_DIR_OUT)->max_size && edpt_is_enabled(&dwc2->epout[4])) {
++    input_usb_pending_sampled = true;
++    input_usb_register_sample(rhport, USB_AUDIO_REG_PENDING_IRQ, true);
++  }

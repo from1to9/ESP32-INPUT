@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "usb_audio.h"
 #include "usb_audio_descriptors.h"
+#include "usb_audio_transport.h"
 #include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -29,6 +30,7 @@ typedef struct {
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static usb_audio_snapshot_t s_status;
+static usb_audio_transport_snapshot_t s_transport;
 static uac_memory_t *s_memory;
 static TaskHandle_t s_worker;
 static bool s_attempted;
@@ -139,7 +141,89 @@ static void replace_link_locked(bool new_attachment)
 static bool live_locked(void)
 {
     return s_status.initialized && s_status.stack_ready && s_status.mounted &&
-        !s_status.suspended && s_status.error == ESP_OK;
+        !s_status.suspended && s_status.error == ESP_OK &&
+        (!INPUT_USB_AUDIO_PTI_REQUIRED || (s_transport.mode_known && s_transport.mode_valid));
+}
+
+void input_usb_audio_dcd_mode(uint32_t epoch, bool known, uint32_t reject, bool in_isr)
+{
+    if (in_isr) portENTER_CRITICAL_ISR(&s_lock); else portENTER_CRITICAL(&s_lock);
+    /* Reset can precede the deferred USB attachment callback. Revoke authority
+     * at this owning lifecycle boundary so old FIFO/consumer state cannot revive. */
+    const bool new_epoch = epoch != s_transport.reset_epoch && s_transport.reset_epoch;
+    const bool lost_mode = s_transport.mode_valid && (!known || !epoch || reject);
+    if (INPUT_USB_AUDIO_PTI_REQUIRED && (new_epoch || lost_mode) && s_status.initialized)
+        replace_link_locked(false);
+    s_transport.observed = true; s_transport.mode_required = INPUT_USB_AUDIO_PTI_REQUIRED;
+    s_transport.reset_epoch = epoch; s_transport.mode_known = known;
+    s_transport.mode_reject = reject;
+    s_transport.mode_valid = known && epoch && !reject;
+    if (known && reject && !s_transport.first_mode_reject) {
+        s_transport.first_mode_reject = reject; s_transport.first_mode_reject_epoch = epoch;
+    }
+    if (in_isr) portEXIT_CRITICAL_ISR(&s_lock); else portEXIT_CRITICAL(&s_lock);
+}
+
+void input_usb_audio_dcd_transfer(uint32_t epoch, uint8_t endpoint, bool completion,
+    uint8_t result, uint16_t bytes, uint32_t feedback_value, uint8_t feedback_length, bool in_isr)
+{
+    usb_audio_endpoint_observation_t *counter = endpoint == 0x04 ? &s_transport.out :
+        endpoint == 0x84 ? &s_transport.in : endpoint == 0x85 ? &s_transport.feedback : NULL;
+    if (!counter) return;
+    if (in_isr) portENTER_CRITICAL_ISR(&s_lock); else portENTER_CRITICAL(&s_lock);
+    s_transport.observed = true;
+    if (completion) {
+        if (result == XFER_RESULT_SUCCESS) {
+            count(&counter->completed_ok); add_count(&counter->successful_bytes, bytes);
+            if (!bytes) count(&counter->successful_zero);
+        } else count(&counter->completed_failed);
+    } else {
+        count(&counter->submitted);
+        if (result == XFER_RESULT_SUCCESS) count(&counter->accepted); else count(&counter->rejected);
+    }
+    if (result != XFER_RESULT_SUCCESS && !counter->first_failure_known) {
+        counter->first_failure_known = true; counter->first_failure_epoch = epoch;
+        counter->first_failure_result = result;
+    }
+    if (endpoint == 0x85 && result == XFER_RESULT_SUCCESS && (feedback_length == 3 || feedback_length == 4)) {
+        if (completion) {
+            s_transport.feedback_completed_known = true; s_transport.feedback_completed = feedback_value;
+            s_transport.feedback_completed_length = feedback_length; s_transport.feedback_completed_epoch = epoch;
+        } else {
+            s_transport.feedback_submitted_known = true; s_transport.feedback_submitted = feedback_value;
+            s_transport.feedback_submitted_length = feedback_length; s_transport.feedback_submitted_epoch = epoch;
+        }
+    }
+    if (in_isr) portEXIT_CRITICAL_ISR(&s_lock); else portEXIT_CRITICAL(&s_lock);
+}
+
+void input_usb_audio_dcd_registers(const usb_audio_dcd_registers_t *registers, bool in_isr)
+{
+    if (!registers) return;
+    if (in_isr) portENTER_CRITICAL_ISR(&s_lock); else portENTER_CRITICAL(&s_lock);
+    s_transport.registers = *registers; s_transport.registers_known = true;
+    if (registers->point == USB_AUDIO_REG_PENDING_IRQ && (!s_transport.pending_registers_known ||
+        s_transport.pending_registers.epoch_before != registers->epoch_before ||
+        s_transport.pending_registers.out_activation != registers->out_activation)) {
+        s_transport.pending_registers = *registers; s_transport.pending_registers_known = true;
+    }
+    if (in_isr) portEXIT_CRITICAL_ISR(&s_lock); else portEXIT_CRITICAL(&s_lock);
+}
+
+void input_usb_audio_class_out(bool rearm, bool accepted, uint8_t result, uint16_t bytes)
+{
+    (void)result; (void)bytes;
+    portENTER_CRITICAL_ISR(&s_lock);
+    if (rearm) { count(&s_transport.class_out_rearm_calls); if (!accepted) count(&s_transport.class_out_rearm_rejected); }
+    else count(&s_transport.class_out_entries);
+    portEXIT_CRITICAL_ISR(&s_lock);
+}
+
+void usb_audio_transport_snapshot(usb_audio_transport_snapshot_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&s_lock); *out = s_transport; out->mode_required = INPUT_USB_AUDIO_PTI_REQUIRED;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 void usb_audio_stack_started(esp_err_t result)
@@ -173,7 +257,8 @@ static ae_result_t capabilities(void *context, ae_route_t route, ae_route_capabi
     if (!out || route != AE_ROUTE_USB_UAC) return AE_INVALID;
     portENTER_CRITICAL(&s_lock);
     *out = (ae_route_capabilities_t){
-        .implemented = true, .available = s_status.initialized && s_status.stack_ready,
+        .implemented = true, .available = s_status.initialized && s_status.stack_ready &&
+            (!INPUT_USB_AUDIO_PTI_REQUIRED || (s_transport.mode_known && s_transport.mode_valid)),
         .connected = live_locked(), .qualified = false,
         .capture = live_locked() && s_status.capture_selected,
         .playback = live_locked() && s_status.playback_selected,
@@ -514,6 +599,10 @@ static void service_feedback(void)
     uint32_t feedback = (uint32_t)((INT64_C(48) << 16) + correction);
     if (high_speed) feedback /= 8;
     const bool ready = s_status.stack_ready && s_status.mounted && !s_status.suspended;
+    if (ready) {
+        s_transport.feedback_calculated = feedback; s_transport.feedback_calculated_known = true;
+        s_transport.feedback_calculated_epoch = s_transport.reset_epoch;
+    }
     portEXIT_CRITICAL(&s_lock);
     if (ready) (void)tud_audio_n_fb_set(0, feedback);
 }

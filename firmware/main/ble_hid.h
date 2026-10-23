@@ -127,6 +127,71 @@ typedef struct {
 void ble_hid_copy_advertising_diagnostics(ble_hid_advertising_diagnostics_t *out);
 const char *ble_hid_advertising_event_name(ble_hid_advertising_event_t event);
 
+#define BLE_HID_ADMISSION_TRACE_CAPACITY 8U
+typedef enum {
+    BLE_HID_ADMISSION_OPEN, BLE_HID_ADMISSION_CLOSE,
+    BLE_HID_ADMISSION_CONNECT, BLE_HID_ADMISSION_CHECK, BLE_HID_ADMISSION_ENCRYPT_RETURN,
+    BLE_HID_ADMISSION_SEC_QUEUED, BLE_HID_ADMISSION_SEC_DECISION,
+    BLE_HID_ADMISSION_SEC_RETURN, BLE_HID_ADMISSION_AUTH, BLE_HID_ADMISSION_DISCONNECT
+} ble_hid_admission_event_t;
+enum {
+    BLE_HID_ADMISSION_CONNECTED = 1U << 0, BLE_HID_ADMISSION_FAILED = 1U << 1,
+    BLE_HID_ADMISSION_SAVED = 1U << 2, BLE_HID_ADMISSION_WINDOW_REQUESTED = 1U << 3,
+    BLE_HID_ADMISSION_PENDING = 1U << 4, BLE_HID_ADMISSION_GRANTED = 1U << 5,
+    BLE_HID_ADMISSION_AUTHENTICATED = 1U << 6, BLE_HID_ADMISSION_LINK_FAULT = 1U << 7,
+    BLE_HID_ADMISSION_CACHE_KNOWN = 1U << 8, BLE_HID_ADMISSION_CACHE_UPDATING = 1U << 9,
+    BLE_HID_ADMISSION_REFRESH_PENDING = 1U << 10, BLE_HID_ADMISSION_CLASSIC_RESERVED = 1U << 11
+};
+enum {
+    BLE_HID_ADMISSION_DENIED_COMMAND = 1U << 0, BLE_HID_ADMISSION_NOT_CURRENT = 1U << 1,
+    BLE_HID_ADMISSION_NOT_GRANTED = 1U << 2, BLE_HID_ADMISSION_FAULT = 1U << 3,
+    BLE_HID_ADMISSION_UNKNOWN_CACHE = 1U << 4, BLE_HID_ADMISSION_REFRESHING = 1U << 5,
+    BLE_HID_ADMISSION_FULL = 1U << 6, BLE_HID_ADMISSION_CLASSIC_BUSY = 1U << 7,
+    BLE_HID_ADMISSION_SHARED_UNAVAILABLE = 1U << 8, BLE_HID_ADMISSION_DEADLINE = 1U << 9,
+    BLE_HID_ADMISSION_REFRESH_ERROR = 1U << 10
+};
+typedef enum { BLE_HID_ADMISSION_STATUS_NONE, BLE_HID_ADMISSION_STATUS_ESP_ERROR,
+    BLE_HID_ADMISSION_STATUS_AUTH_REASON } ble_hid_admission_status_domain_t;
+typedef struct {
+    uint64_t sequence, live_generation, public_generation, command_generation;
+    uint32_t auth_revision, command_auth_revision, tick_low32, window_remaining_ms;
+    uint32_t flags, rejected_predicates, bond_count, bond_capacity;
+    uint16_t conn_id, command_conn_id;
+    bool tick_known, window_known, window_allowed;
+    bool command_known, command_is_rejected;
+    bool subject_saved_known, subject_saved, current_known, current;
+    bool address_match_known, address_match;
+    bool deadline_known, deadline_ok, committed, retry;
+    bool result_known, accepted, status_known, refresh_known, shared_count_known;
+    int32_t status, refresh_error, shared_count;
+    ble_hid_admission_event_t event;
+    ble_hid_admission_status_domain_t status_domain;
+} ble_hid_admission_observation_t;
+typedef struct {
+    bool frozen, overflowed, sequence_exhausted;
+    bool open_known, connect_known, admission_known, first_failure_known;
+    uint64_t total_events;
+    size_t count;
+    ble_hid_admission_observation_t last_open, connect, first_admission, first_failure;
+    ble_hid_admission_observation_t events[BLE_HID_ADMISSION_TRACE_CAPACITY];
+} ble_hid_admission_diagnostics_t;
+/* Observation only: bounded tail plus the last open decision, current accepted
+ * CONNECT and its first committed admission decision. The first failed AUTH
+ * observation freezes all history across later disconnect/reconnect/open events.
+ * It may be stale/foreign: AUTH has no SDK generation; live identity is context,
+ * and current/address-match booleans never manufacture a subject generation.
+ * Raw AUTH reason cannot identify local-versus-peer origin. accepted is the
+ * stage's decision, never proof of encryption/readiness or SDK completion.
+ * SEC_QUEUED observes the candidate before post_control, not queue acceptance;
+ * API-return accepted retains the requested decision, with status separate.
+ * Missing status/deadline/time is explicit. tick_low32 uses an existing FreeRTOS
+ * tick sample (not esp_timer uptime); its domain may wrap. No extra clock, BT or
+ * storage queries, identities, names, key bytes, callback logging or allocation.
+ * Timer-driven expiry is not a producer; later sampled decisions expose its
+ * effective window. Root replay uses fixed caller storage; copy has no SDK I/O. */
+void ble_hid_copy_admission_diagnostics(ble_hid_admission_diagnostics_t *out);
+const char *ble_hid_admission_event_name(ble_hid_admission_event_t event);
+
 typedef enum {
     BLE_HID_FORGET_IDLE,
     BLE_HID_FORGET_RUNNING,

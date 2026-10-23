@@ -71,7 +71,17 @@ UNITS = {
     "tinyusb_audio": "firmware/build/generated/tinyusb_audio/audio_device.c",
     "tinyusb_fifo": "firmware/managed_components/espressif__tinyusb/src/common/tusb_fifo.c",
     "tinyusb_usbd": "firmware/managed_components/espressif__tinyusb/src/device/usbd.c",
-    "tinyusb_dcd": "firmware/managed_components/espressif__tinyusb/src/portable/synopsys/dwc2/dcd_dwc2.c",
+    "tinyusb_dcd": "firmware/build/generated/tinyusb_audio/dcd_dwc2.c",
+    "tinyusb_core": "firmware/managed_components/espressif__tinyusb/src/tusb.c",
+    "tinyusb_task": "firmware/managed_components/espressif__esp_tinyusb/tinyusb_task.c",
+    "tinyusb_driver": "firmware/managed_components/espressif__esp_tinyusb/tinyusb.c",
+    "usb_console": "firmware/main/usb_console.c",
+}
+GENERATED_TINYUSB = {
+    "tinyusb_audio": {"filename": "audio_device.c", "manifest_key": None,
+        "source_path": "src/class/audio/audio_device.c", "patch_file": "patches/tinyusb-audio-streams.patch"},
+    "tinyusb_dcd": {"filename": "dcd_dwc2.c", "manifest_key": "dcd",
+        "source_path": "src/portable/synopsys/dwc2/dcd_dwc2.c", "patch_file": "patches/tinyusb-dwc2-observer.patch"},
 }
 PROVENANCE_FILES = [
     "tools/tinyusb_audio_patch.py", "patches/tinyusb-audio-streams.json",
@@ -81,6 +91,14 @@ PROVENANCE_FILES = [
     "firmware/managed_components/espressif__tinyusb/src/class/audio/audio_device.h",
     "firmware/managed_components/espressif__tinyusb/src/common/tusb_fifo.h",
     "firmware/managed_components/espressif__tinyusb/src/device/dcd.h",
+    "patches/tinyusb-dwc2-observer.patch",
+    "firmware/managed_components/espressif__tinyusb/src/portable/synopsys/dwc2/dcd_dwc2.c",
+    "firmware/managed_components/espressif__tinyusb/src/portable/synopsys/dwc2/dwc2_common.h",
+    "firmware/managed_components/espressif__tinyusb/src/portable/synopsys/dwc2/dwc2_type.h",
+    "firmware/managed_components/espressif__tinyusb/src/portable/synopsys/dwc2/dwc2_esp32.h",
+    "firmware/managed_components/espressif__tinyusb/src/device/usbd.h",
+    "firmware/managed_components/espressif__tinyusb/src/device/usbd_pvt.h",
+    "firmware/managed_components/espressif__tinyusb/src/tusb_option.h",
 ]
 CORE = [("main", "app_main"), ("main", "coordinator_run")]
 DEVICE_SUBMIT = CORE + [("bridge", "app_command_bridge_service"),
@@ -367,14 +385,16 @@ AUDIO_DIAGNOSTIC_PATHS = {
         ("media_runtime", "app_media_runtime_snapshot")],
     "audio_diagnostics_usb_snapshot": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
         ("usb_audio", "usb_audio_snapshot")],
+    "audio_diagnostics_transport_snapshot": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
+        ("usb_audio", "usb_audio_transport_snapshot")],
     "audio_diagnostics_codec_snapshot": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
         ("board_audio", "board_audio_mosaico_status")],
     "audio_diagnostics_job_copy": AUDIO_OBSERVER + [("audio_diagnostics", "observe"), ("audio_diagnostics", "observe_job")],
     "audio_diagnostics_scratch_wipe": AUDIO_OBSERVER + [("audio_diagnostics", "observe"), ("audio_diagnostics", "clear_scratch")],
 }
-for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec"):
+for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec", "log_transport"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_logger}"] = AUDIO_OBSERVER + [("audio_diagnostics", _logger)]
-for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed"):
+for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed", "transport_changed"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_comparison}"] = AUDIO_OBSERVER + [("audio_diagnostics", _comparison)]
 AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_format"] = AUDIO_OBSERVER + [
     ("audio_diagnostics", "codec_changed"), ("audio_helpers", "ae_format_equal")]
@@ -576,6 +596,70 @@ for _name, (_owner, _prefix) in {
         BLE_ADVERTISING_PATHS[f"ble_advertising_{_name}_{_leaf}"] = (_owner, _prefix + _tail)
 for _label, (_owner, _steps) in BLE_ADVERTISING_PATHS.items():
     PATHS[_label] = _steps
+BLE_ADMISSION_REPLAY = CORE + [("main", "report_bluetooth_admission_diagnostics")]
+BLE_ADMISSION_PATHS = {
+    "ble_admission_replay_copy": ("main", BLE_ADMISSION_REPLAY + [("ble", "ble_hid_copy_admission_diagnostics")]),
+    "ble_admission_replay_name": ("main", BLE_ADMISSION_REPLAY + [("main", "report_bluetooth_admission_event"),
+        ("ble", "ble_hid_admission_event_name")]),
+    "ble_admission_replay_event_log": ("main", BLE_ADMISSION_REPLAY + [("main", "report_bluetooth_admission_event")]),
+    "ble_admission_replay_log": ("main", BLE_ADMISSION_REPLAY),
+}
+BLE_ADMISSION_PRODUCERS = {
+    "worker_admission": ("ble_control", [("ble", "control_worker"), ("ble", "service_pairing_admission")]),
+    "worker_security": ("ble_control", [("ble", "control_worker")]),
+    "gap_callback": ("btc", BTC_DISPATCH + [("btc_gap", "btc_gap_ble_cb_handler"),
+        ("btc_gap", "btc_gap_ble_cb_to_app"), ("ble", "gap_callback")]),
+    "gatts_callback": ("btc", BTC_DISPATCH + [("btc_gatts", "btc_gatts_cb_handler"),
+        ("btc_gatts", "btc_gatts_cb_to_app"), ("ble", "gatts_callback")]),
+}
+# Public window mutations also run synchronously under the coordinator's
+# existing management callers. Stop at the API; earlier guard calls returned.
+_admission_prefixes = set()
+for _label, _steps in MANAGEMENT_PATHS.items():
+    for _index, _step in enumerate(_steps):
+        if _step not in (("ble", "ble_hid_pairing_open"), ("ble", "ble_hid_pairing_close")):
+            continue
+        _prefix = _steps[:_index + 1]
+        if tuple(_prefix) not in _admission_prefixes:
+            _admission_prefixes.add(tuple(_prefix))
+            BLE_ADMISSION_PRODUCERS[f"management_{_label}"] = ("main", _prefix)
+for _name, _prefix, _api in (
+    ("legacy_open", CORE + [("main", "service_pair_operation")], "ble_hid_pairing_open"),
+    ("intent_close", LOCAL_INTENT, "ble_hid_pairing_close"),
+    ("priority_close", CORE + [("main", "process_priority")], "ble_hid_pairing_close"),
+    ("update_close", CORE + [("main", "remote_update_service")], "ble_hid_pairing_close"),
+    ("stop_close", LOCAL_INTENT + [("connectivity", "app_connectivity_controls_bluetooth_stop")], "ble_hid_pairing_close"),
+    ("context_close", CORE + [("main", "service_connectivity"), ("main", "refresh_connectivity_context"),
+        ("connectivity", "app_connectivity_controls_context")], "ble_hid_pairing_close"),
+    ("intent_context_close", LOCAL_INTENT + [("main", "refresh_connectivity_context"),
+        ("connectivity", "app_connectivity_controls_context")], "ble_hid_pairing_close"),
+):
+    BLE_ADMISSION_PRODUCERS[_name] = ("main", _prefix + [("ble", _api)])
+_remote_submit = CORE + [("main", "remote_control_service")] + DEVICE_SUBMIT[len(CORE):]
+# Keep owning adapters even when the current optimized build inlines them.
+_remote_submit.insert(_remote_submit.index(("device", "app_remote_device_execute")), ("main", "remote_device_execute"))
+_remote_ui = CORE + [("main", "remote_control_service")] + PATHS["remote_ui"][len(CORE):] + [
+    ("main", "remote_device_submit_action")]
+_remote_approval = CORE + [("main", "remote_control_service"), ("main", "remote_device_service"), ("device", "app_remote_device_service"),
+    ("device", "submit_job"), ("main", "remote_device_submit"), ("main", "remote_device_submit_action")]
+for _name, _prefix in (("remote_submit", _remote_submit), ("remote_ui", _remote_ui),
+                         ("remote_approval", _remote_approval)):
+    BLE_ADMISSION_PRODUCERS[f"{_name}_close"] = ("main", _prefix + [("ble", "ble_hid_pairing_close")])
+    BLE_ADMISSION_PRODUCERS[f"{_name}_open"] = ("main", _prefix + [
+        ("main", "remote_device_bluetooth_progress"), ("ble", "ble_hid_pairing_open")])
+BLE_ADMISSION_PRODUCERS["remote_poll_open"] = ("main", CORE + [("main", "remote_control_service"),
+    ("main", "remote_device_service"), ("device", "app_remote_device_service"), ("main", "remote_device_poll"),
+    ("main", "remote_device_bluetooth_progress"), ("ble", "ble_hid_pairing_open")])
+for _name, (_owner, _prefix) in BLE_ADMISSION_PRODUCERS.items():
+    for _leaf, _tail in {
+        "flags": [("ble", "admission_trace_locked"), ("ble", "admission_flags_locked")],
+        "window": [("ble", "admission_trace_locked"), ("ble", "pairing_allowed_locked"),
+            ("ble", "single_forget_busy_locked")],
+        "finish": [("ble", "admission_trace_finish_locked")],
+    }.items():
+        BLE_ADMISSION_PATHS[f"ble_admission_{_name}_{_leaf}"] = (_owner, _prefix + _tail)
+for _label, (_owner, _steps) in BLE_ADMISSION_PATHS.items():
+    PATHS[_label] = _steps
 USB_AUDIO_WORKER = [("usb_audio", "worker"), ("usb_audio", "service_io")]
 USB_AUDIO_WORKER_PATHS = {
     "usb_audio_worker_count": USB_AUDIO_WORKER + [("usb_audio", "count")],
@@ -587,25 +671,95 @@ for _operation in ("read", "write"):
         ("tinyusb_audio", f"tu_fifo_{_operation}_n"), ("tinyusb_fifo", f"tu_fifo_{_operation}_n_access_mode")]
 # The pinned read implementation retains its frame while calling this leaf.
 USB_AUDIO_WORKER_PATHS["usb_audio_worker_fifo_read"].append(("tinyusb_fifo", "tu_fifo_peek_n_access_mode"))
+for _name, _tail in {
+    "available": [("usb_audio", "tud_audio_available"), ("tinyusb_audio", "tud_audio_n_available"),
+        ("tinyusb_audio", "tu_fifo_count")],
+    "speed": [("tinyusb_usbd", "tud_speed_get")],
+    "live": [("usb_audio", "live_locked")],
+    "set": [("tinyusb_audio", "tud_audio_n_fb_set")],
+}.items():
+    USB_AUDIO_WORKER_PATHS[f"usb_audio_worker_feedback_{_name}"] = [
+        ("usb_audio", "worker"), ("usb_audio", "service_feedback")] + _tail
 PATHS.update(USB_AUDIO_WORKER_PATHS)
+USB_MODE_FLUSH = [("usb_audio", "input_usb_audio_dcd_mode"), ("usb_audio", "replace_link_locked"),
+    ("usb_audio", "request_flush_locked")]
+USB_REGISTER_SAMPLE = [("tinyusb_dcd", "input_usb_register_sample"), ("usb_audio", "input_usb_audio_dcd_registers")]
+USB_MODE_TAILS = {
+    "begin_flush": [("tinyusb_dcd", "input_usb_mode_begin")] + USB_MODE_FLUSH,
+    "end_reject": [("tinyusb_dcd", "input_usb_mode_end"), ("tinyusb_dcd", "input_usb_mode_reject")],
+    "end_flush": [("tinyusb_dcd", "input_usb_mode_end")] + USB_MODE_FLUSH,
+    "end_registers": [("tinyusb_dcd", "input_usb_mode_end")] + USB_REGISTER_SAMPLE,
+}
+USB_TRANSFER_TRACE = [("tinyusb_dcd", "input_usb_transfer_trace"), ("usb_audio", "input_usb_audio_dcd_transfer")]
+USB_DCD_SUBMIT = [("tinyusb_usbd", "usbd_edpt_xfer"), ("tinyusb_dcd", "dcd_edpt_xfer")]
+TINYUSB_INIT = [("tinyusb_task", "tinyusb_device_task"), ("tinyusb_core", "tusb_rhport_init"),
+    ("tinyusb_usbd", "tud_rhport_init"), ("tinyusb_dcd", "dcd_init")]
+TINYUSB_CONTROL = [("tinyusb_task", "tinyusb_device_task"), ("tinyusb_task", "tud_task"),
+    ("tinyusb_usbd", "tud_task_ext"), ("tinyusb_usbd", "process_setup_received"),
+    ("tinyusb_usbd", "invoke_class_control"), ("tinyusb_audio", "audiod_control_xfer_cb"),
+    ("tinyusb_audio", "audiod_control_request"), ("tinyusb_audio", "audiod_set_interface")]
+USB_TRANSPORT_TASK_PATHS = {}
+for _name, _tail in USB_MODE_TAILS.items():
+    USB_TRANSPORT_TASK_PATHS[f"tinyusb_init_{_name}"] = ("tinyusb", TINYUSB_INIT + _tail)
+for _name, _prefix in (("data", TINYUSB_CONTROL),
+                       ("feedback", TINYUSB_CONTROL + [("tinyusb_audio", "audiod_fb_send")])):
+    for _counter in ("count", "add_count"):
+        USB_TRANSPORT_TASK_PATHS[f"tinyusb_{_name}_submit_{_counter}"] = ("tinyusb", _prefix +
+            USB_DCD_SUBMIT + USB_TRANSFER_TRACE + [("usb_audio", _counter)])
+USB_TRANSPORT_TASK_PATHS["tinyusb_out_submit_registers"] = ("tinyusb", TINYUSB_CONTROL + USB_DCD_SUBMIT + USB_REGISTER_SAMPLE)
+for _callback in ("tud_audio_set_itf_cb", "tud_audio_set_itf_close_ep_cb"):
+    USB_TRANSPORT_TASK_PATHS[f"tinyusb_control_{_callback}"] = ("tinyusb", TINYUSB_CONTROL + [
+        ("usb_audio", _callback), ("usb_audio", "replace_link_locked"), ("usb_audio", "request_flush_locked")])
+USB_TRANSPORT_TASK_PATHS["tinyusb_feedback_parameters"] = ("tinyusb", TINYUSB_CONTROL + [
+    ("tinyusb_audio", "audiod_fb_params_prepare"), ("usb_audio", "tud_audio_feedback_params_cb")])
+# Stop deletes the device task first, then deinitializes DCD on its caller.
+# The production caller here is main's driver-install failure cleanup.
+USB_TRANSPORT_TASK_PATHS["tinyusb_startup_failure_deinit"] = ("main", [("main", "app_main"),
+    ("usb_console", "usb_console_start"), ("tinyusb_driver", "tinyusb_driver_install"),
+    ("tinyusb_task", "tinyusb_task_stop"), ("tinyusb_core", "tusb_deinit"),
+    ("tinyusb_usbd", "tud_deinit"), ("tinyusb_dcd", "dcd_deinit")] + USB_MODE_TAILS["begin_flush"])
+for _label, (_owner, _steps) in USB_TRANSPORT_TASK_PATHS.items():
+    PATHS[_label] = _steps
 PATH_OWNERS = {label: "main" for label in PATHS}
 PATH_OWNERS.update({label: owner for label, (owner, _) in AUDIO_RUNTIME_PATHS.items()})
 PATH_OWNERS.update({label: "board_audio" for label in BOARD_AUDIO_PATHS})
 PATH_OWNERS.update({label: owner for label, (owner, _) in BLE_ADVERTISING_PATHS.items()})
+PATH_OWNERS.update({label: owner for label, (owner, _) in BLE_ADMISSION_PATHS.items()})
 PATH_OWNERS.update({label: "usb_audio" for label in USB_AUDIO_WORKER_PATHS})
+PATH_OWNERS.update({label: owner for label, (owner, _) in USB_TRANSPORT_TASK_PATHS.items()})
 # These execute on the hardware interrupt stack. They are an explicitly
 # unqualified inventory, never task paths and never assigned the task reserve.
 INTERRUPT_PATHS = {}
-for _direction, _endpoint in (("rx", "epout"), ("tx", "epin")):
+USB_DCD_ISR = [("tinyusb_dcd", "dcd_int_handler")]
+for _name, _direction, _tail in (
+    ("rx", "rx", [("tinyusb_dcd", "handle_ep_irq"), ("tinyusb_dcd", "handle_epout_dma")]),
+    ("tx", "tx", [("tinyusb_dcd", "handle_ep_irq"), ("tinyusb_dcd", "handle_epin_dma")]),
+    ("incomplete_in", "tx", [("tinyusb_dcd", "handle_incomplete_iso_in")]),
+):
+    _complete = USB_DCD_ISR + _tail + [("tinyusb_dcd", "input_usb_dcd_complete")]
+    _dispatch = _complete + [("tinyusb_dcd", "dcd_event_xfer_complete"),
+        ("tinyusb_usbd", "dcd_event_handler"), ("tinyusb_audio", "audiod_xfer_isr")]
+    _class = _dispatch + [("tinyusb_audio", f"audiod_{_direction}_xfer_isr")]
     for _counter in ("count", "add_count"):
-        INTERRUPT_PATHS[f"usb_audio_{_direction}_{_counter}"] = [
-            ("tinyusb_dcd", "dcd_int_handler"), ("tinyusb_dcd", "handle_ep_irq"),
-            ("tinyusb_dcd", f"handle_{_endpoint}_dma"), ("tinyusb_dcd", "dcd_event_xfer_complete"),
-            ("tinyusb_usbd", "dcd_event_handler"), ("tinyusb_audio", "audiod_xfer_isr"),
-            ("tinyusb_audio", f"audiod_{_direction}_xfer_isr"),
+        INTERRUPT_PATHS[f"usb_audio_{_name}_{_counter}"] = _class + [
             ("usb_audio", f"tud_audio_{_direction}_done_isr"), ("usb_audio", _counter)]
+        INTERRUPT_PATHS[f"usb_dcd_{_name}_complete_{_counter}"] = _complete + USB_TRANSFER_TRACE + [("usb_audio", _counter)]
+        INTERRUPT_PATHS[f"usb_dcd_{_name}_rearm_{_counter}"] = _class + USB_DCD_SUBMIT + USB_TRANSFER_TRACE + [("usb_audio", _counter)]
+        if _direction == "tx":
+            INTERRUPT_PATHS[f"usb_dcd_{_name}_feedback_rearm_{_counter}"] = _dispatch + [
+                ("tinyusb_audio", "audiod_fb_send")] + USB_DCD_SUBMIT + USB_TRANSFER_TRACE + [("usb_audio", _counter)]
+    if _direction == "rx":
+        INTERRUPT_PATHS["usb_class_out_entry"] = _dispatch + [("usb_audio", "input_usb_audio_class_out"), ("usb_audio", "count")]
+        INTERRUPT_PATHS["usb_class_out_rearm"] = _class + [("usb_audio", "input_usb_audio_class_out"), ("usb_audio", "count")]
+        INTERRUPT_PATHS["usb_dcd_out_rearm_registers"] = _class + USB_DCD_SUBMIT + USB_REGISTER_SAMPLE
+INTERRUPT_PATHS["usb_dcd_pending_registers"] = USB_DCD_ISR + USB_REGISTER_SAMPLE
+for _name, _tail in USB_MODE_TAILS.items():
+    INTERRUPT_PATHS[f"usb_dcd_reset_{_name}"] = USB_DCD_ISR + [("tinyusb_dcd", "handle_bus_reset")] + _tail
 INTERRUPT_REQUIRED = {("tinyusb_dcd", "dcd_int_handler"), ("tinyusb_usbd", "dcd_event_handler"),
-    ("tinyusb_audio", "audiod_xfer_isr"), ("usb_audio", "tud_audio_rx_done_isr"), ("usb_audio", "tud_audio_tx_done_isr")}
+    ("tinyusb_audio", "audiod_xfer_isr"), ("tinyusb_dcd", "dcd_edpt_xfer"),
+    ("usb_audio", "tud_audio_rx_done_isr"), ("usb_audio", "tud_audio_tx_done_isr"),
+    ("usb_audio", "input_usb_audio_dcd_mode"), ("usb_audio", "input_usb_audio_dcd_transfer"),
+    ("usb_audio", "input_usb_audio_dcd_registers"), ("usb_audio", "input_usb_audio_class_out")}
 SENSOR = [("board", "sensor_worker"), ("board", "imu_update")]
 STARTUP_IMU = [("main", "app_main"), ("board", "board_init"), ("board", "init_optional_imu")]
 APPEND = [("sensor_journal", "board_sensor_journal_append")]
@@ -735,9 +889,21 @@ REQUIRED.add(("board_audio", "worker"))
 REQUIRED.update({("ble", "control_worker"), ("ble", "gap_callback"), ("ble", "gatts_callback"),
     ("main", "report_bluetooth_advertising_diagnostics"), ("osi_thread", "osi_thread_run"),
     ("btc_thread", "btc_thread_handler"), ("btc_gap", "btc_gap_ble_cb_handler"), ("btc_gatts", "btc_gatts_cb_handler")})
+REQUIRED.update({("main", "report_bluetooth_admission_diagnostics"), ("main", "report_bluetooth_admission_event")})
 REQUIRED.update({("usb_audio", "worker"), ("tinyusb_audio", "tud_audio_n_read"), ("tinyusb_audio", "tud_audio_n_write"),
     ("tinyusb_fifo", "tu_fifo_read_n_access_mode"), ("tinyusb_fifo", "tu_fifo_peek_n_access_mode"),
     ("tinyusb_fifo", "tu_fifo_write_n_access_mode")})
+REQUIRED.update({("tinyusb_task", "tinyusb_device_task"), ("tinyusb_task", "tinyusb_task_stop"),
+    ("tinyusb_core", "tusb_rhport_init"), ("tinyusb_core", "tusb_deinit"),
+    ("tinyusb_usbd", "tud_rhport_init"), ("tinyusb_usbd", "tud_deinit"),
+    ("tinyusb_usbd", "tud_task_ext"), ("tinyusb_usbd", "usbd_edpt_xfer"), ("tinyusb_usbd", "tud_speed_get"),
+    ("tinyusb_audio", "audiod_control_xfer_cb"), ("tinyusb_audio", "tud_audio_n_available"),
+    ("tinyusb_audio", "tud_audio_n_fb_set"), ("tinyusb_dcd", "dcd_init"), ("tinyusb_dcd", "dcd_deinit"),
+    ("tinyusb_dcd", "dcd_edpt_xfer"), ("tinyusb_driver", "tinyusb_driver_install"),
+    ("usb_console", "usb_console_start"), ("usb_audio", "usb_audio_transport_snapshot"),
+    ("usb_audio", "input_usb_audio_dcd_mode"), ("usb_audio", "input_usb_audio_dcd_transfer"),
+    ("usb_audio", "input_usb_audio_dcd_registers"), ("usb_audio", "tud_audio_set_itf_cb"),
+    ("usb_audio", "tud_audio_set_itf_close_ep_cb"), ("usb_audio", "tud_audio_feedback_params_cb")})
 CONSUMERS = [
     "firmware/main/app_motion_capture.inc",
     "firmware/main/main.c", "firmware/main/app_remote_device_bindings.inc",
@@ -759,6 +925,10 @@ BUDGET_FILES = {
     "btc_thread": UNITS["btc_thread"],
     "osi_thread": UNITS["osi_thread"],
     "usb_audio": UNITS["usb_audio"],
+    "usb_console": UNITS["usb_console"],
+    "tinyusb_defaults": "firmware/managed_components/espressif__esp_tinyusb/include/tinyusb_default_config.h",
+    "tinyusb_task": UNITS["tinyusb_task"],
+    "tinyusb_driver": UNITS["tinyusb_driver"],
     "isr_config": ".tools/esp-idf/components/freertos/config/riscv/include/freertos/FreeRTOSConfig_arch.h",
     "isr_port": ".tools/esp-idf/components/freertos/FreeRTOS-Kernel/portable/riscv/port.c",
     "isr_type": ".tools/esp-idf/components/freertos/FreeRTOS-Kernel/portable/riscv/include/freertos/portmacro.h",
@@ -818,6 +988,20 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
             raise RuntimeError(f"Ambiguous or missing task budget in {BUDGET_FILES[key]}: {pattern}")
         return found[0]
 
+    def function_macro(key, name):
+        lines = text[key].splitlines()
+        starts = [i for i, line in enumerate(lines) if re.match(r"^#define\s+" + re.escape(name) + r"\s*\(", line)]
+        if len(starts) != 1:
+            raise RuntimeError(f"Ambiguous or missing task configuration macro: {name}")
+        index = starts[0]
+        body = [lines[index]]
+        while body[-1].rstrip().endswith("\\"):
+            index += 1
+            if index >= len(lines):
+                raise RuntimeError(f"Unterminated task configuration macro: {name}")
+            body.append(lines[index])
+        return "\n".join(body)
+
     def configured(name):
         found = list(re.finditer(r"^#define " + re.escape(name) + r" ([^\n]+)$", config, re.M))
         if len(found) != 1:
@@ -867,6 +1051,20 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         r"BTC_TASK_WORKQUEUE_NUM,\s*workqueue_len,\s*false\s*\)")
     match("osi_thread", r"xTaskCreatePinnedToCore\s*\(\s*osi_thread_run\s*,\s*name\s*,\s*stack_size\s*,")
     usb_audio_stack = integer_expression(single("usb_audio", r"xTaskCreate\s*\(\s*worker\s*,\s*\"usb_audio\"\s*,\s*(\d+)\s*,")[1])
+    tinyusb_stack = integer_expression(single("tinyusb_defaults", r"^#define TINYUSB_DEFAULT_TASK_SIZE\s+([^\n]+)")[1])
+    default_task = function_macro("tinyusb_defaults", "TINYUSB_TASK_DEFAULT")
+    if re.findall(r"\.size\s*=\s*([^,\n]+)", default_task) != ["TINYUSB_DEFAULT_TASK_SIZE"]:
+        raise RuntimeError("Cannot verify TinyUSB default task stack expression")
+    for speed in ("FULL", "HIGH"):
+        body = function_macro("tinyusb_defaults", f"TINYUSB_CONFIG_{speed}_SPEED")
+        if re.findall(r"\.task\s*=\s*([^,\n]+)", body) != ["TINYUSB_TASK_DEFAULT()"]:
+            raise RuntimeError(f"Cannot verify TinyUSB {speed.lower()}-speed task configuration")
+    match("usb_console", r"s_driver\s*=\s*TINYUSB_DEFAULT_CONFIG\(usb_device_event\)")
+    match("usb_console", r"tinyusb_driver_install\s*\(\s*&s_driver\s*\)")
+    if re.search(r"\bs_driver\s*\.\s*task\s*(?:=|\.\s*\w+\s*=)", text["usb_console"]):
+        raise RuntimeError("TinyUSB task override requires an explicit ownership update")
+    match("tinyusb_driver", r"tinyusb_task_start\s*\(\s*config->port\s*,\s*&config->task\s*,\s*&config->descriptor\s*\)")
+    match("tinyusb_task", r"xTaskCreatePinnedToCore\s*\(\s*tinyusb_device_task\s*,\s*\"TinyUSB\"\s*,\s*config->size\s*,")
     https = integer_expression(single("server", r"config\.httpd\.stack_size\s*=\s*([^;]+);")[1])
     match("server", r"httpd_ssl_start\s*\(\s*&s->listener\s*,\s*&config\s*\)")
     match("main", r"board_button_events_register\s*\(\s*physical_button\s*\)")
@@ -906,6 +1104,8 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         "btc": budget("BTC_TASK", btc_stack, ["sdk_tasks", "bt_user_config", "bt_common", "btc_thread", "osi_thread"],
             ["CONFIG_BT_BTC_TASK_STACK_SIZE", "BTC_TASK_STACK_SIZE", "osi_thread_create", "xTaskCreatePinnedToCore"], extra),
         "usb_audio": budget("usb_audio", usb_audio_stack, ["usb_audio"], ["xTaskCreate(worker, usb_audio)"]),
+        "tinyusb": budget("TinyUSB", tinyusb_stack, ["usb_console", "tinyusb_defaults", "tinyusb_driver", "tinyusb_task"],
+            ["TINYUSB_DEFAULT_CONFIG", "TINYUSB_TASK_DEFAULT", "TINYUSB_DEFAULT_TASK_SIZE", "xTaskCreatePinnedToCore(tinyusb_device_task, config->size)"]),
         "https": budget("HTTPS request task", https, ["server"], ["config.httpd.stack_size", "httpd_ssl_start"]),
         "lvgl": budget("lvgl", lvgl, ["board", "bsp_display", "bsp_display_header", "lvgl_header", "lvgl_adapter"],
             ["BSP_DISPLAY_DEFAULT_CONFIG", "ESP_LV_ADAPTER_DEFAULT_STACK_SIZE"]),
@@ -956,34 +1156,61 @@ def digest(path):
 
 def measurement_units(build):
     units = dict(UNITS)
-    generated = build.resolve() / "generated/tinyusb_audio/audio_device.c"
-    units["tinyusb_audio"] = str(generated.relative_to(ROOT)) if generated.is_relative_to(ROOT) else str(generated)
+    for name, spec in GENERATED_TINYUSB.items():
+        generated = build.resolve() / "generated/tinyusb_audio" / spec["filename"]
+        units[name] = str(generated.relative_to(ROOT)) if generated.is_relative_to(ROOT) else str(generated)
     return units
 
 
-def verify_generated_audio_source(build, database):
+def verify_generated_source(build, database, unit):
     """Bind proof to the compiled generated copy, never a managed fallback."""
-    source = ROOT / measurement_units(build)["tinyusb_audio"]
+    contract = GENERATED_TINYUSB[unit]
+    source = ROOT / measurement_units(build)[unit]
     manifest_path = ROOT / "patches/tinyusb-audio-streams.json"
-    manifest = json.loads(manifest_path.read_text())
-    if source.is_symlink() or not source.is_file() or digest(source) != manifest["output_sha256"]:
-        raise RuntimeError(f"Generated TinyUSB audio source missing or differs from reviewed postimage: {source}")
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    spec = manifest if contract["manifest_key"] is None else manifest.get(contract["manifest_key"], {})
+    if spec.get("source_path") != contract["source_path"] or spec.get("patch_file") != contract["patch_file"]:
+        raise RuntimeError(f"Unexpected generated TinyUSB source/patch scope: {unit}")
+    upstream = ROOT / "firmware/managed_components/espressif__tinyusb" / contract["source_path"]
+    patch_path = ROOT / contract["patch_file"]
+    checked = {}
+    for kind, path, expected in (("postimage", source, spec.get("output_sha256")),
+                                 ("preimage", upstream, spec.get("source_sha256")),
+                                 ("patch", patch_path, spec.get("patch_sha256"))):
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"Generated TinyUSB {unit} {kind} missing or has unexpected type: {path}")
+        checked[kind] = digest(path)
+        if checked[kind] != expected:
+            raise RuntimeError(f"Generated TinyUSB {unit} differs from reviewed {kind}: {path}")
     entries = [entry for entry in database if Path(entry["file"]).resolve() == source.resolve()]
-    upstream = ROOT / "firmware/managed_components/espressif__tinyusb/src/class/audio/audio_device.c"
     if len(entries) != 1 or any(Path(entry["file"]).resolve() == upstream.resolve() for entry in database):
-        raise RuntimeError("Expected exactly one generated TinyUSB audio compile input and no managed audio compile input")
-    return {"source": str(source), "sha256": digest(source), "manifest": str(manifest_path),
-            "manifest_sha256": digest(manifest_path), "managed_source": str(upstream),
-            "managed_source_sha256": digest(upstream), "generated_compile_entries": len(entries)}
+        raise RuntimeError(f"Expected exactly one generated TinyUSB {unit} compile input and no managed fallback")
+    return {"source": str(source), "sha256": checked["postimage"], "manifest": str(manifest_path),
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(), "managed_source": str(upstream),
+            "managed_source_sha256": checked["preimage"], "patch": str(patch_path),
+            "patch_sha256": checked["patch"], "generated_compile_entries": len(entries)}
 
 
-def verify_generated_audio_snapshot(proof, snapshot):
+def verify_generated_audio_source(build, database):
+    return verify_generated_source(build, database, "tinyusb_audio")
+
+
+def verify_generated_dcd_source(build, database):
+    return verify_generated_source(build, database, "tinyusb_dcd")
+
+
+def verify_generated_source_snapshot(proof, snapshot):
     for path_key, hash_key in (("source", "sha256"), ("manifest", "manifest_sha256"),
-                               ("managed_source", "managed_source_sha256")):
+                               ("managed_source", "managed_source_sha256"), ("patch", "patch_sha256")):
         path = Path(proof[path_key])
         key = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
         if snapshot.get(key) != proof[hash_key]:
-            raise RuntimeError(f"Generated audio proof input changed while being read: {path}")
+            raise RuntimeError(f"Generated TinyUSB proof input changed while being read: {path}")
+
+
+def verify_generated_audio_snapshot(proof, snapshot):
+    verify_generated_source_snapshot(proof, snapshot)
 
 
 def interrupt_stack_budget(config, root=ROOT):
@@ -1004,6 +1231,9 @@ def interrupt_stack_budget(config, root=ROOT):
 def interrupt_frame_inventory(frames, config, paths=INTERRUPT_PATHS):
     """Non-qualifying interrupt evidence, independent of task reserve/gates."""
     capacity = interrupt_stack_budget(config)
+    def application_step(module, function):
+        return module == "usb_audio" or (module == "tinyusb_dcd" and function.startswith("input_usb_"))
+
     entries_by_path, errors = {}, []
     for label, steps in paths.items():
         entries, complete, application_complete = [], True, True
@@ -1013,7 +1243,7 @@ def interrupt_frame_inventory(frames, config, paths=INTERRUPT_PATHS):
             dynamic = any(value["kind"] != "static" for value in variants.values())
             if missing or dynamic:
                 complete = False
-                if module == "usb_audio":
+                if application_step(module, function):
                     application_complete = False
                 errors.append(f"Interrupt inventory incomplete: {module}:{function}")
             entries.append({"module": module, "function": function,
@@ -1021,7 +1251,8 @@ def interrupt_frame_inventory(frames, config, paths=INTERRUPT_PATHS):
                 "variants": variants, "note": "required emitted frame missing" if missing else
                     ("" if variants else "private helper inlined/not emitted")})
         measured = sum(entry["bytes"] or 0 for entry in entries)
-        application = sum(entry["bytes"] or 0 for entry in entries if entry["module"] == "usb_audio")
+        application = sum(entry["bytes"] or 0 for entry in entries
+            if application_step(entry["module"], entry["function"]))
         exceeded = (application_complete and application > capacity) or (complete and measured > capacity)
         if exceeded:
             errors.append(f"{label}: known interrupt frames exceed configured {capacity}-byte stack; review required")
@@ -1033,6 +1264,9 @@ def interrupt_frame_inventory(frames, config, paths=INTERRUPT_PATHS):
             "pre_change_application_bytes": None, "application_delta_bytes": None}
     return {"status": "BLOCKED" if errors else "UNQUALIFIED", "configured_stack_bytes": capacity,
         "paths": entries_by_path, "task_reserve_applied": False, "safety_pass_claimed": False,
+        "application_scope": "Separately emitted usb_audio and generated DCD input_usb_* helper frames. "
+                             "Inlined generated helpers are included in their selected caller frame; "
+                             "their application-only portion cannot be attributed separately.",
         "unmeasured_costs": ["interrupt entry and RTOS context", "SDK paths outside the selected chain", "interrupt nesting"],
         "pre_post_limit": "No comparable pre-change hook-chain measurement is inferred from absent symbols; current added application frames only.",
         "limits": "Fitting known frames alone does not qualify interrupt safety. Physical high-water and nesting remain unmeasured."}, errors
@@ -1129,11 +1363,13 @@ def main():
     units = measurement_units(build)
     try:
         generated_audio = verify_generated_audio_source(build, database)
+        generated_dcd = verify_generated_dcd_source(build, database)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     before = input_snapshot(build, database, units)
     try:
         verify_generated_audio_snapshot(generated_audio, before)
+        verify_generated_source_snapshot(generated_dcd, before)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     config_bytes = (build / "config/sdkconfig.h").read_bytes()
@@ -1173,13 +1409,14 @@ def main():
               "task_budgets": budgets,
               "sdk_isr_reserve_bytes": SDK_ISR_RESERVE_BYTES,
               "startup_frame_limit_bytes": STARTUP_FRAME_LIMIT_BYTES,
-              "generated_audio_source": generated_audio, "interrupt_frame_inventory": interrupt_inventory,
+              "generated_audio_source": generated_audio, "generated_dcd_source": generated_dcd,
+              "interrupt_frame_inventory": interrupt_inventory,
               "source_hashes": {path: after[path] for path in sorted(paths)},
               "input_hashes": after, "changed_during_measurement": sorted(changed),
               "input_scope": "First-party firmware/main and components C/headers/includes, "
                              "measured vendor/SDK translation units and task-ownership budget sources, "
                              "this checker, compile database, sdkconfig, generated config header, "
-                             "toolchain files, command response files, forced headers and generated TinyUSB audio provenance. "
+                             "toolchain files, command response files, forced headers and generated TinyUSB audio/DCD provenance. "
                              "Other SDK/vendor dependencies are not covered by this drift check.",
               "paths": chains, "all_frames": frames, "errors": errors,
               "limits": "Task PASS covers declared task paths only. Interrupt inventory remains explicitly unqualified. "

@@ -23,6 +23,9 @@ class PatchTests(unittest.TestCase):
         self.source.parent.mkdir(parents=True)
         self.original = (ROOT / "firmware/managed_components/espressif__tinyusb/src/class/audio/audio_device.c").read_bytes()
         self.source.write_bytes(self.original)
+        dcd = self.source_root / "src/portable/synopsys/dwc2/dcd_dwc2.c"
+        dcd.parent.mkdir(parents=True)
+        shutil.copy2(ROOT / "firmware/managed_components/espressif__tinyusb/src/portable/synopsys/dwc2/dcd_dwc2.c", dcd)
         self.output = self.base / "generated/audio_device.c"
 
     def test_exact_copy_and_idempotent_check(self):
@@ -81,6 +84,60 @@ class PatchTests(unittest.TestCase):
             patcher.generate(self.source_root, self.output, manifest_path=path)
         with self.assertRaisesRegex(ValueError, "context changed"):
             patcher.apply_patch("other source\n", "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n", "x")
+
+    def test_dcd_unknown_output_blocks_both_publications(self):
+        self.output.parent.mkdir()
+        dcd = self.output.with_name("dcd_dwc2.c"); dcd.write_text("retained DCD artifact\n")
+        with self.assertRaisesRegex(ValueError, "unknown content"):
+            patcher.generate(self.source_root, self.output)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(dcd.read_text(), "retained DCD artifact\n")
+
+    def test_dcd_missing_check_does_not_recreate(self):
+        patcher.generate(self.source_root, self.output)
+        dcd = self.output.with_name("dcd_dwc2.c"); dcd.unlink()
+        with self.assertRaisesRegex(ValueError, "missing"):
+            patcher.generate(self.source_root, self.output, check_only=True)
+        self.assertFalse(dcd.exists())
+
+    def test_zero_context_insert_and_delete_counts(self):
+        source = "one\ntwo\n"
+        patch = "--- a/x\n+++ b/x\n@@ -1,0 +2 @@\n+insert\n@@ -2 +2,0 @@\n-two\n"
+        self.assertEqual(patcher.apply_patch(source, patch, "x"), "one\ninsert\n")
+
+    def seam(self, action):
+        original = patcher._source_plan
+        def plan(source_root, output, manifest, check_only):
+            result = original(source_root, output, manifest, check_only)
+            if manifest["source_path"].endswith("dcd_dwc2.c"):
+                action()
+            return result
+        return mock.patch.object(patcher, "_source_plan", side_effect=plan)
+
+    def test_check_deletion_between_plans_and_final_verify_is_read_only(self):
+        patcher.generate(self.source_root, self.output)
+        with self.seam(self.output.unlink), mock.patch.object(patcher, "_publish") as publish:
+            with self.assertRaisesRegex(ValueError, "missing"):
+                patcher.generate(self.source_root, self.output, check_only=True)
+            publish.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_unknown_file_between_plans_and_publish_is_preserved(self):
+        def create():
+            self.output.parent.mkdir(); self.output.write_text("seam artifact\n")
+        with self.seam(create):
+            with self.assertRaisesRegex(ValueError, "unknown content"):
+                patcher.generate(self.source_root, self.output)
+        self.assertEqual(self.output.read_text(), "seam artifact\n")
+
+    def test_symlink_between_plans_and_publish_is_preserved(self):
+        def create():
+            self.output.parent.mkdir(); self.output.symlink_to(self.source)
+        with self.seam(create):
+            with self.assertRaisesRegex(ValueError, "unknown content"):
+                patcher.generate(self.source_root, self.output)
+        self.assertTrue(self.output.is_symlink())
+        self.assertEqual(self.source.read_bytes(), self.original)
 
 
 if __name__ == "__main__":

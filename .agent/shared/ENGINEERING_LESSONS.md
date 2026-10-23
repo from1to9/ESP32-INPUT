@@ -445,3 +445,50 @@ establish acoustic quality or all-direction lossless transport.
 
 Evidence: [USB audio regressions](../../tests/usb_audio/README.md) and the
 [reviewed upstream patch manifest](../../patches/tinyusb-audio-streams.json).
+
+## 22. Authentication failure codes can originate in local policy
+
+Decode a raw status in its owning SDK domain and trace every producer before
+assigning a cause to the remote host. In the pinned Bluedroid path, rejecting
+`esp_ble_gap_security_rsp` can produce `SMP_REPEATED_ATTEMPTS`, which BTA converts
+to decimal 86. A peer failure can produce the same final code. It is not enough
+to infer a host cooldown, incompatible security mode or corrupted stored keys.
+
+Pairing admission is decided for a particular physical connection and can
+outlive the visible pairing window. Observe the original connection decision,
+the worker's current generation and admission predicates, and the eventual
+authentication result separately. A queued security response is not an
+authentication outcome. Keep diagnostics bounded and behavior-neutral, without
+key material or raw peer identifiers; preserve the distinction between current
+SDK security records and durable storage.
+
+Evidence: the pinned SDK call chain and
+[deployment record](../../docs/validation.md#stream-repair-deployment-and-remaining-transport-failures-2026-10-23).
+
+## 23. Controller submission is not a completed USB transaction
+
+A passing audio-class/FIFO test does not exercise controller scheduling when
+its endpoint boundary immediately accepts every transfer. The pinned DWC2
+driver programs the opposite current frame parity for an isochronous rearm.
+At high speed, an eight-microframe host interval retains the same parity; a
+phase mismatch can leave an accepted OUT request pending. A register-boundary
+test can establish this programmed condition, but its model of bus behavior
+remains an assumption until confirmed on the device.
+
+Keep the production descriptor, packet contents and positive progress oracle
+identical when comparing a baseline with a candidate. Derive the host interval
+from that descriptor. Retain the expected baseline failure instead of changing
+the success criteria for the old mode. Cover feedback, capture, failed or empty
+completions and endpoint replacement, as well as successful playback.
+
+Count submission, rearm acceptance and successful completion separately. A
+class callback may discard the completion result or run only after rearming,
+so its count cannot substitute for a successful bus transaction. Observe
+effective controller mode rather than inferring it from a compile flag. Read
+registers only in a valid powered context, identify the sampling point and
+epoch, and avoid destructive status reads. Keep mode changes and reset-driven
+session invalidation in the owning lifecycle path; collecting diagnostics
+must not perform either action.
+
+Evidence: the pinned DWC2 source and
+[USB audio regression contract](../../tests/usb_audio/README.md).

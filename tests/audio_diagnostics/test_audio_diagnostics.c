@@ -9,14 +9,16 @@
 static app_media_snapshot_t owner;
 static usb_audio_snapshot_t usb;
 static board_audio_status_t codec;
+static usb_audio_transport_snapshot_t transport;
 static bool available = true;
 static unsigned media_reads, usb_reads, codec_reads, mutations;
-static char lines[128][768];
+static char lines[128][1024];
 static size_t line_count;
 
 bool app_media_runtime_snapshot(app_media_snapshot_t *out)
 { ++media_reads; if (available) *out = owner; return available; }
 usb_audio_snapshot_t usb_audio_snapshot(void) { ++usb_reads; return usb; }
+void usb_audio_transport_snapshot(usb_audio_transport_snapshot_t *out) { *out = transport; }
 board_audio_status_t board_audio_mosaico_status(void) { ++codec_reads; return codec; }
 /* Forbidden mutations are linked and counted independently of the observer. */
 ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *request)
@@ -32,7 +34,7 @@ void audio_diagnostics_test_log(const char *tag, const char *format, ...)
     va_list arguments; va_start(arguments, format);
     int count = vsnprintf(lines[line_count], sizeof(lines[line_count]), format, arguments);
     va_end(arguments);
-    assert(count > 0 && (size_t)count < sizeof(lines[line_count])); ++line_count;
+    assert(count > 0 && (size_t)count < (strstr(format, "USB transport") ? 1024U : 768U)); ++line_count;
 }
 static bool contains_since(size_t first, const char *text)
 {
@@ -44,9 +46,10 @@ static void poll_at(uint64_t now)
     app_media_snapshot_t before = owner;
     usb_audio_snapshot_t usb_before = usb;
     board_audio_status_t codec_before = codec;
+    usb_audio_transport_snapshot_t transport_before = transport;
     app_audio_diagnostics_poll(now);
     assert(!memcmp(&before, &owner, sizeof(owner)) && !memcmp(&usb_before, &usb, sizeof(usb)) &&
-        !memcmp(&codec_before, &codec, sizeof(codec)) && !mutations);
+        !memcmp(&codec_before, &codec, sizeof(codec)) && !memcmp(&transport_before, &transport, sizeof(transport)) && !mutations);
     const unsigned char *bytes = (const unsigned char *)&diagnostics.scratch;
     for (size_t i = 0; i < sizeof(diagnostics.scratch); ++i) assert(!bytes[i]);
 }
@@ -65,24 +68,24 @@ static void test_unknown_is_not_success(void)
     setup(); available = false; usb = (usb_audio_snapshot_t){0}; codec = (board_audio_status_t){0};
     owner.audio.state = AE_RUNNING; owner.audio.playback.received_bytes = 918273;
     poll_at(0);
-    assert(line_count == 4 && contains_since(0, "audio known=0 state=unknown snapshot_available=0") &&
+    assert(line_count == 5 && contains_since(0, "audio known=0 state=unknown snapshot_available=0") &&
         contains_since(0, "USB known=0 state=unknown error_known=0 error=-1") &&
         contains_since(0, "codec known=0 state=unknown error_known=0 error=-1"));
     assert(!contains_since(0, "received_bytes=") && !contains_since(0, "918273"));
     usb.error = ESP_ERR_NO_MEM; codec.last_result = AE_EXHAUSTED; poll_at(100);
-    assert(line_count == 6 && contains_since(4, "error_known=1"));
+    assert(line_count == 7 && contains_since(5, "error_known=1"));
 }
 static void test_idle_throttle_and_counter_summary(void)
 {
-    setup(); poll_at(0); assert(line_count == 8 && media_reads == 1);
+    setup(); poll_at(0); assert(line_count == 9 && media_reads == 1);
     for (uint64_t i = 1; i < 100; ++i) poll_at(i);
-    assert(media_reads == 1 && usb_reads == 1 && codec_reads == 1 && line_count == 8);
+    assert(media_reads == 1 && usb_reads == 1 && codec_reads == 1 && line_count == 9);
     for (uint64_t i = 100; i < 10000; i += 100) {
         owner.audio.playback.received_bytes += 960; usb.dropped_playback_frames += 1; poll_at(i);
     }
-    assert(line_count == 8 && media_reads == 100);
-    poll_at(10000); assert(line_count == 16 && contains_since(8, "received_bytes=95040") &&
-        contains_since(8, "dropped_playback=99"));
+    assert(line_count == 9 && media_reads == 100);
+    poll_at(10000); assert(line_count == 18 && contains_since(9, "received_bytes=95040") &&
+        contains_since(9, "dropped_playback=99"));
 }
 static void test_failed_job_retained_and_replaced(void)
 {
@@ -90,10 +93,10 @@ static void test_failed_job_retained_and_replaced(void)
     ae_job_snapshot_t *job = &owner.audio.playback;
     job->kind = AE_PLAYBACK_STREAM; job->state = AE_JOB_STARTING;
     owner.audio.state = AE_PREPARING; owner.audio.hardware_off_confirmed = false;
-    poll_at(100); assert(line_count == 10);
+    poll_at(100); assert(line_count == 11);
     job->state = AE_JOB_ERROR; job->stop_reason = AE_STOP_START_TIMEOUT; job->error = AE_TIMEOUT;
     job->cleanup_pending = true; poll_at(2100);
-    assert(line_count == 11 && contains_since(10, "first_frame=0") && contains_since(10, "cleanup=1"));
+    assert(line_count == 12 && contains_since(11, "first_frame=0") && contains_since(11, "cleanup=1"));
     owner.audio.state = AE_OFF; owner.audio.hardware_off_confirmed = true; job->cleanup_pending = false;
     poll_at(2200); size_t after_stop = line_count;
     poll_at(2300); assert(line_count == after_stop && diagnostics.previous.jobs[AE_CONSUMERS_MAX].error == AE_TIMEOUT);
@@ -112,7 +115,7 @@ static void test_availability_recovery(void)
     setup(); owner.audio.capture[AE_CAPTURE_LIVE] = (ae_job_snapshot_t){.state = AE_JOB_RUNNING,
         .first_frame_seen = true, .first_frame_ms = 5, .received_bytes = 960};
     poll_at(0); available = false; poll_at(100);
-    assert(contains_since(8, "audio known=0 state=unknown") && !contains_since(8, "received_bytes=0"));
+    assert(contains_since(9, "audio known=0 state=unknown") && !contains_since(9, "received_bytes=0"));
     size_t prior = line_count; available = true; poll_at(200);
     assert(contains_since(prior, "audio known=1") && contains_since(prior, "received_bytes=960"));
     owner.audio_known = false; owner.speech_known = false; prior = line_count; poll_at(300);
@@ -167,6 +170,37 @@ static void test_usb_observation_boundaries(void)
     assert(contains_since(prior, "out_cb=18446744073709551615") &&
         contains_since(prior, "c_bytes=18446744073709551615 c_queued=65535"));
 }
+static void test_transport_mode_and_results(void)
+{
+    setup(); transport.observed = transport.mode_required = true; poll_at(0);
+    assert(contains_since(0, "transport known=1 required=1 mode_known=0 valid=0"));
+    transport.mode_known = true; transport.reset_epoch = 3; transport.mode_reject = 8;
+    size_t prior = line_count; poll_at(100);
+    assert(line_count == prior + 1 && contains_since(prior, "mode_known=1 valid=0 epoch=3 reject=8"));
+    transport.mode_valid = true; transport.mode_reject = 0;
+    transport.feedback_calculated_known = transport.feedback_submitted_known = true;
+    transport.feedback_calculated = transport.feedback_submitted = 0x60000;
+    transport.out.completed_failed = 1; transport.out.first_failure_known = true;
+    prior = line_count; poll_at(200);
+    assert(line_count == prior + 1 && contains_since(prior, "fb_known=1/1/0") && contains_since(prior, "out=0/0/0/0/1/0/0"));
+    transport.in.completed_failed = 10; prior = line_count; poll_at(300); assert(line_count == prior);
+    usb_audio_endpoint_observation_t *endpoints[] = {&transport.out, &transport.in, &transport.feedback};
+    for (unsigned i = 0; i < 3; ++i) {
+        endpoints[i]->submitted = endpoints[i]->accepted = endpoints[i]->rejected = UINT64_MAX;
+        endpoints[i]->completed_ok = endpoints[i]->completed_failed = endpoints[i]->successful_bytes = endpoints[i]->successful_zero = UINT64_MAX;
+    }
+    transport.class_out_entries = transport.class_out_rearm_calls = transport.class_out_rearm_rejected = UINT64_MAX;
+    transport.feedback_calculated = transport.feedback_submitted = transport.feedback_completed = UINT32_MAX;
+    transport.feedback_calculated_epoch = transport.feedback_submitted_epoch = transport.feedback_completed_epoch = UINT32_MAX;
+    transport.feedback_submitted_length = transport.feedback_completed_length = UINT8_MAX;
+    transport.reset_epoch = transport.mode_reject = UINT32_MAX;
+    memset(&transport.registers, 0xff, sizeof(transport.registers));
+    memset(&transport.pending_registers, 0xff, sizeof(transport.pending_registers));
+    transport.registers_known = transport.pending_registers_known = true;
+    prior = line_count; poll_at(10000);
+    assert(contains_since(prior, "out=18446744073709551615/") && contains_since(prior, "regs=ffffffff/") &&
+        contains_since(prior, "pending=1:4294967295:4294967295:ffffffff:ffffffff:ffffffff"));
+}
 static void test_private_metadata_wiped(void)
 {
     setup();
@@ -183,16 +217,16 @@ static void test_private_metadata_wiped(void)
 }
 static void test_clock_regression_is_observer_only(void)
 {
-    setup(); poll_at(UINT64_MAX - 10000); poll_at(UINT64_MAX); assert(line_count == 16);
-    unsigned reads = media_reads; poll_at(UINT64_MAX - 1); assert(line_count == 17 && diagnostics.clock_failed);
-    poll_at(UINT64_MAX); assert(line_count == 17 && media_reads == reads && contains_since(16, "observer_stopped=1"));
+    setup(); poll_at(UINT64_MAX - 10000); poll_at(UINT64_MAX); assert(line_count == 18);
+    unsigned reads = media_reads; poll_at(UINT64_MAX - 1); assert(line_count == 19 && diagnostics.clock_failed);
+    poll_at(UINT64_MAX); assert(line_count == 19 && media_reads == reads && contains_since(18, "observer_stopped=1"));
 }
 int main(int argc, char **argv)
 {
     const char *names[] = {"unknown_is_not_success", "idle_throttle_and_counter_summary", "failed_job_retained_and_replaced",
-        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "private_metadata_wiped", "clock_regression_is_observer_only"};
+        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "transport_mode_and_results", "private_metadata_wiped", "clock_regression_is_observer_only"};
     void (*cases[])(void) = {test_unknown_is_not_success, test_idle_throttle_and_counter_summary, test_failed_job_retained_and_replaced,
-        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_private_metadata_wiped, test_clock_regression_is_observer_only};
+        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_transport_mode_and_results, test_private_metadata_wiped, test_clock_regression_is_observer_only};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)

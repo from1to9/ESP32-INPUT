@@ -38,6 +38,7 @@ static uint8_t copied_payload[8];
 static TickType_t fake_tick;
 static int64_t fake_uptime_us = -1;
 static unsigned uptime_reads;
+static unsigned tick_reads, bond_count_reads, bond_list_reads;
 static unsigned advertising_heap_reads;
 static esp_err_t controller_init_result = ESP_OK;
 static bool task_create_fails;
@@ -80,6 +81,8 @@ static unsigned encryption_calls;
 static esp_err_t rssi_request_result = ESP_OK, remove_request_result = ESP_OK;
 static esp_bd_addr_t last_rssi_address, last_remove_address;
 static bool last_security_accept;
+static void (*security_response_hook)(void);
+static esp_err_t security_response_result;
 static char fake_sdk_name[33] = BLE_HID_DEFAULT_NAME;
 static char configured_adv_name[33], configured_scan_name[33];
 static unsigned name_set_calls, name_get_calls, name_reads_pending, close_calls, adv_stop_calls;
@@ -193,18 +196,20 @@ esp_err_t nvs_commit(nvs_handle_t handle) {
 void nvs_close(nvs_handle_t handle) { assert(!callback_active && (handle == 1 || handle == 2)); }
 int esp_ble_get_bond_device_num(void) {
     assert(!callback_active);
+    ++bond_count_reads;
     int count = fake_bond_count;
     if (bond_count_hook) bond_count_hook();
     return count;
 }
 esp_err_t esp_ble_get_bond_device_list(int *count, esp_ble_bond_dev_t *bonds) {
     assert(!callback_active && *count >= fake_bond_count);
+    ++bond_list_reads;
     *count = fake_bond_count;
     if (bond_hook) bond_hook();
     memcpy(bonds, fake_bonds, (size_t)*count * sizeof(*bonds));
     return bond_result;
 }
-TickType_t xTaskGetTickCount(void) { return fake_tick; }
+TickType_t xTaskGetTickCount(void) { ++tick_reads; return fake_tick; }
 int64_t esp_timer_get_time(void) {
     ++uptime_reads;
     return fake_uptime_us >= 0 ? fake_uptime_us : (int64_t)fake_tick * 1000;
@@ -313,7 +318,9 @@ esp_err_t esp_ble_gatts_create_attr_tab(const esp_gatts_attr_db_t *db, esp_gatt_
 esp_err_t esp_ble_gatts_start_service(uint16_t handle) { assert(handle); ++sdk_calls; return ESP_OK; }
 esp_err_t esp_ble_set_encryption(esp_bd_addr_t address, esp_ble_sec_act_t action) { (void)address; assert(action == ESP_BLE_SEC_ENCRYPT); ++encryption_calls; ++sdk_calls; return ESP_OK; }
 esp_err_t esp_ble_gap_security_rsp(esp_bd_addr_t address, bool accept) {
-    (void)address; assert(!callback_active); last_security_accept = accept; ++sdk_calls; return ESP_OK;
+    (void)address; assert(!callback_active); last_security_accept = accept; ++sdk_calls;
+    if (security_response_hook) security_response_hook();
+    return security_response_result;
 }
 esp_err_t esp_ble_gap_read_rssi(esp_bd_addr_t address) {
     assert(!callback_active);
@@ -360,6 +367,8 @@ static void worker_cycle(void) {
 static void drain(void) { control_command_t command; while (xQueueReceive(control_queue, &command, 0)) {} }
 static control_command_t pop(void) { control_command_t command; assert(xQueueReceive(control_queue, &command, 0)); return command; }
 static void reset(void) {
+    memset(&admission_diagnostics, 0, sizeof(admission_diagnostics));
+    admission_trace_head = 0;
     memset(&advertising_diagnostics, 0, sizeof(advertising_diagnostics));
     advertising_trace_head = 0;
     advertising_start_sequence = advertising_stop_sequence = 0;
@@ -380,6 +389,8 @@ static void reset(void) {
     target_commit_persists_on_error = target_corrupt_readback = false; target_commit_hook = NULL;
     fake_uptime_us = -1;
     uptime_reads = 0;
+    tick_reads = bond_count_reads = bond_list_reads = 0;
+    security_response_hook = NULL; security_response_result = ESP_OK;
     controller_init_result = ESP_OK;
     task_create_fails = false;
     registration_hook = NULL;
@@ -2719,8 +2730,14 @@ static void test_quiet_forget_all_and_empty_durable_preferences(void) {
 #include "native_management_cases.inc"
 #include "advertising_diagnostics_cases.inc"
 #include "physical_disconnect_cases.inc"
+#include "admission_diagnostics_cases.inc"
 
 int main(void) {
+    test_admission_saved_denial_and_explicit_add();
+    test_admission_worker_predicates_and_stale_commands();
+    test_admission_anchors_overflow_freeze_and_copy();
+    test_admission_failure_before_api_return_and_unknown_origin();
+    test_admission_observation_neutrality();
     physical_disconnect_reservation_auth_and_replacement();
     physical_disconnect_add_waits_for_acl();
     physical_disconnect_missing_error_and_identity();

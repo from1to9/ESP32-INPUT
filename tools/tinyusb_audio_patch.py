@@ -28,10 +28,12 @@ def apply_patch(source, patch, name):
         if not match:
             raise ValueError("Invalid TinyUSB patch hunk")
         start, old_count, new_start, new_count = [int(value) if value is not None else 1 for value in match.groups()]
-        if start - 1 < cursor or start - 1 > len(original):
+        old_position = start if old_count == 0 else start - 1
+        new_position = new_start if new_count == 0 else new_start - 1
+        if old_position < cursor or old_position > len(original):
             raise ValueError("Invalid TinyUSB hunk offset")
-        output.extend(original[cursor:start - 1]); cursor = start - 1
-        if len(output) != new_start - 1:
+        output.extend(original[cursor:old_position]); cursor = old_position
+        if len(output) != new_position:
             raise ValueError("Invalid TinyUSB output offset")
         old_seen = new_seen = 0; index += 1
         while index < len(lines) and not lines[index].startswith("@@ "):
@@ -64,6 +66,24 @@ def generate(source_root, output, *, check_only=False, manifest_path=MANIFEST,
         value = re.search(r"(?m)^    " + key + r": ([^\n]+)$", block[1])
         if not value or value[1].strip().strip("'\"") != expected:
             raise ValueError("TinyUSB dependency lock differs from reviewed pin")
+    output = Path(output)
+    dcd_output = output.with_name("dcd_dwc2.c")
+    dcd = manifest["dcd"]
+    if dcd["source_path"] != "src/portable/synopsys/dwc2/dcd_dwc2.c":
+        raise ValueError("Unexpected TinyUSB DCD scope")
+    plans = [_source_plan(source_root, output, manifest, check_only),
+             _source_plan(source_root, dcd_output, dcd, check_only)]
+    if not check_only:
+        for destination, generated, metadata in plans:
+            _publish(destination, generated)
+    for destination, generated, metadata in plans:
+        _verify_output(destination, generated)
+    return {"component": manifest["component"], "version": manifest["version"],
+            **plans[0][2], "dcd": plans[1][2]}
+
+
+def _source_plan(source_root, output, manifest, check_only):
+    name = manifest["source_path"]
     source_path = Path(source_root) / name
     if source_path.is_symlink() or not source_path.is_file():
         raise ValueError("TinyUSB source type changed")
@@ -71,7 +91,8 @@ def generate(source_root, output, *, check_only=False, manifest_path=MANIFEST,
     if digest(source) != manifest["source_sha256"]:
         raise ValueError("TinyUSB source differs from reviewed preimage")
     patch_path = ROOT / manifest["patch_file"]
-    if patch_path.resolve() != (ROOT / "patches/tinyusb-audio-streams.patch").resolve():
+    expected_patch = "patches/tinyusb-audio-streams.patch" if name == "src/class/audio/audio_device.c" else "patches/tinyusb-dwc2-observer.patch"
+    if patch_path.resolve() != (ROOT / expected_patch).resolve():
         raise ValueError("TinyUSB patch path changed")
     patch = patch_path.read_bytes()
     if digest(patch) != manifest["patch_sha256"]:
@@ -86,7 +107,20 @@ def generate(source_root, output, *, check_only=False, manifest_path=MANIFEST,
         raise ValueError("Existing TinyUSB generated output has unknown content; preserve it")
     if check_only and not output.is_file():
         raise ValueError("Generated TinyUSB output is missing")
-    if not output.exists():
+    return output, generated, {"source_sha256": digest(source), "output_sha256": digest(generated), "output": str(output)}
+
+
+def _verify_output(output, generated):
+    if not output.exists() and not output.is_symlink():
+        raise ValueError("Generated TinyUSB output is missing")
+    if output.is_symlink() or not output.is_file() or output.read_bytes() != generated:
+        raise ValueError("Existing TinyUSB generated output has unknown content; preserve it")
+
+
+def _publish(output, generated):
+    if output.exists() or output.is_symlink():
+        _verify_output(output, generated)
+    else:
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = None
         try:
@@ -95,13 +129,13 @@ def generate(source_root, output, *, check_only=False, manifest_path=MANIFEST,
             try:
                 os.link(temporary, output)
             except FileExistsError:
-                if output.is_symlink() or not output.is_file() or output.read_bytes() != generated:
-                    raise ValueError("Concurrent TinyUSB generated output has unknown content; preserve it")
+                try:
+                    _verify_output(output, generated)
+                except ValueError as error:
+                    raise ValueError("Concurrent TinyUSB generated output has unknown content; preserve it") from error
         finally:
             if temporary is not None and temporary.exists():
                 temporary.unlink()
-    return {"component": manifest["component"], "version": manifest["version"],
-            "source_sha256": digest(source), "output_sha256": digest(generated), "output": str(output)}
 
 
 def main():

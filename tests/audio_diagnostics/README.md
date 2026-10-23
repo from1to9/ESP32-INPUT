@@ -1,6 +1,6 @@
 # Cached audio diagnostics observer
 
-Run `python3 tests/audio_diagnostics/run.py` from the repository root. Eight
+Run `python3 tests/audio_diagnostics/run.py` from the repository root. Nine
 isolated cases compile the actual `app_audio_diagnostics.c` observer and format
 comparison code with strict C11 warnings, AddressSanitizer and fail-fast UBSan.
 Only the cached media/USB/codec getters and logger are substituted. Exact
@@ -12,7 +12,7 @@ The observer copies cached snapshots at most once per 100 ms, logs semantic
 state/error changes and emits counter summaries once per ten seconds. No
 producer service, audio mutation, HID action, storage or allocation occurs.
 It can miss transitions shorter than its sampling interval. Logging has a
-cost; physical scheduling/timing effects remain unqualified. At most eight
+cost; physical scheduling/timing effects remain unqualified. At most nine
 lines are emitted per admitted observation, including during error flapping.
 A monotonic clock regression reports the observer failure once and disables
 further observation without changing the audio owner or its policy.
@@ -49,3 +49,29 @@ metadata wiping, unchanged owner inputs, forbidden mutation calls, throttle
 and idle logging bounds, and monotonic-time regression/overflow boundaries.
 These are observer guarantees, not proof of microphone capture, speaker sound,
 USB host compatibility or the reported physical two-second startup cause.
+
+
+A separate cached USB transport copy-out snapshot adds one bounded diagnostic
+line (nine maximum lines per admitted observation). The existing line's 768-byte
+format bound remains; the added transport line is checked below 1,024 bytes even
+with maximum-width counters/registers. Sampling and ten-second summary cadence
+are unchanged. This increases logging cost; target scheduling effects remain
+unqualified. Counter-only changes still wait for the summary; mode/epoch/first
+failure changes can log on the next admitted observation.
+
+The transport line's OUT/IN/feedback slash-separated totals are DCD
+attempts/accepted/rejected/successful-completions/failed-completions/successful-
+bytes/successful-zero-packets. `entry` is class OUT entry/rearm-calls/rearm-rejected.
+`fb_known`, `fb_value` and `fb_epoch` keep calculated/submitted/successfully-completed
+feedback separate, with raw submitted/completed lengths. Completion success is a
+DCD report, not peer application delivery or an isochronous ACK.
+
+`sample` identifies cached-known/point/epoch-before/epoch-after/OUT-activation/
+raw-DSTS-before/raw-DSTS-after. `regs` contains core-ID/HWCFG2/GAHBCFG/DCFG/DCTL/
+DTHRCTL/GINTSTS/GINTMSK/DAINT/OUT-CTL/OUT-INT/OUT-SIZE. `pending` is the first
+pending sample for an observed activation: known/epoch/activation/GINTSTS/
+OUT-CTL/OUT-SIZE. These cached, non-atomic reads can be stale; equality does not
+prove a coherent instant, and the observer never reads peripheral registers.
+Mode required/known/valid and reject bits distinguish unavailable evidence from
+rejected hardware prerequisites. Copying or logging observations never performs
+the explicit audio mode/reset lifecycle transition.

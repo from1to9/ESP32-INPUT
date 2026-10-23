@@ -65,9 +65,10 @@ def setup(python):
 
 def verify_tinyusb_generated(python, *, allow_missing=False):
     output = ROOT / "firmware/build/generated/tinyusb_audio/audio_device.c"
-    if allow_missing and not output.exists() and not output.is_symlink():
-        # First configuration generates the checked copy after resolving the
-        # managed component. Existing copies must pass before compilation.
+    outputs = (output, output.with_name("dcd_dwc2.c"))
+    if allow_missing and not any(path.exists() or path.is_symlink() for path in outputs):
+        # Only an entirely absent pair is a first configuration. A surviving
+        # DCD, partial pair or dangling link must be checked before compilation.
         return
     run([python, ROOT / "tools/tinyusb_audio_patch.py", "--source-root",
          ROOT / "firmware/managed_components/espressif__tinyusb",

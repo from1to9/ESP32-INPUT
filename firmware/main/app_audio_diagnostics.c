@@ -4,6 +4,7 @@
 #include "audio_media.h"
 #include "board_audio_mosaico.h"
 #include "usb_audio.h"
+#include "usb_audio_transport.h"
 #include "esp_log.h"
 #ifdef ESP_PLATFORM
 #include "esp_attr.h"
@@ -42,6 +43,7 @@ typedef struct {
     ae_result_t speech_result;
     bool speech_cleanup;
     usb_audio_snapshot_t usb;
+    usb_audio_transport_snapshot_t transport;
     board_audio_status_t codec;
 } diagnostic_observation_t;
 typedef struct {
@@ -102,6 +104,7 @@ static void observe(void)
         out->speech_cleanup = media->speech.cleanup_pending;
     }
     out->usb = usb_audio_snapshot();
+    usb_audio_transport_snapshot(&out->transport);
     out->codec = board_audio_mosaico_status();
     clear_scratch();
 }
@@ -142,6 +145,50 @@ static bool codec_changed(const board_audio_status_t *a, const board_audio_statu
         a->last_sdk_operation != b->last_sdk_operation || a->first_sdk_error != b->first_sdk_error ||
         a->first_sdk_operation != b->first_sdk_operation;
 }
+static bool transport_changed(const usb_audio_transport_snapshot_t *a, const usb_audio_transport_snapshot_t *b)
+{
+    return a->observed != b->observed || a->mode_required != b->mode_required || a->mode_known != b->mode_known ||
+        a->mode_valid != b->mode_valid || a->reset_epoch != b->reset_epoch || a->mode_reject != b->mode_reject ||
+        a->out.first_failure_known != b->out.first_failure_known || a->in.first_failure_known != b->in.first_failure_known ||
+        a->feedback.first_failure_known != b->feedback.first_failure_known;
+}
+
+#define TRANSPORT_COUNTS "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+#define TRANSPORT_VALUES(ep) (ep).submitted, (ep).accepted, (ep).rejected, (ep).completed_ok, \
+    (ep).completed_failed, (ep).successful_bytes, (ep).successful_zero
+static void log_transport(const usb_audio_transport_snapshot_t *transport)
+{
+    if (!transport->observed) {
+        ESP_LOGI(TAG, "Audio diag USB transport known=0 required=%d mode_known=0", transport->mode_required);
+        return;
+    }
+    const usb_audio_dcd_registers_t *reg = &transport->registers;
+    const usb_audio_dcd_registers_t *pending = &transport->pending_registers;
+    ESP_LOGI(TAG, "Audio diag USB transport known=1 required=%d mode_known=%d valid=%d epoch=%" PRIu32 " reject=%" PRIu32
+        " out=" TRANSPORT_COUNTS " in=" TRANSPORT_COUNTS " fb=" TRANSPORT_COUNTS
+        " entry=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+        " fb_known=%d/%d/%d fb_value=%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32
+        " fb_epoch=%" PRIu32 "/%" PRIu32 "/%" PRIu32 " fb_len=%u/%u"
+        " sample=%d:%u:%" PRIu32 ":%" PRIu32 ":%" PRIu32 ":%08" PRIx32 ":%08" PRIx32
+        " regs=%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32
+        "/%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32 "/%08" PRIx32
+        " pending=%d:%" PRIu32 ":%" PRIu32 ":%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32,
+        transport->mode_required, transport->mode_known, transport->mode_valid, transport->reset_epoch, transport->mode_reject,
+        TRANSPORT_VALUES(transport->out), TRANSPORT_VALUES(transport->in), TRANSPORT_VALUES(transport->feedback),
+        transport->class_out_entries, transport->class_out_rearm_calls, transport->class_out_rearm_rejected,
+        transport->feedback_calculated_known, transport->feedback_submitted_known, transport->feedback_completed_known,
+        transport->feedback_calculated, transport->feedback_submitted, transport->feedback_completed,
+        transport->feedback_calculated_epoch, transport->feedback_submitted_epoch, transport->feedback_completed_epoch,
+        transport->feedback_submitted_length, transport->feedback_completed_length,
+        transport->registers_known, reg->point, reg->epoch_before, reg->epoch_after, reg->out_activation,
+        reg->frame_before, reg->frame_after,
+        reg->core_id, reg->hwcfg2, reg->gahbcfg, reg->dcfg, reg->dctl, reg->dthrctl,
+        reg->gintsts, reg->gintmsk, reg->daint, reg->out_ctl, reg->out_int, reg->out_size,
+        transport->pending_registers_known, pending->epoch_before, pending->out_activation,
+        pending->gintsts, pending->out_ctl, pending->out_size);
+}
+#undef TRANSPORT_COUNTS
+#undef TRANSPORT_VALUES
 static void log_audio(const diagnostic_observation_t *audio)
 {
     if (!audio->audio_known) {
@@ -234,6 +281,7 @@ void app_audio_diagnostics_poll(uint64_t now_ms)
     if (summary || current->speech_known != previous->speech_known || current->speech_state != previous->speech_state ||
         current->speech_result != previous->speech_result || current->speech_cleanup != previous->speech_cleanup) log_speech(current);
     if (summary || usb_changed(&current->usb, &previous->usb)) log_usb(&current->usb);
+    if (summary || transport_changed(&current->transport, &previous->transport)) log_transport(&current->transport);
     if (summary || codec_changed(&current->codec, &previous->codec)) log_codec(&current->codec);
     diagnostics.previous = diagnostics.current;
     diagnostics.observed = true;

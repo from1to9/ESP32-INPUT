@@ -5,9 +5,17 @@
   "component_hash": "16c8d774dab1f484d3e0c0f61105624d2424bbae864efd19818baf7b451b41e7",
   "source_path": "src/class/audio/audio_device.c",
   "source_sha256": "347ac32ce077f8b34b6b21069afb1959f6eb89d8dc32d80c4a672a19ecabc8bc",
-  "output_sha256": "a776472ab1863cf78e7cef4f8af279a256b2ccbf7df258156e45a9e4fd1c0fbc",
+  "output_sha256": "97021b301bab927d1762f31d5a410fa2828fa099df5f47caed3b7914aec251a8",
   "patch_file": "patches/tinyusb-audio-streams.patch",
-  "patch_sha256": "db9eefaa8a9fbf6e2dab8710f046e31ec5f4597bc90fbd0b06f18af4a487ae6a",
+  "patch_sha256": "76b3ad863c6b493435766f717678c6b5a359d85e7e10c30f75d557a09f9ad4e8",
   "license": "MIT; original source license and copyright remain in generated copy",
-  "purpose": "Rearm DMA OUT after empty packets without fabricating PCM, preserve function-1 unread IN PCM with FIFO backpressure, and schedule only actual DMA IN bytes read."
+  "purpose": "Rearm DMA OUT after empty packets without fabricating PCM, preserve function-1 unread IN PCM with FIFO backpressure, and schedule only actual DMA IN bytes read.",
+  "dcd": {
+    "source_path": "src/portable/synopsys/dwc2/dcd_dwc2.c",
+    "source_sha256": "27678dabda2c227c1d472d6cd6b77770287c399cf4944f061e594561ef9be4b3",
+    "output_sha256": "b439dd206ce48c9cf045ababfc575bb00257b99322450a3a934acd0732f6e53f",
+    "patch_file": "patches/tinyusb-dwc2-observer.patch",
+    "patch_sha256": "8844756971a32df7a5261099f55242ea4eb856bb16dbad33279ea9f0fbcfa2e7",
+    "purpose": "Observe existing DCD operation results and cached active-context registers; explicit audio mode/reset lifecycle, no DCD scheduling or recovery changes."
+  }
 }

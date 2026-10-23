@@ -418,6 +418,20 @@ static void playback_binding_barriers(void)
     assert(written_bytes == UAC_FRAME_BYTES); /* Microphone survived both rebinds. */
 }
 
+static void other_profiles_keep_existing_admission(void)
+{
+    assert(!INPUT_USB_AUDIO_PTI_REQUIRED);
+    ae_route_token_t token = start(AE_SPEAKER);
+    uint64_t link = s_status.link_generation;
+    input_usb_audio_dcd_mode(1, true, 0, false);
+    input_usb_audio_dcd_mode(2, false, 0, true);
+    input_usb_audio_dcd_mode(2, true, USB_AUDIO_MODE_PTI_NOT_ACTIVE, true);
+    usb_audio_transport_snapshot_t observed; usb_audio_transport_snapshot(&observed);
+    assert(observed.observed && !observed.mode_required && observed.mode_known && !observed.mode_valid);
+    assert(s_status.link_generation == link && s_status.prepared && s_consumer_generation == 17 &&
+        prepare(NULL, AE_ROUTE_USB_UAC, &s_format, AE_SPEAKER, 11, &token) == AE_OK);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -425,7 +439,8 @@ int main(int argc, char **argv)
         playback_frames_and_cancel, format_and_clock_requests, failed_allocation_stays_unavailable,
         worker_failure_releases_memory, saturation_and_time_failure, many_reconnections,
         same_alternate_and_resume_require_fresh_preparation, endpoint_close_revokes_before_reopen,
-        feedback_tracks_codec_consumption, dropped_frames_preserve_stream_offsets, playback_binding_barriers};
+        feedback_tracks_codec_consumption, dropped_frames_preserve_stream_offsets, playback_binding_barriers,
+        other_profiles_keep_existing_admission};
     unsigned index = (unsigned)strtoul(argv[1], NULL, 10);
     assert(index < sizeof(cases) / sizeof(cases[0]));
     cases[index]();

@@ -151,6 +151,8 @@ static ble_hid_failure_t first_failure = {.stage = "none", .error = ESP_OK};
 static EXT_RAM_BSS_ATTR ble_hid_advertising_diagnostics_t advertising_diagnostics;
 static size_t advertising_trace_head;
 static uint64_t advertising_start_sequence, advertising_stop_sequence;
+static EXT_RAM_BSS_ATTR ble_hid_admission_diagnostics_t admission_diagnostics;
+static size_t admission_trace_head;
 typedef enum {
     NAME_IDLE, NAME_QUIET, NAME_WAIT_STOP, NAME_GET_PREVIOUS, NAME_WAIT_PREVIOUS,
     NAME_SET, NAME_WAIT_VALUE, NAME_ADV, NAME_WAIT_ADV, NAME_SCAN, NAME_WAIT_SCAN,
@@ -641,6 +643,90 @@ static void advertising_return_observation(ble_hid_advertising_event_t event, ui
     (void)advertising_trace_locked(event, now_ms, command, true, (uint32_t)error, NULL);
     if (error != ESP_OK) advertising_diagnostics.frozen = true;
     portEXIT_CRITICAL(&state_lock);
+}
+
+static uint32_t admission_flags_locked(void)
+{
+    return (state.public.connected ? BLE_HID_ADMISSION_CONNECTED : 0U) |
+        (state.public.failed ? BLE_HID_ADMISSION_FAILED : 0U) |
+        (state.peer_saved ? BLE_HID_ADMISSION_SAVED : 0U) |
+        (state.public.pairing_open ? BLE_HID_ADMISSION_WINDOW_REQUESTED : 0U) |
+        (state.pairing_admission_pending ? BLE_HID_ADMISSION_PENDING : 0U) |
+        (state.pairing_admitted ? BLE_HID_ADMISSION_GRANTED : 0U) |
+        (state.auth_complete ? BLE_HID_ADMISSION_AUTHENTICATED : 0U) |
+        (state.link_fault ? BLE_HID_ADMISSION_LINK_FAULT : 0U) |
+        (state.bond_list.known ? BLE_HID_ADMISSION_CACHE_KNOWN : 0U) |
+        (state.bond_list.updating ? BLE_HID_ADMISSION_CACHE_UPDATING : 0U) |
+        (state.bond_refresh_pending ? BLE_HID_ADMISSION_REFRESH_PENDING : 0U) |
+        (state.classic_pairing_reserved ? BLE_HID_ADMISSION_CLASSIC_RESERVED : 0U);
+}
+
+/* Only caller-supplied, already observed ticks and cached state are read here.
+ * No SDK, clock, storage, logger, address copy or allocation is performed. */
+static ble_hid_admission_observation_t *admission_trace_locked(ble_hid_admission_event_t event,
+    const control_command_t *command, bool tick_known, TickType_t tick)
+{
+    if (admission_diagnostics.frozen) return NULL;
+    if (admission_diagnostics.total_events == UINT64_MAX) {
+        admission_diagnostics.sequence_exhausted = true;
+        admission_diagnostics.frozen = true;
+        return NULL;
+    }
+    size_t index = (admission_trace_head + admission_diagnostics.count) % BLE_HID_ADMISSION_TRACE_CAPACITY;
+    if (admission_diagnostics.count == BLE_HID_ADMISSION_TRACE_CAPACITY) {
+        admission_trace_head = (admission_trace_head + 1) % BLE_HID_ADMISSION_TRACE_CAPACITY;
+        admission_diagnostics.overflowed = true;
+    } else ++admission_diagnostics.count;
+    ble_hid_admission_observation_t *entry = &admission_diagnostics.events[index];
+    memset(entry, 0, sizeof(*entry));
+    entry->sequence = ++admission_diagnostics.total_events;
+    entry->event = event;
+    entry->live_generation = state.connection_generation;
+    entry->public_generation = state.public.generation;
+    entry->conn_id = state.conn_id;
+    entry->auth_revision = state.auth_revision;
+    entry->flags = admission_flags_locked();
+    entry->bond_count = state.bond_list.count;
+    entry->bond_capacity = PAIRING_BOND_CAPACITY;
+    entry->tick_known = tick_known;
+    if (tick_known) entry->tick_low32 = (uint32_t)tick;
+    entry->window_known = tick_known || !state.public.pairing_open;
+    if (tick_known) {
+        entry->window_allowed = pairing_allowed_locked(tick);
+        if (entry->window_allowed) entry->window_remaining_ms =
+            (uint32_t)pdTICKS_TO_MS(state.pairing_duration - (TickType_t)(tick - state.pairing_started));
+    }
+    if (command) {
+        entry->command_known = true;
+        entry->command_is_rejected = command->kind == COMMAND_REJECT_CONNECTION;
+        entry->command_generation = command->generation;
+        entry->command_conn_id = command->conn_id;
+        entry->command_auth_revision = command->auth_revision;
+    }
+    return entry;
+}
+
+static void admission_trace_finish_locked(const ble_hid_admission_observation_t *entry)
+{
+    if (!entry) return;
+    if (entry->event == BLE_HID_ADMISSION_OPEN) {
+        admission_diagnostics.last_open = *entry;
+        admission_diagnostics.open_known = true;
+    } else if (entry->event == BLE_HID_ADMISSION_CONNECT && entry->result_known && entry->accepted) {
+        admission_diagnostics.connect = *entry;
+        admission_diagnostics.connect_known = true;
+        admission_diagnostics.admission_known = false;
+        memset(&admission_diagnostics.first_admission, 0, sizeof(admission_diagnostics.first_admission));
+    } else if (entry->event == BLE_HID_ADMISSION_CHECK && entry->committed &&
+        (!admission_diagnostics.admission_known ||
+         admission_diagnostics.first_admission.live_generation != entry->live_generation)) {
+        admission_diagnostics.first_admission = *entry;
+        admission_diagnostics.admission_known = true;
+    } else if (entry->event == BLE_HID_ADMISSION_AUTH && entry->result_known && !entry->accepted) {
+        admission_diagnostics.first_failure = *entry;
+        admission_diagnostics.first_failure_known = true;
+        admission_diagnostics.frozen = true;
+    }
 }
 
 static void fail_transport(const char *operation, esp_err_t error)
@@ -1234,6 +1320,7 @@ static void service_pairing_admission(void)
     identity.generation = state.connection_generation;
     memcpy(identity.address, state.address, sizeof(identity.address));
     uint32_t revision = state.auth_revision;
+    identity.auth_revision = revision;
     portEXIT_CRITICAL(&state_lock);
     if (!pending) return;
 
@@ -1246,10 +1333,13 @@ static void service_pairing_admission(void)
     int shared_count = -1; /* BLE-only admission uses the verified public list. */
 #endif
     portENTER_CRITICAL(&state_lock);
-    bool current = command_current_locked(&identity) && state.auth_revision == revision &&
+    bool physical_current = command_current_locked(&identity);
+    bool current = physical_current && state.auth_revision == revision &&
         state.pairing_admission_pending && !state.auth_complete &&
         !state.public.failed && !state.link_fault;
     bool retry = error != ESP_OK && state.bond_refresh_pending;
+    bool deadline_known = false, deadline_ok = false;
+    TickType_t decision_tick = 0;
     bool grant = current && error == ESP_OK && state.bond_list.known &&
         state.bond_list.count < PAIRING_BOND_CAPACITY &&
         !state.classic_pairing_reserved &&
@@ -1258,8 +1348,35 @@ static void service_pairing_admission(void)
 #else
         shared_count == -1 &&
 #endif
-        (TickType_t)(xTaskGetTickCount() - state.handshake_started) <
-            pdMS_TO_TICKS(PAIRING_HANDSHAKE_TIMEOUT_MS);
+        (deadline_known = true, decision_tick = xTaskGetTickCount(),
+         deadline_ok = (TickType_t)(decision_tick - state.handshake_started) <
+            pdMS_TO_TICKS(PAIRING_HANDSHAKE_TIMEOUT_MS));
+    ble_hid_admission_observation_t *entry = admission_trace_locked(BLE_HID_ADMISSION_CHECK,
+        &identity, deadline_known, decision_tick);
+    if (entry) {
+        entry->current_known = true; entry->current = current;
+        entry->address_match_known = state.public.connected && state.conn_id == identity.conn_id &&
+            state.connection_generation == identity.generation;
+        entry->address_match = physical_current;
+        entry->deadline_known = deadline_known; entry->deadline_ok = deadline_ok;
+        entry->refresh_known = true; entry->refresh_error = error;
+#if CONFIG_BT_CLASSIC_ENABLED
+        entry->shared_count_known = true;
+#endif
+        entry->shared_count = shared_count;
+        entry->committed = current && !retry; entry->retry = retry;
+        entry->result_known = true; entry->accepted = grant;
+        entry->rejected_predicates = (!current ? BLE_HID_ADMISSION_NOT_CURRENT : 0U) |
+            (error != ESP_OK ? BLE_HID_ADMISSION_REFRESH_ERROR : 0U) |
+            (!state.bond_list.known ? BLE_HID_ADMISSION_UNKNOWN_CACHE : 0U) |
+            (state.bond_list.count >= PAIRING_BOND_CAPACITY ? BLE_HID_ADMISSION_FULL : 0U) |
+            (state.classic_pairing_reserved ? BLE_HID_ADMISSION_CLASSIC_BUSY : 0U) |
+#if CONFIG_BT_CLASSIC_ENABLED
+            (shared_count < 0 || shared_count >= PAIRING_BOND_CAPACITY ? BLE_HID_ADMISSION_SHARED_UNAVAILABLE : 0U) |
+#endif
+            (deadline_known && !deadline_ok ? BLE_HID_ADMISSION_DEADLINE : 0U);
+    }
+    admission_trace_finish_locked(entry);
     if (current && !retry) {
         state.pairing_admission_pending = false;
         state.pairing_admitted = grant;
@@ -1271,7 +1388,18 @@ static void service_pairing_admission(void)
     }
     portEXIT_CRITICAL(&state_lock);
     if (!current || retry) return;
-    if (grant) error = esp_ble_set_encryption(identity.address, ESP_BLE_SEC_ENCRYPT);
+    if (grant) {
+        error = esp_ble_set_encryption(identity.address, ESP_BLE_SEC_ENCRYPT);
+        portENTER_CRITICAL(&state_lock);
+        entry = admission_trace_locked(BLE_HID_ADMISSION_ENCRYPT_RETURN, &identity, false, 0);
+        if (entry) {
+            entry->result_known = true; entry->accepted = grant;
+            entry->status_known = true; entry->status_domain = BLE_HID_ADMISSION_STATUS_ESP_ERROR;
+            entry->status = error;
+        }
+        admission_trace_finish_locked(entry);
+        portEXIT_CRITICAL(&state_lock);
+    }
     if (error != ESP_OK) {
         fail_link_current(&identity, revision, true, "Pairing capacity/encryption", error);
     }
@@ -1777,17 +1905,50 @@ static void control_worker(void *argument)
                  * a fresh Pair Request bypass the app's security grant.
                  * The independent admission service confirms capacity first. */
                 break;
-            case COMMAND_SECURITY_REPLY:
+            case COMMAND_SECURITY_REPLY: {
                 portENTER_CRITICAL(&state_lock);
                 current = command_current_locked(&command);
+                bool deadline_known = false, deadline_ok = false;
+                TickType_t decision_tick = 0;
                 bool grant = state.pairing_admitted && !state.link_fault &&
                     state.bond_list.known && !state.bond_refresh_pending &&
                     state.bond_list.count < PAIRING_BOND_CAPACITY &&
-                    (TickType_t)(xTaskGetTickCount() - state.handshake_started) <
-                        pdMS_TO_TICKS(PAIRING_HANDSHAKE_TIMEOUT_MS);
+                    (deadline_known = true, decision_tick = xTaskGetTickCount(),
+                     deadline_ok = (TickType_t)(decision_tick - state.handshake_started) <
+                        pdMS_TO_TICKS(PAIRING_HANDSHAKE_TIMEOUT_MS));
+                bool accept = command.accept && current && grant;
+                ble_hid_admission_observation_t *entry = admission_trace_locked(
+                    BLE_HID_ADMISSION_SEC_DECISION, &command, deadline_known, decision_tick);
+                if (entry) {
+                    entry->current_known = true; entry->current = current;
+                    entry->address_match_known = state.public.connected && state.conn_id == command.conn_id &&
+                        state.connection_generation == command.generation;
+                    entry->address_match = current;
+                    entry->deadline_known = deadline_known; entry->deadline_ok = deadline_ok;
+                    entry->result_known = true; entry->accepted = accept;
+                    entry->rejected_predicates = (!command.accept ? BLE_HID_ADMISSION_DENIED_COMMAND : 0U) |
+                        (!current ? BLE_HID_ADMISSION_NOT_CURRENT : 0U) |
+                        (!state.pairing_admitted ? BLE_HID_ADMISSION_NOT_GRANTED : 0U) |
+                        (state.link_fault ? BLE_HID_ADMISSION_FAULT : 0U) |
+                        (!state.bond_list.known ? BLE_HID_ADMISSION_UNKNOWN_CACHE : 0U) |
+                        (state.bond_refresh_pending ? BLE_HID_ADMISSION_REFRESHING : 0U) |
+                        (state.bond_list.count >= PAIRING_BOND_CAPACITY ? BLE_HID_ADMISSION_FULL : 0U) |
+                        (deadline_known && !deadline_ok ? BLE_HID_ADMISSION_DEADLINE : 0U);
+                }
+                admission_trace_finish_locked(entry);
                 portEXIT_CRITICAL(&state_lock);
-                error = esp_ble_gap_security_rsp(command.address, command.accept && current && grant);
+                error = esp_ble_gap_security_rsp(command.address, accept);
+                portENTER_CRITICAL(&state_lock);
+                entry = admission_trace_locked(BLE_HID_ADMISSION_SEC_RETURN, &command, false, 0);
+                if (entry) {
+                    entry->result_known = true; entry->accepted = accept;
+                    entry->status_known = true; entry->status_domain = BLE_HID_ADMISSION_STATUS_ESP_ERROR;
+                    entry->status = error;
+                }
+                admission_trace_finish_locked(entry);
+                portEXIT_CRITICAL(&state_lock);
                 break;
+            }
             case COMMAND_REJECT_CONNECTION:
                 portENTER_CRITICAL(&state_lock);
                 bool reject_current = state.rejected_pending &&
@@ -2055,7 +2216,7 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
             invalidate_bonds_locked();
         }
         break;
-    case ESP_GAP_BLE_AUTH_CMPL_EVT:
+    case ESP_GAP_BLE_AUTH_CMPL_EVT: {
         /* The SDK may already have persisted keys, even if DISCONNECT has
          * arrived or this event belongs to an obsolete link. Invalidate the
          * durable view independently of current connection/auth state. */
@@ -2066,8 +2227,10 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
                 parameter->ble_security.auth_cmpl.bd_addr, ESP_BD_ADDR_LEN) != 0)) {
             state.public.pairing_open = false;
         }
-        if (state.public.connected && memcmp(state.address,
-            parameter->ble_security.auth_cmpl.bd_addr, ESP_BD_ADDR_LEN) == 0) {
+        bool address_match_known = state.public.connected;
+        bool current = state.public.connected && memcmp(state.address,
+            parameter->ble_security.auth_cmpl.bd_addr, ESP_BD_ADDR_LEN) == 0;
+        if (current) {
             bool was_ready = state.public.ready;
             state.bond_resolved = false;
             if (parameter->ble_security.auth_cmpl.success) {
@@ -2113,7 +2276,19 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
                 advance_generation_locked();
             }
         }
+        ble_hid_admission_observation_t *entry = admission_trace_locked(BLE_HID_ADMISSION_AUTH, NULL, true, now);
+        if (entry) {
+            entry->current_known = true; entry->current = current;
+            entry->address_match_known = address_match_known; entry->address_match = current;
+            entry->result_known = true; entry->accepted = parameter->ble_security.auth_cmpl.success;
+            if (!entry->accepted) {
+                entry->status_known = true; entry->status_domain = BLE_HID_ADMISSION_STATUS_AUTH_REASON;
+                entry->status = parameter->ble_security.auth_cmpl.fail_reason;
+            }
+        }
+        admission_trace_finish_locked(entry);
         break;
+    }
     default:
         break;
     }
@@ -2135,10 +2310,20 @@ static void gap_callback(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *p
         command.generation = state.connection_generation;
         command.auth_revision = state.auth_revision;
         command.conn_id = state.conn_id;
+        bool deadline_known = false, deadline_ok = false;
+        bool address_match_known = false, address_match = false;
         command.accept = state.public.connected && !state.public.failed && !state.link_fault &&
             (state.pairing_admitted || state.pairing_admission_pending) &&
-            (TickType_t)(now - state.handshake_started) < pdMS_TO_TICKS(PAIRING_HANDSHAKE_TIMEOUT_MS) &&
-            memcmp(state.address, command.address, ESP_BD_ADDR_LEN) == 0;
+            (deadline_known = true, deadline_ok = (TickType_t)(now - state.handshake_started) <
+                pdMS_TO_TICKS(PAIRING_HANDSHAKE_TIMEOUT_MS)) &&
+            (address_match_known = true, address_match = memcmp(state.address, command.address, ESP_BD_ADDR_LEN) == 0);
+        ble_hid_admission_observation_t *entry = admission_trace_locked(BLE_HID_ADMISSION_SEC_QUEUED, &command, true, now);
+        if (entry) {
+            entry->deadline_known = deadline_known; entry->deadline_ok = deadline_ok;
+            entry->address_match_known = address_match_known; entry->address_match = address_match;
+            entry->result_known = true; entry->accepted = command.accept;
+        }
+        admission_trace_finish_locked(entry);
         portEXIT_CRITICAL(&state_lock);
         post_control(&command);
     }
@@ -2241,6 +2426,13 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
             command.generation = state.connection_generation;
         }
         refresh_locked();
+        ble_hid_admission_observation_t *entry = admission_trace_locked(BLE_HID_ADMISSION_CONNECT, &command, true, now);
+        if (entry) {
+            entry->subject_saved_known = true; entry->subject_saved = saved;
+            entry->window_allowed = pairing;
+            entry->result_known = true; entry->accepted = command.kind != COMMAND_REJECT_CONNECTION;
+        }
+        admission_trace_finish_locked(entry);
         (void)advertising_trace_locked(command.kind == COMMAND_REJECT_CONNECTION ?
             BLE_HID_ADV_CONNECT_REJECTED : BLE_HID_ADV_CONNECT_ACCEPTED,
             trace_ms, 0, false, 0, NULL);
@@ -2259,6 +2451,7 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
             reset_link_locked();
         }
         refresh_locked();
+        admission_trace_finish_locked(admission_trace_locked(BLE_HID_ADMISSION_DISCONNECT, NULL, false, 0));
         (void)advertising_trace_locked(BLE_HID_ADV_DISCONNECT, trace_ms, 0, false, 0, NULL);
         portEXIT_CRITICAL(&state_lock);
         break;
@@ -2409,6 +2602,33 @@ void ble_hid_copy_advertising_diagnostics(ble_hid_advertising_diagnostics_t *out
     for (size_t i = 0; i < out->count; ++i)
         out->events[i] = advertising_diagnostics.events[(advertising_trace_head + i) % BLE_HID_ADVERTISING_TRACE_CAPACITY];
     portEXIT_CRITICAL(&state_lock);
+}
+
+void ble_hid_copy_admission_diagnostics(ble_hid_admission_diagnostics_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&state_lock);
+    *out = admission_diagnostics;
+    for (size_t i = 0; i < out->count; ++i)
+        out->events[i] = admission_diagnostics.events[(admission_trace_head + i) % BLE_HID_ADMISSION_TRACE_CAPACITY];
+    portEXIT_CRITICAL(&state_lock);
+}
+
+const char *ble_hid_admission_event_name(ble_hid_admission_event_t event)
+{
+    switch (event) {
+    case BLE_HID_ADMISSION_OPEN: return "open";
+    case BLE_HID_ADMISSION_CLOSE: return "close";
+    case BLE_HID_ADMISSION_CONNECT: return "connect";
+    case BLE_HID_ADMISSION_CHECK: return "admission";
+    case BLE_HID_ADMISSION_ENCRYPT_RETURN: return "encrypt_api_return";
+    case BLE_HID_ADMISSION_SEC_QUEUED: return "sec_request";
+    case BLE_HID_ADMISSION_SEC_DECISION: return "sec_decision";
+    case BLE_HID_ADMISSION_SEC_RETURN: return "sec_api_return";
+    case BLE_HID_ADMISSION_AUTH: return "auth";
+    case BLE_HID_ADMISSION_DISCONNECT: return "disconnect";
+    default: return "unknown";
+    }
 }
 
 const char *ble_hid_advertising_event_name(ble_hid_advertising_event_t event)
@@ -2616,7 +2836,14 @@ esp_err_t ble_hid_target_order(uint64_t bond_revision, const ble_hid_target_t *o
 
 bool ble_hid_pairing_open(uint32_t duration_ms)
 {
-    if (duration_ms == 0 || duration_ms > BLE_HID_PAIRING_MAX_MS) return false;
+    if (duration_ms == 0 || duration_ms > BLE_HID_PAIRING_MAX_MS) {
+        portENTER_CRITICAL(&state_lock);
+        ble_hid_admission_observation_t *entry = admission_trace_locked(BLE_HID_ADMISSION_OPEN, NULL, false, 0);
+        if (entry) { entry->result_known = true; entry->accepted = false; }
+        admission_trace_finish_locked(entry);
+        portEXIT_CRITICAL(&state_lock);
+        return false;
+    }
     TickType_t now = xTaskGetTickCount();
     portENTER_CRITICAL(&state_lock);
     bool accepted = state.public.initialized && !state.public.failed &&
@@ -2629,6 +2856,9 @@ bool ble_hid_pairing_open(uint32_t duration_ms)
         state.pairing_user_controlled = true;
         open_pairing_locked(now, duration_ms);
     }
+    ble_hid_admission_observation_t *entry = admission_trace_locked(BLE_HID_ADMISSION_OPEN, NULL, true, now);
+    if (entry) { entry->result_known = true; entry->accepted = accepted; }
+    admission_trace_finish_locked(entry);
     portEXIT_CRITICAL(&state_lock);
     return accepted;
 }
@@ -2636,8 +2866,10 @@ bool ble_hid_pairing_open(uint32_t duration_ms)
 void ble_hid_pairing_close(void)
 {
     portENTER_CRITICAL(&state_lock);
+    bool changed = state.public.pairing_open;
     state.pairing_user_controlled = true;
     state.public.pairing_open = false;
+    if (changed) admission_trace_finish_locked(admission_trace_locked(BLE_HID_ADMISSION_CLOSE, NULL, false, 0));
     portEXIT_CRITICAL(&state_lock);
 }
 
