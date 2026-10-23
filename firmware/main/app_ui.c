@@ -24,7 +24,7 @@
 #define ON_ACCENT 0xfffefe
 #define MAX_BINDINGS 64
 #define MAX_COLOR_BINDINGS 512
-#define COMMON_KEY_BUTTONS 14
+#define COMMON_KEY_BUTTONS 15
 
 #if LV_FONT_MONTSERRAT_16
 #define BODY_FONT (&lv_font_montserrat_16)
@@ -1454,8 +1454,7 @@ static void create_extension(lv_obj_t *body, lv_obj_t *title, app_overlay_t kind
             unsigned cell = i < 5 ? i + 3 : i + 4;
             s_common_keys[i + 3] = button(body, names[i], (int)(cell % 3) * 156, 48 + (int)(cell / 3) * 60, 144, 52, APP_KEY, usages[i]);
         }
-        lv_obj_t *note = label(body, "Sends now\nDraft stays", 316, 174, 136, MUTED);
-        lv_obj_set_style_text_font(note, META_FONT, 0);
+        s_common_keys[14] = button(body, "Select all", 312, 168, 144, 52, APP_SHORTCUT, APP_SHORTCUT_SELECT_ALL);
         button(body, "Back to keyboard", 0, 360, 456, 48, APP_CLOSE, 0);
     }
 }
@@ -1730,7 +1729,7 @@ static void render_extension(const app_view_t *view, bool hid_ready)
         label_format(s_common_context, "%s / %s",
             view->input_transport == APP_INPUT_USB ? "USB" : "Bluetooth", s_target_text);
         label_text(s_common_modifiers, view->host_os == APP_HOST_COMMAND ?
-            "Apple shortcuts / Cmd+C, Cmd+V, Cmd+Z" : "Windows shortcuts / Ctrl+C, Ctrl+V, Ctrl+Z");
+            "Apple shortcuts / Cmd+C, Cmd+V, Cmd+Z, Cmd+A" : "Windows shortcuts / Ctrl+C, Ctrl+V, Ctrl+Z, Ctrl+A");
         for (unsigned i = 0; i < COMMON_KEY_BUTTONS; ++i)
             enabled(s_common_keys[i], hid_ready && view->mode == INPUT_KEYBOARD && !view->sending);
         return;

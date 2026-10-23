@@ -63,6 +63,7 @@ static uint16_t s_reason;
 static uint32_t s_event_generation;
 static bool s_disconnected;
 static app_wifi_scan_snapshot_t s_scan;
+static app_wifi_scan_diagnostics_t s_scan_diagnostics;
 static scan_record_t s_scan_records[APP_WIFI_SCAN_CAPACITY];
 static bool s_scan_wait_event, s_scan_done, s_scan_stop_sent, s_scan_cancelled;
 static uint32_t s_scan_status;
@@ -178,6 +179,8 @@ static void scan_event(void *context, esp_event_base_t base, int32_t id, void *d
     if (s_scan_wait_event && !s_scan_done) {
         s_scan_done = true;
         s_scan_status = event ? event->status : 1U;
+        s_scan_diagnostics.current.event_status_known = event != NULL;
+        s_scan_diagnostics.current.event_status = event ? event->status : 0;
     }
     portEXIT_CRITICAL(&s_lock);
 }
@@ -190,6 +193,26 @@ static bool scan_busy(void)
         s_scan.cleanup_pending;
     portEXIT_CRITICAL(&s_lock);
     return busy;
+}
+
+/* Only the Wi-Fi owner advances phases. The event callback copies the raw
+ * completion status under the same lock; readers receive a bounded copy. */
+static void observe_scan_locked(app_wifi_scan_phase_t phase, esp_err_t error)
+{
+    app_wifi_scan_observation_t *current = &s_scan_diagnostics.current;
+    if (current->known) {
+        current->phase = phase;
+        current->error = error;
+        if (error != ESP_OK && (!s_scan_diagnostics.last_failure.known ||
+            s_scan_diagnostics.last_failure.generation != current->generation))
+            s_scan_diagnostics.last_failure = *current;
+    }
+}
+static void observe_scan(app_wifi_scan_phase_t phase, esp_err_t error)
+{
+    portENTER_CRITICAL(&s_lock);
+    observe_scan_locked(phase, error);
+    portEXIT_CRITICAL(&s_lock);
 }
 
 static void finish_scan(app_wifi_scan_state_t state, esp_err_t error, esp_err_t cleanup)
@@ -209,6 +232,8 @@ static void finish_scan(app_wifi_scan_state_t state, esp_err_t error, esp_err_t 
         memset(s_scan_records, 0, sizeof(s_scan_records));
     }
     s_scan_completed_at = now_ms();
+    observe_scan_locked(cleanup == ESP_OK ? APP_WIFI_SCAN_PHASE_COMPLETE : APP_WIFI_SCAN_PHASE_CLEAR,
+        cleanup == ESP_OK ? s_scan.error : cleanup);
     publish();
     portEXIT_CRITICAL(&s_lock);
     s_scan_cleanup_at = cleanup != ESP_OK ? now_ms() + CLEANUP_RETRY_MS : 0;
@@ -225,9 +250,21 @@ static void start_scan(void)
     }
     /* Provisional reserves are admission limits, not heap/radio qualification. */
     unsigned caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    size_t free_internal = heap_caps_get_free_size(caps);
+    size_t largest_internal = heap_caps_get_largest_free_block(caps);
+    size_t free_dma = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    size_t largest_dma = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    portENTER_CRITICAL(&s_lock);
+    s_scan_diagnostics.current.heap_known = true;
+    s_scan_diagnostics.current.station_state = s_snapshot.state;
+    s_scan_diagnostics.current.lan_ready = s_snapshot.lan_ready;
+    s_scan_diagnostics.current.free_internal = free_internal;
+    s_scan_diagnostics.current.largest_internal = largest_internal;
+    s_scan_diagnostics.current.free_dma = free_dma;
+    s_scan_diagnostics.current.largest_dma = largest_dma;
+    portEXIT_CRITICAL(&s_lock);
     esp_err_t error = ESP_OK;
-    if (heap_caps_get_free_size(caps) < 32768U ||
-        heap_caps_get_largest_free_block(caps) < 16384U) error = ESP_ERR_NO_MEM;
+    if (free_internal < 32768U || largest_internal < 16384U) error = ESP_ERR_NO_MEM;
     wifi_scan_config_t config = {
         .show_hidden = true,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
@@ -249,10 +286,19 @@ static void start_scan(void)
     s_scan.state = APP_WIFI_SCAN_RUNNING;
     publish();
     portEXIT_CRITICAL(&s_lock);
-    if (error == ESP_OK) error = esp_wifi_scan_start(&config, false);
+    observe_scan(APP_WIFI_SCAN_PHASE_HEAP, error);
+    if (error == ESP_OK) {
+        error = esp_wifi_scan_start(&config, false);
+        portENTER_CRITICAL(&s_lock);
+        s_scan_diagnostics.current.driver_admitted = error == ESP_OK;
+        portEXIT_CRITICAL(&s_lock);
+        observe_scan(APP_WIFI_SCAN_PHASE_SDK_START, error);
+    }
     if (error != ESP_OK) {
         /* Failed admission must not manufacture a successful empty scan. */
-        finish_scan(APP_WIFI_SCAN_ERROR, error, esp_wifi_clear_ap_list());
+        esp_err_t cleared = esp_wifi_clear_ap_list();
+        observe_scan(APP_WIFI_SCAN_PHASE_CLEAR, cleared);
+        finish_scan(APP_WIFI_SCAN_ERROR, error, cleared);
     } else s_scan_deadline = now_ms() + APP_WIFI_SCAN_TIMEOUT_MS;
 }
 
@@ -274,8 +320,10 @@ static void service_scan(bool cancel)
         if (now >= s_scan_cancel_until && s_scan.error == ESP_OK) s_scan.error = ESP_ERR_TIMEOUT;
         publish();
         portEXIT_CRITICAL(&s_lock);
+        if (s_scan.error != ESP_OK) observe_scan(APP_WIFI_SCAN_PHASE_WAIT_EVENT, s_scan.error);
         if (!done && !s_scan_stop_sent && now >= s_scan_cleanup_at) {
             esp_err_t stopped = esp_wifi_scan_stop();
+            observe_scan(APP_WIFI_SCAN_PHASE_STOP, stopped);
             s_scan_stop_sent = stopped == ESP_OK;
             s_scan_cleanup_at = now + CLEANUP_RETRY_MS;
             portENTER_CRITICAL(&s_lock);
@@ -288,20 +336,29 @@ static void service_scan(bool cancel)
          * Without that evidence new scan/join/reconnect remains blocked. */
     }
     if (awaiting && done) {
+        observe_scan(APP_WIFI_SCAN_PHASE_EVENT, !s_scan_cancelled && status ? ESP_FAIL : ESP_OK);
         if (s_scan_cancelled || status != 0) {
             esp_err_t error = s_scan.error;
             if (!s_scan_cancelled && status && error == ESP_OK) error = ESP_FAIL;
+            esp_err_t cleared = esp_wifi_clear_ap_list();
+            observe_scan(APP_WIFI_SCAN_PHASE_CLEAR, cleared);
             finish_scan(s_scan_cancelled && error == ESP_OK ? APP_WIFI_SCAN_CANCELLED :
-                APP_WIFI_SCAN_ERROR, error, esp_wifi_clear_ap_list());
+                APP_WIFI_SCAN_ERROR, error, cleared);
         } else {
             uint16_t count = 0;
             esp_err_t error = esp_wifi_scan_get_ap_num(&count);
+            portENTER_CRITICAL(&s_lock);
+            s_scan_diagnostics.current.count_known = error == ESP_OK;
+            s_scan_diagnostics.current.driver_count = error == ESP_OK ? count : 0;
+            portEXIT_CRITICAL(&s_lock);
+            observe_scan(APP_WIFI_SCAN_PHASE_COUNT, error);
             wifi_ap_record_t current = {0};
             bool current_known = esp_wifi_sta_get_ap_info(&current) == ESP_OK;
             uint16_t kept = count < APP_WIFI_SCAN_CAPACITY ? count : APP_WIFI_SCAN_CAPACITY;
             for (uint16_t i = 0; error == ESP_OK && i < kept; ++i) {
                 wifi_ap_record_t ap = {0};
                 error = esp_wifi_scan_get_ap_record(&ap);
+                observe_scan(APP_WIFI_SCAN_PHASE_RECORD, error);
                 if (error != ESP_OK) break;
                 scan_record_t record = {.channel = ap.primary, .rssi = ap.rssi,
                     .authmode = (uint16_t)ap.authmode};
@@ -316,9 +373,11 @@ static void service_scan(bool cancel)
                     !s_snapshot.storage_uncertain && scan_availability(&record) == APP_WIFI_JOIN_AVAILABLE &&
                     profile_remembered_locked(record.ssid);
                 s_scan_records[i] = record;
+                s_scan_diagnostics.current.read_count = i + 1U;
                 portEXIT_CRITICAL(&s_lock);
             }
             esp_err_t cleared = esp_wifi_clear_ap_list();
+            observe_scan(APP_WIFI_SCAN_PHASE_CLEAR, cleared);
             portENTER_CRITICAL(&s_lock);
             s_scan.count = error == ESP_OK ? kept : 0;
             s_scan.capacity_reached = count >= APP_WIFI_SCAN_CAPACITY;
@@ -330,7 +389,9 @@ static void service_scan(bool cancel)
     } else if (!awaiting && cleanup && now >= s_scan_cleanup_at) {
         app_wifi_scan_state_t terminal = s_scan.state == APP_WIFI_SCAN_CANCELLING ?
             (s_scan.error == ESP_OK ? APP_WIFI_SCAN_CANCELLED : APP_WIFI_SCAN_ERROR) : s_scan.state;
-        finish_scan(terminal, s_scan.error, esp_wifi_clear_ap_list());
+        esp_err_t cleared = esp_wifi_clear_ap_list();
+        observe_scan(APP_WIFI_SCAN_PHASE_CLEAR, cleared);
+        finish_scan(terminal, s_scan.error, cleared);
     } else if (!awaiting && cancel && !cleanup) {
         finish_scan(APP_WIFI_SCAN_CANCELLED, ESP_OK, ESP_OK);
     }
@@ -1145,6 +1206,9 @@ esp_err_t app_wifi_scan_start(void)
     else {
         uint32_t generation = s_scan.generation + 1U;
         s_scan = (app_wifi_scan_snapshot_t){.state = APP_WIFI_SCAN_QUEUED, .generation = generation};
+        s_scan_diagnostics.current = (app_wifi_scan_observation_t){.known = true,
+            .generation = generation, .phase = APP_WIFI_SCAN_PHASE_QUEUED,
+            .station_state = s_snapshot.state, .lan_ready = s_snapshot.lan_ready};
         memset(s_scan_records, 0, sizeof(s_scan_records));
         s_scan_next_at = now_ms() + APP_WIFI_SCAN_COOLDOWN_MS;
         s_scan_cleanup_at = 0;
@@ -1186,6 +1250,14 @@ void app_wifi_get_scan_snapshot(app_wifi_scan_snapshot_t *snapshot)
             APP_WIFI_SCAN_RESULT_TTL_MS - (uint32_t)age : 0;
         if (!snapshot->remaining_ms) snapshot->state = APP_WIFI_SCAN_EXPIRED;
     }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void app_wifi_get_scan_diagnostics(app_wifi_scan_diagnostics_t *diagnostics)
+{
+    if (!diagnostics) return;
+    portENTER_CRITICAL(&s_lock);
+    *diagnostics = s_scan_diagnostics;
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -1363,6 +1435,8 @@ esp_err_t app_wifi_get_setup_info(app_wifi_setup_info_t *info)
 }
 
 #else
+void app_wifi_get_scan_diagnostics(app_wifi_scan_diagnostics_t *out)
+{ if (out) memset(out, 0, sizeof(*out)); }
 esp_err_t app_wifi_profile_result(uint64_t id,app_wifi_profile_result_t *out){(void)id;if(out)memset(out,0,sizeof(*out));return ESP_ERR_NOT_SUPPORTED;}
 void app_wifi_set_backend_state(bool available,esp_err_t error){(void)available;(void)error;}
 esp_err_t app_wifi_profiles_forget_all_request(uint64_t rev,bool ack,uint64_t *id){(void)rev;(void)ack;if(id)*id=0;return ESP_ERR_NOT_SUPPORTED;}

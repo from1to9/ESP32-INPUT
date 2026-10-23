@@ -35,6 +35,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#include <math.h>
 
 #define INTENT_CAPACITY 16
 #define COORDINATOR_PERIOD_MS 10
@@ -205,6 +206,17 @@ static uint32_t s_touch_gesture, s_consumed_gesture;
 static uint32_t s_live_touch_gesture;
 static uint64_t s_touch_transition_ms;
 static uint64_t s_last_imu_us;
+/* One coordinator owns this bounded observation state. It never participates
+ * in motion admission, clock handling, sample acceptance or report retries. */
+typedef struct {
+    uint32_t processed, duplicates, read_errors, gaps, clock_backsteps;
+    uint32_t sample_blocks, move_attempts, move_admitted, move_rejected;
+    uint64_t last_dt_us, max_dt_us, last_gap_us, first_active_gap_us, first_active_gap_at_us;
+    uint32_t window_samples, window_enabled, invalid_raw;
+    int32_t minimum[6], maximum[6];
+    bool range_known, first_active_gap_known, saturated;
+} motion_trace_t;
+static EXT_RAM_BSS_ATTR motion_trace_t s_motion_trace;
 typedef struct { bool down; uint64_t time_ms; } button_edge_t;
 static button_edge_t s_button_edges[8];
 static unsigned s_button_head, s_button_count;
@@ -231,13 +243,78 @@ static void clear_private(void *memory, size_t length)
     while (length--) *bytes++ = 0;
 }
 
+static void motion_trace_count(uint32_t *counter)
+{
+    if (*counter != UINT32_MAX) ++*counter;
+    else s_motion_trace.saturated = true;
+}
+
+static void observe_model_clock(uint64_t time_ms)
+{
+    if (s_interaction.clock_seen && time_ms < s_interaction.now_ms)
+        motion_trace_count(&s_motion_trace.clock_backsteps);
+}
+
+static void __attribute__((noinline)) observe_motion_sample(const board_imu_sample_t *sample)
+{
+    motion_trace_count(&s_motion_trace.processed);
+    motion_trace_count(&s_motion_trace.window_samples);
+    if (s_engine.state.gyro_enabled) motion_trace_count(&s_motion_trace.window_enabled);
+    if (s_last_imu_us && sample->timestamp_us >= s_last_imu_us) {
+        const uint64_t dt = sample->timestamp_us - s_last_imu_us;
+        s_motion_trace.last_dt_us = dt;
+        if (dt > s_motion_trace.max_dt_us) s_motion_trace.max_dt_us = dt;
+        /* Observe the existing 50 ms consumer contract, without driving it. */
+        if (dt > 50000) {
+            motion_trace_count(&s_motion_trace.gaps);
+            s_motion_trace.last_gap_us = dt;
+            if (s_engine.state.gyro_enabled && !s_motion_trace.first_active_gap_known) {
+                s_motion_trace.first_active_gap_known = true;
+                s_motion_trace.first_active_gap_us = dt;
+                s_motion_trace.first_active_gap_at_us = sample->timestamp_us;
+            }
+        }
+    }
+    const float raw[] = {sample->x_dps, sample->y_dps, sample->z_dps,
+                         sample->x_g, sample->y_g, sample->z_g};
+    int32_t scaled[6];
+    for (size_t i = 0; i < 6; ++i) {
+        if (!isfinite(raw[i]) || fabsf(raw[i]) > 2000000.0f) {
+            motion_trace_count(&s_motion_trace.invalid_raw);
+            return;
+        }
+        scaled[i] = (int32_t)(raw[i] * 1000.0f);
+    }
+    for (size_t i = 0; i < 6; ++i) {
+        if (!s_motion_trace.range_known || scaled[i] < s_motion_trace.minimum[i]) s_motion_trace.minimum[i] = scaled[i];
+        if (!s_motion_trace.range_known || scaled[i] > s_motion_trace.maximum[i]) s_motion_trace.maximum[i] = scaled[i];
+    }
+    s_motion_trace.range_known = true;
+}
+
 typedef struct {
     app_wifi_snapshot_t wifi;
     app_media_snapshot_t media;
     app_control_runtime_snapshot_t control;
+    app_wifi_scan_diagnostics_t scan;
 } runtime_diagnostics_t;
 /* One coordinator owns these copied observations, including their cleanup. */
 static EXT_RAM_BSS_ATTR runtime_diagnostics_t s_runtime_diagnostics;
+
+static void __attribute__((noinline)) report_scan_observation(const char *label,
+    const app_wifi_scan_observation_t *scan)
+{
+    if (!scan->known) { ESP_LOGI(TAG, "WiFiScan %s known=0", label); return; }
+    ESP_LOGI(TAG, "WiFiScan %s known=1 generation=%u phase=%d error=%d station=%d lan=%d "
+             "heap_known=%d free_internal=%u largest_internal=%u free_dma=%u largest_dma=%u "
+             "admitted=%d event_known=%d event_status=%u count_known=%d driver_count=%u read_count=%u",
+             label, (unsigned)scan->generation, (int)scan->phase, (int)scan->error,
+             (int)scan->station_state, scan->lan_ready, scan->heap_known,
+             (unsigned)scan->free_internal, (unsigned)scan->largest_internal,
+             (unsigned)scan->free_dma, (unsigned)scan->largest_dma,
+             scan->driver_admitted, scan->event_status_known, (unsigned)scan->event_status,
+             scan->count_known, (unsigned)scan->driver_count, (unsigned)scan->read_count);
+}
 
 static void __attribute__((noinline)) report_runtime_diagnostics(void)
 {
@@ -246,6 +323,7 @@ static void __attribute__((noinline)) report_runtime_diagnostics(void)
     app_wifi_get_snapshot(&observed->wifi);
     bool media_available = app_media_runtime_snapshot(&observed->media);
     app_control_runtime_snapshot(&observed->control);
+    app_wifi_get_scan_diagnostics(&observed->scan);
     ESP_LOGI(TAG, "Runtime Wi-Fi initialized=%d state=%d lan_ready=%d backend_available=%d "
              "error=%d backend_error=%d",
              observed->wifi.initialized,
@@ -274,6 +352,8 @@ static void __attribute__((noinline)) report_runtime_diagnostics(void)
              (int)observed->control.server.error, observed->control.trust.known,
              observed->control.trust.present, observed->control.trust.uncertain,
              observed->control.clock.known);
+    report_scan_observation("current", &observed->scan.current);
+    report_scan_observation("last_failure", &observed->scan.last_failure);
     clear_private(observed, sizeof(*observed));
 }
 
@@ -435,9 +515,14 @@ static bool send_report(void *context, uint8_t report_id,
                          const uint8_t *data, size_t length)
 {
     const uint64_t *generation = context;
-    return s_input_transport == APP_INPUT_USB ?
+    const bool movement = report_id == HID_ENGINE_MOUSE_REPORT_ID &&
+        length == HID_ENGINE_MOUSE_REPORT_LENGTH && (data[1] || data[2]);
+    if (movement) motion_trace_count(&s_motion_trace.move_attempts);
+    bool accepted = s_input_transport == APP_INPUT_USB ?
         usb_hid_send_generation(*generation, report_id, data, length) :
         ble_hid_send_generation(*generation, report_id, data, length);
+    if (movement) motion_trace_count(accepted ? &s_motion_trace.move_admitted : &s_motion_trace.move_rejected);
+    return accepted;
 }
 
 static input_link_t input_link_snapshot(const ble_hid_snapshot_t *bluetooth)
@@ -468,6 +553,7 @@ static void service_usb_selection(void)
 
 static void sync_interaction(void)
 {
+    observe_model_clock(s_now_ms);
     interaction_sync(&s_interaction, &s_engine.state,
         s_engine.ready && !s_engine.state.release_pending && !s_engine.congested, s_now_ms);
     bool touch, physical;
@@ -1715,10 +1801,12 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         if (s_engine.state.mode != INPUT_KEYBOARD ||
             (s_keyboard_submode != APP_KEYBOARD_SHORTCUTS && s_overlay != APP_OVERLAY_COMMON_KEYS))
             return;
-        static const unsigned usages[] = {0x06, 0x19, 0x1d, 0x2b, 0x29, 0x28};
-        if (intent->x < APP_SHORTCUT_COPY || intent->x > APP_SHORTCUT_ENTER) return;
-        if (s_overlay == APP_OVERLAY_COMMON_KEYS && intent->x > APP_SHORTCUT_UNDO) return;
-        unsigned modifier = intent->x <= APP_SHORTCUT_UNDO ?
+        static const unsigned usages[] = {0x06, 0x19, 0x1d, 0x2b, 0x29, 0x28, 0x04};
+        if (intent->x < APP_SHORTCUT_COPY || intent->x > APP_SHORTCUT_SELECT_ALL) return;
+        if (s_overlay != APP_OVERLAY_COMMON_KEYS && intent->x > APP_SHORTCUT_ENTER) return;
+        if (s_overlay == APP_OVERLAY_COMMON_KEYS && intent->x > APP_SHORTCUT_UNDO &&
+            intent->x != APP_SHORTCUT_SELECT_ALL) return;
+        unsigned modifier = intent->x <= APP_SHORTCUT_UNDO || intent->x == APP_SHORTCUT_SELECT_ALL ?
             (s_host_os == APP_HOST_COMMAND ? 0x08U : 0x01U) : 0;
         result = hid_engine_enqueue_key(&s_engine, intent->epoch, INPUT_LOCAL,
             modifier, usages[intent->x]);
@@ -1950,6 +2038,7 @@ static void process_buttons(void)
         s_now_ms = edge.time_ms;
         if (s_now_ms > poll_ms) poll_ms = s_now_ms;
         /* Classify any older pending single before assigning a new press token. */
+        observe_model_clock(edge.time_ms);
         handle_button_events(interaction_tick(&s_interaction, edge.time_ms));
         if (edge.down && s_ai_token < UINT64_MAX) ++s_ai_token;
         bool was_asleep = s_idle.asleep;
@@ -1980,13 +2069,18 @@ static void process_motion(void)
 {
     board_imu_sample_t sample;
     if (board_imu_read(&sample) != ESP_OK) {
+        motion_trace_count(&s_motion_trace.read_errors);
         if (!board_capabilities().imu) {
             (void)hid_engine_set_gyro(&s_engine, false);
             (void)interaction_set_motion(&s_interaction, false);
         }
         return;
     }
-    if (sample.timestamp_us == s_last_imu_us) return;
+    if (sample.timestamp_us == s_last_imu_us) {
+        motion_trace_count(&s_motion_trace.duplicates);
+        return;
+    }
+    observe_motion_sample(&sample);
     s_last_imu_us = sample.timestamp_us;
     /* The board adapter supplies the right-handed display frame for both
      * sensors. Host inversion belongs after gravity projection, never here. */
@@ -2000,6 +2094,8 @@ static void process_motion(void)
      * chooses an authorized source; it never starts another sensor reader. */
     bool consumed = app_remote_input_motion_sample(s_remote_input, &mapped, s_now_ms);
     input_delta_t delta = consumed ? (input_delta_t){0} : interaction_motion_sample(&s_interaction, &mapped);
+    if (s_interaction.view.motion_block_reason == INTERACTION_MOTION_BLOCK_SAMPLE)
+        motion_trace_count(&s_motion_trace.sample_blocks);
     if (!was_calibrated && s_interaction.view.calibrated) {
         s_message = "Motion calibrated. Click AI to toggle motion.";
     }
@@ -2007,6 +2103,84 @@ static void process_motion(void)
         (void)hid_engine_enqueue_mouse_move(&s_engine, s_engine.state.epoch,
             INPUT_LOCAL, delta.x, delta.y);
     }
+}
+
+static int32_t motion_trace_fixed(float value)
+{
+    return isfinite(value) && fabsf(value) <= 2000000.0f ? (int32_t)(value * 1000.0f) : INT32_MIN;
+}
+
+static void __attribute__((noinline)) report_motion_diagnostics(const input_link_t *link)
+{
+    static EXT_RAM_BSS_ATTR board_imu_status_t imu;
+    imu = board_imu_status();
+    ESP_LOGI(TAG, "Motion imu_available=%d imu_error=%s samples=%llu "
+             "sample_age_known=%d sample_age_us=%llu late_batches=%llu late_batches_saturated=%d "
+             "calibrated=%d calibrating=%d "
+             "calibration_samples=%u input_kind=%d input_connected=%d input_ready=%d "
+             "phase=%d worker_running=%d recoveries=%llu failure_streak=%u retry_ms=%u "
+             "batch_time_known=%d batch_us=%llu max_batch_us=%llu schedule_late_us=%llu "
+             "engine_motion=%d model_motion=%d model_ready=%d model_block=%d mode=%d owner=%d "
+             "reference=%d geometry=%d touch=%d gesture=%d menu=%d haptic=%d button=%d freeze_left_ms=%llu "
+             "consumer_samples=%u duplicate_samples=%u consumer_errors=%u consumer_gaps=%u "
+             "consumer_dt_us=%llu consumer_max_dt_us=%llu last_gap_us=%llu "
+             "first_active_gap_known=%d first_active_gap_us=%llu first_active_gap_at_us=%llu "
+             "sample_blocks=%u clock_backsteps=%u move_attempts=%u move_admitted=%u move_rejected=%u "
+             "gravity_x_milli=%d bias_x_mdps=%d bias_y_mdps=%d bias_z_mdps=%d counters_saturated=%d",
+             imu.available, esp_err_to_name(imu.error),
+             (unsigned long long)imu.sample_count, imu.sample_age_known,
+             (unsigned long long)imu.sample_age_us,
+             (unsigned long long)imu.late_batch_count, imu.late_batch_count_saturated,
+             s_interaction.view.calibrated,
+             s_interaction.view.calibrating, (unsigned)s_interaction.view.calibration_samples,
+             (int)link->kind, link->connected, s_engine.ready, (int)imu.phase, imu.worker_running,
+             (unsigned long long)imu.recovery_count, (unsigned)imu.failure_streak,
+             (unsigned)imu.retry_delay_ms, imu.batch_time_known,
+             (unsigned long long)imu.last_batch_us, (unsigned long long)imu.max_batch_us,
+             (unsigned long long)imu.last_schedule_late_us,
+             s_engine.state.gyro_enabled, s_interaction.view.motion_enabled, s_interaction.output_ready,
+             (int)s_interaction.view.motion_block_reason, (int)s_engine.state.mode, (int)s_engine.state.owner,
+             s_interaction.gravity_ready, s_interaction.geometry_ready, s_interaction.view.touch_active,
+             s_interaction.touch.active, s_interaction.view.menu_open, s_interaction.view.haptic_active,
+             s_interaction.view.button_down,
+             (unsigned long long)(s_now_ms < s_interaction.freeze_until_ms ? s_interaction.freeze_until_ms - s_now_ms : 0),
+             (unsigned)s_motion_trace.processed, (unsigned)s_motion_trace.duplicates,
+             (unsigned)s_motion_trace.read_errors, (unsigned)s_motion_trace.gaps,
+             (unsigned long long)s_motion_trace.last_dt_us, (unsigned long long)s_motion_trace.max_dt_us,
+             (unsigned long long)s_motion_trace.last_gap_us, s_motion_trace.first_active_gap_known,
+             (unsigned long long)s_motion_trace.first_active_gap_us,
+             (unsigned long long)s_motion_trace.first_active_gap_at_us,
+             (unsigned)s_motion_trace.sample_blocks, (unsigned)s_motion_trace.clock_backsteps,
+             (unsigned)s_motion_trace.move_attempts, (unsigned)s_motion_trace.move_admitted,
+             (unsigned)s_motion_trace.move_rejected,
+             motion_trace_fixed(s_interaction.gravity[0]), motion_trace_fixed(s_interaction.bias[0]),
+             motion_trace_fixed(s_interaction.bias[1]), motion_trace_fixed(s_interaction.bias[2]),
+             s_motion_trace.saturated);
+    if (imu.fault_latched)
+        ESP_LOGW(TAG, "First IMU fault stage=%s error=%s uptime_us=%llu "
+                 "last_hardware_stage=%s last_hardware_error=%s ready_known=%d ready_bits=%u",
+                 imu.first_fault_stage, esp_err_to_name(imu.first_fault_error),
+                 (unsigned long long)imu.first_fault_us, imu.last_hardware_stage,
+                 esp_err_to_name(imu.last_hardware_error), imu.data_ready_known,
+                 (unsigned)imu.data_ready_bits);
+    if (s_motion_trace.range_known)
+        ESP_LOGI(TAG, "MotionWindow samples=%u enabled=%u raw_known=1 invalid_raw=%u "
+                 "gx_min_mdps=%d gx_max_mdps=%d gy_min_mdps=%d gy_max_mdps=%d gz_min_mdps=%d gz_max_mdps=%d "
+                 "ax_min_mg=%d ax_max_mg=%d ay_min_mg=%d ay_max_mg=%d az_min_mg=%d az_max_mg=%d",
+                 (unsigned)s_motion_trace.window_samples, (unsigned)s_motion_trace.window_enabled,
+                 (unsigned)s_motion_trace.invalid_raw,
+                 s_motion_trace.minimum[0], s_motion_trace.maximum[0], s_motion_trace.minimum[1], s_motion_trace.maximum[1],
+                 s_motion_trace.minimum[2], s_motion_trace.maximum[2], s_motion_trace.minimum[3], s_motion_trace.maximum[3],
+                 s_motion_trace.minimum[4], s_motion_trace.maximum[4], s_motion_trace.minimum[5], s_motion_trace.maximum[5]);
+    else ESP_LOGI(TAG, "MotionWindow samples=%u enabled=%u raw_known=0 invalid_raw=%u",
+                  (unsigned)s_motion_trace.window_samples, (unsigned)s_motion_trace.window_enabled,
+                  (unsigned)s_motion_trace.invalid_raw);
+    /* Only observation-window storage changes after reporting. Lifetime totals
+     * and the first active gap remain available to a late USB reader. Movement
+     * report counts include touch/remote movement and mean transport admission,
+     * never host acknowledgement or Motion-only delivery. */
+    s_motion_trace.window_samples = s_motion_trace.window_enabled = s_motion_trace.invalid_raw = 0;
+    s_motion_trace.range_known = false;
 }
 
 static app_wifi_row_view_t wifi_row(const app_wifi_scan_record_t *record, uint16_t index)
@@ -2439,32 +2613,8 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
             last_health_us = now;
             report_memory_diagnostics();
             report_runtime_diagnostics();
-            board_imu_status_t imu = board_imu_status();
             app_presenter_status_t presentation = app_presenter_status();
-            ESP_LOGI(TAG, "Motion imu_available=%d imu_error=%s samples=%llu "
-                     "sample_age_known=%d sample_age_us=%llu late_batches=%llu late_batches_saturated=%d "
-                     "calibrated=%d calibrating=%d "
-                     "calibration_samples=%u input_kind=%d input_connected=%d input_ready=%d "
-                     "phase=%d worker_running=%d recoveries=%llu failure_streak=%u retry_ms=%u "
-                     "batch_time_known=%d batch_us=%llu max_batch_us=%llu schedule_late_us=%llu",
-                     imu.available, esp_err_to_name(imu.error),
-                     (unsigned long long)imu.sample_count, imu.sample_age_known,
-                     (unsigned long long)imu.sample_age_us,
-                     (unsigned long long)imu.late_batch_count, imu.late_batch_count_saturated,
-                     s_interaction.view.calibrated,
-                     s_interaction.view.calibrating, (unsigned)s_interaction.view.calibration_samples,
-                     (int)link.kind, link.connected, s_engine.ready, (int)imu.phase, imu.worker_running,
-                     (unsigned long long)imu.recovery_count, (unsigned)imu.failure_streak,
-                     (unsigned)imu.retry_delay_ms, imu.batch_time_known,
-                     (unsigned long long)imu.last_batch_us, (unsigned long long)imu.max_batch_us,
-                     (unsigned long long)imu.last_schedule_late_us);
-            if (imu.fault_latched)
-                ESP_LOGW(TAG, "First IMU fault stage=%s error=%s uptime_us=%llu "
-                         "last_hardware_stage=%s last_hardware_error=%s ready_known=%d ready_bits=%u",
-                         imu.first_fault_stage, esp_err_to_name(imu.first_fault_error),
-                         (unsigned long long)imu.first_fault_us, imu.last_hardware_stage,
-                         esp_err_to_name(imu.last_hardware_error), imu.data_ready_known,
-                         (unsigned)imu.data_ready_bits);
+            report_motion_diagnostics(&link);
             ESP_LOGI(TAG, "UI published=%llu applied=%llu pending=%d pending_age_ms=%llu "
                      "applying=%d last_apply_latency_ms=%llu",
                      (unsigned long long)presentation.published_count,

@@ -26,6 +26,7 @@ def main():
         binary = temporary / "test_wifi"
         subprocess.run([compiler, "-std=c11", "-D_DEFAULT_SOURCE", "-Wall", "-Wextra",
                         "-Werror", "-pedantic", "-g", "-fsanitize=address,undefined",
+                        "-fno-sanitize-recover=all",
                         "-fno-omit-frame-pointer", "-I", str(temporary), "-I",
                         str(SUITE / "stubs"), str(SUITE / "test_wifi.c"),
                         "-o", str(binary)], check=True)

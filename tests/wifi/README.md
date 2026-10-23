@@ -6,6 +6,22 @@ Native-station checks cover queued asynchronous scan, driver retention configura
 
 Scan faults cover low free/largest-block heap, SDK admission/count/read failure, empty success versus failed scan, cancellation before/after SDK start, missing/late completion, timeout, scan-stop failure with bounded retries, list-clear failure/recovery, no reconnect or replacement while cleanup owns the driver, and forget draining active scan state. They exercise the production worker and documented SDK completion boundary; they do not claim driver internals or dense-radio behavior are simulated.
 
+The separate copied scan diagnostics expose the current accepted generation and
+the first error from the most recently failed generation. Later cleanup errors,
+rejected requests and successful scans do not erase that earlier cause. A new
+failed generation replaces the previous failure. Records distinguish heap
+admission, SDK start, raw completion status, count/read progress, stop, clear and
+missing-event timeout. Unknown event/count/heap values have explicit flags;
+the captured heap values describe admission, not a measured scan peak. They
+include both internal 8-bit and DMA free/largest blocks, without credentials or
+network identities. The existing UI scan snapshot and all scan policies remain
+unchanged. Regression cases cover connected start failure followed by clear
+failure/recovery and a successful next scan, partial reads, absent event data,
+expected cancellation, exact memory thresholds, and a new generation admitted
+at the previous result publication boundary. These fault injections validate
+diagnostic truth and ownership; they do not identify an uncaptured intermittent
+device failure or qualify Bluetooth/radio coexistence.
+
 Editor reservation tests select a fresh row, expire/replace the display list, then submit the original five-minute ticket without reinterpreting its SSID. They reject ordinary stale-row joins, wrong ticket/SSID/index, unsupported selection, stale renewal, replacement/release/forget, replay, absolute ticket expiry and queued expiry. Consuming a ticket transfers it to the worker; an editor-close release cannot cancel that accepted request. Owned manager tests separate the native editor from each authenticated remote principal/session: foreign reserve, release, selected join and manual join cannot borrow or replace an unexpired ticket.
 
 Fallback regression checks retain explicit setup/no automatic AP, one-time form submission, AP-only bind configuration, random-session replacement, exact Host/Origin, body bounds, fragmented reads/timeouts, duplicate/unknown/malformed fields, UTF-8/control rejection, HTML escaping, token replay, queued-save cancellation/expiry, saved-network reload, capped retry timing, RSSI/IP validity, local stop/forget, storage recovery and initialization cleanup.

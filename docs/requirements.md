@@ -36,7 +36,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 | K03 | Character entry | A-Z/a-z, digits, space, delete, common ASCII punctuation and clear-preview action |
 | K04 | Explicit send | Visible target, preview and progress; no appended Enter; remaining queue can be cancelled |
 | K05 | Shortcuts | Host-specific Ctrl/Command configuration rather than one hardcoded mapping |
-| K06 | Common keys | One-tap Keys from every Keyboard submode: Copy/Paste/Undo, Esc, Tab, Enter, Backspace, forward Delete, arrows, Home and End without modifying the preview |
+| K06 | Common keys | One-tap Keys from every Keyboard submode: Copy/Paste/Undo/Select all, Esc, Tab, Enter, Backspace, forward Delete, arrows, Home and End in a symmetric 5 x 3 grid without modifying the preview |
 | S01 | Lock | Release HID, cancel queued input, suspend remote control and mute; long press again to unlock |
 | S02 | Reconnect | No replay of old clicks, keys or text; motion stays off and remote tasks stay stopped |
 
@@ -71,7 +71,7 @@ release/cancel action. Gesture interruption must never leave a host button held.
 - Motion changes local focus; AI single-click confirms. Touch uses the same grid and buffer.
 - Integrate relative angular movement, reset the center after confirmation, apply boundary hysteresis and never auto-confirm from dwell or jitter.
 - Characters enter preview first. Send emits key-down/key-up pairs without Enter. Track the accepted prefix and preserve only unsent text after interruption; never automatically replay a partial send.
-- A persistent Keyboard header Keys button opens a separate live-host panel from every submode. It sends explicit key-down/key-up pairs to the selected host. Copy/Paste/Undo follow the saved Ctrl/Command setting; no clipboard contents are read. Enter is deliberate and never appended by Send. Preview deletion, host Backspace and host forward Delete are distinct operations; key-panel actions leave the preview unchanged.
+- A persistent Keyboard header Keys button opens a separate live-host panel from every submode. It sends explicit key-down/key-up pairs to the selected host. Copy/Paste/Undo/Select all follow the saved Ctrl/Command setting; no clipboard contents are read. Enter is deliberate and never appended by Send. Preview deletion, host Backspace and host forward Delete are distinct operations; key-panel actions leave the preview unchanged.
 - Initial encoding is US ANSI. The host must use a matching physical layout and English input mode. Other layouts require explicit support.
 - Transport acceptance does not prove text reached the intended field. Focus is user-controlled until a separate visual feedback loop exists.
 

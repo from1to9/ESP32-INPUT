@@ -55,6 +55,8 @@ The chooser is an on-demand panel with five 456 x 64 rows at y 64/y 136/y 208/y 
 
 The 2026-10-22 user-requested discoverability revision adds the persistent Keys entry without moving or shrinking the grid, preview, Clear or Delete draft/Space/Send controls. It reuses the Common keys overlay with fourteen controls in a three-column, five-row layout; Copy/Paste/Undo share the panel with the eleven explicit host keys. The capture cue and Menu retain their original header rectangles. The additional button and caption raise the fixed-core budget by exactly two objects (104 to 106); the dynamic-panel ceiling remains 160. See [Common keys](native-wifi-ui.md#11-common-keys-without-shrinking-the-character-grid) for layout and action semantics.
 
+The 2026-10-23 symmetry revision fills the remaining cell with Select all, completing fifteen controls in five rows of three. It follows the acknowledged Ctrl/Command setting, preserves the host draft distinction and leaves the original fourteen hit rectangles unchanged. The fixed core and dynamic-panel ceiling remain 106 and 160 objects.
+
 Each cell grows from 112 x 44 to 112 x 76, with 44 px minimum targets retained everywhere. The local/remote draft revision, focus, accepted prefix, consent and send cancellation remain shared state. An AI single on a hidden keyboard page does not confirm a character.
 
 ## 4. Audio geometry

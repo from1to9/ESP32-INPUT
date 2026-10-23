@@ -44,6 +44,7 @@ static device_settings_t test_saved_request;
 static esp_err_t test_storage_error;
 static unsigned test_storage_requests;
 static app_wifi_snapshot_t test_wifi;
+static app_wifi_scan_diagnostics_t test_scan_diagnostics;
 static app_control_runtime_snapshot_t test_control_runtime;
 static bool test_media_snapshot_unavailable;
 static app_wifi_setup_info_t test_wifi_info;
@@ -63,7 +64,7 @@ static size_t test_usb_enable_trace[32], test_usb_enable_count;
 static input_link_t test_previous_link;
 static void (*test_ble_after_accept)(void), (*test_usb_after_accept)(void);
 static bool test_diagnostic_logs_enabled, test_heap_observation_enabled;
-static char test_diagnostic_logs[16][256];
+static char test_diagnostic_logs[16][2048];
 static size_t test_diagnostic_log_count, test_heap_observation_count;
 static size_t test_heap_free_internal, test_heap_largest_internal;
 static size_t test_heap_free_dma, test_heap_largest_dma;
@@ -391,6 +392,7 @@ void app_wifi_get_snapshot(app_wifi_snapshot_t *snapshot)
     assert(snapshot);
     *snapshot = test_wifi;
 }
+void app_wifi_get_scan_diagnostics(app_wifi_scan_diagnostics_t *out) { *out = test_scan_diagnostics; }
 esp_err_t app_wifi_get_setup_info(app_wifi_setup_info_t *info)
 {
     assert(info);
@@ -876,6 +878,8 @@ static void setup(input_mode_t mode)
     test_control_state = (cp_device_state_t){0};
     test_control_result = (cp_result_t){0};
     test_control_runtime = (app_control_runtime_snapshot_t){.error = ESP_ERR_INVALID_STATE};
+    test_scan_diagnostics = (app_wifi_scan_diagnostics_t){0};
+    memset(&s_motion_trace, 0, sizeof s_motion_trace);
     test_media_snapshot_unavailable = false;
     test_media_snapshot = (app_media_snapshot_t){0};
     test_indicator = (app_presenter_indicator_status_t){0};
@@ -1579,6 +1583,36 @@ static void motion_gates_and_local_keyboard_focus(void)
     sync_interaction();
     for (unsigned i = 0; i < 20; ++i) { sample_after(10, 50, 0); expect_idle(); }
     assert(!s_engine.state.gyro_enabled && s_interaction.view.preview_length == 0);
+}
+
+static void fresh_sensor_after_consumer_gap_requires_new_reference(void)
+{
+    setup(INPUT_MOUSE);
+    remote_control_init(false);
+    calibrate();
+    action(APP_MOTION, 0);
+    const uint8_t moved[] = {0, 2, 0, 0};
+    /* Yaw about gravity is a physically coherent constant-1g trajectory. */
+    for (unsigned i = 0; i < 200; ++i) {
+        sample_after(10, 25, 0);
+        const uint8_t fractional[] = {0, (uint8_t)(i % 2 ? 3 : 2), 0, 0};
+        expect_report(2, fractional, sizeof fractional);
+    }
+    /* The board still supplies a new fresh sample; only the consumer missed
+     * an interval. A healthy sampler does not repair the missing history. */
+    sample_after(100, 25, 0);
+    expect_idle();
+    assert(s_interaction.view.calibrated && !s_interaction.view.calibration_samples);
+    assert(s_engine.state.gyro_enabled && s_interaction.view.motion_enabled && !s_interaction.gravity_ready);
+    for (unsigned i = 0; i < 200; ++i) {
+        sample_after(10, 25, 0);
+        expect_idle();
+    }
+    assert(s_interaction.view.motion_block_reason == INTERACTION_MOTION_BLOCK_REFERENCE);
+    for (unsigned i = 0; i < 15; ++i) { sample_after(10, 0, 0); expect_idle(); }
+    assert(s_interaction.gravity_ready);
+    sample_after(10, 25, 0);
+    expect_report(2, moved, sizeof moved); /* No stale catch-up movement. */
 }
 
 static void rendered_state_is_truthful(void)
@@ -3881,7 +3915,7 @@ static void runtime_diagnostics_keep_unknowns_private_and_observation_only(void)
     const unsigned priority = s_priority_requests;
     const uint64_t revision = s_ui_revision;
     report_runtime_diagnostics();
-    assert(test_diagnostic_log_count == 3);
+    assert(test_diagnostic_log_count == 5);
     assert(strstr(test_diagnostic_logs[0], "initialized=1"));
     assert(strstr(test_diagnostic_logs[0], "lan_ready=1 backend_available=0"));
     assert(strstr(test_diagnostic_logs[1], "snapshot_available=1 initialized=1 audio_known=1"));
@@ -3908,7 +3942,7 @@ static void runtime_diagnostics_keep_unknowns_private_and_observation_only(void)
     for (unsigned repeat = 0; repeat < 10; ++repeat) {
         test_diagnostic_log_count = 0;
         report_runtime_diagnostics();
-        assert(test_diagnostic_log_count == 3);
+        assert(test_diagnostic_log_count == 5);
         assert(strstr(test_diagnostic_logs[0], "initialized=0 state=-1 lan_ready=0"));
         assert(strstr(test_diagnostic_logs[1], "snapshot_available=0 initialized=0 audio_known=0 audio_state=-1 audio_error=-1"));
         assert(strstr(test_diagnostic_logs[1], "off_confirmed=0 speech_known=0 speech_state=-1 speech_result=-1 busy=0 result_known=0 result=-1"));
@@ -3921,6 +3955,67 @@ static void runtime_diagnostics_keep_unknowns_private_and_observation_only(void)
     assert(memcmp(&s_settings, &settings, sizeof settings) == 0);
     assert(uxQueueMessagesWaiting(s_intents) == queued && s_priority_requests == priority);
     assert(s_ui_revision == revision && test_heap_observation_count == 0);
+}
+
+static void motion_and_scan_diagnostics_are_bounded_observations(void)
+{
+    setup(INPUT_MOUSE); calibrate(); action(APP_MOTION, 0);
+    sample_after(10, 25, 0);
+    const uint8_t moved[] = {0, 2, 0, 0}; expect_report(2, moved, sizeof moved);
+    const uint32_t processed = s_motion_trace.processed;
+    process_motion();
+    assert(s_motion_trace.processed == processed && s_motion_trace.duplicates == 1);
+    sample_after(100, 25, 0); expect_idle();
+    assert(s_motion_trace.gaps == 1 && s_motion_trace.last_gap_us == 100000);
+    assert(s_motion_trace.first_active_gap_known && s_motion_trace.first_active_gap_us == 100000);
+    assert(s_motion_trace.max_dt_us == 100000 && s_motion_trace.sample_blocks == 1);
+    assert(s_motion_trace.minimum[2] == 0 && s_motion_trace.maximum[2] == 25000);
+    const hid_engine_t engine = s_engine;
+    const interaction_t interaction = s_interaction;
+    const uint64_t last_sample = s_last_imu_us;
+    input_link_t link = input_link_snapshot(&test_link);
+    test_diagnostic_logs_enabled = true;
+    report_motion_diagnostics(&link);
+    assert(test_diagnostic_log_count == 2);
+    assert(strstr(test_diagnostic_logs[0], "engine_motion=1 model_motion=1"));
+    assert(strstr(test_diagnostic_logs[0], "consumer_gaps=1"));
+    assert(strstr(test_diagnostic_logs[0], "last_gap_us=100000"));
+    assert(strstr(test_diagnostic_logs[1], "raw_known=1"));
+    assert(strstr(test_diagnostic_logs[1], "gz_max_mdps=25000"));
+    assert(memcmp(&engine, &s_engine, sizeof engine) == 0);
+    assert(memcmp(&interaction, &s_interaction, sizeof interaction) == 0 && s_last_imu_us == last_sample);
+    assert(!s_motion_trace.range_known && !s_motion_trace.window_samples);
+    assert(s_motion_trace.gaps == 1 && s_motion_trace.processed == processed + 1);
+
+    test_diagnostic_log_count = 0;
+    report_runtime_diagnostics();
+    assert(test_diagnostic_log_count == 5 && strstr(test_diagnostic_logs[3], "current known=0"));
+    assert(strstr(test_diagnostic_logs[4], "last_failure known=0"));
+    test_scan_diagnostics.current = (app_wifi_scan_observation_t){.known = true, .generation = 4,
+        .phase = APP_WIFI_SCAN_PHASE_COMPLETE, .error = ESP_OK, .heap_known = true,
+        .free_internal = 30000, .largest_internal = 16000, .driver_admitted = true,
+        .count_known = true, .driver_count = 3, .read_count = 3};
+    test_scan_diagnostics.last_failure = (app_wifi_scan_observation_t){.known = true, .generation = 3,
+        .phase = APP_WIFI_SCAN_PHASE_SDK_START, .error = ESP_FAIL};
+    test_diagnostic_log_count = 0;
+    report_runtime_diagnostics();
+    assert(strstr(test_diagnostic_logs[3], "generation=4 phase=9 error=0"));
+    assert(strstr(test_diagnostic_logs[4], "generation=3 phase=3 error=-1"));
+    assert(strstr(test_diagnostic_logs[4], "heap_known=0"));
+    assert(!test_scans && !test_selections && !test_joins);
+    for (size_t i = 0; i < sizeof s_runtime_diagnostics; ++i)
+        assert(((const uint8_t *)&s_runtime_diagnostics)[i] == 0);
+
+    /* Emit the actual producer formatting for the separate parser-only proof;
+     * these synthetic snapshots do not claim device or physical evidence. */
+    for (unsigned i = 0; i < 3; ++i) {
+        test_update_imu = (board_imu_status_t){.available = true, .error = ESP_OK,
+            .sample_count = 1000U + 1000U * i, .sample_age_known = true, .sample_age_us = 1000,
+            .phase = BOARD_IMU_ACTIVE, .worker_running = true};
+        test_diagnostic_log_count = 0;
+        report_motion_diagnostics(&link);
+        puts(test_diagnostic_logs[0]); puts(test_diagnostic_logs[1]);
+    }
 }
 
 static void expect_neutral_navigation_trace(void)
@@ -4545,7 +4640,8 @@ static void common_keys_are_explicit_and_preserve_preview(void)
 
 static void common_keys_include_host_edit_shortcuts_in_each_keyboard_submode(void)
 {
-    const uint8_t usages[] = {0x06, 0x19, 0x1d}; /* Copy, Paste, Undo. */
+    const uint8_t usages[] = {0x06, 0x19, 0x1d, 0x04}; /* Copy, Paste, Undo, Select all. */
+    const int shortcuts[] = {APP_SHORTCUT_COPY, APP_SHORTCUT_PASTE, APP_SHORTCUT_UNDO, APP_SHORTCUT_SELECT_ALL};
     const uint8_t up[8] = {0};
     for (int host = APP_HOST_CTRL; host <= APP_HOST_COMMAND; ++host) {
         for (int submode = APP_KEYBOARD_MOTION; submode <= APP_KEYBOARD_SHORTCUTS; ++submode) {
@@ -4560,8 +4656,8 @@ static void common_keys_include_host_edit_shortcuts_in_each_keyboard_submode(voi
             action(APP_MENU, APP_OVERLAY_COMMON_KEYS);
             release_barrier(); sync_interaction();
             assert(s_keyboard_submode == (app_keyboard_submode_t)submode);
-            for (int shortcut = APP_SHORTCUT_COPY; shortcut <= APP_SHORTCUT_UNDO; ++shortcut) {
-                action(APP_SHORTCUT, shortcut);
+            for (size_t shortcut = 0; shortcut < sizeof shortcuts / sizeof shortcuts[0]; ++shortcut) {
+                action(APP_SHORTCUT, shortcuts[shortcut]);
                 const uint8_t down[8] = {host == APP_HOST_COMMAND ? 8 : 1, 0,
                     usages[shortcut], 0, 0, 0, 0, 0};
                 expect_report(1, down, sizeof down);
@@ -4569,13 +4665,22 @@ static void common_keys_include_host_edit_shortcuts_in_each_keyboard_submode(voi
                 assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
                 expect_idle();
             }
-            action(APP_SHORTCUT, -1); action(APP_SHORTCUT, APP_SHORTCUT_ENTER + 1);
+            action(APP_SHORTCUT, -1); action(APP_SHORTCUT, APP_SHORTCUT_SELECT_ALL + 1);
             /* Non-edit shortcuts use the explicit unmodified APP_KEY path
              * in this panel; forged enum variants cannot bypass its contract. */
             for (int other = APP_SHORTCUT_TAB; other <= APP_SHORTCUT_ENTER; ++other)
                 action(APP_SHORTCUT, other);
-            app_intent_t stale = make_intent(APP_SHORTCUT, APP_SHORTCUT_PASTE, 0, NULL);
+            s_engine.ready = false;
+            action(APP_SHORTCUT, APP_SHORTCUT_SELECT_ALL);
+            assert(!s_engine.count && !strcmp(s_interaction.view.preview, "ABAB"));
+            s_engine.ready = true; sync_interaction();
+            hid_engine_cancel(&s_engine); sync_interaction();
+            action(APP_SHORTCUT, APP_SHORTCUT_SELECT_ALL);
+            assert(!s_engine.count);
+            release_barrier(); sync_interaction();
+            app_intent_t stale = make_intent(APP_SHORTCUT, APP_SHORTCUT_SELECT_ALL, 0, NULL);
             action(APP_CLOSE, 0); deliver(stale);
+            action(APP_SHORTCUT, APP_SHORTCUT_SELECT_ALL); /* No forged legacy-submode admission. */
             assert(s_overlay == APP_OVERLAY_NONE && s_keyboard_submode == (app_keyboard_submode_t)submode);
             expect_idle();
         }
@@ -5509,6 +5614,7 @@ int main(int argc, char **argv)
     RUN(touch_precision_and_drag_boundaries);
     RUN(raw_button_timing_and_takeover);
     RUN(motion_gates_and_local_keyboard_focus);
+    RUN(fresh_sensor_after_consumer_gap_requires_new_reference);
     RUN(rendered_state_is_truthful);
     RUN(motion_recovery_requires_fresh_samples_and_explicit_enable);
     RUN(touch_lifecycle_rejects_ended_gesture);
@@ -5579,6 +5685,7 @@ int main(int argc, char **argv)
     RUN(allocation_diagnostics_ignore_an_unpublished_record);
     RUN(boot_memory_diagnostics_preserve_bounded_capability_history);
     RUN(runtime_diagnostics_keep_unknowns_private_and_observation_only);
+    RUN(motion_and_scan_diagnostics_are_bounded_observations);
     RUN(remote_initializers_honor_alignment_and_clean_allocation_failures);
     RUN(quick_status_settings_back_preserves_primary_context);
     RUN(chooser_entry_rejects_wrong_mode_and_invalid_payload_without_cancelling_send);

@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--build-dir", type=Path, default=ROOT / ".build/ui-host")
     parser.add_argument("--output-dir", type=Path,
                         help="new or empty evidence directory; existing evidence is never overwritten")
-    parser.add_argument("--suite", choices=("all", "visual", "resources"), default="all",
+    parser.add_argument("--suite", choices=("all", "visual", "resources", "keys"), default="all",
                         help="focused diagnosis only; complete acceptance requires the default all suites")
     args = parser.parse_args()
     if args.output_dir is None:
@@ -92,7 +92,10 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log = args.build_dir / "build.log"
     with log.open("w") as stream:
-        for command in [configure, [cmake, "--build", str(args.build_dir), "-j", "4"]]:
+        build = [cmake, "--build", str(args.build_dir), "-j", "4"]
+        if args.suite == "keys":
+            build += ["--target", "ui_visual"]
+        for command in [configure, build]:
             result = subprocess.run(command, cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT)
             if result.returncode:
                 print(log.read_text()[-12000:])
@@ -105,6 +108,8 @@ def main():
     commands = []
     if args.suite in ("all", "visual"):
         commands.append(("visual", [str(args.build_dir / "ui_visual"), str(args.output_dir)]))
+    if args.suite == "keys":
+        commands.append(("keys", [str(args.build_dir / "ui_visual"), str(args.output_dir), "keys"]))
     if args.suite in ("all", "resources"):
         commands.append(("resources", [str(args.build_dir / "ui_resources"),
                                        str(args.output_dir / "resources.json")]))
@@ -133,6 +138,7 @@ def main():
                 "native_binary_sha256_before": binary_before, "native_binary_sha256_after": binary_after,
                 "results": results, "screenshot_count": len(screenshots),
                 "legacy_scenarios_expected": len(legacy), "missing_legacy_scenarios": missing,
+                "legacy_scenarios_checked": args.suite in ("all", "visual"),
                 "screenshots": screenshots, "render_mode": "FULL", "color_format": "RGB565",
                 "all_suites_passed": args.suite == "all" and stable and not missing and all(code == 0 for code in results.values()),
                 "visual_review": "Pending; assertions and image generation do not establish visual review."}

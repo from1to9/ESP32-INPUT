@@ -554,8 +554,8 @@ static void common_keys_checks(void)
     s_state.overlay = APP_OVERLAY_COMMON_KEYS; ++s_state.ui_revision;
     screenshot("common-keys-ready");
     const char *rows[][3] = {{"Copy", "Paste", "Undo"}, {"Backspace", "Delete fwd", "Enter"},
-        {"Esc", "Tab", NULL}, {"Home", "Up", "End"}, {"Left", "Down", "Right"}};
-    for (unsigned row = 0; row < 5; ++row) row_geometry(rows[row], row == 2 ? 2 : 3);
+        {"Esc", "Tab", "Select all"}, {"Home", "Up", "End"}, {"Left", "Down", "Right"}};
+    for (unsigned row = 0; row < 5; ++row) row_geometry(rows[row], 3);
     assert_rect(control("Back to keyboard"), 12, 424, 456, 48);
     assert_rect(control("Close"), 404, 8, 64, 48);
     s_state.target_name = "Office workstation - shared desk";
@@ -575,18 +575,27 @@ static void common_keys_checks(void)
         assert(action_count(APP_DELETE) == 0 && action_count(APP_SEND) == 0 && action_count(APP_SHORTCUT) == 0);
         assert(strcmp(s_state.preview, "Unsent draft") == 0);
     }
-    const char *shortcuts[] = {"Copy", "Paste", "Undo"};
-    const app_shortcut_t actions[] = {APP_SHORTCUT_COPY, APP_SHORTCUT_PASTE, APP_SHORTCUT_UNDO};
+    const char *shortcuts[] = {"Copy", "Paste", "Undo", "Select all"};
+    const app_shortcut_t actions[] = {APP_SHORTCUT_COPY, APP_SHORTCUT_PASTE, APP_SHORTCUT_UNDO, APP_SHORTCUT_SELECT_ALL};
     for (unsigned host = 0; host < 2; ++host) {
         s_state.host_os = host ? APP_HOST_COMMAND : APP_HOST_CTRL;
         ++s_state.ui_revision; screenshot(host ? "common-keys-command" : "common-keys-control");
-        assert(has_visible_label(lv_screen_active(), host ?
-            "Apple shortcuts / Cmd+C, Cmd+V, Cmd+Z" : "Windows shortcuts / Ctrl+C, Ctrl+V, Ctrl+Z"));
+        const char *modifier_hint = host ? "Apple shortcuts / Cmd+C, Cmd+V, Cmd+Z, Cmd+A" :
+            "Windows shortcuts / Ctrl+C, Ctrl+V, Ctrl+Z, Ctrl+A";
+        lv_obj_t *hint = find_visible_label(lv_screen_active(), modifier_hint);
+        assert(hint);
+        lv_point_t hint_size;
+        lv_text_get_size(&hint_size, modifier_hint, lv_obj_get_style_text_font(hint, 0),
+            lv_obj_get_style_text_letter_space(hint, 0), lv_obj_get_style_text_line_space(hint, 0),
+            LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        assert(hint_size.x <= lv_obj_get_content_width(hint));
         for (unsigned submode = 0; submode < 4; ++submode) {
             s_state.keyboard_submode = (app_keyboard_submode_t)submode;
             ++s_state.ui_revision; render();
-            for (unsigned i = 0; i < 3; ++i) {
-                assert_rect(control(shortcuts[i]), 12 + (int)i * 156, 112, 144, 52);
+            for (unsigned i = 0; i < 4; ++i) {
+                unsigned cell = i < 3 ? i : 8;
+                assert_rect(control(shortcuts[i]), 12 + (int)(cell % 3) * 156,
+                            112 + (int)(cell / 3) * 60, 144, 52);
                 clear_intents(); tap_control(shortcuts[i]);
                 assert(action_count(APP_SHORTCUT) == 1 && last_action(APP_SHORTCUT)->x == (int)actions[i]);
                 assert(last_action(APP_SHORTCUT)->ui_revision == s_state.ui_revision);
@@ -596,27 +605,31 @@ static void common_keys_checks(void)
         }
     }
     /* A held shortcut retains the old revision; it must never adopt a new host setting. */
-    clear_intents(); pointer(84, 138, true);
-    app_intent_t begin = *last_action(APP_TOUCH_BEGIN);
-    uint64_t pressed_revision = s_state.ui_revision;
-    s_state.host_os = APP_HOST_CTRL; ++s_state.ui_revision;
-    render(); pointer(84, 138, false); assert_terminal(&begin);
-    assert(action_count(APP_SHORTCUT) == 1 && last_action(APP_SHORTCUT)->ui_revision == pressed_revision);
+    for (unsigned i = 0; i < 2; ++i) {
+        int x = i ? 396 : 84, y = i ? 258 : 138;
+        clear_intents(); pointer(x, y, true);
+        app_intent_t begin = *last_action(APP_TOUCH_BEGIN);
+        uint64_t pressed_revision = s_state.ui_revision;
+        s_state.host_os = s_state.host_os == APP_HOST_CTRL ? APP_HOST_COMMAND : APP_HOST_CTRL;
+        ++s_state.ui_revision;
+        render(); pointer(x, y, false); assert_terminal(&begin);
+        assert(action_count(APP_SHORTCUT) == 1 && last_action(APP_SHORTCUT)->ui_revision == pressed_revision);
+    }
     clear_intents(); pointer(396, 198, true);
-    begin = *last_action(APP_TOUCH_BEGIN);
+    app_intent_t begin = *last_action(APP_TOUCH_BEGIN);
     s_state.ready = false; ++s_state.ui_revision;
     render(); pointer(396, 198, false); assert_terminal(&begin);
     assert(action_count(APP_KEY) == 0);
     screenshot("common-keys-unready");
     for (unsigned i = 0; i < 11; ++i) assert(lv_obj_has_state(control(names[i]), LV_STATE_DISABLED));
-    for (unsigned i = 0; i < 3; ++i) assert(lv_obj_has_state(control(shortcuts[i]), LV_STATE_DISABLED));
+    for (unsigned i = 0; i < 4; ++i) assert(lv_obj_has_state(control(shortcuts[i]), LV_STATE_DISABLED));
     s_state.ready = true;
     for (unsigned gate = 0; gate < 3; ++gate) {
         s_state.sending = gate == 0;
         s_state.connected = gate != 1;
         s_state.release_pending = gate == 2;
         ++s_state.ui_revision; render();
-        for (unsigned i = 0; i < 3; ++i) {
+        for (unsigned i = 0; i < 4; ++i) {
             clear_intents(); tap_control(shortcuts[i]);
             assert(action_count(APP_SHORTCUT) == 0 && action_count(APP_SEND) == 0);
         }
@@ -625,15 +638,18 @@ static void common_keys_checks(void)
     }
     s_state.connected = true; s_state.release_pending = false;
     for (unsigned gate = 0; gate < 2; ++gate) {
-        s_state.locked = gate == 0; s_state.screen_off = gate == 1;
-        ++s_state.ui_revision; render(); clear_intents();
-        if (!gate) screenshot("common-keys-locked");
-        pointer(84, 138, true);
-        begin = *last_action(APP_TOUCH_BEGIN);
-        s_state.locked = s_state.screen_off = false;
-        ++s_state.ui_revision; render(); pointer(84, 138, false);
-        assert_terminal(&begin);
-        assert(action_count(APP_KEY) == 0 && action_count(APP_SHORTCUT) == 0);
+        for (unsigned i = 0; i < 2; ++i) {
+            int x = i ? 396 : 84, y = i ? 258 : 138;
+            s_state.locked = gate == 0; s_state.screen_off = gate == 1;
+            ++s_state.ui_revision; render(); clear_intents();
+            if (!gate && !i) screenshot("common-keys-locked");
+            pointer(x, y, true);
+            begin = *last_action(APP_TOUCH_BEGIN);
+            s_state.locked = s_state.screen_off = false;
+            ++s_state.ui_revision; render(); pointer(x, y, false);
+            assert_terminal(&begin);
+            assert(action_count(APP_KEY) == 0 && action_count(APP_SHORTCUT) == 0);
+        }
     }
     s_state.overlay = APP_OVERLAY_NONE; s_state.keyboard_submode = APP_KEYBOARD_TOUCH;
     grid_groups(); ++s_state.ui_revision; render();
@@ -642,7 +658,7 @@ static void common_keys_checks(void)
     clear_intents(); tap_control("Send");
     assert(action_count(APP_SEND) == 1 && action_count(APP_KEY) == 0 && action_count(APP_SHORTCUT) == 0);
     s_state = original; render(); clear_intents();
-    puts("PASS: one-tap Keys in every Keyboard submode; eleven host usages and three host-setting shortcuts preserve draft, revision and readiness/wake/lock gates");
+    puts("PASS: one-tap Keys in every Keyboard submode; symmetric 5 x 3 panel with eleven host usages and four host-setting shortcuts preserves draft, revision and readiness/wake/lock gates");
 }
 
 static void motion_reason_and_tap_setting_checks(void)

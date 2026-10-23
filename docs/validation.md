@@ -343,6 +343,50 @@ increasing samples and sample ages within 50 ms. Legacy logs without Motion
 records remain readable but cannot satisfy this candidate's device gate.
 Previous failed captures remain failed.
 
+### Repeat device test and physical failures: 2026-10-23
+
+The same `04a8ec59...` application was reflashed after all 148 target inputs,
+467 host inputs and five frozen artifacts were verified against the reviewed
+package. The application digest, partition table and NVS/PHY preservation were
+verified again, without a new backup. macOS 27.0.1 registered the USB keyboard
+and mouse drivers and one input/one output audio interface at 48 kHz. This is
+interface evidence, not host-key delivery or acoustic qualification.
+
+The immediate 90.005-second capture contained eight health observations and
+still **failed** the unchanged error-log gate. Its two error lines came from
+GPIO ISR service installation after the TE display path had already installed
+that service. The pinned touch and button callers explicitly accept
+`ESP_ERR_INVALID_STATE` and continue registering their handlers. Those lines
+alone do not establish failed touch hardware, but the original failed capture
+is retained without filtering or changing the acceptance criteria.
+
+All eight Motion records were ACTIVE, available and calibrated, with a live
+worker and accepted samples increasing from 1,069 to 8,073. Sample ages were
+511..9,138 microseconds. There was no latched first fault or recovery in this
+boot, but one IMU batch exceeded 20 ms (maximum 24,589 microseconds) and was
+discarded. The previous accepted cache remained within its 50-ms budget, so
+continued ACTIVE state is consistent with this rejected batch. Wi-Fi and
+Bluetooth remained connected. The earlier boot's 69,358-microsecond delay and
+its cause remain unresolved.
+
+Physical feedback nevertheless **failed** the product behavior: Motion initially
+moved abnormally and stopped after approximately two seconds while its switch
+remained on. The touchpad could still move the same host's pointer. Wi-Fi Scan
+reported Failed on one attempt and displayed a refreshed network list on a
+later attempt with unchanged firmware. This establishes intermittent failure,
+not a permanent parameter rejection or a repaired scan path. The user also
+found the Keys panel's explanatory caption confusing; host-key reception was
+not confirmed.
+
+A subsequent capture was interrupted by a user-confirmed unplug or manual
+restart after 15.562 seconds; it is incomplete, not evidence of a spontaneous
+reset. After reconnection, a 45.001-second capture passed its bounded serial
+checks with five fresh Motion observations. Neither that pass nor sensor
+availability clears the physical Motion and scan failures. Investigation must
+distinguish acquisition, consumed-sample timing, reference validity, pause
+conditions, generated motion and HID admission/delivery. Exact scan failure
+phase and error were not available in these logs.
+
 ## Historical evidence
 
 Evidence date: 2026-10-21. The pinned S31 toolchain has built the minimal composite HID firmware. Portable behavior, report layout and production BLE callback logic have executable host coverage. The physical development board is identified as Mosaico v1.2 (eFuse `0x0102`) with 16 MB flash, and its original flash contents have been backed up locally. Runtime deployment and host compatibility evidence are recorded separately below; a build does not establish a working HID device or long-term reliability.

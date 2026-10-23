@@ -40,14 +40,20 @@ static void (*created_task)(void *);
 static wifi_ap_record_t scan_aps[40];
 static uint16_t scan_ap_count, scan_ap_index;
 static unsigned scans, scan_stops, scan_clears, scan_reads;
+static unsigned scan_read_fail_at;
 static esp_err_t scan_start_error, scan_stop_error, scan_clear_error, scan_read_error, scan_count_error;
 static size_t free_heap = 131072, largest_block = 65536;
+static size_t free_dma = 12911, largest_dma = 11776;
 static bool ip_assigned = true;
 static bool fail_ap_netif;
 static unsigned ap_creates;
 
-size_t heap_caps_get_free_size(unsigned caps) { assert(caps == 3U); return free_heap; }
-size_t heap_caps_get_largest_free_block(unsigned caps) { assert(caps == 3U); return largest_block; }
+size_t heap_caps_get_free_size(unsigned caps) {
+    assert(caps == 3U || caps == 5U); return caps == 3U ? free_heap : free_dma;
+}
+size_t heap_caps_get_largest_free_block(unsigned caps) {
+    assert(caps == 3U || caps == 5U); return caps == 3U ? largest_block : largest_dma;
+}
 esp_err_t esp_wifi_scan_start(const wifi_scan_config_t *config, bool block) {
     assert(!block && config->max_scan_ap_num == APP_WIFI_SCAN_CAPACITY && config->show_hidden);
     assert(config->scan_time.active.max == 60 && config->home_chan_dwell_time == 30);
@@ -58,7 +64,7 @@ esp_err_t esp_wifi_scan_stop(void) { ++scan_stops; return scan_stop_error; }
 esp_err_t esp_wifi_scan_get_ap_num(uint16_t *count) { *count = scan_ap_count; return scan_count_error; }
 esp_err_t esp_wifi_scan_get_ap_record(wifi_ap_record_t *record) {
     ++scan_reads;
-    if (scan_read_error) return scan_read_error;
+    if (scan_read_error && (!scan_read_fail_at || scan_reads == scan_read_fail_at)) return scan_read_error;
     assert(scan_ap_index < scan_ap_count);
     *record = scan_aps[scan_ap_index++]; return ESP_OK;
 }
@@ -216,6 +222,7 @@ static void reset(bool preserve) {
     s_cleanup_retry_at = 0;
     s_retry_delay = 1000; s_generation = s_station_generation = s_event_generation = 0;
     memset(&s_scan, 0, sizeof(s_scan)); memset(s_scan_records, 0, sizeof(s_scan_records));
+    memset(&s_scan_diagnostics, 0, sizeof(s_scan_diagnostics));
     s_scan_wait_event = s_scan_done = s_scan_stop_sent = s_scan_cancelled = false;
     s_scan_status = 0;
     s_scan_deadline = s_scan_completed_at = s_scan_next_at = s_scan_cleanup_at = s_scan_cancel_until = 0;
@@ -226,8 +233,10 @@ static void reset(bool preserve) {
     memset(s_selection_ssid, 0, sizeof(s_selection_ssid));
     memset(scan_aps, 0, sizeof(scan_aps)); scan_ap_count = scan_ap_index = 0;
     scans = scan_stops = scan_clears = scan_reads = 0;
+    scan_read_fail_at = 0;
     scan_start_error = scan_stop_error = scan_clear_error = scan_read_error = scan_count_error = ESP_OK;
     free_heap = 131072; largest_block = 65536; ip_assigned = true;
+    free_dma = 12911; largest_dma = 11776;
     linked = false; store_error = commit_error = connect_error = http_error = mode_error = ESP_OK;
     set_blob_error = erase_error = http_stop_error = station_config_error = ESP_OK;
     apply_failed_set = apply_failed_erase = false;
@@ -636,6 +645,127 @@ static void test_scan_cancel_cleanup_and_pressure(void) {
     assert(scan_snapshot().state == APP_WIFI_SCAN_ERROR && scan_reads == 0 && scan_clears == 1);
 }
 
+static app_wifi_scan_diagnostics_t scan_diagnostics(void) {
+    app_wifi_scan_diagnostics_t value;
+    app_wifi_get_scan_diagnostics(&value);
+    return value;
+}
+static void queue_scan_at_completion(void) {
+    if (s_scan.state != APP_WIFI_SCAN_READY) {
+        manager_unlock_hook = queue_scan_at_completion;
+        return;
+    }
+    assert(app_wifi_scan_start() == ESP_OK);
+}
+static void cancel_at_heap_observation(void) {
+    if (!s_scan_diagnostics.current.heap_known) {
+        manager_unlock_hook = cancel_at_heap_observation;
+        return;
+    }
+    assert(app_wifi_scan_cancel() == ESP_OK);
+}
+static void test_scan_diagnostics_preserve_failed_generation(void) {
+    reset(false);
+    assert(!scan_diagnostics().current.known && !scan_diagnostics().last_failure.known);
+    app_wifi_get_scan_diagnostics(NULL);
+    seed_network();
+    assert(snapshot().lan_ready && snapshot().state == APP_WIFI_CONNECTED);
+    free_heap = 38731; largest_block = 25600;
+    scan_start_error = ESP_ERR_WIFI_STATE; scan_clear_error = ESP_FAIL;
+    assert(app_wifi_scan_start() == ESP_OK);
+    assert(scan_diagnostics().current.phase == APP_WIFI_SCAN_PHASE_QUEUED &&
+           !scan_diagnostics().current.heap_known);
+    service_step();
+    app_wifi_scan_diagnostics_t failed = scan_diagnostics();
+    assert(scan_snapshot().state == APP_WIFI_SCAN_ERROR && scan_snapshot().cleanup_pending);
+    assert(failed.current.phase == APP_WIFI_SCAN_PHASE_CLEAR && failed.current.error == ESP_FAIL &&
+           failed.last_failure.known);
+    assert(failed.last_failure.phase == APP_WIFI_SCAN_PHASE_SDK_START &&
+           failed.last_failure.error == ESP_ERR_WIFI_STATE && !failed.last_failure.driver_admitted);
+    assert(failed.last_failure.station_state == APP_WIFI_CONNECTED && failed.last_failure.lan_ready);
+    assert(failed.last_failure.heap_known && failed.last_failure.free_internal == 38731 &&
+           failed.last_failure.largest_internal == 25600 && failed.last_failure.free_dma == 12911 &&
+           failed.last_failure.largest_dma == 11776 && !failed.last_failure.event_status_known &&
+           !failed.last_failure.count_known);
+    assert(app_wifi_scan_start() == ESP_ERR_INVALID_STATE);
+    scan_clear_error = scan_start_error = ESP_OK;
+    clock_ms += CLEANUP_RETRY_MS; service_step();
+    assert(!scan_snapshot().cleanup_pending);
+    assert(!memcmp(&failed.last_failure, &s_scan_diagnostics.last_failure, sizeof(failed.last_failure)));
+    clock_ms += APP_WIFI_SCAN_COOLDOWN_MS;
+    begin_scan(); scan_row(0, "Fresh after failure", WIFI_AUTH_WPA2_PSK); scan_done(0); service_step();
+    app_wifi_scan_diagnostics_t success = scan_diagnostics();
+    assert(scan_snapshot().state == APP_WIFI_SCAN_READY && scan_snapshot().count == 1);
+    assert(success.current.driver_admitted && success.current.event_status_known &&
+           success.current.event_status == 0 && success.current.count_known &&
+           success.current.driver_count == 1 && success.current.read_count == 1);
+    assert(success.current.generation > failed.last_failure.generation &&
+           !memcmp(&success.last_failure, &failed.last_failure, sizeof(success.last_failure)));
+    scan_done(99); /* An unowned late event cannot overwrite either observation. */
+    assert(!memcmp(&success, &s_scan_diagnostics, sizeof(success)));
+
+    clock_ms += APP_WIFI_SCAN_COOLDOWN_MS; begin_scan();
+    scan_row(0, "First", WIFI_AUTH_WPA2_PSK); scan_row(1, "Second", WIFI_AUTH_WPA2_PSK);
+    scan_read_error = ESP_ERR_NO_MEM; scan_read_fail_at = scan_reads + 2; scan_clear_error = ESP_FAIL;
+    scan_done(0); service_step();
+    app_wifi_scan_diagnostics_t read_failure = scan_diagnostics();
+    assert(read_failure.last_failure.generation == read_failure.current.generation &&
+           read_failure.last_failure.generation > failed.last_failure.generation);
+    assert(read_failure.last_failure.phase == APP_WIFI_SCAN_PHASE_RECORD &&
+           read_failure.last_failure.error == ESP_ERR_NO_MEM && read_failure.last_failure.driver_count == 2 &&
+           read_failure.last_failure.read_count == 1 && read_failure.last_failure.event_status_known);
+    assert(scan_snapshot().count == 0 && scan_snapshot().cleanup_error == ESP_FAIL);
+
+    reset(false); begin_scan(); scan_count_error = ESP_FAIL; scan_done(0); service_step();
+    assert(scan_diagnostics().last_failure.phase == APP_WIFI_SCAN_PHASE_COUNT &&
+           !scan_diagnostics().last_failure.count_known && scan_reads == 0);
+    reset(false); begin_scan(); scan_row(0, "Readable", WIFI_AUTH_WPA2_PSK);
+    scan_clear_error = ESP_ERR_INVALID_STATE; scan_done(0); service_step();
+    assert(scan_diagnostics().last_failure.phase == APP_WIFI_SCAN_PHASE_CLEAR &&
+           scan_diagnostics().last_failure.error == ESP_ERR_INVALID_STATE &&
+           scan_diagnostics().last_failure.read_count == 1 && scan_snapshot().cleanup_pending);
+    reset(false); begin_scan(); scan_stop_error = ESP_FAIL;
+    assert(app_wifi_scan_cancel() == ESP_OK); service_step();
+    assert(scan_diagnostics().last_failure.phase == APP_WIFI_SCAN_PHASE_STOP &&
+           scan_diagnostics().last_failure.error == ESP_FAIL && s_scan_wait_event);
+
+    reset(false); free_heap = 32767;
+    assert(app_wifi_scan_start() == ESP_OK); service_step();
+    assert(!scans && scan_diagnostics().last_failure.phase == APP_WIFI_SCAN_PHASE_HEAP &&
+           scan_diagnostics().last_failure.error == ESP_ERR_NO_MEM);
+    reset(false); free_heap = 32767;
+    assert(app_wifi_scan_start() == ESP_OK);
+    manager_unlock_hook = cancel_at_heap_observation;
+    service_step();
+    assert(!manager_unlock_hook && !scans && scan_snapshot().state == APP_WIFI_SCAN_CANCELLED &&
+           !scan_diagnostics().last_failure.known);
+    reset(false); free_heap = 32768; largest_block = 16384;
+    begin_scan(); scan_done(7); service_step();
+    assert(scans == 1 && scan_diagnostics().last_failure.phase == APP_WIFI_SCAN_PHASE_EVENT &&
+           scan_diagnostics().last_failure.event_status_known &&
+           scan_diagnostics().last_failure.event_status == 7);
+    reset(false); begin_scan();
+    scan_event(NULL, WIFI_EVENT, WIFI_EVENT_SCAN_DONE, NULL); service_step();
+    assert(scan_diagnostics().last_failure.phase == APP_WIFI_SCAN_PHASE_EVENT &&
+           !scan_diagnostics().last_failure.event_status_known);
+    reset(false); begin_scan(); scan_stop_error = ESP_FAIL;
+    clock_ms += APP_WIFI_SCAN_TIMEOUT_MS; service_step();
+    assert(scan_diagnostics().last_failure.phase == APP_WIFI_SCAN_PHASE_WAIT_EVENT &&
+           scan_diagnostics().last_failure.error == ESP_ERR_TIMEOUT);
+    scan_done(0); service_step();
+    assert(scan_diagnostics().last_failure.phase == APP_WIFI_SCAN_PHASE_WAIT_EVENT);
+    reset(false); begin_scan(); assert(app_wifi_scan_cancel() == ESP_OK); service_step();
+    scan_done(1); service_step();
+    assert(scan_snapshot().state == APP_WIFI_SCAN_CANCELLED && !scan_diagnostics().last_failure.known);
+
+    reset(false); begin_scan(); clock_ms += APP_WIFI_SCAN_COOLDOWN_MS; scan_done(0);
+    manager_unlock_hook = queue_scan_at_completion;
+    service_step();
+    assert(!manager_unlock_hook && scan_snapshot().state == APP_WIFI_SCAN_QUEUED &&
+           scan_diagnostics().current.phase == APP_WIFI_SCAN_PHASE_QUEUED &&
+           !scan_diagnostics().current.heap_known && !scan_diagnostics().last_failure.known);
+}
+
 static void test_station_storage_and_scan_reconnect(void) {
     seed_network();
     app_wifi_join_request_t join = join_request("Replacement", true);
@@ -835,6 +965,7 @@ int main(void) {
     test_selection_owner_domains();
     test_device_station_provisioning(); test_scan_bounds_and_identity();
     test_scan_cancel_cleanup_and_pressure(); test_station_storage_and_scan_reconnect();
+    test_scan_diagnostics_preserve_failed_generation();
     test_selected_editor_reservations();test_multiple_profiles();test_profile_radio_failure_preserves_durable_evidence();
     reset(false);start();app_wifi_set_maintenance(true);assert(!s_accept_form);service_step();assert(!snapshot().setup_active);
     assert(app_wifi_start_setup()==ESP_ERR_INVALID_STATE&&app_wifi_forget_network()==ESP_ERR_INVALID_STATE&&app_wifi_scan_start()==ESP_ERR_INVALID_STATE);

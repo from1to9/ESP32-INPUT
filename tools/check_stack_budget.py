@@ -35,6 +35,7 @@ UNITS = {
     "preferences": "components/device_settings/device_settings.c",
     "wifi": "firmware/main/app_wifi.c",
     "control_runtime": "firmware/main/app_control_runtime.c",
+    "board": "firmware/main/board_mosaico.c",
 }
 CORE = [("main", "app_main"), ("main", "coordinator_run")]
 DEVICE_SUBMIT = CORE + [("bridge", "app_command_bridge_service"),
@@ -51,6 +52,14 @@ MEDIA_INTENT = CORE + [("main", "handle_intent"),
 PATHS = {
     "runtime_diagnostics_wifi": CORE + [("main", "report_runtime_diagnostics"),
                                         ("wifi", "app_wifi_get_snapshot")],
+    "scan_diagnostics_copy": CORE + [("main", "report_runtime_diagnostics"),
+                                     ("wifi", "app_wifi_get_scan_diagnostics")],
+    "scan_diagnostics_log": CORE + [("main", "report_runtime_diagnostics"),
+                                    ("main", "report_scan_observation")],
+    "motion_diagnostics": CORE + [("main", "report_motion_diagnostics"),
+                                   ("board", "board_imu_status")],
+    "motion_sample_observation": CORE + [("main", "process_motion"),
+                                         ("main", "observe_motion_sample")],
     "runtime_diagnostics_media": CORE + [("main", "report_runtime_diagnostics"),
                                          ("media_runtime", "app_media_runtime_snapshot")],
     "runtime_diagnostics_control": CORE + [("main", "report_runtime_diagnostics"),
@@ -155,7 +164,9 @@ PATHS = {
                           ("device", "execute_owned"), ("device", "execute"),
                           ("device", "submit_job"), ("main", "remote_device_submit")],
 }
-REQUIRED = set(CORE + [("main", "render_view"), ("main", "report_runtime_diagnostics")]) | {
+REQUIRED = set(CORE + [("main", "render_view"), ("main", "report_runtime_diagnostics"),
+                       ("main", "report_motion_diagnostics"), ("main", "observe_motion_sample"),
+                       ("main", "report_scan_observation")]) | {
     step for path in PATHS.values() for step in path
     if step[1].startswith(("app_", "ble_", "bt_", "settings_", "device_settings_"))
 }

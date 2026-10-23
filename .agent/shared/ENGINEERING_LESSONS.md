@@ -2,7 +2,7 @@
 scope: repository-shared
 portability: cross-checkout
 status: active
-verified_at: 2026-10-22
+verified_at: 2026-10-23
 evidence_kind: reviewed-source-host-target-and-limited-device-evidence
 privacy_reviewed: true
 contains_local_runtime_facts: false
@@ -184,3 +184,26 @@ their documented evidence.
 Publish reviewed source when authorized while keeping these limits visible.
 Keep credentials, recordings, factory recovery images and raw device logs in
 ignored local storage; they are not part of an all-source synchronization.
+
+## 9. Observe producer and consumer timing separately
+
+A fresh IMU cache and a live acquisition task do not prove that the coordinator
+consumes consecutive samples on time. The current interaction model rejects
+consumed-sample gaps over 50 ms, invalidates its gravity reference and clears the
+calibration accumulator while preserving an already established bias. Therefore
+`calibrated=1` with a zero accumulator does not alone establish a broken sensor.
+Reference acquisition, output suppression, generated deltas, queue admission
+and host receipt need separate evidence when touch works but Motion stops.
+This source-supported failure path is a diagnostic lead, not a confirmed cause
+of the reported physical failure.
+
+Keep time domains explicit. In the pinned SDK, log prefixes use a cycle-derived
+base plus RTOS ticks, while application uptime and IMU timestamps use
+`esp_timer_get_time()`. Do not align their numeric values directly or apply one
+boot's timestamps to another boot. A delayed replay of startup observations
+adds a separate distinction between event time and print time. Use retained
+timestamps from the same clock before attributing a delay to a startup phase.
+
+Evidence: [interaction model](../../components/interaction/interaction.c),
+[coordinator](../../firmware/main/main.c), [SDK pin](../../toolchain.lock.json)
+and the [dated device record](../../docs/validation.md#repeat-device-test-and-physical-failures-2026-10-23).

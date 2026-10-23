@@ -1331,7 +1331,8 @@ static void setup_cache_lifetime_checks(void)
 
 int main(int argc, char **argv)
 {
-    assert(argc == 2);
+    assert(argc == 2 || (argc == 3 && strcmp(argv[2], "keys") == 0));
+    bool keys_only = argc == 3;
     assert(!app_ui_touch_context().eligible_pad);
     s_output = argv[1];
     ui_memory_check_observer();
@@ -1370,6 +1371,10 @@ int main(int argc, char **argv)
         }
         strcpy(s_state.bluetooth_hosts[1].name, "Named test host");
         grid_groups();
+        if (keys_only) {
+            common_keys_checks();
+            continue;
+        }
         screenshot("mouse");
         s_state.congested = true;
         s_state.motion_enabled = true;

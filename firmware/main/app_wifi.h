@@ -72,6 +72,45 @@ typedef struct {
     esp_err_t cleanup_error;
 } app_wifi_scan_snapshot_t;
 
+typedef enum {
+    APP_WIFI_SCAN_PHASE_NONE,
+    APP_WIFI_SCAN_PHASE_QUEUED,
+    APP_WIFI_SCAN_PHASE_HEAP,
+    APP_WIFI_SCAN_PHASE_SDK_START,
+    APP_WIFI_SCAN_PHASE_EVENT,
+    APP_WIFI_SCAN_PHASE_COUNT,
+    APP_WIFI_SCAN_PHASE_RECORD,
+    APP_WIFI_SCAN_PHASE_CLEAR,
+    APP_WIFI_SCAN_PHASE_STOP,
+    APP_WIFI_SCAN_PHASE_COMPLETE,
+    APP_WIFI_SCAN_PHASE_WAIT_EVENT
+} app_wifi_scan_phase_t;
+
+/* Observational data only; no credentials, radio commands or extra retries.
+ * Heap values describe admission, not a measured scan allocation peak. */
+typedef struct {
+    bool known;
+    uint32_t generation;
+    app_wifi_scan_phase_t phase;
+    esp_err_t error;
+    app_wifi_state_t station_state;
+    bool lan_ready, heap_known;
+    uint32_t free_internal, largest_internal, free_dma, largest_dma;
+    bool driver_admitted, event_status_known;
+    uint32_t event_status;
+    bool count_known;
+    uint16_t driver_count, read_count;
+} app_wifi_scan_observation_t;
+
+typedef struct {
+    app_wifi_scan_observation_t current;
+    /* First failure in the most recently failed generation. A later successful
+     * scan does not erase it. Unknown flags remain distinct from zero. */
+    app_wifi_scan_observation_t last_failure;
+} app_wifi_scan_diagnostics_t;
+
+void app_wifi_get_scan_diagnostics(app_wifi_scan_diagnostics_t *);
+
 typedef struct {
     uint8_t ssid[32];
     uint8_t ssid_length;

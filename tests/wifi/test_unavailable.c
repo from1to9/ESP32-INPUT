@@ -20,6 +20,11 @@ int main(void)
     assert(app_wifi_select_scan_record(1, 0, &selection) == ESP_ERR_NOT_SUPPORTED && !selection.id);
     assert(app_wifi_release_selection(1) == ESP_ERR_NOT_SUPPORTED);
     app_wifi_scan_snapshot_t scan;
+    app_wifi_scan_diagnostics_t diagnostics;
+    memset(&diagnostics, 42, sizeof(diagnostics));
+    app_wifi_get_scan_diagnostics(&diagnostics);
+    assert(!diagnostics.current.known && !diagnostics.last_failure.known);
+    app_wifi_get_scan_diagnostics(NULL);
     app_wifi_scan_record_t record;
     app_wifi_get_scan_snapshot(&scan);
     assert(scan.state == APP_WIFI_SCAN_ERROR && scan.error == ESP_ERR_NOT_SUPPORTED);
