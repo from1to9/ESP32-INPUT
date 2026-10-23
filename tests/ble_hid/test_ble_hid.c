@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../firmware/main/ble_hid.c"
+#include "../../firmware/main/app_bluetooth_management.h"
 
 /* Existing state-transition assertions exercise copy-out and legacy callers. */
 static ble_hid_bond_list_t observed_bonds(void)
@@ -2663,7 +2664,12 @@ static void test_quiet_forget_all_and_empty_durable_preferences(void) {
     assert(ble_hid_pairing_open(1000)); /* A later explicit local action still works. */
 }
 
+#include "native_management_cases.inc"
 int main(void) {
+    native_management_selected_add_and_reconnect();
+    native_management_all_and_single_removal();
+    native_management_generation_and_replacement();
+    native_management_cancellation_failure_and_stale();
     test_target_submission_workspace_ownership();
     test_quiet_forget_all_and_empty_durable_preferences();
     test_single_bond_forget_success_and_preservation(); test_single_bond_forget_cancel_and_stale();

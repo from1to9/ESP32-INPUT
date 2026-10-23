@@ -10,8 +10,8 @@ static UI_TASK_BSS media_binding_t s_media_bindings[MEDIA_BINDINGS];
 static media_binding_t s_media_pressed;
 static size_t s_media_binding_count, s_core_media_bindings;
 static lv_obj_t *s_voice_reject;
-static lv_obj_t *s_media_routes[4], *s_media_enable[2], *s_media_mute[2], *s_media_gain[2];
-static lv_obj_t *s_media_peer, *s_media_link, *s_media_disconnect, *s_media_level;
+static lv_obj_t *s_media_connections[2], *s_media_connection_state, *s_media_connection_reason;
+static lv_obj_t *s_media_peer, *s_media_link, *s_media_disconnect;
 static lv_obj_t *s_record_profile, *s_record_duration, *s_record_duration_buttons[2];
 static lv_obj_t *s_record_details, *s_record_state, *s_record_reason, *s_record_action, *s_record_cancel[2];
 static lv_obj_t *s_record_rows[APP_MEDIA_ROWS], *s_record_meta[APP_MEDIA_ROWS];
@@ -71,6 +71,7 @@ static bool media_request_equal(const app_media_request_t *a, const app_media_re
         memcmp(a->peer_id.bytes, b->peer_id.bytes, sizeof(a->peer_id.bytes))) return false;
     switch (a->operation) {
     case APP_MEDIA_SELECT_ROUTE: return a->value.route == b->value.route;
+    case APP_MEDIA_SELECT_CONNECTION: return a->value.connection == b->value.connection;
     case APP_MEDIA_SET_ENABLED: case APP_MEDIA_SET_MUTED: case APP_MEDIA_LIVE_START: case APP_MEDIA_LIVE_STOP:
         return a->value.role.role == b->value.role.role && a->value.role.value == b->value.role.value;
     case APP_MEDIA_SELECT_PEER: return !memcmp(a->value.peer_id.bytes, b->value.peer_id.bytes, sizeof(a->value.peer_id.bytes));
@@ -108,16 +109,11 @@ static void media_action(lv_obj_t *target, int level)
     if ((!s_submit || !s_submit(&intent)) && s_status) label_text(s_status, "Input busy. Please try again.");
 }
 
-static const char *media_route_name(app_media_route_t route)
+static const char *media_connection_name(const app_media_view_t *media)
 {
-    switch (route) {
-    case APP_MEDIA_ROUTE_LOCAL: return "Local";
-    case APP_MEDIA_ROUTE_HFP: return "Bluetooth calls";
-    case APP_MEDIA_ROUTE_A2DP: return "Bluetooth music";
-    case APP_MEDIA_ROUTE_UAC: return "USB audio";
-    case APP_MEDIA_ROUTE_OFF: return "Route off";
-    default: return "Route unknown";
-    }
+    if (!media->known || !media->connection_known) return "Connection";
+    return media->connection == APP_MEDIA_CONNECTION_USB ? "USB" :
+        media->connection == APP_MEDIA_CONNECTION_BLUETOOTH ? "Bluetooth" : "Connection";
 }
 
 static const char *media_job_name(app_media_job_state_t state)
@@ -135,55 +131,109 @@ static const char *media_job_name(app_media_job_state_t state)
     }
 }
 
-static void media_role(lv_obj_t *enable, lv_obj_t *mute, app_media_role_t role)
+static bool media_job_active(const app_media_job_view_t *job)
 {
-    const app_media_role_view_t *state = role == APP_MEDIA_MICROPHONE ? &s_view.media.microphone : &s_view.media.speaker;
-    const char *name = role == APP_MEDIA_MICROPHONE ? "Microphone" : "Speaker";
-    char caption[64];
-    snprintf(caption, sizeof(caption), "%s / %s", name, !state->known ? "unknown" : state->enabled ? "on" : "off");
-    if (enable != s_audio_power) text(enable, caption);
-    app_media_request_t request = media_request(APP_MEDIA_SET_ENABLED);
-    request.value.role.role = role;
-    request.value.role.value = !state->enabled;
-    media_bind(enable, request, state->known && (state->enabled ? state->can_disable : state->can_enable));
-    snprintf(caption, sizeof(caption), "%s / %s", role == APP_MEDIA_MICROPHONE ? "Mic" : "Speaker",
-        !state->known || !state->mute_confirmed ? "mute unknown" : state->muted ? "muted" : "unmuted");
-    if (mute != s_audio_mute) text(mute, caption);
-    request = media_request(APP_MEDIA_SET_MUTED);
-    request.value.role.role = role;
-    /* Unknown mute acknowledgement only offers an admitted stop/mute. */
-    request.value.role.value = !state->mute_confirmed || !state->muted;
-    media_bind(mute, request, state->known && (request.value.role.value ? state->can_mute : state->can_unmute));
+    return job->known && (job->state == APP_MEDIA_JOB_STARTING || job->state == APP_MEDIA_JOB_RUNNING ||
+        job->state == APP_MEDIA_JOB_STOPPING || job->state == APP_MEDIA_JOB_FINALIZING);
+}
+
+static bool media_mic_in_use(void)
+{
+    return media_job_active(&s_view.media.recording) ||
+        s_view.media.speech.state == APP_SPEECH_STARTING ||
+        s_view.media.speech.state == APP_SPEECH_LISTENING ||
+        s_view.media.speech.state == APP_SPEECH_STOPPING;
+}
+
+static const char *media_start_reason(bool speaker, const app_media_role_view_t *role,
+    const app_media_job_view_t *job)
+{
+    if (!s_view.media.known || !role->known || role->can_start || media_job_active(job) ||
+        (job->known && job->state == APP_MEDIA_JOB_ERROR) || (!speaker && media_mic_in_use())) return NULL;
+    /* The owner supplies the admission result; presentation never reconstructs
+     * connection, hardware, token or stream readiness from other fields. */
+    switch (role->start_block) {
+    case APP_MEDIA_START_LOCKED: return "Unlock device to start";
+    case APP_MEDIA_START_SCREEN_UNAVAILABLE: return "Wake screen to start";
+    case APP_MEDIA_START_CLOCK_UNAVAILABLE: return "Timing unavailable";
+    case APP_MEDIA_START_PENDING: return "Audio change in progress";
+    case APP_MEDIA_START_QUARANTINED: return "Audio recovery required";
+    case APP_MEDIA_START_CONNECTION_REQUIRED: return "Choose USB or Bluetooth";
+    case APP_MEDIA_START_UNSUPPORTED: return speaker ? "Speaker unsupported on this connection" : "Mic unsupported on this connection";
+    case APP_MEDIA_START_ROUTE_UNAVAILABLE: return "Audio connection unavailable";
+    case APP_MEDIA_START_HOST_UNAVAILABLE: return "Host audio is not connected";
+    case APP_MEDIA_START_HOST_STREAM_REQUIRED: return speaker ? "Play audio to this device on host" : "Open Mic on host";
+    case APP_MEDIA_START_IDENTITY_UNAVAILABLE: return "Audio session unavailable";
+    case APP_MEDIA_START_PEER_MISMATCH: return "Audio devices do not match";
+    case APP_MEDIA_START_CLEANUP: return "Finishing previous audio";
+    case APP_MEDIA_START_OCCUPIED: return "Audio resource in use";
+    case APP_MEDIA_START_STOP_REQUIRED: return "Stop current audio first";
+    case APP_MEDIA_START_CODEC_UNAVAILABLE: return "Audio hardware unavailable";
+    case APP_MEDIA_START_FORMAT_UNSUPPORTED: return "Audio format unsupported";
+    default: return "Start status unavailable";
+    }
+}
+
+static const char *media_core_state(bool speaker, const app_media_role_view_t *role, const app_media_job_view_t *job)
+{
+    if (!s_view.media.known || !role->known) return "Status unknown";
+    if (job->known) {
+        if (job->state == APP_MEDIA_JOB_ERROR) return "Error";
+        if (job->state == APP_MEDIA_JOB_STARTING) return "Starting";
+        if (job->state == APP_MEDIA_JOB_STOPPING) return "Stopping";
+        if (job->state == APP_MEDIA_JOB_FINALIZING) return "Finishing";
+        if (job->state == APP_MEDIA_JOB_RUNNING)
+            return !role->mute_confirmed ? "On / Mute unconfirmed" : role->muted ? "On / Muted" : "On";
+    }
+    if (!speaker && media_job_active(&s_view.media.recording)) return "In use / Recording";
+    if (!speaker && (s_view.media.speech.state == APP_SPEECH_STARTING || s_view.media.speech.state == APP_SPEECH_LISTENING ||
+        s_view.media.speech.state == APP_SPEECH_STOPPING)) return "In use / Spoken letters";
+    if (s_view.media.state == APP_MEDIA_FAULT) return "Audio error";
+    if (s_view.media.command_pending) return "Updating";
+    if (role->can_start) return "Off / Ready";
+    return "Off / Unavailable";
 }
 
 static void render_media_core(void)
 {
     const app_media_view_t *media = &s_view.media;
-    bool speaker = s_view.audio_kind == APP_AUDIO_SPEAKER;
-    const app_media_role_view_t *role = speaker ? &media->speaker : &media->microphone;
-    media_role(s_audio_power, s_audio_mute, speaker ? APP_MEDIA_SPEAKER : APP_MEDIA_MICROPHONE);
-    const app_media_job_view_t *job = speaker ? &media->playback : &media->live_capture;
-    bool active = job->known && (job->state == APP_MEDIA_JOB_STARTING || job->state == APP_MEDIA_JOB_RUNNING ||
-        job->state == APP_MEDIA_JOB_STOPPING || job->state == APP_MEDIA_JOB_FINALIZING);
-    app_media_request_t power = media_request(active ? APP_MEDIA_LIVE_STOP : APP_MEDIA_LIVE_START);
-    power.value.role.role = speaker ? APP_MEDIA_SPEAKER : APP_MEDIA_MICROPHONE;
-    power.job_id = job->id; power.consumer_generation = job->consumer_generation;
-    media_bind(s_audio_power, power, active ? job->can_stop : role->can_start);
-    text(s_audio_power, active ? "Stop audio" : "Start audio");
-    label_text(s_audio_title, !media->known || !role->known ? (speaker ? "Speaker state unknown" : "Microphone state unknown") :
-        !role->enabled ? (speaker ? "Speaker is off" : "Microphone is off") :
-        !role->mute_confirmed ? "Mute state unconfirmed" : role->muted ?
-        (speaker ? "Speaker muted" : "Microphone muted") : (speaker ? "Speaker active" : "Microphone active"));
-    label_text(s_audio_profile, media_route_name(media->route));
-    label_text(s_audio_capability, !media->known ? "Audio status unavailable" : media->command_pending ? "Operation pending" :
-        media->state == APP_MEDIA_FAULT ? "Audio error" : media->state == APP_MEDIA_PREPARING ? "Preparing audio" :
-        media->state == APP_MEDIA_STOPPING ? "Stopping audio" : "Observed audio state");
-    selected(s_audio_power, true);
+    const char *start_reason[2] = {NULL, NULL};
+    for (unsigned i = 0; i < 2; ++i) {
+        const app_media_role_view_t *role = i ? &media->speaker : &media->microphone;
+        const app_media_job_view_t *job = i ? &media->playback : &media->live_capture;
+        bool active = media_job_active(job);
+        app_media_request_t power = media_request(active ? APP_MEDIA_LIVE_STOP : APP_MEDIA_LIVE_START);
+        power.value.role.role = i ? APP_MEDIA_SPEAKER : APP_MEDIA_MICROPHONE;
+        power.job_id = job->id; power.consumer_generation = job->consumer_generation;
+        media_bind(s_audio_power[i], power, active ? job->can_stop && media_id_valid(job->id) && job->consumer_generation :
+            role->known && role->can_start && !media->command_pending);
+        text(s_audio_power[i], i ? (active ? "Stop speaker" : "Start speaker") : (active ? "Stop mic" : "Start mic"));
+        selected(s_audio_power[i], active);
+        start_reason[i] = media_start_reason(i != 0, role, job);
+        const char *reason = job->known && *job->reason ? job->reason : start_reason[i];
+        if (reason) label_format(s_audio_state[i], "%s\n%s", media_core_state(i != 0, role, job), reason);
+        else label_text(s_audio_state[i], media_core_state(i != 0, role, job));
+    }
+    const app_media_role_view_t *mic = &media->microphone;
+    bool mute = !mic->mute_confirmed || !mic->muted;
+    app_media_request_t request = media_request(APP_MEDIA_SET_MUTED);
+    request.value.role.role = APP_MEDIA_MICROPHONE;
+    request.value.role.value = mute;
+    media_bind(s_audio_mute, request, mic->known && (mute ? mic->can_mute : mic->can_unmute));
+    text(s_audio_mute, mic->known && !mic->mute_confirmed ? "Mute mic / unconfirmed" : mute ? "Mute mic" : "Unmute mic");
+    selected(s_audio_mute, mic->known && mic->mute_confirmed && mic->muted);
     bool volume = media->volume_known && media->volume_percent <= 100 && media->safe_volume_max <= 100;
     media_bind(s_volume, media_request(APP_MEDIA_SET_VOLUME), volume && media->can_set_volume && !media->command_pending);
     if (volume) { slider_value(s_volume, media->volume_percent); label_format(s_volume_text, "%u%%", media->volume_percent); }
     else label_text(s_volume_text, "--");
-    label_text(s_audio_note, *media->reason ? media->reason : "Choose routes, recording and storage from the Audio menu.");
+    if (!media->known) label_text(s_audio_note, "Audio status unavailable.");
+    else if (*media->reason) label_text(s_audio_note, media->reason);
+    else if (media->live_capture.known && *media->live_capture.reason) label_format(s_audio_note, "Mic: %s", media->live_capture.reason);
+    else if (media->playback.known && *media->playback.reason) label_format(s_audio_note, "Speaker: %s", media->playback.reason);
+    else if (start_reason[0] && start_reason[1]) label_format(s_audio_note, "Mic: %s\nSpeaker: %s", start_reason[0], start_reason[1]);
+    else if (start_reason[0]) label_format(s_audio_note, "Mic: %s", start_reason[0]);
+    else if (start_reason[1]) label_format(s_audio_note, "Speaker: %s", start_reason[1]);
+    else label_text(s_audio_note, "Choose a connection, then start Mic or Speaker.");
 }
 
 static void render_speech(void)
@@ -221,16 +271,14 @@ static void clear_media_panel(void)
     s_media_binding_count = s_core_media_bindings;
     memset(s_media_bindings + s_core_media_bindings, 0,
         (MEDIA_BINDINGS - s_core_media_bindings) * sizeof(s_media_bindings[0]));
-    memset(s_media_routes, 0, sizeof(s_media_routes));
-    memset(s_media_enable, 0, sizeof(s_media_enable));
-    memset(s_media_mute, 0, sizeof(s_media_mute));
-    memset(s_media_gain, 0, sizeof(s_media_gain));
+    memset(s_media_connections, 0, sizeof(s_media_connections));
     memset(s_record_duration_buttons, 0, sizeof(s_record_duration_buttons));
     memset(s_record_rows, 0, sizeof(s_record_rows));
     memset(s_record_meta, 0, sizeof(s_record_meta));
     memset(s_record_cancel, 0, sizeof(s_record_cancel));
     memset(s_record_pages, 0, sizeof(s_record_pages));
-    s_media_peer = s_media_link = s_media_disconnect = s_media_level = NULL;
+    s_media_peer = s_media_link = s_media_disconnect = NULL;
+    s_media_connection_state = s_media_connection_reason = NULL;
     s_record_profile = s_record_duration = s_record_details = s_record_state = s_record_reason = NULL;
     s_record_action = s_record_page = s_record_play = s_record_delete = NULL;
 }
@@ -251,18 +299,16 @@ static lv_obj_t *media_label(lv_obj_t *parent, int y, int height, uint32_t color
 static void create_media_panel(lv_obj_t *body, lv_obj_t *title, app_overlay_t kind)
 {
     if (kind == APP_OVERLAY_MEDIA_OPTIONS) {
-        label_text(title, "Routes and roles");
-        for (int i = 0; i < 4; ++i)
-            s_media_routes[i] = media_button(body, media_route_name((app_media_route_t)(i + 1)), (i % 2) * 232, (i / 2) * 56, 224);
-        s_media_peer = button(body, "Choose saved audio peer", 0, 112, 456, 44, APP_MEDIA_CONTROL, 0);
-        s_media_link = button(body, "Connect audio", 0, 164, 224, 44, APP_MEDIA_CONTROL, 0);
-        s_media_disconnect = button(body, "Disconnect audio", 232, 164, 224, 44, APP_MEDIA_CONTROL, 0);
-        for (int i = 0; i < 2; ++i) {
-            s_media_enable[i] = button(body, "Role unknown", i * 232, 216, 224, 44, APP_MEDIA_CONTROL, 0);
-            s_media_mute[i] = button(body, "Mute unknown", i * 232, 268, 224, 44, APP_MEDIA_CONTROL, 0);
-            s_media_gain[i] = media_button(body, i ? "Gain +6 dB" : "Gain -6 dB", i * 232, 360, 224);
-        }
-        s_media_level = media_label(body, 320, 32, INK);
+        label_text(title, "Audio connection");
+        s_media_connections[0] = button(body, "USB", 0, 0, 224, 56, APP_MEDIA_CONTROL, 0);
+        s_media_connections[1] = button(body, "Bluetooth", 232, 0, 224, 56, APP_MEDIA_CONTROL, 0);
+        s_media_connection_state = media_label(body, 72, 32, INK);
+        s_media_connection_reason = media_label(body, 112, 56, MUTED);
+        s_media_peer = media_button(body, "Choose audio device", 0, 184, 456);
+        s_media_link = media_button(body, "Connect", 0, 244, 224);
+        s_media_disconnect = media_button(body, "Disconnect", 232, 244, 224);
+        label_text(media_label(body, 312, 40, MUTED), "Connection selection does not start audio.");
+        button(body, "Back to Audio", 0, 360, 456, 48, APP_CLOSE, 0);
     } else if (kind == APP_OVERLAY_RECORDING_START) {
         label_text(title, "Record");
         s_record_profile = media_button(body, "Profile unavailable", 0, 0, 456);
@@ -335,32 +381,29 @@ static void render_media_panel(void)
 {
     const app_media_view_t *media = &s_view.media;
     if (s_view.overlay == APP_OVERLAY_MEDIA_OPTIONS) {
-        for (unsigned i = 0; i < 4; ++i) {
-            app_media_route_t route = (app_media_route_t)(i + 1);
-            app_media_request_t request = media_request(APP_MEDIA_SELECT_ROUTE);
-            request.value.route = route;
-            media_bind(s_media_routes[i], request, media->routes[route].available && media->routes[route].can_select && !media->command_pending);
-            selected(s_media_routes[i], media->known && media->route == route);
+        bool connection = media->known && media->connection_known && (unsigned)media->connection < APP_MEDIA_CONNECTION_COUNT;
+        for (unsigned i = 0; i < APP_MEDIA_CONNECTION_COUNT; ++i) {
+            app_media_request_t request = media_request(APP_MEDIA_SELECT_CONNECTION);
+            request.value.connection = (app_media_connection_t)i;
+            media_bind(s_media_connections[i], request, media->can_select_connection[i] && !media->command_pending);
+            selected(s_media_connections[i], connection && (unsigned)media->connection == i);
         }
-        const app_media_route_view_t *route = (unsigned)media->route < APP_MEDIA_ROUTE_COUNT ? &media->routes[media->route] : NULL;
-        text(s_media_peer, *media->peer_label ? media->peer_label : "Choose saved audio peer");
+        bool bluetooth = connection && media->connection == APP_MEDIA_CONNECTION_BLUETOOTH;
+        bool matching_route = connection && (bluetooth ? media->route == APP_MEDIA_ROUTE_HFP || media->route == APP_MEDIA_ROUTE_A2DP :
+            media->route == APP_MEDIA_ROUTE_UAC);
+        const app_media_route_view_t *route = matching_route ? &media->routes[media->route] : NULL;
+        label_text(s_media_connection_state, !connection ? "No confirmed selection" : media->command_pending ? "Updating connection" :
+            route && route->connected ? "Selected / Link connected" : "Selected / Not connected");
+        label_text(s_media_connection_reason, !media->known ? "Audio status unavailable." : *media->reason ? media->reason :
+            route && *route->reason ? route->reason : bluetooth ? "Select your audio device and connect." :
+            connection ? "Connect the USB cable to use audio." : "Choose USB or Bluetooth. Audio stays off until started.");
+        visible(s_media_peer, bluetooth); visible(s_media_link, bluetooth); visible(s_media_disconnect, bluetooth);
+        text(s_media_peer, *media->peer_label ? media->peer_label : "Choose audio device");
         app_media_request_t peer_request = media_request(APP_MEDIA_SELECT_PEER);
         peer_request.value.peer_id = media->next_peer_id;
-        media_bind(s_media_peer, peer_request, media->can_select_peer);
-        text(s_media_link, media->route == APP_MEDIA_ROUTE_HFP ? "Connect voice" : "Connect audio");
-        media_bind(s_media_link, media_request(APP_MEDIA_LINK_CONNECT), route && route->can_connect && !media->command_pending);
-        media_bind(s_media_disconnect, media_request(APP_MEDIA_LINK_DISCONNECT), route && route->can_disconnect && !media->command_pending);
-        media_role(s_media_enable[0], s_media_mute[0], APP_MEDIA_MICROPHONE);
-        media_role(s_media_enable[1], s_media_mute[1], APP_MEDIA_SPEAKER);
-        bool gain = media->gain_known && media->microphone_gain_db <= 42 && media->microphone_gain_db % 6 == 0;
-        if (gain) label_format(s_media_level, "Microphone gain / %u dB", media->microphone_gain_db);
-        else label_text(s_media_level, "Microphone gain unavailable");
-        for (unsigned i = 0; i < 2; ++i) {
-            app_media_request_t request = media_request(APP_MEDIA_SET_GAIN);
-            request.value.level = (uint8_t)(i ? media->microphone_gain_db + 6 : media->microphone_gain_db - 6);
-            media_bind(s_media_gain[i], request, gain && media->can_set_gain && !media->command_pending &&
-                (i ? media->microphone_gain_db < 42 : media->microphone_gain_db >= 6));
-        }
+        media_bind(s_media_peer, peer_request, bluetooth && media->can_select_peer && !media->command_pending);
+        media_bind(s_media_link, media_request(APP_MEDIA_LINK_CONNECT), bluetooth && route && route->can_connect && !media->command_pending);
+        media_bind(s_media_disconnect, media_request(APP_MEDIA_LINK_DISCONNECT), bluetooth && route && route->can_disconnect && !media->command_pending);
     } else if (s_view.overlay == APP_OVERLAY_RECORDING_START) {
         const app_media_record_options_t *options = &media->recording_options;
         const app_media_job_view_t *job = &media->recording;

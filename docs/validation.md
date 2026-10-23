@@ -10,8 +10,9 @@ attempt is recorded below. Historical observations belong to their named images
 and must not be used as evidence for a different combined image.
 
 The latest reviewed source incorporates the repairs recorded below. Source
-synchronization is authorized separately from device acceptance: the retained
-startup IMU fault remains unresolved and the latest device gate remains failed.
+synchronization is authorized separately from device acceptance. Earlier startup
+faults remain in their image-specific records; the latest capture observed fresh
+IMU samples but still failed the error-log and physical Motion gates.
 This checkpoint is not a qualified release. Reusable findings are indexed in
 the [engineering lessons](../.agent/shared/ENGINEERING_LESSONS.md).
 
@@ -488,6 +489,190 @@ build and no-op checks passed; an isolated exact CMake dependency block also
 passed eight real-Git transition stages. Stack budgets passed with the unchanged
 2 KiB SDK/ISR reserve. These are source/host/target results only: metadata does
 not alter or qualify Motion, audio, Wi-Fi failure recovery or endurance.
+
+### Live sensor API source integration: 2026-10-23
+
+The [sensor API](sensor-api.md) adds a 256-record, 88-byte-per-record raw journal
+at the existing acquisition owners, with independent cursors over USB CDC and
+authenticated station HTTPS. The catalog appends operations 149..151 without
+changing the previous 148 entries. The diagnostics scope does not grant HID,
+settings, microphone capture or enrollment authority. Input observations redact
+private coordinates and invalid/overflow snapshots before publication.
+
+The full host regression passed, including 160 coordinator cases and 163 with
+diagnostic capture enabled, production board/USB/HTTP adapters, explicit ring
+gaps and exhaustion, immutable reads, codec corruption checks and private-touch
+redaction. The production LVGL visual suite passed with 800 renders and actual
+pointer-driven private-editor/deferred-close checks. No product UI was redesigned.
+These are host boundaries, not hardware throughput or physical input evidence.
+
+The pinned ESP32-S31 build passed with a 4,675,776-byte application and 26 percent
+of its six-MiB slot free. Its 92 declared stack paths passed with the existing
+2-KiB reserve and 512-byte startup-frame gate; the measured startup frame was
+336 bytes. Independent sensor-component review approved the frozen source and
+evidence, including the collector's 21 tests. Later Bluetooth and Audio edits
+require a new combined build, stack check and review before publication. USB and
+authenticated LAN sensor capture on hardware are not yet qualified. This
+integration does not enable the experimental handheld-translation estimator or
+repair the earlier Motion result.
+
+### Ordered capture deployment and repeated Waiting: 2026-10-23
+
+Reviewed source `812ec0ebe6551c77a2792b3bdbb15201d76e8920`, tree
+`4a584a072a7f213e79e8796b626775eebb04dbe7`, was published and rebuilt cleanly
+with `CONFIG_APP_IMU_CAPTURE=y`. The 4,663,728-byte application SHA-256 is
+`955a9479756f8203747d91710bbc2f92b55b5097f4c9450d7062f37f6b9c31bd`;
+its ELF SHA-256 is
+`3a3a914d4e1d7e3961a576470761720f59103f3954892c1c99d1fc82707279a7`.
+The application-only write and independent digest verification succeeded.
+Partition table and NVS/PHY bytes remained unchanged; no new backup was made.
+
+This image adds an ordered diagnostic observer. The existing latest-value angular
+Mouse path remains active; the unqualified handheld translation experiment is
+not linked into firmware. Full host checks, the 162-case capture coordinator
+suite, eight reader cases, target compilation, 51 declared stack paths and
+independent source/package review passed before deployment. These checks do not
+qualify physical movement.
+
+The immediate 90.001-second health capture contained eight fresh, advancing IMU
+observations, completed calibration, and ready Bluetooth. It still **failed**
+on the two retained GPIO ISR-service installation errors. The traced touch and
+button callers accept the already-installed service and register distinct
+handlers after the display's initial installation. This does not change the
+failed capture, or establish interrupt behavior during flash/cache operations.
+One acquisition batch had exceeded the 20-ms limit by the first periodic
+observation (maximum 24,722 us);
+periodic accepted-sample ages were 1,432..9,148 us with no recovery or latched
+source failure in those observations. Minimum observed free internal memory was
+38,063 bytes; coordinator stack watermark was 4,160 bytes. No long-duration
+resource or timing qualification follows from this bounded run.
+
+The user reported repeated Waiting and jerky movement. The retained first
+terminal incident occurred at sample time 43,700,793 us, exactly 250,001 us after
+the last trusted acceleration correction. Both its first rejected and terminal
+frames failed the near-one-g and gyro-compensated acceleration-change checks;
+innovation was not evaluated on either frame. The old reference policy expired
+the grip, suppressed movement and required a new stable interval. Later periodic
+Ready observations do not erase these outages. Producer sampling continued near
+100 Hz while the legacy latest-value consumer observed about 66 Hz; zero legacy
+gap alarms only exclude intervals above 50 ms, not skipped publications.
+
+A subsequent complete export identified the exact clean image and contained
+638 sensor frames plus one initial intentional fence, in a 6.380-second capture
+window (6.370 seconds between the first and last samples).
+It had no sequence break, new dropped publication, source failure or stale
+observation. Read-completion intervals were 7,800..12,198 us; 16 of 637 intervals
+fell outside the experiment's fixed 100 Hz +/-5 percent assumption. The complete
+ordered segment is usable as raw evidence, but not compatible with that fixed
+cadence hypothesis. Its unstructured operator actions provide no exact physical
+trajectory or verified initial rest. No frames were retimed or discarded.
+
+A prompted lateral-motion trial then exported 1,541 sensor frames and six
+markers in a 15.506-second capture window. Wire completeness passed, but ordered
+segment usability failed: five internal REJECTED boundaries divided the trace,
+and four previously accepted publications were flushed by the delivery queue.
+The fifth rejection found no buffered accepted publication. Bracketing unchanged
+late-batch counters distinguish these from over-budget reads: the board had
+observed a missing gyro and/or accelerometer data-ready bit. The exact missing
+bit was not retained at each event. Cached hardware remained available; this is
+not an overflow, stale-observer or communication-fault diagnosis. The operator's
+reported action sequence is an intent label, without a synchronized external
+trajectory or measured stationary interval. It cannot qualify a replacement
+estimator or be repaired by retiming/discarding the discontinuities.
+
+The same boot observed LAN connectivity but an unprovisioned, stopped control
+server and unknown clock. It does not qualify Wi-Fi management, OTA or raw-log
+download. The [LAN development workflow](wifi-management-ota.md#development-update-and-diagnostic-workflow)
+records the requested next access path and its outstanding implementation and
+device gates. Raw logs, device identifiers and per-run artifacts remain local.
+
+### Bluetooth discovery and USB audio investigation: 2026-10-23
+
+The device still ran the verified `812ec0e` application during this investigation.
+The user reported inconsistent saved-host deletion and pairing, then successful
+Windows pairing but no iPad discovery after removing the iPad-side record.
+Native Add host returned to the list without a persistent pairing-status page.
+Source inspection found that native single-host deletion was not wired and that
+Add/Forget all did not complete the durable target-policy transition required by
+the BLE owner. A saved selected target can therefore block a later pairing window.
+The repair must use acknowledged owner transitions, preserve unrelated hosts,
+and show actual advertising state rather than equating an accepted request with
+discoverability. These findings do not establish the result of a repaired radio
+test.
+
+An initial 90-second health capture passed with advancing IMU samples and BLE
+initialized but disconnected. A later 90-second capture reported BLE connected
+and input-ready; the peer identity was not established. That capture failed on
+one retained IMU `batch_time / ESP_ERR_TIMEOUT` incident between captures, with
+a maximum observed batch of 66,204 us and one recovery. Subsequent samples were
+fresh, but the historical fault remains a failed health gate. Repeated reports
+of the same first incident are not new incidents. The duration includes driver,
+scheduling and lock time; it is not a measured I2C wire transaction or evidence
+that Bluetooth caused the delay.
+
+macOS enumerated the USB input/output audio interfaces. A bounded, output-only
+probe selected that exact USB device, left system defaults unchanged and rendered
+4,180,480 mono frames at 48 kHz. This proves host callback activity, not USB OUT
+receipt or sound from the speaker. The simultaneous 120-second capture observed
+Audio off throughout and retained the same earlier IMU fault. Ten-second
+aggregate snapshots cannot explain the user's reported two-second audio stop.
+Per-job first-frame/terminal state and cached transport/codec observations are
+needed; no startup deadline or failure criterion is relaxed to conceal the issue.
+
+A later 150-second replay with host output active again retained 15 Audio OFF
+observations. The operator clarified that Start audio was gray and could not be
+pressed. This attempt therefore did not exercise codec playback; the immediate
+question is the local admission reason, distinct from the earlier Windows report
+of stopping after two seconds. The new primary controls must expose their actual
+unavailable reason without relaxing admission. A separate Windows touchpad report
+describes USB lag and Bluetooth cursor jumps with Motion explicitly disabled;
+that transport/input investigation remains open.
+
+A production coordinator/interaction/HID host reproduction then confirmed a
+lossy transient-busy boundary on both USB and BLE. Three relative movements of
+20 units emitted 60 with an idle transport but only 40 when the middle sample
+arrived during an in-flight report. A touch beginning during the same transient
+busy state was canceled and emitted no movement after readiness returned. A
+separate 300-unit sample emitted 127 with no retained remainder. These sanitizer
+reproductions establish source defects; they do not measure their frequency or
+end-to-end latency on Windows. The repair must retain bounded relative movement
+across temporary backpressure while preserving disconnect, ownership, release
+and button-ordering barriers.
+
+### Combined sensor, connectivity, Audio and touch candidate: 2026-10-23
+
+The combined source repairs native Bluetooth add/delete/policy transitions,
+provides the simplified independent Mic/Speaker controls and their actual Start
+admission reasons, and binds local audio commands to the original observed peer
+and stream token. Cached audio diagnostics observe role, job, transport and codec
+state without starting capture or exposing PCM. The raw sensor API and collector
+are included for the next physical Motion investigation.
+
+Touch movement now retains bounded relative displacement through temporary
+USB/BLE backpressure and splits large deltas into the existing wire reports.
+Independent review caught an explicit remote Cancel path that could leave a
+partial displacement queued. The corrected path discards that remainder through
+the existing ownership and neutral-release lifecycle; normal End still drains
+accepted movement. The new production regression fails before the repair and
+passes for cancellation before/after a partial report, while busy and while a
+button is held. The standard host runner now includes these touch-pointer tests.
+
+The final combined host suite and target build passed after that repair. All
+296 declared stack paths passed with unchanged task budgets, the 2-KiB reserve
+and a 336-byte startup frame under the 512-byte gate. The native all-suite run
+passed 842 renders, all 174 retained baseline scenes, actual pointer hits and
+presenter integration. Its 138 idle/hidden cases and 1,000 cycles across 41 panel
+variants per theme retained no growth: core/peak objects were 112/154 under the
+160-object panel limit, with zero live allocations after teardown. Representative
+frames received visual review. Focused and full runs have different inherited
+HID/draft fixture states; no cross-suite pixel equality is claimed. A later
+documentation-only touch contract paragraph did not change UI sources or tests.
+
+Independent component reviews closed the reported findings. These host and
+compile results do not qualify audible playback, microphone capture, iPad
+rediscovery, Windows pointer latency, physical sensor-export throughput or
+powered endurance. The existing angular Motion algorithm remains unqualified;
+this candidate does not enable the experimental handheld-translation estimator.
 
 ## Historical evidence
 

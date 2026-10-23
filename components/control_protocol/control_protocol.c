@@ -2,6 +2,7 @@
 #include "control_protocol.h"
 #include "control_registry.h"
 #include "control_registry_internal.h"
+#include "control_sensor_usb.h"
 #include <inttypes.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -1135,6 +1136,8 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
         } else {
             error = gates(c, session, o, args);
         }
+        if (error == CP_OK && (o->id == CP_OP_SENSORS_CATALOG || o->id == CP_OP_SENSORS_LATEST ||
+                              o->id == CP_OP_SENSORS_SAMPLES)) error = CP_NOT_IMPLEMENTED;
         if (error == CP_OK &&
             !cj_canonical(d, args, cmd->args_json, sizeof(cmd->args_json), NULL)) {
             error = CP_TOO_LARGE;
@@ -1494,12 +1497,62 @@ static cp_error_t metadata(cp_context_t *c, unsigned session, const char *resour
     out->length = used;
     return CP_OK;
 }
+static bool sensor_hex_span(const char *p, size_t length)
+{
+    for (size_t i = 0; i < length; ++i)
+        if (!((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f'))) return false;
+    return true;
+}
+static bool sensor_decimal(const char *p, size_t length, uint64_t *out)
+{
+    if (!length || length > 20 || (length > 1 && p[0] == '0')) return false;
+    uint64_t n = 0;
+    for (size_t i = 0; i < length; ++i) {
+        if (p[i] < '0' || p[i] > '9' || n > (UINT64_MAX - (unsigned)(p[i] - '0')) / 10U) return false;
+        n = n * 10U + (unsigned)(p[i] - '0');
+    }
+    *out = n; return true;
+}
+static bool samples_query(const char *p, char boot[33], uint64_t *after, unsigned *limit)
+{
+    if (strlen(p) < 32U + 7U + 1U + 7U + 1U || !sensor_hex_span(p, 32) || strncmp(p + 32, "&after=", 7)) return false;
+    memcpy(boot, p, 32); boot[32] = 0; p += 39;
+    const char *end = strchr(p, '&');
+    if (!end || !sensor_decimal(p, (size_t)(end - p), after) || strncmp(end, "&limit=", 7) ||
+        end[7] < '1' || end[7] > '8' || end[8]) return false;
+    *limit = (unsigned)(end[7] - '0'); return true;
+}
+cp_sensor_resource_t cp_sensor_resource(const char *p)
+{
+    if (!p) return CP_SENSOR_RESOURCE_NONE;
+    static const char root[] = "/api/v1/sensors";
+    if (strncmp(p, root, sizeof(root) - 1U) || (p[sizeof(root) - 1U] &&
+        p[sizeof(root) - 1U] != '/' && p[sizeof(root) - 1U] != '?')) return CP_SENSOR_RESOURCE_NONE;
+    if (!strcmp(p, "/api/v1/sensors/catalog")) return CP_SENSOR_RESOURCE_CATALOG;
+    if (!strcmp(p, "/api/v1/sensors/latest")) return CP_SENSOR_RESOURCE_LATEST;
+    static const char samples[] = "/api/v1/sensors/samples?boot=";
+    char boot[33]; uint64_t after; unsigned limit;
+    if (!strncmp(p, samples, sizeof(samples) - 1U) && samples_query(p + sizeof(samples) - 1U, boot, &after, &limit))
+        return CP_SENSOR_RESOURCE_SAMPLES;
+    return CP_SENSOR_RESOURCE_INVALID;
+}
 static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *resource,
                                cp_http_response_t *out)
 {
     cp_identity_t who = identity(c, session);
+    cp_sensor_resource_t sensor = cp_sensor_resource(resource);
+    if (sensor != CP_SENSOR_RESOURCE_NONE) {
+        if (sensor == CP_SENSOR_RESOURCE_INVALID) return failure(out, CP_INVALID);
+        if (!(who.scopes & CP_SCOPE_DIAGNOSTICS_READ)) return failure(out, CP_FORBIDDEN);
+        cp_error_t error = provider_read(c, session, resource, out->body, sizeof(out->body), &out->length);
+        if (error != CP_OK) return failure(out, error);
+        out->status = 200;
+        return CP_OK;
+    }
     bool recording = strncmp(resource, "/api/v1/recordings", 18) == 0;
-    if (!(who.scopes & (recording ? CP_SCOPE_RECORDING_READ : CP_SCOPE_VIEW))) {
+    bool capability_metadata = !strcmp(resource, "/api/v1/capabilities") &&
+                               (who.scopes & CP_SCOPE_DIAGNOSTICS_READ);
+    if (!capability_metadata && !(who.scopes & (recording ? CP_SCOPE_RECORDING_READ : CP_SCOPE_VIEW))) {
         return failure(out, CP_FORBIDDEN);
     }
     if (strcmp(resource, "/api/v1/state") == 0) {

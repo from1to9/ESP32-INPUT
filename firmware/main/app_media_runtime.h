@@ -20,6 +20,9 @@ typedef struct {
     app_media_action_t action;
     ae_job_kind_t kind;
     ae_route_t route;
+    /* Required for a local external-route START. Copy the admitted full
+     * transport identity; asynchronous route selection never replaces it. */
+    ae_route_token_t expected_route_token;
     ae_format_t format;
     uint32_t duration_seconds;
     uint64_t byte_limit;

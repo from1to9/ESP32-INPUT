@@ -51,16 +51,18 @@ static inline void ui_fixture_media(app_view_t *state)
     app_media_view_t *media = &state->media;
     *media = (app_media_view_t){.known = true, .management_generation = 31,
         .audio_generation = 47, .resource_revision = 59, .state = APP_MEDIA_READY_MUTED,
-        .route = APP_MEDIA_ROUTE_LOCAL, .volume_known = true, .can_set_volume = true,
+        .route = APP_MEDIA_ROUTE_UAC, .volume_known = true, .can_set_volume = true,
         .volume_percent = 35, .safe_volume_max = 60, .gain_known = true, .can_set_gain = true,
-        .microphone_gain_db = 18};
+        .microphone_gain_db = 18, .connection_known = true, .connection = APP_MEDIA_CONNECTION_USB,
+        .can_select_connection = {true, true}};
     media->peer_id.bytes[0] = 5;
     strcpy(media->peer_label, "Synthetic audio peer");
     for (size_t i = 1; i < APP_MEDIA_ROUTE_COUNT; ++i)
         media->routes[i] = (app_media_route_view_t){.available = true, .can_select = true, .can_connect = true};
+    media->routes[APP_MEDIA_ROUTE_UAC].connected = true;
     media->microphone = media->speaker = (app_media_role_view_t){.known = true, .enabled = true,
         .muted = true, .mute_confirmed = true, .can_enable = true, .can_disable = true,
-        .can_mute = true, .can_unmute = true, .can_start = true};
+        .can_mute = true, .can_start = true, .start_block = APP_MEDIA_START_ALLOWED};
     media->recording_options = (app_media_record_options_t){.known = true, .can_start = true,
         .can_edit = true, .profile_id = 7, .profile_count = 2, .duration_seconds = 5,
         .minimum_duration_seconds = 1, .maximum_duration_seconds = 7,

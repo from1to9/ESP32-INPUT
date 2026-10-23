@@ -7,8 +7,10 @@ static void recording_storage_checks(void)
     s_state.locked = s_state.screen_off = s_state.remote_owned = false;
     s_state.capture_indicator_required = s_state.audio_active = s_state.listening = false;
     ++s_state.ui_revision; render();
-    clear_intents(); tap_control("Recording storage");
-    assert(last_action(APP_MENU)->x == APP_OVERLAY_RECORDING_STORAGE);
+    assert(!find_control(lv_screen_active(), "Recording storage"));
+    assert(!find_control(lv_screen_active(), "Record") && !find_control(lv_screen_active(), "Recordings"));
+    /* Advanced storage remains an owner-supplied panel, outside primary Audio navigation. */
+    clear_intents();
     s_state.overlay = APP_OVERLAY_RECORDING_STORAGE; ++s_state.ui_revision;
     s_state.recording_storage = (app_recording_storage_view_t){0};
     screenshot("recording-storage-unknown");

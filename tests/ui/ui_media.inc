@@ -1,72 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 static void media_checks(void)
 {
+    audio_core_checks();
     app_view_t original = s_state;
+    const app_media_request_t *request;
     s_state.mode = INPUT_AUDIO;
-    s_state.audio_kind = APP_AUDIO_VOICE;
     s_state.overlay = APP_OVERLAY_NONE;
     s_state.locked = s_state.screen_off = s_state.remote_owned = false;
     s_state.audio_active = s_state.listening = s_state.capture_indicator_required = false;
-    s_state.media = (app_media_view_t){0};
-    ++s_state.ui_revision;
-    screenshot("media-unknown");
-    assert(has_visible_label(lv_screen_active(), "Microphone state unknown"));
-    clear_intents(); tap_control("Start audio");
-    assert(action_count(APP_MEDIA_CONTROL) == 0);
-    ui_fixture_media(&s_state);
-    screenshot("media-local-muted");
-    clear_intents(); tap_control("Start audio");
-    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_LIVE_START);
-    assert(last_action(APP_MEDIA_CONTROL)->media.value.role.role == APP_MEDIA_MICROPHONE);
-    assert(s_state.media.microphone.enabled);
-    s_state.media.live_capture = (app_media_job_view_t){.known = true, .id = {{81}}, .consumer_generation = 91,
-        .state = APP_MEDIA_JOB_RUNNING, .can_stop = true};
-    render(); clear_intents(); tap_control("Stop audio");
-    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_LIVE_STOP &&
-        last_action(APP_MEDIA_CONTROL)->media.job_id.bytes[0] == 81 && last_action(APP_MEDIA_CONTROL)->media.consumer_generation == 91);
-    clear_intents(); tap_control("Microphone muted");
-    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_SET_MUTED);
-    assert(!last_action(APP_MEDIA_CONTROL)->media.value.role.value);
-    s_state.media.microphone.mute_confirmed = false;
-    screenshot("media-mute-unconfirmed");
-    assert(!has_visible_label(lv_screen_active(), "Microphone muted"));
-    clear_intents(); tap_control("Mute state unconfirmed");
-    assert(last_action(APP_MEDIA_CONTROL)->media.value.role.value);
-    ui_fixture_media(&s_state);
-    s_state.overlay = APP_OVERLAY_MEDIA_OPTIONS; ++s_state.ui_revision;
-    screenshot("media-routes-and-roles");
-    s_state.media.can_select_peer = true; s_state.media.next_peer_id.bytes[15] = 93; render();
-    clear_intents(); tap_control("Synthetic audio peer");
-    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_SELECT_PEER && last_action(APP_MEDIA_CONTROL)->media.value.peer_id.bytes[15] == 93);
-    clear_intents(); tap_control("Bluetooth calls");
-    const app_media_request_t *request = &last_action(APP_MEDIA_CONTROL)->media;
-    assert(request->operation == APP_MEDIA_SELECT_ROUTE && request->value.route == APP_MEDIA_ROUTE_HFP);
-    assert(request->management_generation == 31 && request->audio_generation == 47 && request->resource_revision == 59);
-    s_state.media.route = APP_MEDIA_ROUTE_HFP;
-    s_state.media.routes[APP_MEDIA_ROUTE_HFP].connected = true; /* SLC exists; SCO still needs explicit Connect voice. */
-    s_state.media.routes[APP_MEDIA_ROUTE_HFP].can_disconnect = true;
-    screenshot("media-voice-service-connected");
-    clear_intents(); tap_control("Connect voice");
-    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_LINK_CONNECT);
-    clear_intents(); tap_control("Disconnect audio");
-    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_LINK_DISCONNECT);
-    s_state.media.command_pending = true; render(); clear_intents();
-    tap_control("Connect voice"); tap_control("Disconnect audio"); assert(action_count(APP_MEDIA_CONTROL) == 0);
-    s_state.media.command_pending = false;
-    s_state.media.routes[APP_MEDIA_ROUTE_HFP].can_connect = false;
-    screenshot("media-voice-connected");
-    clear_intents(); tap_control("Connect voice"); assert(action_count(APP_MEDIA_CONTROL) == 0);
-    clear_intents(); tap_control("Gain +6 dB");
-    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_SET_GAIN);
-    assert(last_action(APP_MEDIA_CONTROL)->media.value.level == 24);
-    clear_intents(); pointer(356, 88, true); ++s_state.media.resource_revision; render(); pointer(356, 88, false);
-    assert(action_count(APP_MEDIA_CONTROL) == 0);
-    s_state.media.routes[APP_MEDIA_ROUTE_HFP].available = false;
-    s_state.media.microphone.can_unmute = false;
-    s_state.media.gain_known = false;
-    screenshot("media-unavailable-operations");
-    clear_intents(); tap_control("Bluetooth calls"); tap_control("Mic / muted"); tap_control("Gain +6 dB");
-    assert(action_count(APP_MEDIA_CONTROL) == 0);
     ui_fixture_media(&s_state);
     s_state.overlay = APP_OVERLAY_RECORDING_START; ++s_state.ui_revision;
     screenshot("recording-options");
@@ -177,5 +118,5 @@ static void media_checks(void)
     screenshot("recordings-invalid-count");
     assert(has_visible_label(lv_screen_active(), "Recording list unavailable"));
     s_state = original; render(); clear_intents();
-    puts("PASS: typed media routes/roles/gain, immutable record and speech identities, reviews, no optimistic mutation or automatic send");
+    puts("PASS: independent Mic/Speaker controls, immutable record and speech identities, reviews, no optimistic mutation or automatic send");
 }

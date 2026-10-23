@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "board_imu_stream.h"
+#include "board_sensor_journal.h"
 #include "esp_err.h"
 #include "lvgl.h"
 
@@ -211,6 +212,29 @@ esp_err_t board_imu_stream_detach(board_imu_consumer_t consumer);
  * measurement. No profile is programmed. Charging reflects current direction;
  * zero current is unknown. This BSP cannot independently sense external power. */
 esp_err_t board_power_read(board_power_status_t *status);
+/* Same copied/derived freshness result as board_power_read, without modifying
+ * any cache, capability or history. Return is the observed power error. */
+esp_err_t board_power_observe(board_power_status_t *status);
+
+/* Stateless read-only cursors: after is the last delivered global record ID,
+ * zero starts from ID1. GAP returns count0, exact lost_records and next_after
+ * (oldest-1); adopt that cursor explicitly before resuming. Future cursors and
+ * invalid arguments return INVALID_ARG with all outputs untouched. DATA and
+ * EMPTY may coexist with journal EXHAUSTED, preserving its retained records.
+ * Each query atomically copies consistent bounds plus at most eight records.
+ * ESP_OK means a valid query, not a healthy hardware source. Root API owns boot
+ * identity validation; journal IDs are scoped to that boot. Storage is fixed
+ * external RAM, initialized once by board_init; no allocation or sensor I/O. */
+esp_err_t board_sensor_journal_read(uint64_t after, board_sensor_record_t *records,
+    size_t capacity, board_sensor_batch_t *batch);
+/* Same batch metadata without records; no cursor acknowledgement/mutation. */
+esp_err_t board_sensor_journal_status(board_sensor_batch_t *batch);
+/* Task-context tee of existing touch/button observations only. Validates kind,
+ * flags, payload and unknown/reserved fields; cannot inject IMU/power events.
+ * Caller sets sequence=observed_us=0; board assigns its ID/publication time.
+ * Returns INVALID_ARG for malformed input, INVALID_STATE if not retained.
+ * This never changes input authority, touch callbacks or any sensor state. */
+esp_err_t board_sensor_journal_publish_input(const board_sensor_record_t *record);
 
 /* Accept the latest brightness request [0,100] for the low-priority worker.
  * ESP_OK means queued/coalesced; inspect status for actual driver acceptance.

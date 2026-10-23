@@ -16,7 +16,7 @@ HEADERS = ["esp_err.h", "esp_heap_caps.h", "esp_random.h", "esp_timer.h", "esp_p
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case",choices=["trust","update","clock","server","work","stack"])
+    parser.add_argument("--case",choices=["trust","update","clock","server","work","stack","usb"])
     selected=parser.parse_args().case
     compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
     with tempfile.TemporaryDirectory(prefix="control-adapters-") as directory:
@@ -55,6 +55,9 @@ def main():
     if not selected or selected=="stack":
         from run_stack import main as run_stack
         run_stack()
+    if not selected or selected=="usb":
+        from run_usb import main as run_usb
+        run_usb()
 
 if __name__ == "__main__":
     main()

@@ -24,7 +24,15 @@ bool app_connectivity_controls_init(void);
 void app_connectivity_controls_context(const app_connectivity_controls_context_t *);
 bool app_connectivity_controls_handle(const app_intent_t *, app_connectivity_controls_effect_t *);
 void app_connectivity_controls_poll(uint64_t now_ms, app_connectivity_controls_effect_t *);
+/* Called only after the parent's fresh physical Add/Forget-all confirmation.
+ * Revision capture and start remain separate to reject changed review data. */
+bool app_connectivity_controls_bluetooth_revisions(uint64_t *bond_revision, uint64_t *preferences_revision);
+bool app_connectivity_controls_bluetooth_start(app_pairing_operation_t, uint64_t generation,
+    uint64_t bond_revision, uint64_t preferences_revision, app_connectivity_controls_effect_t *);
+bool app_connectivity_controls_bluetooth_busy(void);
+void app_connectivity_controls_bluetooth_stop(app_connectivity_controls_effect_t *);
 /* Owns api/saved_wifi/bluetooth_target and actual saved BLE row metadata only.
- * Does not alter legacy scan/password/setup, pairing, media or main settings.
+ * Also owns confirmed native pairing/removal workflows and their actual ACKs.
+ * Does not alter legacy scan/password/setup, media or main settings.
  * Classic audio peer choice remains app_media_controls' single owner. */
 void app_connectivity_controls_fill(app_view_t *);

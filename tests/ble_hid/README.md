@@ -68,6 +68,30 @@ The coordinator owns user confirmation and cancel/release/disconnect. `ble_hid_f
 
 After an actual zero-bond read, the worker commits an empty versioned `hid_cccd/subscriptions` blob and verifies zero bonds again. It never erases the NVS partition. Only completed success publishes `DONE`, a known empty list and a new 120-second pairing window. A submission error, callback error, unreadable list, lack of deletion progress, subscription commit error or ten-second deadline publishes `FAILED` with an error and unavailable/partial cache; it cannot silently claim success. Late callbacks cannot reopen pairing after terminal failure. Existing bonds that were not removed remain stored after a partial failure.
 
+## Native saved-host management
+
+The native `app_bluetooth_management` workflow uses the production worker in
+this suite. Add waits for input release and actual link-down, saves a revisioned
+unselected target policy, verifies its matching durable acknowledgement, then
+opens the bounded pairing window and waits for advertising completion. It
+preserves every existing bond. Forget all uses the separate no-pairing worker
+entry point, verifies actual deletion and subscription cleanup, and saves an
+empty durable target policy before completion. Only a later explicit Add opens
+new admission. Single-host Forget matches the exact fingerprint, address type
+and revisions, awaits its deletion receipt, preserves all other bonds and
+subscriptions, and durably reconciles the remaining selected policy and order.
+
+The composition covers selected-target Add and saved reconnect, deletion of a
+selected or unselected host, simulated preference reboot, applied-on-error NVS
+uncertainty, stale revisions/fingerprints, cancellation after SDK submission,
+and the separate 30-second preparation deadline. Real connect/disconnect
+callbacks verify that an admission-induced generation increment is not actual
+link-down, a replacement before acceptance aborts, and replacement after
+acceptance cannot trigger another disconnect or mutation while connected.
+Timeout and cancellation cannot reopen pairing through a late callback. The
+SDK/NVS boundary remains substituted; target radio and host interoperability
+still require device qualification.
+
 ## Internal RSSI diagnostics
 
 The worker optionally requests actual asynchronous RSSI at two-second intervals for an active link. Samples are in dBm, valid only for SDK success with values -127 through 20, and expire after five seconds. Sentinel 127, failures and disconnect invalidate them. There is no percentage conversion or inferred quality. RSSI completion is scoped to its captured connection generation and address. A two-second timeout quarantines the pending request until its callback drains, including across reconnect to the same address; RSSI failure does not fault HID. These fields are diagnostic only and do not add a signal indicator to product UI.

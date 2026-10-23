@@ -48,6 +48,8 @@ static void clear_queue(hid_engine_t *engine)
     engine->text_pending = 0;
     engine->release_stage = 0;
     engine->mouse_buttons = 0;
+    engine->buffered_motion_count = 0;
+    engine->motion_since_ms = 0;
 }
 
 void hid_engine_init(hid_engine_t *engine)
@@ -93,6 +95,9 @@ bool hid_engine_observe_transport(hid_engine_t *engine, uint64_t now_ms,
         engine->congestion_since_ms = now_ms;
         engine->congestion_cancelled = false;
     }
+    if (engine->buffered_motion_count &&
+        (now_ms < engine->motion_since_ms || now_ms - engine->motion_since_ms >=
+         HID_ENGINE_CONGESTION_TIMEOUT_MS)) invalidate = true;
     if (invalidate) {
         hid_engine_cancel(engine);
         engine->congestion_cancelled = true;
@@ -164,6 +169,20 @@ static void push(hid_engine_t *engine, const hid_engine_action_t *action)
     ++engine->count;
 }
 
+static void refresh_motion_age(hid_engine_t *engine)
+{
+    engine->buffered_motion_count = 0;
+    engine->motion_since_ms = 0;
+    for (size_t i = 0; i < engine->count; ++i) {
+        const hid_engine_action_t *action =
+            &engine->queue[(engine->head + i) % HID_ENGINE_QUEUE_CAPACITY];
+        if (!action->buffered_motion) continue;
+        if (!engine->buffered_motion_count || action->motion_since_ms < engine->motion_since_ms)
+            engine->motion_since_ms = action->motion_since_ms;
+        ++engine->buffered_motion_count;
+    }
+}
+
 static uint8_t queued_mouse_buttons(const hid_engine_t *engine)
 {
     uint8_t buttons = engine->mouse_buttons;
@@ -215,6 +234,52 @@ hid_engine_enqueue_result_t hid_engine_enqueue_mouse_move(hid_engine_t *engine,
     if (x < -127 || x > 127 || y < -127 || y > 127)
         return HID_ENGINE_ENQUEUE_INVALID;
     return enqueue_mouse(engine, epoch, owner, 0, x, y, 0, false, false);
+}
+
+hid_engine_enqueue_result_t hid_engine_enqueue_mouse_displacement(hid_engine_t *engine,
+    uint64_t epoch, input_owner_t owner, int x, int y, uint64_t sample_ms, uint64_t now_ms)
+{
+    if (x < -HID_ENGINE_MOUSE_DISPLACEMENT_MAX || x > HID_ENGINE_MOUSE_DISPLACEMENT_MAX ||
+        y < -HID_ENGINE_MOUSE_DISPLACEMENT_MAX || y > HID_ENGINE_MOUSE_DISPLACEMENT_MAX)
+        return HID_ENGINE_ENQUEUE_INVALID;
+    hid_engine_action_t *tail = engine->count ?
+        &engine->queue[(engine->head + engine->count - 1) % HID_ENGINE_QUEUE_CAPACITY] : NULL;
+    const bool merge = owner == INPUT_LOCAL && tail && tail->buffered_motion &&
+        tail->epoch == epoch && tail->owner == owner;
+    const bool held = queued_mouse_buttons(engine) != 0;
+    const hid_engine_enqueue_result_t result = check_enqueue(engine, epoch, owner,
+        INPUT_MOUSE, (merge ? 0U : 1U) + (held ? 1U : 0U), owner == INPUT_LOCAL);
+    if (result != HID_ENGINE_ENQUEUE_OK) return result;
+    if (engine->congestion_cancelled || (engine->time_observed && now_ms < engine->observed_ms))
+        return HID_ENGINE_ENQUEUE_BLOCKED;
+    if (sample_ms > now_ms || now_ms - sample_ms >= HID_ENGINE_CONGESTION_TIMEOUT_MS)
+        return HID_ENGINE_ENQUEUE_STALE;
+    const int total_x = x + (merge ? tail->remaining_x : 0);
+    const int total_y = y + (merge ? tail->remaining_y : 0);
+    if (total_x < -HID_ENGINE_MOUSE_DISPLACEMENT_MAX || total_x > HID_ENGINE_MOUSE_DISPLACEMENT_MAX ||
+        total_y < -HID_ENGINE_MOUSE_DISPLACEMENT_MAX || total_y > HID_ENGINE_MOUSE_DISPLACEMENT_MAX)
+        return HID_ENGINE_ENQUEUE_FULL;
+    if (merge) {
+        tail->remaining_x = (int16_t)total_x;
+        tail->remaining_y = (int16_t)total_y;
+        if (sample_ms < tail->motion_since_ms) tail->motion_since_ms = sample_ms;
+        if (!total_x && !total_y) {
+            *tail = (hid_engine_action_t){0};
+            --engine->count;
+        }
+    } else {
+        if (!x && !y) return HID_ENGINE_ENQUEUE_OK;
+        const hid_engine_action_t action = {
+            .epoch = epoch, .owner = owner, .mode = INPUT_MOUSE,
+            .report_id = HID_ENGINE_MOUSE_REPORT_ID,
+            .length = HID_ENGINE_MOUSE_REPORT_LENGTH,
+            .buffered_motion = true, .remaining_x = (int16_t)x, .remaining_y = (int16_t)y,
+            .motion_since_ms = sample_ms
+        };
+        push(engine, &action);
+    }
+    refresh_motion_age(engine);
+    return HID_ENGINE_ENQUEUE_OK;
 }
 
 hid_engine_enqueue_result_t hid_engine_enqueue_mouse_click(hid_engine_t *engine,
@@ -345,10 +410,20 @@ hid_engine_step_result_t hid_engine_step(hid_engine_t *engine,
         !action->needs_release && !action->sets_mouse_buttons) {
         memcpy(mouse, action->data, sizeof mouse);
         mouse[0] = engine->mouse_buttons;
+        if (action->buffered_motion) {
+            const int x = action->remaining_x, y = action->remaining_y;
+            mouse[1] = (uint8_t)(x > 127 ? 127 : x < -127 ? -127 : x);
+            mouse[2] = (uint8_t)(y > 127 ? 127 : y < -127 ? -127 : y);
+        }
         data = mouse;
     }
     if (!send(context, action->report_id, data, action->length))
         return send_failed(engine);
+    if (action->buffered_motion) {
+        action->remaining_x = (int16_t)(action->remaining_x - (int8_t)mouse[1]);
+        action->remaining_y = (int16_t)(action->remaining_y - (int8_t)mouse[2]);
+        if (action->remaining_x || action->remaining_y) return HID_ENGINE_STEP_SENT;
+    }
     if (action->sets_mouse_buttons) engine->mouse_buttons = action->data[0];
     if (action->text_character) {
         if (action->release_next) {
@@ -364,6 +439,7 @@ hid_engine_step_result_t hid_engine_step(hid_engine_t *engine,
         *action = (hid_engine_action_t){0};
         engine->head = (engine->head + 1) % HID_ENGINE_QUEUE_CAPACITY;
         --engine->count;
+        refresh_motion_age(engine);
     }
     return HID_ENGINE_STEP_SENT;
 }

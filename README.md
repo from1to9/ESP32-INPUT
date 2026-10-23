@@ -37,6 +37,10 @@ The combined delivery does not flash or test a device; see the
 - Saved Bluetooth peers, explicit pairing windows, device naming, target preferences,
   local override and bounded remote-input leases are integrated. Input ownership and
   independent media authorization have separate lifetimes.
+- The [live sensor API](docs/sensor-api.md) exports a bounded, read-only journal
+  over USB CDC and authenticated station HTTPS, with a host JSONL/CSV collector.
+  Raw acquisition errors and retention gaps remain visible; transport and Motion
+  usability require separate physical qualification.
 - Compact native workspaces, Light/Dark themes, boot logo, battery/connectivity status,
   50% default brightness, configurable display blanking and haptics use actual capabilities.
   Temporary settings remain distinct from saved preferences.

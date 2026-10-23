@@ -255,6 +255,7 @@ void interaction_sync(interaction_t *m, const input_state_t *state,
     m->view.mode = state->mode;
     m->output_ready = output_ready && state->connected && !state->locked &&
         !state->release_pending;
+    m->touch_motion_ready = m->output_ready;
     if (boundary) {
         (void)interaction_touch_cancel(m);
         m->touch.latest_gesture = 0;
@@ -269,6 +270,12 @@ void interaction_sync(interaction_t *m, const input_state_t *state,
         }
         reset_grid(m);
     }
+}
+
+void interaction_set_touch_motion_ready(interaction_t *m, bool ready)
+{
+    m->touch_motion_ready = ready && m->control.connected && !m->control.locked &&
+        !m->control.release_pending && m->control.owner == INPUT_LOCAL;
 }
 
 bool interaction_configure(interaction_t *m, const interaction_config_t *c)
@@ -391,6 +398,28 @@ input_delta_t interaction_touch_move_owned(interaction_t *m, input_owner_t sourc
                            touch_axis(&m->touch_carry[1], dy, m->view.touch_divisor)};
 }
 
+interaction_touch_delta_t interaction_touch_displacement_owned(interaction_t *m,
+    input_owner_t source, float dx, float dy)
+{
+    const bool ready = source == INPUT_LOCAL ? m->touch_motion_ready : m->output_ready;
+    if (!isfinite(dx) || !isfinite(dy) || fabsf(dx) > 4096 || fabsf(dy) > 4096 ||
+        !valid_source(source) ||
+        !(source == INPUT_LOCAL ? m->view.touch_active : m->touch.active && m->touch.source == source) ||
+        m->view.mode != INPUT_MOUSE || !ready || m->control.owner != source ||
+        m->view.menu_open || m->view.button_down) {
+        memset(m->touch_carry, 0, sizeof m->touch_carry);
+        return (interaction_touch_delta_t){0};
+    }
+    interaction_touch_delta_t result;
+    const float x = m->touch_carry[0] + dx / (float)m->view.touch_divisor;
+    const float y = m->touch_carry[1] + dy / (float)m->view.touch_divisor;
+    result.x = (int16_t)x;
+    result.y = (int16_t)y;
+    m->touch_carry[0] = x - result.x;
+    m->touch_carry[1] = y - result.y;
+    return result;
+}
+
 void interaction_touch_defaults(interaction_touch_config_t *config)
 {
     if (config) *config = (interaction_touch_config_t){
@@ -424,6 +453,7 @@ static interaction_touch_result_t touch_effect(interaction_t *m, interaction_tou
 interaction_touch_result_t interaction_touch_cancel(interaction_t *m)
 {
     if (!m) return touch_none(false);
+    memset(m->touch_carry, 0, sizeof m->touch_carry);
     interaction_touch_state_t *t = &m->touch;
     const bool release = t->held || t->pending.effect != INTERACTION_TOUCH_NONE;
     t->active = t->candidate = t->second = t->have_tap = false;
@@ -545,16 +575,18 @@ interaction_touch_result_t interaction_touch_input_owned(interaction_t *m, input
     if (event->phase == INTERACTION_TOUCH_BEGIN) {
         t->latest_gesture = event->gesture;
         if (t->active || t->exhausted) return interaction_touch_cancel(m);
-        const bool second = t->have_tap && tap_allowed && m->touch_config.tap_to_click &&
+        const bool second = m->output_ready && t->have_tap && tap_allowed && m->touch_config.tap_to_click &&
             event->timestamp_ms >= t->tap_ms &&
             event->timestamp_ms - t->tap_ms <= m->touch_config.double_window_ms &&
             hypotf(event->x - t->tap_x, event->y - t->tap_y) <= m->touch_config.double_slop_px;
         t->source = source; t->gesture = event->gesture; t->epoch = event->epoch; t->ui_revision = event->ui_revision;
         t->started_ms = t->contact_ms = event->timestamp_ms;
         t->start_x = t->x = event->x; t->start_y = t->y = event->y;
-        t->active = true; t->candidate = tap_allowed && m->touch_config.tap_to_click;
+        t->active = true;
+        t->candidate = m->output_ready && tap_allowed && m->touch_config.tap_to_click;
         t->second = second; t->have_tap = false;
-        if (!touch_context(m, current_ui_revision) || !m->output_ready) return interaction_touch_cancel(m);
+        const bool motion_ready = source == INPUT_LOCAL ? m->touch_motion_ready : m->output_ready;
+        if (!touch_context(m, current_ui_revision) || !motion_ready) return interaction_touch_cancel(m);
         if (second) return touch_effect(m, INTERACTION_TOUCH_LEFT_DOWN);
         return touch_none(false);
     }
@@ -581,7 +613,8 @@ interaction_touch_result_t interaction_touch_input_owned(interaction_t *m, input
         }
         return touch_none(false);
     }
-    return touch_none(event->phase == INTERACTION_TOUCH_MOVE && m->output_ready);
+    return touch_none(event->phase == INTERACTION_TOUCH_MOVE &&
+        (source == INPUT_LOCAL ? m->touch_motion_ready : m->output_ready));
 }
 
 static bool append_character(interaction_t *m, unsigned char c)

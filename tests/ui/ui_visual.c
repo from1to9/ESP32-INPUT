@@ -730,7 +730,7 @@ static void transport_and_grid_checks(void)
     s_state.audio_available = false;
     screenshot("usb-audio-unavailable");
     clear_intents();
-    tap_control("Start audio");
+    tap_control("Start mic");
     assert(action_count(APP_AUDIO_POWER) == 0);
     s_state.overlay = APP_OVERLAY_SETTINGS;
     s_state.settings_page = APP_SETTINGS_CONNECTIVITY;
@@ -1048,7 +1048,7 @@ static void interaction_checks(void)
     s_state.mode = INPUT_AUDIO;
     render();
     clear_intents();
-    tap_control("Start audio");
+    tap_control("Start mic");
     tap(240, 164);
     assert(action_count(APP_AUDIO_POWER) == 0 && action_count(APP_AUDIO_MUTE) == 0);
     clear_intents();
@@ -1161,18 +1161,19 @@ static void quick_panel_and_chooser_checks(void)
     s_state.overlay = APP_OVERLAY_NONE;
     ++s_state.ui_revision;
     render();
-    assert_rect(control("Start audio"), 12, 280, 456, 56);
+    assert_rect(control("Start mic"), 316, 80, 136, 48);
+    assert_rect(control("Start speaker"), 316, 260, 136, 48);
     clear_intents();
-    tap_control("Voice");
-    assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_AUDIO);
-    s_state.overlay = APP_OVERLAY_AUDIO;
+    tap_control("Connection");
+    assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_MEDIA_OPTIONS);
+    s_state.overlay = APP_OVERLAY_MEDIA_OPTIONS;
     ++s_state.ui_revision;
     screenshot("audio-kind-chooser");
-    const char *audio[] = {"Voice / meeting", "Speaker"};
+    const char *audio[] = {"USB", "Bluetooth"};
     for (unsigned i = 0; i < 2; ++i) {
         clear_intents();
         tap_control(audio[i]);
-        assert(action_count(APP_AUDIO_KIND) == 1 && last_action(APP_AUDIO_KIND)->x == (int)i);
+        assert(action_count(APP_AUDIO_KIND) == 0 && action_count(APP_MEDIA_CONTROL) == 0);
         assert(s_state.audio_kind == APP_AUDIO_VOICE && action_count(APP_AUDIO_POWER) == 0);
     }
     s_state.overlay = APP_OVERLAY_NONE;
@@ -1328,17 +1329,21 @@ static void setup_cache_lifetime_checks(void)
 #include "ui_capture_indicator.inc"
 #include "ui_touch_context.inc"
 #include "ui_recording_storage.inc"
+#include "ui_audio_core.inc"
 #include "ui_media.inc"
 #include "ui_connections.inc"
+#include "ui_bluetooth_management.inc"
 #include "ui_remote_review.inc"
 #include "ui_trust_review.inc"
 
 int main(int argc, char **argv)
 {
-    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion") || !strcmp(argv[2], "about"))));
+    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion") || !strcmp(argv[2], "about") || !strcmp(argv[2], "audio") || !strcmp(argv[2], "bluetooth"))));
     bool keys_only = argc == 3 && !strcmp(argv[2], "keys");
     bool motion_only = argc == 3 && !strcmp(argv[2], "motion");
     bool about_only = argc == 3 && !strcmp(argv[2], "about");
+    bool audio_only = argc == 3 && !strcmp(argv[2], "audio");
+    bool bluetooth_only = argc == 3 && !strcmp(argv[2], "bluetooth");
     assert(!app_ui_touch_context().eligible_pad);
     s_output = argv[1];
     ui_memory_check_observer();
@@ -1358,6 +1363,7 @@ int main(int argc, char **argv)
             .dark_theme = theme != 0,
             .connected = true, .ready = true, .motion_available = true,
             .bluetooth_available = true, .bluetooth_connected = true, .bluetooth_ready = true,
+            .bluetooth_management = {.known = true, .can_add = true},
             .bluetooth_target_name = "HID test peer",
             .haptics_available = true, .haptics_enabled = true, .gain_divisor = 1,
             .microphone_muted = true, .volume = 0, .target_name = "HID test peer",
@@ -1384,6 +1390,16 @@ int main(int argc, char **argv)
         if (about_only) {
             about_metadata_checks();
             device_settings_checks();
+            continue;
+        }
+        if (audio_only) {
+            media_checks();
+            recording_storage_checks();
+            quick_panel_and_chooser_checks();
+            continue;
+        }
+        if (bluetooth_only) {
+            bluetooth_management_checks();
             continue;
         }
         if (motion_only) {
@@ -1485,6 +1501,7 @@ int main(int argc, char **argv)
         recording_storage_checks();
         media_checks();
         connection_checks();
+        bluetooth_management_checks();
         remote_review_checks();
         trust_review_checks();
     }

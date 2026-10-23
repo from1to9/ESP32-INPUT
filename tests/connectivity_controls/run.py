@@ -14,6 +14,7 @@ with tempfile.TemporaryDirectory(prefix="esp32-connectivity-controls-") as direc
                "-I", str(ROOT / "components/input_core/include"), "-I", str(ROOT / "components/audio_engine/include"),
                "-I", str(ROOT / "components/device_settings/include"), "-I", str(ROOT / "components/control_protocol/include"),
                str(ROOT / "tests/connectivity_controls/test_connectivity_controls.c"),
+               str(ROOT / "firmware/main/app_bluetooth_management.c"),
                str(ROOT / "components/control_protocol/control_registry.c"), "-o", str(binary)]
     subprocess.run(command, check=True)
     for case in subprocess.check_output([str(binary), "--list"], text=True).splitlines():

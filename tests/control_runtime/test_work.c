@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
 #include "control_json.h"
+#include "control_sensor_usb.h"
 #include "weak_heap.h"
 #ifndef ESP_ERR_NOT_FOUND
 #define ESP_ERR_NOT_FOUND 0x105

@@ -3,6 +3,7 @@
 #include "app_wifi_profiles.h"
 #include "app_control_runtime.h"
 #include "ble_hid.h"
+#include "app_bluetooth_management.h"
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -17,7 +18,7 @@
 _Static_assert(APP_API_REVIEW_PAGES <= 64, "Review navigation bitmap is bounded");
 _Static_assert(APP_CONTROL_TRUST_REVIEW_ABI >= 2, "Native review requires complete public trust authority");
 typedef enum { P_NONE, P_WIFI_JOIN, P_WIFI_PREFER, P_WIFI_FORGET, P_BLE, P_API_OPEN,
-    P_API_CLOSE, P_API_APPROVE } pending_t;
+    P_API_CLOSE, P_API_APPROVE, P_BLE_MANAGEMENT } pending_t;
 typedef struct {
     bool initialized, clock_known, clock_failed, target_known;
     uint64_t now_ms, started_ms, api_revision, api_trust_revision;
@@ -42,6 +43,9 @@ typedef struct {
     uint64_t reviewed_pages;
     bool confirm_owned, confirm_valid, confirm_entering;
     uint64_t confirm_epoch, confirm_ui_revision, confirm_profile_revision;
+    bool confirm_bluetooth;
+    uint64_t confirm_bond_revision, confirm_preference_revision, confirm_generation, management_revision;
+    ble_hid_target_t confirm_target;
     char confirm_profile[33];
     char expected_digest[65], message[97];
 } connectivity_controls_t;
@@ -264,7 +268,7 @@ static void rebuild(void)
     else if (controls.saved.uncertain) snprintf(controls.saved.reason, sizeof(controls.saved.reason), "Saved network outcome uncertain. Verify storage before retrying.");
     else snprintf(controls.saved.reason, sizeof(controls.saved.reason), "%s", controls.message);
     controls.target = (app_bluetooth_target_view_t){.bond_revision = controls.bonds.revision, .preferences_revision = controls.preference.revision,
-        .pending = controls.pending == P_BLE || controls.preference.request_status == BLE_HID_TARGET_PENDING || controls.preference.request_status == BLE_HID_TARGET_APPLYING,
+        .pending = controls.pending == P_BLE || controls.pending == P_BLE_MANAGEMENT || controls.preference.request_status == BLE_HID_TARGET_PENDING || controls.preference.request_status == BLE_HID_TARGET_APPLYING,
         .uncertain = controls.preference.request_status == BLE_HID_TARGET_UNCERTAIN};
     int found = controls.target_known ? find_bond(&controls.selected_target) : -1;
     if (found >= 0) {
@@ -273,9 +277,14 @@ static void rebuild(void)
         snprintf(controls.target.name, sizeof(controls.target.name), "Saved input host");
         snprintf(controls.target.identity, sizeof(controls.target.identity), "%02X:%02X:%02X:%02X:%02X:%02X (type %u)", row->address[0], row->address[1], row->address[2], row->address[3], row->address[4], row->address[5], row->address_type);
         controls.target.can_select = ble_idle() && row->selection_supported; controls.target.can_prefer = ble_idle() && found > 0;
+        controls.target.can_forget = idle() && row->bond_id_known && row->address_type_known &&
+            controls.preference.loaded && controls.preference.request_status != BLE_HID_TARGET_PENDING &&
+            controls.preference.request_status != BLE_HID_TARGET_APPLYING && controls.preference.request_status != BLE_HID_TARGET_UNCERTAIN &&
+            controls.bluetooth.initialized && !controls.bluetooth.failed && !controls.context.transport_switch_pending;
         snprintf(controls.target.reason, sizeof(controls.target.reason), "%s", !row->selection_supported ? "Exact selection is unavailable for this private or unverified identity." :
             controls.bluetooth.connected ? "Release input and disconnect the current host before changing targets." : controls.message);
-    } else snprintf(controls.target.reason, sizeof(controls.target.reason), "The saved target is unavailable or changed. Select a fresh row.");
+    } else snprintf(controls.target.reason, sizeof(controls.target.reason), "%s", controls.message[0] ?
+        controls.message : "The saved target is unavailable or changed. Select a fresh row.");
     controls.api = (app_api_view_t){.known = controls.runtime.initialized && controls.runtime.trust.initialized,
         .tls = controls.runtime.server.tls, .commissioning_open = controls.runtime.commissioning_open,
         .usb_import_active = controls.runtime.usb_import_active, .remaining_known = controls.runtime.trust.import_window && controls.runtime.trust.window_remaining_ms != 0,
@@ -330,18 +339,25 @@ static void refresh_owners(void)
 bool app_connectivity_controls_init(void)
 {
     if (controls.initialized) return false;
-    memset(&controls, 0, sizeof(controls)); controls.initialized = true; controls.api_revision = 1; return true;
+    memset(&controls, 0, sizeof(controls)); controls.initialized = true; controls.api_revision = 1;
+    app_bluetooth_management_init(); return true;
 }
 void app_connectivity_controls_context(const app_connectivity_controls_context_t *context)
 {
     if (!context || !controls.initialized) return;
+    if (controls.context.overlay == APP_OVERLAY_BLUETOOTH_PAIRING && context->overlay != APP_OVERLAY_BLUETOOTH_PAIRING) {
+        app_bluetooth_management_cancel();
+        ble_hid_pairing_close();
+    }
     if (controls.confirm_owned) {
-        bool confirm = context->overlay == APP_OVERLAY_CONFIRM && context->confirmation == APP_CONFIRM_WIFI_FORGET;
+        bool confirm = context->overlay == APP_OVERLAY_CONFIRM && context->confirmation ==
+            (controls.confirm_bluetooth ? APP_CONFIRM_BLUETOOTH_FORGET_ONE : APP_CONFIRM_WIFI_FORGET);
         if (controls.confirm_entering && confirm) {
             /* Parent open_overlay cancels HID and advances epoch/revision.
              * Bind the one requested review transition, then freeze identity. */
             controls.confirm_epoch = context->epoch; controls.confirm_ui_revision = context->ui_revision; controls.confirm_entering = false;
-        } else if (controls.confirm_entering && (context->overlay != APP_OVERLAY_WIFI_PROFILES ||
+        } else if (controls.confirm_entering && (context->overlay !=
+            (controls.confirm_bluetooth ? APP_OVERLAY_BLUETOOTH_TARGET : APP_OVERLAY_WIFI_PROFILES) ||
             context->epoch != controls.confirm_epoch || context->ui_revision != controls.confirm_ui_revision)) {
             controls.confirm_valid = false; controls.confirm_owned = false;
         } else if (!controls.confirm_entering && (!confirm || context->epoch != controls.confirm_epoch ||
@@ -381,6 +397,7 @@ static void handle_wifi(const app_saved_wifi_request_t *request, app_connectivit
     if (request->operation == APP_SAVED_WIFI_FORGET_REQUEST) {
         if (!controls.saved.rows[found].can_forget) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return; }
         controls.confirm_owned = controls.confirm_valid = controls.confirm_entering = true;
+        controls.confirm_bluetooth = false;
         controls.confirm_epoch = controls.context.epoch; controls.confirm_ui_revision = controls.context.ui_revision;
         controls.confirm_profile_revision = controls.profiles.revision; memcpy(controls.confirm_profile, request->id, 33);
         effect->open_overlay = true; effect->overlay = APP_OVERLAY_CONFIRM; effect->confirmation = APP_CONFIRM_WIFI_FORGET; return;
@@ -398,6 +415,18 @@ static void handle_bluetooth(const app_bluetooth_target_request_t *request, app_
     if (request->operation == APP_BLUETOOTH_TARGET_DETAILS) {
         controls.selected_target = request->target; controls.target_known = true;
         effect->open_overlay = true; effect->overlay = APP_OVERLAY_BLUETOOTH_TARGET; return;
+    }
+    if (request->operation == APP_BLUETOOTH_TARGET_FORGET_REQUEST) {
+        if (controls.context.overlay != APP_OVERLAY_BLUETOOTH_TARGET || !controls.target.can_forget ||
+            !controls.bonds.bonds[found].bond_id_known || !controls.bonds.bonds[found].address_type_known) {
+            say(effect, error_text(ESP_ERR_NOT_SUPPORTED)); return;
+        }
+        controls.confirm_owned = controls.confirm_valid = controls.confirm_entering = controls.confirm_bluetooth = true;
+        controls.confirm_epoch = controls.context.epoch; controls.confirm_ui_revision = controls.context.ui_revision;
+        controls.confirm_bond_revision = controls.bonds.revision; controls.confirm_preference_revision = controls.preference.revision;
+        controls.confirm_generation = controls.bluetooth.generation; controls.confirm_target = owner_key(&controls.bonds.bonds[found]);
+        effect->open_overlay = true; effect->overlay = APP_OVERLAY_CONFIRM;
+        effect->confirmation = APP_CONFIRM_BLUETOOTH_FORGET_ONE; return;
     }
     if (controls.context.overlay != APP_OVERLAY_BLUETOOTH_TARGET || !ble_idle() ||
         (request->operation != APP_BLUETOOTH_TARGET_SELECT && request->operation != APP_BLUETOOTH_TARGET_PREFER) ||
@@ -447,6 +476,46 @@ static void handle_api(const app_api_request_t *request, app_connectivity_contro
     }
     say(effect, error_text(error));
 }
+bool app_connectivity_controls_bluetooth_revisions(uint64_t *bond_revision, uint64_t *preferences_revision)
+{
+    refresh_owners();
+    if (!bond_revision || !preferences_revision || !idle() || !controls.bonds.known || controls.bonds.updating ||
+        !controls.preference.loaded || controls.preference.request_status == BLE_HID_TARGET_PENDING ||
+        controls.preference.request_status == BLE_HID_TARGET_APPLYING || controls.preference.request_status == BLE_HID_TARGET_UNCERTAIN)
+        return false;
+    *bond_revision = controls.bonds.revision; *preferences_revision = controls.preference.revision;
+    return true;
+}
+bool app_connectivity_controls_bluetooth_busy(void)
+{
+    app_bluetooth_management_snapshot_t state; app_bluetooth_management_snapshot(&state);
+    return state.active;
+}
+bool app_connectivity_controls_bluetooth_start(app_pairing_operation_t operation, uint64_t generation,
+    uint64_t bond_revision, uint64_t preferences_revision, app_connectivity_controls_effect_t *effect)
+{
+    if (effect) *effect = (app_connectivity_controls_effect_t){0};
+    if (!idle() || (operation != APP_PAIR_OPEN && operation != APP_PAIR_FORGET_ALL)) {
+        say(effect, "Bluetooth management is busy or unavailable."); return false;
+    }
+    esp_err_t error = app_bluetooth_management_begin(operation == APP_PAIR_OPEN ? APP_BT_MANAGE_ADD : APP_BT_MANAGE_FORGET_ALL,
+        generation, bond_revision, preferences_revision, NULL, controls.now_ms);
+    if (error != ESP_OK) { say(effect, error_text(error)); return false; }
+    begin(P_BLE_MANAGEMENT);
+    app_bluetooth_management_snapshot_t state; app_bluetooth_management_snapshot(&state);
+    controls.management_revision = state.revision; say(effect, state.message);
+    return true;
+}
+void app_connectivity_controls_bluetooth_stop(app_connectivity_controls_effect_t *effect)
+{
+    if (effect) *effect = (app_connectivity_controls_effect_t){0};
+    if (!local_ready()) { say(effect, "Unlock the device before changing pairing."); return; }
+    app_bluetooth_management_cancel(); ble_hid_pairing_close();
+    app_bluetooth_management_snapshot_t state; app_bluetooth_management_snapshot(&state);
+    if (controls.pending == P_BLE_MANAGEMENT) controls.pending = P_NONE;
+    controls.management_revision = state.revision;
+    say(effect, state.phase == APP_BT_MANAGE_CANCELLED ? state.message : "Pairing stopped. Saved pairings remain.");
+}
 bool app_connectivity_controls_handle(const app_intent_t *intent, app_connectivity_controls_effect_t *effect)
 {
     if (!effect) return false;
@@ -459,6 +528,21 @@ bool app_connectivity_controls_handle(const app_intent_t *intent, app_connectivi
     effect->handled = true; refresh_owners(); rebuild();
     if (!local_ready() || intent->epoch != controls.context.epoch || intent->ui_revision != controls.context.ui_revision) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return true; }
     if (confirm) {
+        if (controls.confirm_bluetooth) {
+            bool valid = controls.confirm_valid && !controls.confirm_entering &&
+                controls.context.overlay == APP_OVERLAY_CONFIRM && controls.context.confirmation == APP_CONFIRM_BLUETOOTH_FORGET_ONE &&
+                intent->ui_revision == controls.confirm_ui_revision && controls.confirm_bond_revision == controls.bonds.revision &&
+                controls.confirm_preference_revision == controls.preference.revision && controls.confirm_generation == controls.bluetooth.generation;
+            controls.confirm_owned = controls.confirm_valid = false;
+            if (intent->x == 1 && valid) {
+                esp_err_t error = app_bluetooth_management_begin(APP_BT_MANAGE_FORGET_ONE, controls.confirm_generation,
+                    controls.confirm_bond_revision, controls.confirm_preference_revision, &controls.confirm_target, controls.now_ms);
+                if (error == ESP_OK) { begin(P_BLE_MANAGEMENT); say(effect, "Releasing input before forgetting this exact saved host."); }
+                else say(effect, error_text(error));
+            } else say(effect, intent->x == 0 ? "Forget cancelled." : "Saved host changed. Review the exact identity again.");
+            effect->open_overlay = true; effect->overlay = APP_OVERLAY_BLUETOOTH_TARGET;
+            rebuild(); return true;
+        }
         bool valid = controls.confirm_valid && !controls.confirm_entering && controls.context.overlay == APP_OVERLAY_CONFIRM &&
             controls.context.confirmation == APP_CONFIRM_WIFI_FORGET && intent->ui_revision == controls.confirm_ui_revision &&
             controls.confirm_profile_revision == controls.profiles.revision;
@@ -477,6 +561,18 @@ void app_connectivity_controls_poll(uint64_t now_ms, app_connectivity_controls_e
     if (!controls.initialized) return;
     if (controls.clock_known && now_ms < controls.now_ms) controls.clock_failed = true;
     controls.clock_known = true; controls.now_ms = now_ms;
+    app_bluetooth_management_context_t bluetooth_context = {.locked = controls.context.locked,
+        .screen_off = controls.context.screen_off, .release_pending = controls.context.release_pending,
+        .transport_switch_pending = controls.context.transport_switch_pending};
+    app_bluetooth_management_snapshot_t management_state; app_bluetooth_management_snapshot(&management_state);
+    if (management_state.active && management_state.operation == APP_BT_MANAGE_ADD &&
+        controls.context.overlay != APP_OVERLAY_BLUETOOTH_PAIRING) app_bluetooth_management_cancel();
+    app_bluetooth_management_service(&bluetooth_context, now_ms);
+    app_bluetooth_management_snapshot(&management_state);
+    if (management_state.revision != controls.management_revision) {
+        controls.management_revision = management_state.revision; say(effect, management_state.message);
+    }
+    if (controls.pending == P_BLE_MANAGEMENT && !management_state.active) controls.pending = P_NONE;
     refresh_owners();
     pending_t pending = controls.pending; const char *message = NULL;
     if (pending == P_BLE) {
@@ -524,6 +620,47 @@ void app_connectivity_controls_fill(app_view_t *view)
     if (!view || !controls.initialized) return;
     rebuild();
     view->api = controls.api; view->saved_wifi = controls.saved; view->bluetooth_target = controls.target;
+    app_bluetooth_management_snapshot_t management_state; app_bluetooth_management_snapshot(&management_state);
+    app_bluetooth_management_view_t *management_view = &view->bluetooth_management;
+    memset(management_view, 0, sizeof(*management_view));
+    management_view->known = controls.bluetooth.initialized;
+    management_view->pending = management_state.active;
+    management_view->uncertain = management_state.uncertain || controls.preference.request_status == BLE_HID_TARGET_UNCERTAIN;
+    management_view->connected = controls.bluetooth.connected;
+    management_view->window_open = controls.bluetooth.pairing_open;
+    management_view->advertising = controls.bluetooth.advertising;
+    management_view->remaining_known = controls.bluetooth.pairing_open && controls.bluetooth.pairing_remaining_ms > 0;
+    management_view->remaining_seconds = (controls.bluetooth.pairing_remaining_ms + 999U) / 1000U;
+    management_view->can_add = idle() && controls.bluetooth.initialized && !controls.bluetooth.failed &&
+        controls.bonds.known && !controls.bonds.updating && controls.bonds.capacity && controls.bonds.count < controls.bonds.capacity &&
+        controls.preference.loaded && controls.preference.request_status != BLE_HID_TARGET_PENDING &&
+        controls.preference.request_status != BLE_HID_TARGET_APPLYING && controls.preference.request_status != BLE_HID_TARGET_UNCERTAIN;
+    management_view->can_stop = local_ready() && (controls.bluetooth.pairing_open ||
+        (management_state.active && management_state.operation == APP_BT_MANAGE_ADD));
+    bool preparing_disconnect = management_state.active &&
+        (management_state.phase == APP_BT_MANAGE_RELEASE || management_state.phase == APP_BT_MANAGE_DISCONNECT);
+    const char *status = !controls.bluetooth.initialized ? "Bluetooth unavailable" : controls.bluetooth.failed ? "Bluetooth failed" :
+        preparing_disconnect ? "Preparing pairing" : controls.bluetooth.connected ?
+        (controls.bluetooth.ready ? "Connected" : "Connecting securely") :
+        management_state.active ? "Preparing pairing" :
+        controls.bluetooth.pairing_open ? (controls.bluetooth.advertising ? "Ready to pair" : "Preparing pairing") : "Pairing closed";
+    snprintf(management_view->status, sizeof(management_view->status), "%s", status);
+    const char *reason = controls.message[0] ? controls.message :
+        "Saved hosts reconnect from their Bluetooth settings. Add host opens a new pairing window.";
+    if (management_state.operation == APP_BT_MANAGE_ADD && management_state.phase == APP_BT_MANAGE_COMPLETE &&
+        !strcmp(controls.message, management_state.message)) {
+        reason = controls.bluetooth.connected ? (controls.bluetooth.ready ? "Bluetooth input is ready. Manage saved hosts to change or disconnect." :
+            "A host is connected. Waiting for secure input readiness.") :
+            controls.bluetooth.pairing_open ? (controls.bluetooth.advertising ?
+                "Choose this device in your host's Bluetooth settings." : "Waiting for Bluetooth to become visible.") :
+            "Pairing is closed. Try again requests a new pairing window.";
+    }
+    snprintf(management_view->reason, sizeof(management_view->reason), "%s", reason);
+    if (controls.confirm_bluetooth) snprintf(management_view->forget_identity, sizeof(management_view->forget_identity),
+        "%02X:%02X:%02X:%02X:%02X:%02X (type %u)", controls.confirm_target.address[0], controls.confirm_target.address[1],
+        controls.confirm_target.address[2], controls.confirm_target.address[3], controls.confirm_target.address[4],
+        controls.confirm_target.address[5], controls.confirm_target.address_type);
+    if (management_state.active) view->pairing_state = APP_PAIRING_CLEARING;
     view->wifi_lan_service_url[0] = 0;
     const char *service_message;
     if (!controls.api.known) {

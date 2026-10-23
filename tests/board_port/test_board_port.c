@@ -589,6 +589,8 @@ static void reset(void)
     s_imu_accel_scale = s_imu_gyro_scale = 0;
     memset(&s_imu_sample, 0, sizeof(s_imu_sample));
     memset(&s_imu_stream, 0, sizeof(s_imu_stream));
+    memset(&s_sensor_journal, 0, sizeof(s_sensor_journal));
+    memset(&s_imu_observation, 0, sizeof(s_imu_observation));
     s_imu_sample_valid = false;
     s_imu_error = ESP_ERR_INVALID_STATE;
     s_imu_status = (board_imu_status_t){
@@ -1983,8 +1985,199 @@ static void test_ordered_stream_observer_during_acquisition_preserves_cause(void
     assert(stream_batch.count == 1 && stream_frames[0].sequence == 4);
 }
 
+static board_sensor_record_t journal_records[BOARD_SENSOR_JOURNAL_READ_MAX];
+static board_sensor_batch_t journal_batch;
+
+static uint64_t journal_word64(const uint32_t *words)
+{
+    return (uint64_t)words[0] | ((uint64_t)words[1] << 32);
+}
+
+static void journal_read(uint64_t after)
+{
+    const unsigned imu_reads = hw.gyro_reads, gauge_reads = hw.gauge_reads;
+    assert(board_sensor_journal_read(after, journal_records, BOARD_SENSOR_JOURNAL_READ_MAX, &journal_batch) == ESP_OK);
+    assert(imu_reads == hw.gyro_reads && gauge_reads == hw.gauge_reads && !hw.critical_depth);
+}
+
+static void test_raw_journal_retains_samples_around_actual_read_rejections(void)
+{
+    stream_start();
+    assert(board_sensor_journal_status(&journal_batch) == ESP_OK);
+    const uint64_t before = journal_batch.latest_sequence;
+    hw.time_us += 10000; assert(imu_update() == ESP_OK);
+    const board_imu_sample_t accepted = s_imu_sample;
+    hw.ready_mask = BMI2_DRDY_ACC; hw.time_us += 10000;
+    const uint64_t start = hw.time_us;
+    assert(imu_update() == ESP_OK && s_caps.imu && !s_imu_status.fault_latched);
+    hw.ready_mask = BMI2_DRDY_GYR | BMI2_DRDY_ACC; hw.time_us += 10000;
+    assert(imu_update() == ESP_OK);
+    journal_read(before);
+    assert(journal_batch.state == BOARD_SENSOR_READ_DATA && journal_batch.count == 3);
+    assert(journal_records[0].kind == BOARD_SENSOR_IMU_SAMPLE && journal_records[0].source_sequence == 2);
+    assert(journal_records[0].sample_us == accepted.timestamp_us && !journal_records[0].source_epoch);
+    const float axes[6] = {accepted.x_dps, accepted.y_dps, accepted.z_dps, accepted.x_g, accepted.y_g, accepted.z_g};
+    assert(memcmp(journal_records[0].payload, axes, sizeof(axes)) == 0);
+    const board_sensor_record_t *rejected = &journal_records[1];
+    assert(rejected->kind == BOARD_SENSOR_IMU_REJECTED && rejected->error == ESP_ERR_NOT_FOUND &&
+        rejected->discontinuities == BOARD_IMU_DISCONTINUITY_REJECTED && !rejected->source_sequence);
+    assert(journal_word64(rejected->payload) == start && journal_word64(rejected->payload + 2) == start + 20 &&
+        journal_word64(rejected->payload + 4) == 20 && rejected->sample_us == start + 20);
+    assert((rejected->flags >> 8) == BMI2_DRDY_ACC && (rejected->payload[6] & 0xffffU) == (1U | (BMI2_DRDY_ACC << 8)));
+    assert(((rejected->payload[6] >> 16) & 0xffU) == BOARD_SENSOR_ATTEMPT_NOT_READY &&
+        (rejected->payload[6] >> 24) == BOARD_SENSOR_STAGE_DATA_READY && rejected->payload[7] == ESP_OK);
+    assert(rejected->validity == (BOARD_SENSOR_VALID_READ_START | BOARD_SENSOR_VALID_READ_END |
+        BOARD_SENSOR_VALID_DURATION | BOARD_SENSOR_VALID_SOURCE_ERROR));
+    assert(journal_records[2].kind == BOARD_SENSOR_IMU_SAMPLE && journal_records[2].source_sequence == 3);
+    /* Existing actuation semantics still discard the pending accepted sample. */
+    stream_drain();
+    assert(stream_batch.state == BOARD_IMU_DELIVERY_DISCONTINUITY && stream_batch.dropped_frames == 1);
+    const uint64_t last = journal_batch.next_after;
+    hw.time_us += 1000; hw.read_delay_us = 10001;
+    assert(imu_update() == ESP_OK); journal_read(last);
+    assert(journal_batch.count == 1 && journal_records[0].error == ESP_ERR_TIMEOUT &&
+        ((journal_records[0].payload[6] >> 16) & 0xffU) == BOARD_SENSOR_ATTEMPT_LATE &&
+        (journal_records[0].payload[6] >> 24) == BOARD_SENSOR_STAGE_BATCH_TIME &&
+        journal_word64(journal_records[0].payload + 4) == 20002);
+    assert(journal_records[0].payload[7] == ESP_OK && s_imu_status.late_batch_count == 1);
+}
+
+static void test_raw_journal_source_epoch_recovery_and_no_observer_mutation(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    assert(board_sensor_journal_status(&journal_batch) == ESP_OK);
+    const uint64_t before = journal_batch.latest_sequence;
+    hw.time_us += 10000; hw.gyro_error = ESP_FAIL;
+    assert(imu_update() == ESP_FAIL && s_imu_generation == 1);
+    hw.time_us += 10000; hw.gyro_error = ESP_OK;
+    assert(imu_update() == ESP_OK);
+    const board_imu_status_t status = s_imu_status;
+    const board_imu_sample_t sample = s_imu_sample;
+    const board_imu_queue_t queue = s_imu_stream;
+    const board_sensor_journal_t journal = s_sensor_journal;
+    journal_read(before);
+    assert(journal_batch.count == 2 && journal_records[0].kind == BOARD_SENSOR_IMU_REJECTED &&
+        journal_records[0].error == ESP_FAIL && (int32_t)journal_records[0].payload[7] == ESP_FAIL &&
+        journal_records[0].source_epoch == 0 && journal_records[1].source_epoch == 1);
+    assert(((journal_records[0].payload[6] >> 16) & 0xffU) == BOARD_SENSOR_ATTEMPT_COMMUNICATION);
+    assert(journal_records[1].kind == BOARD_SENSOR_IMU_SAMPLE && journal_records[1].source_sequence == 2);
+    hw.time_us += 60000; journal_read(before); /* Read stale history without latching source loss. */
+    assert(memcmp(&status, &s_imu_status, sizeof(status)) == 0 && memcmp(&sample, &s_imu_sample, sizeof(sample)) == 0 &&
+        memcmp(&queue, &s_imu_stream, sizeof(queue)) == 0 && memcmp(&journal, &s_sensor_journal, sizeof(journal)) == 0 && s_caps.imu);
+    const board_sensor_batch_t saved = journal_batch;
+    const board_sensor_record_t saved_record = journal_records[0];
+    assert(board_sensor_journal_read(journal.latest_sequence + 1, journal_records, 8, &journal_batch) == ESP_ERR_INVALID_ARG);
+    assert(board_sensor_journal_read(0, journal_records, 9, &journal_batch) == ESP_ERR_INVALID_ARG);
+    assert(memcmp(&saved, &journal_batch, sizeof(saved)) == 0 && memcmp(&saved_record, journal_records, sizeof(saved_record)) == 0);
+}
+
+static void test_power_observer_is_pure_and_power_journal_has_provenance_fields(void)
+{
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    journal_read(0);
+    const board_sensor_record_t *power = NULL;
+    for (uint32_t i = 0; i < journal_batch.count; ++i) if (journal_records[i].kind == BOARD_SENSOR_POWER) power = &journal_records[i];
+    assert(power && power->error == ESP_OK && power->payload[1] == (uint32_t)-12 &&
+        power->payload[2] == 3850 && power->payload[3] == 63 && power->payload[4] == 1 && !power->source_epoch);
+    float temperature; memcpy(&temperature, power->payload, sizeof(temperature));
+    assert(fabsf(temperature - 24.95f) < 0.001f && power->sample_us == s_power.timestamp_us);
+    assert(power->validity == (BOARD_SENSOR_VALID_POWER_STATE | BOARD_SENSOR_VALID_POWER_PERCENT |
+        BOARD_SENSOR_VALID_POWER_VOLTAGE | BOARD_SENSOR_VALID_POWER_CURRENT | BOARD_SENSOR_VALID_POWER_TEMPERATURE));
+    const board_power_status_t cached = s_power;
+    const board_capabilities_t caps = s_caps;
+    const unsigned reads = hw.gauge_reads;
+    board_power_status_t observed;
+    hw.time_us = s_power.timestamp_us + POWER_MAX_AGE_US;
+    assert(board_power_observe(&observed) == ESP_OK && observed.temperature_valid);
+    ++hw.time_us;
+    assert(board_power_observe(&observed) == ESP_ERR_TIMEOUT && !observed.temperature_valid && observed.timestamp_us == cached.timestamp_us);
+    hw.time_us = s_power.timestamp_us - 1;
+    assert(board_power_observe(&observed) == ESP_ERR_TIMEOUT);
+    assert(memcmp(&cached, &s_power, sizeof(cached)) == 0 && memcmp(&caps, &s_caps, sizeof(caps)) == 0 && reads == hw.gauge_reads);
+    assert(board_power_read(&observed) == ESP_ERR_TIMEOUT && !s_caps.battery); /* Legacy behavior remains independent. */
+}
+
+static void test_raw_journal_input_whitelist_redaction_and_exhaustion_isolation(void)
+{
+    reset();
+    assert(board_sensor_journal_status(&journal_batch) == ESP_OK && journal_batch.state == BOARD_SENSOR_READ_UNAVAILABLE);
+    board_sensor_record_t input = {.kind = BOARD_SENSOR_BUTTON, .flags = BOARD_SENSOR_FLAG_SAMPLE_TIME,
+        .sample_us = 1000, .validity = BOARD_SENSOR_VALID_INPUT};
+    assert(board_sensor_journal_publish_input(&input) == ESP_ERR_INVALID_STATE);
+    assert(board_init(legacy_hold) == ESP_OK);
+    assert(board_sensor_journal_status(&journal_batch) == ESP_OK);
+    const uint64_t before = journal_batch.latest_sequence;
+    const board_sensor_record_t original = input;
+    assert(board_sensor_journal_publish_input(&input) == ESP_OK && memcmp(&input, &original, sizeof(input)) == 0);
+    input.kind = BOARD_SENSOR_IMU_SAMPLE; assert(board_sensor_journal_publish_input(&input) == ESP_ERR_INVALID_ARG);
+    input.kind = BOARD_SENSOR_TOUCH; input.flags |= BOARD_SENSOR_FLAG_REDACTED; input.validity = 0;
+    assert(board_sensor_journal_publish_input(&input) == ESP_OK);
+    input.payload[3] = 88; assert(board_sensor_journal_publish_input(&input) == ESP_ERR_INVALID_ARG);
+    journal_read(before);
+    assert(journal_batch.count == 2 && journal_records[0].kind == BOARD_SENSOR_BUTTON &&
+        (journal_records[0].flags & BOARD_SENSOR_FLAG_OBSERVED_TIME));
+    assert(journal_records[1].kind == BOARD_SENSOR_TOUCH && !journal_records[1].validity &&
+        (journal_records[1].flags & BOARD_SENSOR_FLAG_REDACTED));
+    for (unsigned i = 0; i < 8; ++i) assert(!journal_records[1].payload[i]);
+    s_sensor_journal = (board_sensor_journal_t){.records = s_sensor_records, .capacity = 256,
+        .latest_sequence = UINT64_MAX - 1, .state = BOARD_SENSOR_JOURNAL_LIVE};
+    hw.time_us += 10000; assert(imu_update() == ESP_OK);
+    assert(s_sensor_journal.state == BOARD_SENSOR_JOURNAL_EXHAUSTED);
+    const uint64_t samples = s_imu_status.sample_count;
+    hw.time_us += 10000; assert(imu_update() == ESP_OK && s_imu_status.sample_count == samples + 1 && s_caps.imu);
+    assert(!s_imu_status.fault_latched && s_sensor_journal.latest_sequence == UINT64_MAX);
+    journal_read(UINT64_MAX - 1);
+    assert(journal_batch.count == 1 && journal_records[0].sequence == UINT64_MAX &&
+        journal_batch.journal_state == BOARD_SENSOR_JOURNAL_EXHAUSTED);
+}
+
+static void test_raw_journal_startup_failure_clock_and_inflight_cancellation(void)
+{
+    reset(); hw.imu_init_error = ESP_FAIL;
+    assert(board_init(legacy_hold) == ESP_OK); journal_read(0);
+    assert(journal_records[0].kind == BOARD_SENSOR_IMU_REJECTED && journal_records[0].error == ESP_FAIL &&
+        ((journal_records[0].payload[6] >> 16) & 0xffU) == BOARD_SENSOR_ATTEMPT_STARTUP &&
+        (journal_records[0].payload[6] >> 24) == BOARD_SENSOR_STAGE_INIT);
+    assert(!(journal_records[0].flags & BOARD_SENSOR_FLAG_SAMPLE_TIME) && !journal_records[0].sample_us &&
+        !(journal_records[0].validity & (BOARD_SENSOR_VALID_READ_START | BOARD_SENSOR_VALID_READ_END | BOARD_SENSOR_VALID_DURATION)));
+    reset(); hw.gyro_ready_after_us = 80000;
+    assert(board_init(legacy_hold) == ESP_OK);
+    uint64_t after = 0; unsigned accepted = 0, not_ready = 0;
+    do {
+        journal_read(after);
+        for (uint32_t i = 0; i < journal_batch.count; ++i) {
+            if (journal_records[i].kind == BOARD_SENSOR_IMU_SAMPLE) ++accepted;
+            if (journal_records[i].kind == BOARD_SENSOR_IMU_REJECTED &&
+                ((journal_records[i].payload[6] >> 16) & 0xffU) == BOARD_SENSOR_ATTEMPT_NOT_READY) ++not_ready;
+        }
+        after = journal_batch.next_after;
+    } while (journal_batch.count);
+    assert(accepted == 1 && not_ready > 1 && s_imu_status.sample_count == 1);
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    assert(board_sensor_journal_status(&journal_batch) == ESP_OK); after = journal_batch.latest_sequence;
+    hw.time_us += 10000; hw.during_gyro_read = stale_consumer_during_bus_read;
+    assert(imu_update() == ESP_ERR_TIMEOUT); journal_read(after);
+    assert(journal_batch.count == 1 && journal_records[0].kind == BOARD_SENSOR_IMU_REJECTED &&
+        journal_records[0].source_epoch == 0 && s_imu_generation == 1);
+    assert((int32_t)journal_records[0].payload[7] == ESP_ERR_TIMEOUT);
+    reset(); assert(board_init(legacy_hold) == ESP_OK);
+    assert(board_sensor_journal_status(&journal_batch) == ESP_OK); after = journal_batch.latest_sequence;
+    hw.time_us += 40000; hw.during_gyro_read = rollback_during_gyro_read;
+    assert(imu_update() == ESP_ERR_TIMEOUT); journal_read(after);
+    assert(journal_batch.count == 1 && (journal_records[0].payload[6] >> 24) == BOARD_SENSOR_STAGE_CLOCK &&
+        ((journal_records[0].payload[6] >> 16) & 0xffU) == BOARD_SENSOR_ATTEMPT_FATAL &&
+        !(journal_records[0].validity & BOARD_SENSOR_VALID_DURATION) &&
+        (journal_records[0].discontinuities & BOARD_IMU_DISCONTINUITY_CLOCK));
+    assert(journal_word64(journal_records[0].payload + 2) < journal_word64(journal_records[0].payload));
+}
+
 int main(void)
 {
+    test_raw_journal_retains_samples_around_actual_read_rejections();
+    test_raw_journal_source_epoch_recovery_and_no_observer_mutation();
+    test_power_observer_is_pure_and_power_journal_has_provenance_fields();
+    test_raw_journal_input_whitelist_redaction_and_exhaustion_isolation();
+    test_raw_journal_startup_failure_clock_and_inflight_cancellation();
     test_ordered_stream_preserves_cache_units_and_identity();
     test_ordered_stream_inflight_fence_is_delivery_only();
     test_ordered_stream_loss_and_hardware_health_are_distinct();

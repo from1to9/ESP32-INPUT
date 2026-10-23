@@ -39,6 +39,20 @@ static void touch_context_checks(void)
     pointer(120, 342, false); render();
     assert(app_ui_touch_context().eligible_pad);
     assert(app_ui_touch_context().ui_revision == s_state.ui_revision);
+    /* A live private editor remains private even over Mouse. Exercise real
+     * pointer typing and the deferred close while its last key is held. */
+    open_editor(APP_LOCAL_EDIT_WIFI_PASSPHRASE, NULL);
+    s_state.mode = INPUT_MOUSE; ++s_state.ui_revision; render();
+    assert(!app_ui_touch_context().eligible_pad);
+    editor_type_text("test-only-secret");
+    assert(ui_private_password_contains("test-only-secret"));
+    assert(!app_ui_touch_context().eligible_pad);
+    pointer(120, 342, true);
+    s_state.overlay = APP_OVERLAY_NONE; ++s_state.ui_revision; render();
+    assert(!app_ui_touch_context().eligible_pad);
+    pointer(120, 342, false); render();
+    assert(app_ui_touch_context().eligible_pad && ui_private_buffers_cleared());
+    finish_editor();
     s_state = original; render(); clear_intents();
     puts("PASS: read-only visible pad context, exact bounds, stale covering panels and authority-free allocation/flush-free queries");
 }

@@ -21,7 +21,7 @@ Long/invalid/incomplete summaries disable approval instead of truncating it.
 Parent main owns physical-origin and remote-input allowance checks and fills
 remote-input fields after the helper; neither TLS nor media enables that gate.
 
-The 14 cases include complete ABI-2 disclosure of the HTTPS port, unauthenticated
+The 18 cases include complete ABI-2 disclosure of the HTTPS port, unauthenticated
 SNTP servers, source CA fingerprint, private-source permission, minimum release,
 product/board/layout and all principal, capture and update policy fields. A
 minimal enrollment uses 3 pages; a one-principal/grant/source/policy example uses
@@ -46,3 +46,13 @@ sequence verifies exact revisions, peer identities, order and zero unused tail.
 The target refresh frame is 176 bytes (previously 1,616); the preference handler
 is now inlined into the 80-byte outer handler instead of a separate 1,424-byte
 frame. Transport submission and durable completion rules are unchanged.
+
+The native Bluetooth management module is linked unchanged. Cases verify exact
+single-host confirmation fingerprints and both revisions, delayed release,
+truthful owner rejection, and Back after an accepted policy write. Cancellation
+retains the request ID and uncertainty while preventing future pairing after a
+late acknowledgement. Pairing status requires the actual window and advertising
+observations together; saved-host advertising alone cannot produce Ready to
+pair. These cached-port tests do not claim successful radio/storage execution;
+`tests/ble_hid/native_management_cases.inc` composes the same workflow with the
+production BLE worker for those positive and failure paths.

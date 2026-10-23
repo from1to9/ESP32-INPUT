@@ -176,6 +176,9 @@
 #define CP_OP_FIRMWARE_CANCEL 146U
 #define CP_OP_FIRMWARE_POLICY_GET 147U
 #define CP_OP_INPUT_MOTION_RECENTER 148U
+#define CP_OP_SENSORS_CATALOG 149U
+#define CP_OP_SENSORS_LATEST 150U
+#define CP_OP_SENSORS_SAMPLES 151U
 cp_scope_mask_t cp_scope_from_name(const char *);
 const char *cp_scope_name(size_t);
 bool cp_operation_flag(cp_operation_id_t, const char *);

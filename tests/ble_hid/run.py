@@ -25,6 +25,7 @@ def main():
                    "-I", str(ROOT / "components/device_settings/include"),
                    str(SUITE / "test_ble_hid.c"),
                    str(ROOT / "firmware/main/ble_hid_store.c"),
+                   str(ROOT / "firmware/main/app_bluetooth_management.c"),
                    str(ROOT / "components/hid_engine/hid_engine.c"),
                    str(ROOT / "components/input_core/input_core.c"),
                    str(ROOT / "components/device_settings/device_settings.c"),

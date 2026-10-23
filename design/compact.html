@@ -357,48 +357,56 @@
         width: 240px;
         height: 48px;
       }
-      .audio-state {
+      .audio-card {
         left: 12px;
         top: 64px;
         width: 456px;
-        height: 200px;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
+        height: 168px;
         background: var(--surface);
-        border: 1px solid var(--line) !important;
-        gap: 10px;
+        border-radius: 16px;
       }
-      .audio-state strong {
-        font-size: 38px;
-        font-weight: 600;
+      .audio-card.speaker { top: 244px; }
+      .audio-card h2 {
+        position: absolute;
+        left: 16px;
+        top: 12px;
+        margin: 0;
+        font-size: 24px;
       }
-      .audio-state span {
+      .audio-card .role-state {
+        position: absolute;
+        left: 16px;
+        top: 48px;
+        width: 424px;
+        margin: 0;
         font-size: 16px;
         color: var(--muted);
       }
-      .audio-start {
-        left: 12px;
-        top: 280px;
-        width: 456px;
-        height: 56px;
+      .audio-card .role-power {
+        position: absolute;
+        left: 304px;
+        top: 16px;
+        width: 136px;
+        height: 48px;
       }
-      .volume {
-        left: 12px;
-        top: 352px;
-        width: 456px;
-        height: 56px;
-        background: var(--surface);
-        border-radius: 12px;
-        padding: 10px 16px;
-        display: flex;
-        align-items: center;
-        gap: 16px;
+      .audio-card .mic-mute {
+        position: absolute;
+        left: 16px;
+        top: 104px;
+        width: 424px;
+        height: 48px;
       }
+      .screen .audio-card .role-power,
+      .screen .audio-card .mic-mute { border: 1px solid var(--line); }
+      .volume { position: absolute; left: 16px; top: 94px; width: 424px; height: 60px; }
+      .volume output { float: right; color: var(--muted); }
       .volume input {
-        flex: 1;
-        min-width: 0;
+        position: absolute;
+        left: 8px;
+        top: 22px;
+        width: 408px;
+        height: 44px;
+        margin: 0;
         accent-color: var(--accent);
       }
       .audio-note {
@@ -408,9 +416,17 @@
         height: 48px;
         color: var(--muted);
         font-size: 15px;
-        text-align: center;
         margin: 0;
       }
+      .audio-connection-options { left: 12px; top: 64px; width: 456px; display: grid; grid-template-columns: 224px 224px; gap: 8px; }
+      .audio-connection-options button { height: 56px; }
+      .audio-connection-state { left: 12px; top: 136px; width: 456px; margin: 0; }
+      .audio-connection-reason { left: 12px; top: 176px; width: 456px; margin: 0; color: var(--muted); }
+      .audio-connection-peer { left: 12px; top: 248px; width: 456px; height: 48px; }
+      .audio-connection-links { left: 12px; top: 308px; width: 456px; display: grid; grid-template-columns: 224px 224px; gap: 8px; }
+      .audio-connection-links button { height: 48px; }
+      .audio-connection-note { left: 12px; top: 376px; width: 456px; margin: 0; color: var(--muted); }
+      .audio-connection-back { left: 12px; top: 424px; width: 456px; height: 48px; }
       .panel {
         position: absolute;
         inset: 0;
@@ -791,7 +807,7 @@
         mode: "mouse",
         panel: null,
         submode: "touch",
-        audioKind: "voice",
+        audioConnection: null,
         theme: "dark",
         motion: false,
         drag: false,
@@ -886,15 +902,15 @@
           "at critical",
         );
       }
-      function top(title) {
+      function workspaceHeader(title) {
         return html`<div class="at mode-title">${title}</div>
-          <div class="at input-context" title="Bluetooth / Synthetic HID host">
-            BT · Synthetic host
+          <div class="at input-context" title="${title === "Audio" ? "Audio status unavailable" : "Bluetooth / Synthetic HID host"}">
+            ${title === "Audio" ? "Mic / Speaker" : "BT · Synthetic host"}
           </div>
           ${critical()}${button("Menu", "menu", "at launcher")}`;
       }
       function mouse() {
-        return html`${top("Mouse")}
+        return html`${workspaceHeader("Mouse")}
           <div class="at pad" data-pad="true">
             <div class="pad-marker"></div>
             <strong>Touch to move</strong
@@ -994,7 +1010,7 @@
               )}
             </div>`;
         }
-        return html`${top("Keyboard")}${button(
+        return html`${workspaceHeader("Keyboard")}${button(
             `${state.submode[0].toUpperCase() + state.submode.slice(1)} ▾`,
             "submodes",
             "at submode",
@@ -1029,37 +1045,21 @@
           </div>`;
       }
       function audio() {
-        return html`${top("Audio")}${button(
-            `${state.audioKind === "voice" ? "Voice" : "Speaker"} ▾`,
-            "audio-kinds",
+        return html`${workspaceHeader("Audio")}${button(
+            state.audioConnection === "usb" ? "USB" : state.audioConnection === "bluetooth" ? "Bluetooth" : "Connection",
+            "audio-connection",
             "at submode",
-          )}${button(
-            `<strong>${state.audioKind === "voice" ? "Muted" : "Speaker off"}</strong><span>Audio unavailable on this device</span>`,
-            "mute",
-            "at audio-state",
-            true,
-          )}${button(
-            state.audioKind === "voice" ? "Start microphone" : "Start speaker",
-            "audio-start",
-            "at audio-start",
-            true,
-          )}
-          <div class="at volume">
-            <span>Volume</span
-            ><input
-              type="range"
-              min="0"
-              max="100"
-              value="0"
-              disabled
-              aria-label="Volume unavailable"
-            /><span>—</span>
-          </div>
-          <p class="at audio-note">
-            ${state.audioKind === "voice"
-              ? "Capture starts only with actual capability and consent."
-              : "Speaker playback does not upload microphone audio."}
-          </p>`;
+          )}<section class="at audio-card">
+            <h2>Mic</h2><p class="role-state">Status unavailable</p>
+            ${button("Start mic", "mic-start", "role-power", true)}
+            ${button("Mute mic", "mic-mute", "mic-mute", true)}
+          </section><section class="at audio-card speaker">
+            <h2>Speaker</h2><p class="role-state">Status unavailable</p>
+            ${button("Start speaker", "speaker-start", "role-power", true)}
+            <div class="volume"><label for="audio-volume">Volume</label><output>--</output>
+              <input id="audio-volume" type="range" min="0" max="100" value="0" disabled aria-label="Volume unavailable" />
+            </div>
+          </section><p class="at audio-note">Audio status unavailable.</p>`;
       }
       function panelHeader(title) {
         return html`<div class="at panel-title">${title}</div>
@@ -1085,7 +1085,7 @@
             ${[
               ["mouse", "Mouse", "Move and click"],
               ["keyboard", "Keyboard", "Preview and send"],
-              ["audio", "Audio", "Voice / speaker"],
+              ["audio", "Audio", "Mic / Speaker"],
             ]
               .map(([id, name, sub]) =>
                 button(
@@ -1177,27 +1177,34 @@
             "About",
             '<div class="detail"><strong>Interface</strong><span>Proposal 02</span></div><div class="detail"><strong>Evidence</strong><span>Browser interaction only</span></div><p>Native LVGL, hardware allocation and physical readability need separate validation.</p>',
           );
-        if (state.panel === "submodes" || state.panel === "audio-kinds") {
-          const audio = state.panel === "audio-kinds";
-          const items = audio
-            ? [
-                ["voice", "Voice", "Microphone / mute"],
-                ["speaker", "Speaker", "Playback / volume"],
-              ]
-            : [
+        if (state.panel === "audio-connection") {
+          return html`<div class="panel">${panelHeader("Audio connection")}
+            <div class="at audio-connection-options">
+              ${button("USB", "audio-connection:usb", state.audioConnection === "usb" ? "selected" : "")}
+              ${button("Bluetooth", "audio-connection:bluetooth", state.audioConnection === "bluetooth" ? "selected" : "")}
+            </div><p class="at audio-connection-state">${state.audioConnection ? "Selected / Not connected" : "No confirmed selection"}</p>
+            <p class="at audio-connection-reason">Audio status unavailable.</p>
+            ${state.audioConnection === "bluetooth" ? html`
+              ${button("Choose audio device", "audio-peer", "at audio-connection-peer", true)}
+              <div class="at audio-connection-links">${button("Connect", "audio-connect", "", true)}${button("Disconnect", "audio-disconnect", "", true)}</div>` : ""}
+            <p class="at audio-connection-note">Connection selection does not start audio.</p>
+            ${button("Back to Audio", "close", "at audio-connection-back")}</div>`;
+        }
+        if (state.panel === "submodes") {
+          const items = [
                 ["motion", "Motion", "Local focus; AI confirms"],
                 ["touch", "Touch", "Tap group, then character"],
                 ["spoken", "Spoken", "Unavailable until qualified"],
                 ["shortcuts", "Shortcuts", "Explicit host key actions"],
               ];
           return html`<div class="panel">
-            ${panelHeader(audio ? "Audio kind" : "Keyboard entry")}
+            ${panelHeader("Keyboard entry")}
             <div class="at choice-list">
               ${items
                 .map(([id, name, desc]) =>
                   button(
                     `${name}<small>${desc}</small>`,
-                    `${audio ? "audio-kind" : "submode"}:${id}`,
+                    `submode:${id}`,
                   ),
                 )
                 .join("")}
@@ -1283,7 +1290,7 @@
             "about",
             "connectivity",
             "submodes",
-            "audio-kinds",
+            "audio-connection",
           ].includes(name)
         ) {
           state.panel = name;
@@ -1297,9 +1304,9 @@
           state.panel = null;
           state.group = -1;
           state.focus = 0;
-        } else if (name.startsWith("audio-kind:")) {
-          state.audioKind = name.split(":")[1];
-          state.panel = null;
+        } else if (name.startsWith("audio-connection:")) {
+          state.audioConnection = name.split(":")[1];
+          log("Preview audio connection selected; no capture or playback started.");
         } else if (name === "theme") {
           state.theme = state.theme === "dark" ? "light" : "dark";
         } else if (name === "motion") {

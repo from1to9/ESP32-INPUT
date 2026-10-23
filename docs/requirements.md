@@ -17,7 +17,22 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 5. Prefer concurrent mouse and microphone operation. Deliver independent modes first if concurrency cannot be made stable.
 6. Qualify three different connection cases separately: HID plus HFP/A2DP on one host; HID and audio on different hosts; multiple HID targets. The first case has priority. Remembering multiple bonds does not imply simultaneous control.
 7. Keep multiple Bluetooth pairings and show the actual connected peer. Bluetooth is a connection state, not a signal-strength meter in the product UI. Wi-Fi retains measured signal display.
-8. Functional mode and connection transport are independent. Every primary mode uses the System connection selector: Bluetooth or USB. The initial preference is Bluetooth and is saved after a successful switch. Implement and qualify USB/Bluetooth mouse and keyboard first; audio requires separate working drivers and host tests before its transport can be shown as available.
+   Add host must lead to a visible pairing page showing the effective device
+   name, preparation, acknowledged advertising and remaining window, with Stop
+   and an actionable failure reason. If already connected, explain the required
+   disconnect before confirmation. Saved-host details support exact single-host
+   forgetting. Forget all waits for both bond removal and durable target-policy
+   cleanup; it does not implicitly open a new pairing window. Selection policy
+   changes, disconnection and new trust are distinct acknowledged operations.
+8. Functional mode and connection transport are independent. Every primary mode
+   offers Bluetooth or USB selection. System input settings select the shared
+   mouse/keyboard link; the Audio connection entry selects the audio link under
+   the Mic/Speaker workspace revision below. Their acknowledged connection states
+   remain separate, allowing the same-host and different-host cases above.
+   The initial input preference is Bluetooth and is saved after a successful
+   switch. Implement and qualify USB/Bluetooth mouse and keyboard first; audio
+   requires separate working drivers and host tests before its transport can be
+   shown as available.
 9. Wi-Fi is a separate management/control channel, not an alternative HID target.
    It may remain connected while Bluetooth or USB carries input. Its services are
    authenticated remote control, state reporting, MCP bridge access and firmware
@@ -114,11 +129,25 @@ release/cancel action. Gesture interruption must never leave a host button held.
 | V03 | Local recognition | Prefer ESP-SR mn7_en; choose confidence/rejection thresholds from measurements |
 | A01 | Voice microphone | HFP HF with ES8311; first validate Windows/macOS capture, playback and mute |
 | A02 | Speaker | A2DP Sink with SBC; appropriate mono mix, no stereo-speaker claim |
-| A03 | Audio controls | Local microphone mute, playback volume, link and resource ownership status |
+| A03 | Audio controls | Two primary controls, Mic and Speaker, with independent observed start/stop state, microphone mute and speaker volume; USB/Bluetooth is the connection choice |
 | A04 | Echo handling | Duplex playback/capture requires AEC and acoustic tests; otherwise limit experiments to separated output or half duplex |
 | A05 | Local recording | Explicit start/stop, visible capture state, bounded storage and duration, recoverable partial files, playback/list/delete/export and truthful completion; no automatic restart or upload |
 
 On-device letter recognition consumes local microphone frames; it does not require HFP transport. One audio manager owns capture/codec resources. Recognition and HFP must not independently reopen the codec.
+
+The 2026-10-23 user revision simplifies the primary Audio workspace to Mic and
+Speaker. Do not expose Routes, Roles, Voice, recording setup or internal profile
+names as competing primary modes. The audio owner chooses a supported Bluetooth
+profile for the requested microphone/speaker combination; the UI does not guess
+from the HID connection. Connection transitions must stop and acknowledge old
+consumers before binding a new peer/profile. USB enumeration alone proves neither
+microphone delivery nor speaker playback. Show waiting, active, stopping and
+failure from actual stream/codec observations. Retain recording and spoken-letter
+backend contracts; spoken-letter controls remain in Keyboard.
+Each unavailable Start control must show the owning admission reason, such as
+missing host audio, unsupported microphone capability or an operation still
+stopping. Derive the explanation from the same decision that disables the
+control; a generic Off label or a previously successful command is insufficient.
 
 ## P2: concurrency and remote extensions
 
@@ -276,3 +305,20 @@ Do not persist per-frame state or write unchanged defaults on every boot.
   a checksum alone is not authorization. Do not silently change secure-boot eFuses.
 - Qualify partition migration and power-loss recovery before exposing installation.
   Keep the original factory backup and preserve bonds, profiles and preferences.
+- Prefer the existing station LAN connection for subsequent development updates,
+  status inspection and diagnostic capture downloads after authenticated
+  commissioning and device qualification. Ordinary iteration should not require
+  entering USB download mode. USB remains the recovery path when boot or network
+  services are unavailable; the requested no-new-backup procedure remains a
+  separate deployment choice.
+- Provide bounded, authenticated diagnostic exports with explicit capture
+  identity, firmware/configuration identity, sequence/loss accounting and
+  completion/integrity evidence. Network transfer must not block sensor acquisition
+  or input handling, grant input ownership, or silently start audio recording.
+  Interrupted or incomplete exports remain visibly incomplete. Keep private
+  addresses, credentials, input text and audio outside ordinary diagnostic logs.
+- Provide a [live sensor read API](sensor-api.md) over the existing USB and
+  authenticated station LAN transports, independent of Mouse Motion and screen
+  blanking. Expose actual available sensors and observed input events with units,
+  timestamps, source identity and explicit loss/unknown state. Support independent
+  developer readers and bounded host recording without additional sensor owners.

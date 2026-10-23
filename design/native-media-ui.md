@@ -1,6 +1,6 @@
 # Native audio, recording and spoken-letter UI proposal
 
-Status: native UI and coordinator media controls implemented, 2026-10-21.
+Status: native media controls with the authorized Mic/Speaker primary revision, 2026-10-23.
 The UI submits typed requests to the real asynchronous runtime and reads cached
 owner snapshots. Hardware compatibility and physical display/audio behavior
 remain unverified; host fixtures do not establish those outcomes.
@@ -13,14 +13,18 @@ it does not introduce alternate wire commands or loosen admission rules.
 
 ## Navigation and shared state
 
-Keep Mouse, Keyboard and Audio as the three primary modes. Audio retains
-`Voice / meeting` and `Speaker` and gains a `Recordings` entry leading to one
-temporary panel. Keyboard retains `Spoken letters`. Opening any page selects a
+Keep Mouse, Keyboard and Audio as the three primary modes. Audio shows Mic and
+Speaker together, each with its own observed state and Start/Stop control.
+Its connection chooser contains USB and Bluetooth. Routes, roles, Voice,
+recording and storage are not primary Audio navigation. The advanced recording
+backend and detail/review panels remain available to their existing owners;
+they are not deleted by this product simplification. Keyboard retains
+`Spoken letters`. Opening any page selects a
 view only: it never enables a role, starts capture, grants consent, unmutes or
 changes the HID target. Audio route/peer and HID target remain independently
 labeled, including when they happen to name the same computer.
 
-Each 480 x 480 page keeps the existing header and bottom navigation. A persistent
+Each 480 x 480 page keeps the shared header and on-demand Menu. A persistent
 capture/stop region has priority over page content and overlays. The middle
 content uses one dynamically created detail panel, with back navigation and
 44-pixel minimum action targets. Large setup forms use sequential panels rather
@@ -40,26 +44,52 @@ represent every route and operation.
 
 | Screen control | Owner operation and evidence | Visible result |
 | --- | --- | --- |
-| Route and audio peer | Qualified route/profile IDs; `audio.route.select`, `audio.link.connect/disconnect` | Actual route, peer and link status. HFP, A2DP or UAC remain unavailable until separately qualified; no simulated host or implicit HID switch |
-| Enable microphone / Enable speaker | `audio.enable.set`, explicit role and Boolean | `Preparing`, then `Ready - muted` only after manager acknowledgement. Enabling alone does not capture/play |
-| Microphone mute | `audio.mute.set`, role microphone and explicit Boolean | Requested mute and applied hardware mute are separate. Unmute requires a bounded admitted consumer and applicable capture consent |
-| Speaker mute | Same operation, role speaker | Applied speaker mute; zero volume is not off/muted evidence |
-| Start voice / Stop voice | Qualified bounded voice session using the audio manager, not a UI-owned loop | First valid capture frames establish activity; actual peer/resource state remains visible. No duplex claim before qualification |
-| Start playback / Stop playback | `audio.playback.start/stop`, approved live stream or owned recording and finite limits | Preparing, playing, stopping and fault from the actual session. Initial v1 offers no pause, seek or fabricated play position |
-| Output volume | `config.stage/apply/cancel` with `audio.output_volume_percent` | Applied local output level, separate pending/error state. It does not claim host OS/AVRCP volume changed |
-| Audio settings | Qualified discrete format, gain and processing profiles through the same config family | Explicit profile and apply status; no rounded gain, invented AGC/AEC, stereo claim or silent format substitution |
+| USB / Bluetooth | `APP_MEDIA_SELECT_CONNECTION` with the owner-selected connection enum | Applied selection is separate from link readiness; the media owner resolves USB/HFP/A2DP and release barriers. The UI never guesses a Bluetooth profile or changes HID transport |
+| Audio device / Connect / Disconnect | Existing media peer and link intents in the Bluetooth connection panel | Actual saved audio peer and link state; service connectivity alone is not evidence of a live microphone or speaker stream |
+| Start mic / Stop mic | `APP_MEDIA_LIVE_START/STOP`, microphone role and exact job/consumer identity | Independent live-capture state; explicit start only, with owner admission and local consent. Enabled hardware alone never displays On |
+| Mute mic / Unmute mic | `APP_MEDIA_SET_MUTED`, microphone role and explicit Boolean | Confirmed mute differs from requested mute. Unknown acknowledgement offers only an admitted mute, never an invented unmute |
+| Start speaker / Stop speaker | `APP_MEDIA_LIVE_START/STOP`, speaker role and exact job/consumer identity | Independent playback state; no implied microphone start, recording, pause or successful audible output |
+| Volume | `APP_MEDIA_SET_VOLUME`, bounded by the actual safe ceiling | Applied local output level. Unknown is `--`; zero volume does not imply stopped or hardware-muted playback |
+
+The Mic card is x 12/y 64/w 456/h 168; Speaker uses the same dimensions at
+y 244. Each has a title and a two-line state at x 28, and a 136 x 48 Start/Stop
+button at x 316/y 80 or y 260. Mic privacy uses x 28/y 168/w 424/h 48.
+Speaker volume has a 408-pixel slider at x 36/y 376, with its value above;
+the 12-pixel track plus 16-pixel extra hit area on each side gives a 44-pixel
+touch region. A bounded reason stays at x 12/y 424/w 456/h 48. The connection
+entry reuses x 140/y 8/w 132/h 48. Mouse and Keyboard geometry is unchanged.
+
+Both cards remain visible regardless of the legacy `audio_kind` value.
+Starting, running, stopping, finishing and error come from the corresponding
+`live_capture` or `playback` job. `can_start` admits an explicit action and can
+show Off / Ready; it does not establish running audio. The two cards add six
+fixed objects: the approved core limit is 112, with the dynamic limit remaining
+160. Native resource measurements must prove these bounds and zero idle work.
+An independently running recording or spoken-letter consumer is shown as
+Mic in use, rather than claiming that the microphone is off. The global privacy
+Stop/lock remains available and ordinary live Stop does not target another job.
+
+Each role also carries `start_block`, the audio owner's semantic result from
+the same admission function that produces `can_start`. A disabled Start shows
+this reason on the existing second status line and repeats it with its role in
+the existing footer. For USB, an unopened host stream says `Open Mic on host`
+or `Play audio to this device on host`; it must not claim a disconnected link.
+Unknown or invalid reason codes stay unavailable. Running jobs, actual job
+errors and an independently active microphone take precedence over start
+reasons. The UI maps codes to bounded English copy; it does not reconstruct
+the admission decision or add controls, objects, or automatic start behavior.
 
 For `off -> preparing -> ready_muted -> running -> stopping -> off|fault`, show
 the exact owner state in readable words. During stopping, disable starts and
 conflicting changes; preserve Stop/lock and the uncertainty warning. A rejected
 duplex/route request leaves the applied state intact with its rejection reason.
-If a future route needs a distinct bounded call-session operation, its owner
-must define that operation before enabling Start voice. Do not alias a local
+If a future connection needs a distinct bounded call-session operation, its owner
+must define that operation before enabling Start mic. Do not alias a local
 capture command to an unimplemented HFP connection.
 
 ## Consent, capture indicator and local Stop
 
-A capture start review names the source, consumer, destination/persistence,
+An advanced recording start review names the source, consumer, destination/persistence,
 actual profile, maximum duration and byte bound. File recording also states
 retention and export policy. Use an existing valid scoped grant or an explicit
 exact-job local consent action; never fabricate a permission grant from a page
@@ -70,7 +100,7 @@ Wi-Fi when its actual manager/store/recognizer is available.
 The critical region is driven by manager capture/egress state across every
 mode, not `audio_active && !muted` or the current page. It distinguishes
 `Starting microphone`, `Microphone active`, `Stopping microphone` and
-`Microphone stop unconfirmed`. Consumer labels identify Voice, Recording or
+`Microphone stop unconfirmed`. Consumer labels identify Mic, Recording or
 Spoken letters without exposing samples/transcripts. Keep an immediately
 accessible local Stop and the existing lock path; indicator loss or screen
 blanking cannot leave capture running. Actual stop acknowledgement clears the
@@ -78,7 +108,10 @@ warning, not a command queue success. A privacy stop closes all affected
 consumers; stopping one ordinary recording does not silently cancel a separately
 qualified live consumer. Those distinct actions must have distinct labels.
 
-## Recording flow
+## Retained advanced recording flow
+
+These panels preserve the earlier recording implementation and recovery paths;
+they are excluded from the simplified primary Audio navigation.
 
 1. `Recordings` opens an authorized list with at most four visible rows and
    bounded next/previous cursor navigation. Show permitted metadata only; do
@@ -176,6 +209,17 @@ Before modifying `app_ui.h/c`, agree on bounded snapshots and typed intents:
 - Speech generation/revision, qualified profile/vocabulary, actual candidate
   availability and expiry, confidence-policy result and capture session state.
 
+The 2026-10-23 connection revision appends `APP_MEDIA_SELECT_CONNECTION`,
+preserving existing operation numbers. `value.connection` carries USB or
+Bluetooth. The copied view adds `connection_known`, `connection` and two
+`can_select_connection` flags. Known means the owner-applied selection is known;
+it does not imply host enumeration, negotiated profile, stream readiness or
+audio activity. The owner retains the previous applied selection through a
+pending switch and owns stop/flush/token barriers. Requests retain the existing
+management/audio/resource revision checks. The primary connection chooser uses
+the existing media-options overlay; its title and controls contain no internal
+profile terminology.
+
 UI callbacks submit typed coordinator intents only; they perform no codec,
 storage, networking or recognizer work. Bind controls to the snapshot identity
 presented at press time. Reject stale release/selection, disable pending starts,
@@ -243,7 +287,8 @@ recording, recognition or interoperability evidence.
 ## Implemented native media surface
 
 `app_media_ui.h` is the bounded copied owner/UI boundary. `app_ui_media.inc`
-implements the Audio roles and routes panel, recording profile/duration review,
+implements independent Mic/Speaker cards and the USB/Bluetooth connection panel,
+plus the retained recording profile/duration review,
 recording controls, four-row list/detail, playback, destructive confirmations
 and explicit spoken-letter candidate confirmation/rejection. Unknown state is
 not rendered as muted, saved, available, or an empty successful list. Audio
@@ -256,7 +301,8 @@ changes. Recording start, delete and discard open a coordinator-owned immutable
 `media_review`; `APP_CONFIRM` carries its original request. Start shows the exact
 profile, duration, byte limit, retention, download and continuation policy.
 
-Microphone gain follows the engine's discrete 0..42 dB in 6 dB steps. Volume
+Advanced microphone gain follows the engine's discrete 0..42 dB in 6 dB steps;
+it is not a primary Audio control. Volume
 remains bounded by the actual safe ceiling. Reading or opening a page does not
 start capture or playback; speech confirmation never sends HID. Runtime mapping
 is owned by `app_media_controls`, while actual jobs, consent, storage, codec and
@@ -272,8 +318,9 @@ mutations are never automatically retried. UI gestures carry resource revisions,
 immutable object/job identities and candidate generations; confirmation retains
 the original recording limits or deletion target.
 
-Core Start/Stop submits a bounded live consumer or stops its exact job. Enabling
-a role in Routes and roles only prepares it; it does not create a live consumer.
+Core Start/Stop submits a bounded live consumer or stops its exact job. The
+retained backend role-enable operation only prepares hardware; it does not
+create a live consumer and is not a separate primary UI step.
 Live host routes have a one-hour ceiling. Local recording defaults to five
 seconds, clamped to actual store overhead and free quota, and is separately
 reviewed with a 512 KiB maximum budget, one-hour retention and no export grant.
@@ -291,7 +338,7 @@ format. Replaced requests/peers, catalogue changes, lock, missing runtime state,
 failure or timeout prevent the next phase; they never cause automatic retry.
 Already submitted radio work remains owned by the transport's quarantine and
 timeout, rather than cancelling a possibly replaced global request. The separate
-Disconnect audio button remains available for an idle SLC after voice failure.
+Disconnect button remains available for an idle SLC after a failed connection.
 
 An SLC-only connection cannot enable live microphone capture. Connection neither
 starts a live consumer nor grants microphone consent; Start remains a separate

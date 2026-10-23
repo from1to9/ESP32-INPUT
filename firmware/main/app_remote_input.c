@@ -851,6 +851,11 @@ static cp_error_t virtual_touch(app_remote_input_t *m, const cp_command_t *cmd, 
         next_x=old_x+(float)dx; next_y=old_y+(float)dy;
     }
     if (next_x < 0 || next_x > 479 || next_y < 0 || next_y > 479) return CP_INVALID;
+    /* The owned gesture was validated above. Cancellation must revoke all of
+     * its residual displacement, including an ordinary contact without a held
+     * button; END keeps its ordered movement drain. Use the existing target/
+     * epoch-checked neutral-release lifecycle, including when output is busy. */
+    if (pad && cmd->operation == CP_OP_TOUCH_CANCEL) return safety_stop(m,cmd,out);
     if (!pad) {
         char reason[CP_REASON_CAPACITY];
         if (!m->port.delegate || !m->port.delegate_available ||
@@ -868,6 +873,11 @@ static cp_error_t virtual_touch(app_remote_input_t *m, const cp_command_t *cmd, 
             event.phase=INTERACTION_TOUCH_MOVE; event.x=next_x-old_x; event.y=next_y-old_y;
         } else { event.phase=cmd->operation == CP_OP_TOUCH_END ? INTERACTION_TOUCH_END : INTERACTION_TOUCH_CANCEL;
             event.x=next_x; event.y=next_y; }
+        /* A rejected MOVE must be retryable without consuming contact distance
+         * or fractional carry. The authority/readiness gate ran before this. */
+        const interaction_touch_state_t touch_before = m->port.interaction->touch;
+        const float carry_before[2] = {m->port.interaction->touch_carry[0],
+                                      m->port.interaction->touch_carry[1]};
         interaction_touch_result_t effect=interaction_touch_input_owned(m->port.interaction,INPUT_REMOTE,&event,
             m->now_ms,m->state.ui_revision,!m->drag_requested);
         const bool had_effect=effect.effect != INTERACTION_TOUCH_NONE;
@@ -887,12 +897,18 @@ static cp_error_t virtual_touch(app_remote_input_t *m, const cp_command_t *cmd, 
         }
         bool movement=false;
         if (effect.allow_motion && event.phase == INTERACTION_TOUCH_MOVE) {
-            const input_delta_t delta=interaction_touch_move_owned(m->port.interaction,INPUT_REMOTE,event.x,event.y);
+            const interaction_touch_delta_t delta=interaction_touch_displacement_owned(
+                m->port.interaction,INPUT_REMOTE,event.x,event.y);
             movement=delta.x != 0 || delta.y != 0;
-            if (movement) applied=enqueue_error(hid_engine_enqueue_mouse_move(m->port.engine,
-                m->port.engine->state.epoch,INPUT_REMOTE,delta.x,delta.y));
+            if (movement) applied=enqueue_error(hid_engine_enqueue_mouse_displacement(m->port.engine,
+                m->port.engine->state.epoch,INPUT_REMOTE,delta.x,delta.y,m->now_ms,m->now_ms));
         }
-        if (applied != CP_OK) { if (j) secure_zero(j,sizeof *j); return applied; }
+        if (applied != CP_OK) {
+            m->port.interaction->touch = touch_before;
+            memcpy(m->port.interaction->touch_carry, carry_before, sizeof carry_before);
+            if (j) secure_zero(j,sizeof *j);
+            return applied;
+        }
         if (had_effect || movement) { if (!j) return CP_INTERNAL; *out=j->result; }
         else { if (j) secure_zero(j,sizeof *j); *out=result_for(cmd->command_key,CP_RESULT_APPLIED,CP_OK,"virtual_contact_applied"); }
     }

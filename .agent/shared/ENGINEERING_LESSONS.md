@@ -263,3 +263,66 @@ actual cause; do not relabel source loss as an intentional user fence. Accepted
 publication sequence differs from hardware conversion sequence. A complete raw
 export, a continuous accepted-sample segment and useful physical input are
 separate claims. See the [capture contract](../../docs/motion-capture.md).
+
+An actuation queue may intentionally discard pending samples at a source
+boundary. A raw observation journal must preserve already accepted observations
+and append a typed rejection event instead; otherwise diagnostics lose the data
+needed to explain that boundary. Separate unavailable conversion data from
+accepted publications dropped by delivery. Retain the attempt's ready bits and
+timing atomically: later periodic status cannot reconstruct each rejection.
+Likewise, a latest-value consumer's zero gap alarms do not prove every producer
+sample was consumed. See the [live sensor API](../../docs/sensor-api.md) and
+[ordered capture evidence](../../docs/validation.md#ordered-capture-deployment-and-repeated-waiting-2026-10-23).
+
+## 13. Pairing combines bond storage, target policy and radio acknowledgement
+
+Deleting bond records does not necessarily clear a separately persisted selected
+target. Opening a pairing window may require both an acknowledged disconnect
+and a completed target-policy update. Native controls must follow the same owner
+contract as remote controls, including exact bond identity, revision checks,
+asynchronous deletion receipts and durable policy verification. Preserve the
+remaining hosts and their ordering when deleting one host. Forget all must not
+silently open a new pairing window.
+
+An accepted pairing request is not proof of advertising or host discovery.
+Keep preparation, actual advertising, timeout and failure visible on the same
+page. A host-side Forget action is independent from device-side stored state.
+Exercise these transitions against the actual BLE owner and storage adapter;
+a test double that accepts every pairing request misses policy interlocks.
+See the [Bluetooth investigation](../../docs/validation.md#bluetooth-discovery-and-usb-audio-investigation-2026-10-23).
+
+## 14. Audio implementation, connection and first frame are separate evidence
+
+A compiled profile may be implemented without a negotiated audio connection.
+When multiple profiles share one build-time support flag, an unsupported-profile
+fallback test does not cover choosing between the real supported profiles.
+Exercise an available A2DP speaker with unconnected HFP, both marked implemented;
+preserve an already usable profile and require actual HFP capture for a microphone.
+Never infer audio readiness from HID pairing or from the connection selector.
+
+USB enumeration and host render callbacks do not prove device receipt, a complete
+codec write or audible playback. A brief startup failure can fall entirely between
+aggregate health reports. Keep job first-frame evidence and terminal stop reasons,
+then correlate them with bounded cached transport/codec observations. Observation
+must not start a stream, change its deadline, grant microphone access or expose
+PCM, transcripts or peer identity. See the [audio investigation](../../docs/validation.md#bluetooth-discovery-and-usb-audio-investigation-2026-10-23).
+
+## 15. Relative input must survive ordinary transport backpressure
+
+An in-flight USB report or pending BLE confirmation is temporary backpressure,
+not a disconnected input owner. Advancing touch coordinates while dropping that
+sample loses relative distance. Clipping a large displacement to the wire field
+without retaining its remainder loses distance even on an otherwise idle link.
+Test emitted displacement totals through the production coordinator, interaction
+logic and transport completion boundaries, including contact start while busy.
+
+Retained motion needs finite capacity and an age bound measured from the original
+sample. New samples, partial sends and brief ready intervals must not renew old
+motion indefinitely. Preserve button, ownership, host and release ordering; cancel
+on genuine authority loss. Admission failure must leave a remote command safely
+retryable or explicitly canceled, never report success for discarded movement.
+Test explicit cancellation independently from normal contact end and lease
+expiry: an unheld contact can still own queued movement after a partial report.
+Ending a contact may drain accepted movement; canceling it must discard the
+remaining movement through the owning neutral-release lifecycle.
+These conservation checks do not establish physical pointer latency or smoothness.

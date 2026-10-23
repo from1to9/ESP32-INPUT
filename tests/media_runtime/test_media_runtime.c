@@ -153,6 +153,7 @@ static void setup(void)
     bond_copies=0; bond_reentrant_request=NULL; bond_reentrant_result=AE_OK;
     commands=safety_stops=speech_starts=speech_cancels=0; completion_ready=false; channel_generation=17;
     audio=(ae_snapshot_t){.route=AE_ROUTE_OFF,.audio_generation=1,.revision=1,.hardware_off_confirmed=true};
+    route_token=(ae_route_token_t){.peer_id={{1}},.stream_id={{2}},.link_generation=3};
     const app_media_services_t services={0};
     assert(app_media_runtime_init(&services)==AE_OK);
     assert(network_port.user==media && network_port.capture_allowed && network_port.capture_failed && network_port.playback && network_port.channel_lost);
@@ -162,7 +163,7 @@ static void setup(void)
 static app_media_local_request_t request(ae_job_kind_t kind, ae_route_t route)
 {
     return (app_media_local_request_t){.token=1,.epoch=10,.ui_revision=20,.action=APP_MEDIA_START,
-        .kind=kind,.route=route,.format={route==AE_ROUTE_LOCAL?16000U:48000U,1,10,AE_PCM_S16_LE},
+        .kind=kind,.route=route,.expected_route_token=route_token,.format={route==AE_ROUTE_LOCAL?16000U:48000U,1,10,AE_PCM_S16_LE},
         .duration_seconds=kind==AE_CAPTURE_RECOGNITION?8U:300U,.byte_limit=32U*1024U*1024U};
 }
 static void acknowledge(ae_result_t result)
@@ -178,6 +179,69 @@ static void admit_start(app_media_local_request_t req)
     assert(app_media_runtime_submit_local(&req)==AE_OK);
     media_step(media); assert(submitted.kind==APP_AUDIO_CMD_ROUTE);
     acknowledge(AE_OK); media_step(media); assert(submitted.kind==APP_AUDIO_CMD_START);
+}
+static void replace_local_identity(unsigned field)
+{
+    if (field == 0) route_token.peer_id.bytes[0] ^= 8;
+    else if (field == 1) route_token.stream_id.bytes[0] ^= 8;
+    else ++route_token.link_generation; /* Same-peer reconnect/USB reset. */
+}
+static void assert_no_local_grant(void)
+{
+    for (unsigned i = 0; i <= AE_CONSUMERS_MAX; ++i) assert(!media->grants[i].valid);
+}
+static void assert_local_result(ae_result_t expected)
+{
+    uint64_t token = 0; ae_result_t result = AE_OK;
+    assert(app_media_runtime_take_result(&token, &result) && token == 1 && result == expected);
+}
+static void local_transport_identity(void)
+{
+    const ae_route_t targets[] = {AE_ROUTE_USB_UAC, AE_ROUTE_HFP_HF, AE_ROUTE_A2DP_SINK};
+    for (unsigned r = 0; r < sizeof(targets) / sizeof(targets[0]); ++r) {
+        ae_route_t target = targets[r];
+        for (unsigned role = 0; role < (target == AE_ROUTE_A2DP_SINK ? 1U : 2U); ++role) {
+            ae_job_kind_t kind = role ? AE_CAPTURE_LIVE : AE_PLAYBACK_STREAM;
+            setup(); app_media_local_request_t req = request(kind, target);
+            req.expected_route_token = (ae_route_token_t){0};
+            assert(app_media_runtime_submit_local(&req) == AE_STALE && !commands && !media->pending);
+            assert_no_local_grant();
+            for (unsigned field = 0; field < 3; ++field) {
+                setup(); req = request(kind, target); replace_local_identity(field);
+                assert(app_media_runtime_submit_local(&req) == AE_STALE && !commands && !media->pending);
+                assert_no_local_grant();
+
+                setup(); req = request(kind, target);
+                assert(app_media_runtime_submit_local(&req) == AE_OK);
+                replace_local_identity(field); media_step(media);
+                assert(!commands); assert_no_local_grant(); assert_local_result(AE_STALE);
+
+                setup(); audio.route = target == AE_ROUTE_HFP_HF ? AE_ROUTE_A2DP_SINK : AE_ROUTE_OFF;
+                req = request(kind, target); assert(app_media_runtime_submit_local(&req) == AE_OK);
+                media_step(media); assert(commands == 1 && submitted.kind == APP_AUDIO_CMD_ROUTE);
+                acknowledge(AE_OK); assert(media->phase == MEDIA_ADMIT && commands == 1);
+                replace_local_identity(field); media_step(media);
+                assert(commands == 1); assert_no_local_grant(); assert_local_result(AE_STALE);
+            }
+            setup(); req = request(kind, target); admit_start(req);
+            assert(commands == 2 && ae_route_token_equal(&submitted.start.route_token, &req.expected_route_token));
+            unsigned slot = kind <= AE_CAPTURE_RECOGNITION ? (unsigned)kind : AE_CONSUMERS_MAX;
+            assert(media->grants[slot].valid && ae_route_token_equal(&media->grants[slot].request.route_token, &req.expected_route_token));
+            acknowledge(AE_OK); assert_local_result(AE_OK);
+            for (unsigned barrier = 0; barrier < 3; ++barrier) {
+                setup(); req = request(kind, target); assert(app_media_runtime_submit_local(&req) == AE_OK);
+                if (barrier) { media_step(media); acknowledge(AE_OK); }
+                if (barrier == 2) app_media_runtime_stop(AE_STOP_REQUESTED);
+                else {
+                    ae_environment_t environment = {.screen_visible = true, .privacy_latched = true};
+                    app_media_runtime_environment(&environment, 10, 20, true);
+                }
+                unsigned before = commands; media_step(media);
+                assert(commands == before); assert_no_local_grant(); assert_local_result(AE_PRIVACY);
+            }
+        }
+    }
+    puts("PASS: local USB/HFP/A2DP full admission token survives route ACK; peer/stream/reset replacement and privacy/stop reject without fresh grants");
 }
 static bool session_live(void *context, const cp_identity_t *identity)
 { (void)context; assert(!lock_depth); ++session_calls; return (!session_fail_after || session_calls<=session_fail_after) && remote_session_live && identity->principal_id[0]==9 && identity->session_id[0]==10; }
@@ -506,7 +570,7 @@ int main(int argc, char **argv)
     assert(transport_frames == 4 && ingress_frames == 5 && transport_reads == 5);
     ingress_capacity = 4; media_step(media);
     assert(!transport_frames && ingress_frames == 9 && transport_reads == 9);
-    remote_and_queries(); channel_lifetime_authority(); remote_link_admission();
+    local_transport_identity(); remote_and_queries(); channel_lifetime_authority(); remote_link_admission();
     assert(!lock_depth);
     heap_caps_free(media); media=NULL;
     puts("PASS: media runtime local grants, route/start ordering, cancellation, independent HID context and speech preview");

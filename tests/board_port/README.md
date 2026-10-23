@@ -8,6 +8,53 @@ driver doubles model the ESP-IDF/BSP boundary; they do not claim hardware or
 radio success. Task creation records ownership and allocation, while the sensor
 worker's recovery/fatal paths run against a deterministic clock.
 
+The independent raw observation journal retains 256 typed 88-byte records in
+22,528 bytes of external RAM. Its SDK-independent record and payload contract is
+[`board_sensor_journal.h`](../../firmware/main/board_sensor_journal.h); the API
+owner explicitly encodes the fields rather than sending native structs. The
+same existing acquisition owner records accepted IMU publications and typed
+not-ready, late, communication, fatal, publication and startup failures. Accepted
+float bits, units, axes and timestamps are unchanged. Hardware loss generation
+is distinct from actuation delivery epoch and coordinator permission. A rejected
+attempt has timing/status/error metadata, never fabricated zero axes. Missing
+time, ready bits or source identity remain explicitly unknown. Clock failure
+may retain a backward start/end pair with duration marked unknown.
+
+Rejection markers do not discard previously retained accepted observations.
+The existing actuation queue still performs its original segment cancellation;
+its contracts, cache/recovery authority and acceptance thresholds are unchanged.
+The journal appends a single bounded copy under the existing status lock, with
+no allocation, extra sensor transaction, network operation or producer logging.
+The existing power poll adds cached field values and validity, including gauge
+temperature provenance. There is no additional power polling task or cadence.
+
+Each journal reader supplies an independent last-delivered cursor. Reads copy
+consistent oldest/latest bounds and at most eight records under the same lock,
+without consuming records or mutating source health. Overwritten cursors first
+receive a zero-record gap with its exact lost count and explicit resume cursor.
+Future cursors and invalid arguments leave outputs untouched. Identifier
+exhaustion stops retention without wrapping or affecting hardware; retained
+history remains readable with the exhausted state. The API layer owns boot
+identity and transport/subscriber loss reporting. The ring is bounded history,
+not evidence of lossless sensor conversions or unlimited client backpressure.
+
+`board_power_observe` derives the legacy power freshness result in an output
+copy without clearing cache/capabilities; `board_power_read` keeps its existing
+source-authority behavior. The generic input tee accepts only bounded touch and
+button observations from their existing owners, rejecting IMU/power injection.
+Touch-only redaction requires zero payload and validity. It does not replace a
+touch callback, read GPIO/I2C or grant HID authority. Public touch change-event
+coalescing and privacy eligibility belong to the coordinator.
+
+Focused journal regressions cover two readers with different drain rates,
+exact payload retention around rejected acquisitions, ring wrap/overwrite gaps,
+read-only isolation, untouched invalid/future-cursor outputs, startup readiness
+and failures, hardware generation across recovery, clock rollback, ID exhaustion,
+power provenance and pure age/clock observation, and input whitelisting and
+redaction. These are host proofs. Target external-RAM placement, lock duration,
+stack margin, transport delivery and device performance require integration
+and exact-image hardware validation. Historical capture evidence is unchanged.
+
 The optional ordered delivery API uses the same sole acquisition owner and
 unchanged native six-axis samples. The SDK-independent
 [`board_imu_stream.h`](../../firmware/main/board_imu_stream.h) defines frames,

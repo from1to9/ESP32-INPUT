@@ -177,6 +177,8 @@ class DeviceSession:
             if op in {"operations.list", "config.schema"}:
                 if args:
                     resource += "?cursor=" + str(args.get("cursor", "0")) + "&limit=" + str(args.get("limit", 8))
+            elif op == "sensors.samples":
+                resource += "?boot=" + args["boot"] + "&after=" + args["after"] + "&limit=" + str(args.get("limit", 8))
             elif op == "wifi.scan.results":
                 if args:
                     resource += "/" + str(args["cursor"])

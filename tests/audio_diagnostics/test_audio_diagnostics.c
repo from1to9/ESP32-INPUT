@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: Apache-2.0
+#include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "../../firmware/main/app_audio_diagnostics.c"
+
+static app_media_snapshot_t owner;
+static usb_audio_snapshot_t usb;
+static board_audio_status_t codec;
+static bool available = true;
+static unsigned media_reads, usb_reads, codec_reads, mutations;
+static char lines[128][768];
+static size_t line_count;
+
+bool app_media_runtime_snapshot(app_media_snapshot_t *out)
+{ ++media_reads; if (available) *out = owner; return available; }
+usb_audio_snapshot_t usb_audio_snapshot(void) { ++usb_reads; return usb; }
+board_audio_status_t board_audio_mosaico_status(void) { ++codec_reads; return codec; }
+/* Forbidden mutations are linked and counted independently of the observer. */
+ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *request)
+{ (void)request; ++mutations; return AE_INVALID; }
+void app_media_runtime_stop(ae_stop_reason_t reason) { (void)reason; ++mutations; }
+void app_audio_request_safety_stop(ae_stop_reason_t reason) { (void)reason; ++mutations; }
+ae_result_t app_audio_submit(const app_audio_command_t *command)
+{ (void)command; ++mutations; return AE_INVALID; }
+
+void audio_diagnostics_test_log(const char *tag, const char *format, ...)
+{
+    assert(!strcmp(tag, "audio_diag") && line_count < 128);
+    va_list arguments; va_start(arguments, format);
+    int count = vsnprintf(lines[line_count], sizeof(lines[line_count]), format, arguments);
+    va_end(arguments);
+    assert(count > 0 && (size_t)count < sizeof(lines[line_count])); ++line_count;
+}
+static bool contains_since(size_t first, const char *text)
+{
+    for (size_t i = first; i < line_count; ++i) if (strstr(lines[i], text)) return true;
+    return false;
+}
+static void poll_at(uint64_t now)
+{
+    app_media_snapshot_t before = owner;
+    usb_audio_snapshot_t usb_before = usb;
+    board_audio_status_t codec_before = codec;
+    app_audio_diagnostics_poll(now);
+    assert(!memcmp(&before, &owner, sizeof(owner)) && !memcmp(&usb_before, &usb, sizeof(usb)) &&
+        !memcmp(&codec_before, &codec, sizeof(codec)) && !mutations);
+    const unsigned char *bytes = (const unsigned char *)&diagnostics.scratch;
+    for (size_t i = 0; i < sizeof(diagnostics.scratch); ++i) assert(!bytes[i]);
+}
+static void setup(void)
+{
+    owner = (app_media_snapshot_t){.initialized = true, .audio_known = true, .speech_known = true,
+        .audio = {.state = AE_OFF, .route = AE_ROUTE_USB_UAC, .audio_generation = 9, .hardware_off_confirmed = true},
+        .speech = {.state = SL_IDLE}};
+    usb = (usb_audio_snapshot_t){.initialized = true, .stack_ready = true, .mounted = true,
+        .playback_selected = true, .link_generation = 8};
+    codec = (board_audio_status_t){.worker_started = true, .probe_complete = true, .hardware_observed = true,
+        .speaker_muted = true, .format = {48000, 1, 10, AE_PCM_S16_LE}};
+}
+static void test_unknown_is_not_success(void)
+{
+    setup(); available = false; usb = (usb_audio_snapshot_t){0}; codec = (board_audio_status_t){0};
+    owner.audio.state = AE_RUNNING; owner.audio.playback.received_bytes = 918273;
+    poll_at(0);
+    assert(line_count == 4 && contains_since(0, "audio known=0 state=unknown snapshot_available=0") &&
+        contains_since(0, "USB known=0 state=unknown error_known=0 error=-1") &&
+        contains_since(0, "codec known=0 state=unknown error_known=0 error=-1"));
+    assert(!contains_since(0, "received_bytes=") && !contains_since(0, "918273"));
+    usb.error = ESP_ERR_NO_MEM; codec.last_result = AE_EXHAUSTED; poll_at(100);
+    assert(line_count == 6 && contains_since(4, "error_known=1"));
+}
+static void test_idle_throttle_and_counter_summary(void)
+{
+    setup(); poll_at(0); assert(line_count == 8 && media_reads == 1);
+    for (uint64_t i = 1; i < 100; ++i) poll_at(i);
+    assert(media_reads == 1 && usb_reads == 1 && codec_reads == 1 && line_count == 8);
+    for (uint64_t i = 100; i < 10000; i += 100) {
+        owner.audio.playback.received_bytes += 960; usb.dropped_playback_frames += 1; poll_at(i);
+    }
+    assert(line_count == 8 && media_reads == 100);
+    poll_at(10000); assert(line_count == 16 && contains_since(8, "received_bytes=95040") &&
+        contains_since(8, "dropped_playback=99"));
+}
+static void test_failed_job_retained_and_replaced(void)
+{
+    setup(); poll_at(0);
+    ae_job_snapshot_t *job = &owner.audio.playback;
+    job->kind = AE_PLAYBACK_STREAM; job->state = AE_JOB_STARTING;
+    owner.audio.state = AE_PREPARING; owner.audio.hardware_off_confirmed = false;
+    poll_at(100); assert(line_count == 10);
+    job->state = AE_JOB_ERROR; job->stop_reason = AE_STOP_START_TIMEOUT; job->error = AE_TIMEOUT;
+    job->cleanup_pending = true; poll_at(2100);
+    assert(line_count == 11 && contains_since(10, "first_frame=0") && contains_since(10, "cleanup=1"));
+    owner.audio.state = AE_OFF; owner.audio.hardware_off_confirmed = true; job->cleanup_pending = false;
+    poll_at(2200); size_t after_stop = line_count;
+    poll_at(2300); assert(line_count == after_stop && diagnostics.previous.jobs[AE_CONSUMERS_MAX].error == AE_TIMEOUT);
+    poll_at(10000); assert(contains_since(after_stop, "stop_reason=") &&
+        diagnostics.previous.jobs[AE_CONSUMERS_MAX].stop_reason == AE_STOP_START_TIMEOUT);
+    job->state = AE_JOB_STARTING; job->error = AE_OK; job->stop_reason = AE_STOP_REQUESTED;
+    poll_at(10100); assert(diagnostics.previous.jobs[AE_CONSUMERS_MAX].state == AE_JOB_STARTING);
+    job->state = AE_JOB_RUNNING; job->first_frame_seen = true; job->first_frame_ms = 10150;
+    job->deadline_ms = 3610150; job->received_bytes = job->delivered_bytes = 960; job->sample_frames = 480;
+    size_t prior = line_count; poll_at(10200);
+    assert(line_count == prior + 1 && contains_since(prior, "first_frame=1 first_frame_ms=10150") &&
+        contains_since(prior, "sample_frames=480"));
+}
+static void test_availability_recovery(void)
+{
+    setup(); owner.audio.capture[AE_CAPTURE_LIVE] = (ae_job_snapshot_t){.state = AE_JOB_RUNNING,
+        .first_frame_seen = true, .first_frame_ms = 5, .received_bytes = 960};
+    poll_at(0); available = false; poll_at(100);
+    assert(contains_since(8, "audio known=0 state=unknown") && !contains_since(8, "received_bytes=0"));
+    size_t prior = line_count; available = true; poll_at(200);
+    assert(contains_since(prior, "audio known=1") && contains_since(prior, "received_bytes=960"));
+    owner.audio_known = false; owner.speech_known = false; prior = line_count; poll_at(300);
+    assert(contains_since(prior, "snapshot_available=1 initialized=1") &&
+        contains_since(prior, "speech known=0 state=unknown") && !contains_since(prior, "received_bytes="));
+}
+static void test_transport_and_codec_errors(void)
+{
+    setup(); poll_at(0);
+    usb.suspended = true; usb.prepared = false; ++usb.link_generation;
+    codec.last_result = AE_IO_ERROR; codec.last_sdk_error = 1234; codec.cleanup_uncertain = true;
+    size_t prior = line_count; poll_at(100);
+    assert(line_count == prior + 2 && contains_since(prior, "suspended=1") &&
+        contains_since(prior, "cleanup_uncertain=1") && contains_since(prior, "sdk_error=1234"));
+    owner.audio.error = AE_UNCERTAIN; prior = line_count; poll_at(200);
+    assert(line_count == prior + 1 && contains_since(prior, "audio known=1"));
+    codec.probe_result = AE_TIMEOUT; codec.format.sample_rate_hz = 16000; prior = line_count; poll_at(300);
+    assert(line_count == prior + 1 && contains_since(prior, "rate=16000"));
+}
+static void test_private_metadata_wiped(void)
+{
+    setup();
+    memset(owner.audio.route_token.peer_id.bytes, 'X', AE_ID_BYTES);
+    memset(owner.audio.route_token.stream_id.bytes, 'Y', AE_ID_BYTES);
+    memset(owner.audio.playback.job_id.bytes, 'Z', AE_ID_BYTES);
+    memset(owner.result_detail.metadata.principal_id.bytes, 'W', AE_ID_BYTES);
+    owner.speech.candidate = 'Q'; owner.speech.state = SL_CANDIDATE; owner.speech.token = UINT64_C(98765432101234);
+    poll_at(0);
+    assert(!contains_since(0, "58585858") && !contains_since(0, "59595959") &&
+        !contains_since(0, "5a5a5a5a") && !contains_since(0, "57575757") &&
+        !contains_since(0, "98765432101234") && !contains_since(0, "candidate") && !contains_since(0, "Q"));
+    assert(!diagnostics.scratch.media.speech.candidate);
+}
+static void test_clock_regression_is_observer_only(void)
+{
+    setup(); poll_at(UINT64_MAX - 10000); poll_at(UINT64_MAX); assert(line_count == 16);
+    unsigned reads = media_reads; poll_at(UINT64_MAX - 1); assert(line_count == 17 && diagnostics.clock_failed);
+    poll_at(UINT64_MAX); assert(line_count == 17 && media_reads == reads && contains_since(16, "observer_stopped=1"));
+}
+int main(int argc, char **argv)
+{
+    const char *names[] = {"unknown_is_not_success", "idle_throttle_and_counter_summary", "failed_job_retained_and_replaced",
+        "availability_recovery", "transport_and_codec_errors", "private_metadata_wiped", "clock_regression_is_observer_only"};
+    void (*cases[])(void) = {test_unknown_is_not_success, test_idle_throttle_and_counter_summary, test_failed_job_retained_and_replaced,
+        test_availability_recovery, test_transport_and_codec_errors, test_private_metadata_wiped, test_clock_regression_is_observer_only};
+    assert(argc == 2);
+    if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: audio diagnostics %s\n", names[i]); return 0; }
+    return 2;
+}

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise build identity against real temporary Git histories and archive fallbacks."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -67,6 +68,24 @@ class BuildIdentityTests(unittest.TestCase):
         shutil.copyfile(self.metadata, archive / "firmware/project_identity.json")
         result = identity.generate(archive, archive / "generated.h")
         self.assertEqual((result["git_commit"], result["git_state"]), ("", "unknown"))
+
+    def test_actual_configuration_identity_and_missing_file(self):
+        self.assertEqual(identity.generate(self.root, self.output)["config_sha256"], "")
+        config = self.output.parent / "sdkconfig"
+        config.write_bytes(b"CONFIG_APP_IMU_CAPTURE=y\n")
+        first = identity.generate(self.root, self.output, config)
+        self.assertEqual(first["config_sha256"], hashlib.sha256(config.read_bytes()).hexdigest())
+        stamp = self.output.stat().st_mtime_ns
+        identity.generate(self.root, self.output, config)
+        self.assertEqual(stamp, self.output.stat().st_mtime_ns)
+        config.write_bytes(b"CONFIG_APP_IMU_CAPTURE=n\n")
+        second = identity.generate(self.root, self.output, config)
+        self.assertNotEqual(first["config_sha256"], second["config_sha256"])
+        previous = self.output.read_bytes()
+        config.unlink()
+        with self.assertRaises(OSError):
+            identity.generate(self.root, self.output, config)
+        self.assertEqual(previous, self.output.read_bytes())
 
     def test_unavailable_git_is_unknown_not_clean(self):
         with patch.dict(os.environ, {"PATH": str(self.root / "no-programs")}):

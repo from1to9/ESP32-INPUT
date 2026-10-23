@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure selected coordinator paths with the configured target compiler.
+"""Measure declared task/callback paths with the configured target compiler.
 
 This is a focused regression gate, not a whole-program stack proof. Compiler
 frames include inlined locals. Named out-of-line clone bodies are conservatively
@@ -9,6 +9,7 @@ No shared build output, device, or running process is changed.
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -28,7 +29,13 @@ UNITS = {
     "remote_media": "firmware/main/app_remote_media.c",
     "media_controls": "firmware/main/app_media_controls.c",
     "connectivity": "firmware/main/app_connectivity_controls.c",
+    "bluetooth_management": "firmware/main/app_bluetooth_management.c",
     "media_runtime": "firmware/main/app_media_runtime.c",
+    "audio_manager": "firmware/main/app_audio.c",
+    "audio_diagnostics": "firmware/main/app_audio_diagnostics.c",
+    "usb_audio": "firmware/main/usb_audio.c",
+    "board_audio": "firmware/main/board_audio_mosaico.c",
+    "audio_helpers": "components/audio_engine/audio_media.c",
     "ble": "firmware/main/ble_hid.c",
     "classic": "firmware/main/bt_audio.c",
     "settings": "firmware/main/settings_store.c",
@@ -37,8 +44,26 @@ UNITS = {
     "control_runtime": "firmware/main/app_control_runtime.c",
     "board": "firmware/main/board_mosaico.c",
     "interaction": "components/interaction/interaction.c",
+    "hid_engine": "components/hid_engine/hid_engine.c",
+    "input_core": "components/input_core/input_core.c",
     "imu_queue": "firmware/main/board_imu_queue.c",
     "motion_capture": "firmware/main/motion_capture.c",
+    "sensor_api": "firmware/main/app_sensor_api.c",
+    "sensor_wire": "firmware/main/sensor_wire.c",
+    "sensor_journal": "firmware/main/board_sensor_journal.c",
+    "sensor_usb": "components/control_protocol/control_sensor_usb.c",
+    "protocol": "components/control_protocol/control_protocol.c",
+    "server": "firmware/main/app_control_server.c",
+    "touch": "firmware/main/board_touch_mosaico.c",
+    "ui": "firmware/main/app_ui.c",
+    "control_trust": "firmware/main/app_control_trust.c",
+    "usb_hid": "firmware/main/usb_hid.c",
+    "vendor_button": "firmware/managed_components/espressif__button/iot_button.c",
+    "vendor_lvgl_adapter": "firmware/managed_components/espressif__esp_lvgl_adapter/src/adapter/esp_lv_adapter.c",
+    "vendor_lvgl_touch": "firmware/managed_components/espressif__esp_lvgl_adapter/src/input/esp_lv_adapter_input_touch.c",
+    "lvgl_timer": "firmware/managed_components/lvgl__lvgl/src/misc/lv_timer.c",
+    "lvgl_indev": "firmware/managed_components/lvgl__lvgl/src/indev/lv_indev.c",
+    "sdk_timer": ".tools/esp-idf/components/esp_timer/src/esp_timer.c",
 }
 CORE = [("main", "app_main"), ("main", "coordinator_run")]
 DEVICE_SUBMIT = CORE + [("bridge", "app_command_bridge_service"),
@@ -215,6 +240,360 @@ PATHS = {
                           ("device", "execute_owned"), ("device", "execute"),
                           ("device", "submit_job"), ("main", "remote_device_submit")],
 }
+# New local management paths run synchronously on the coordinator. BLE/media
+# owner request functions copy work for other tasks; those worker stacks are
+# deliberately not nested under the submitting coordinator frame.
+LOCAL_INTENT = CORE + [("main", "consume_coordinator_event"), ("main", "handle_intent")]
+BT_BEGIN = LOCAL_INTENT + [("connectivity", "app_connectivity_controls_bluetooth_start"),
+    ("bluetooth_management", "app_bluetooth_management_begin")]
+BT_EXACT_BEGIN = LOCAL_INTENT + [("connectivity", "app_connectivity_controls_handle"),
+    ("bluetooth_management", "app_bluetooth_management_begin")]
+BT_SERVICE = CORE + [("main", "service_connectivity"),
+    ("connectivity", "app_connectivity_controls_poll"),
+    ("bluetooth_management", "app_bluetooth_management_service")]
+BT_CANCEL_STOP = LOCAL_INTENT + [("connectivity", "app_connectivity_controls_bluetooth_stop"),
+    ("bluetooth_management", "app_bluetooth_management_cancel")]
+BT_CANCEL_CONTEXT = CORE + [("main", "service_connectivity"), ("main", "refresh_connectivity_context"),
+    ("connectivity", "app_connectivity_controls_context"),
+    ("bluetooth_management", "app_bluetooth_management_cancel")]
+BT_POLICY = BT_SERVICE + [("bluetooth_management", "submit_policy"),
+    ("ble", "ble_hid_target_preferences_request"), ("ble", "submit_preferences_locked")]
+MANAGEMENT_PATHS = {
+    "bluetooth_begin_message": BT_BEGIN + [("bluetooth_management", "message")],
+    "bluetooth_exact_begin_target": BT_EXACT_BEGIN + [("bluetooth_management", "target_matches")],
+    "bluetooth_service_policy_key": BT_SERVICE + [("bluetooth_management", "submit_policy"), ("bluetooth_management", "key")],
+    "bluetooth_service_policy_selected": BT_SERVICE + [("bluetooth_management", "submit_policy"), ("bluetooth_management", "same_target")],
+    "bluetooth_service_selected_verify": BT_SERVICE + [("bluetooth_management", "same_target")],
+    "bluetooth_service_policy_stable": BT_SERVICE + [("bluetooth_management", "policy_stable")],
+    "bluetooth_policy_request_key": BT_POLICY + [("ble", "key_for_bond")],
+    "bluetooth_policy_request_editable": BT_POLICY + [("ble", "target_editable_locked"), ("ble", "single_forget_busy_locked")],
+    "bluetooth_policy_request_blocked": BT_POLICY + [("ble", "target_blocked_locked")],
+    "bluetooth_policy_request_name": BT_POLICY + [("ble", "target_editable_locked"), ("ble", "name_busy_locked")],
+    "bluetooth_policy_request_match": BT_POLICY + [("ble", "target_key_matches")],
+    "bluetooth_service_disconnect": BT_SERVICE + [("ble", "ble_hid_disconnect_generation"), ("ble", "refresh_locked")],
+    "bluetooth_service_disconnect_generation": BT_SERVICE + [("ble", "ble_hid_disconnect_generation"), ("ble", "advance_generation_locked")],
+    "bluetooth_service_forget_all": BT_SERVICE + [("ble", "ble_hid_forget_bonds_without_pairing"),
+        ("ble", "request_forget_bonds"), ("ble", "bond_list_status_locked")],
+    "bluetooth_service_forget_all_refresh": BT_SERVICE + [("ble", "ble_hid_forget_bonds_without_pairing"),
+        ("ble", "request_forget_bonds"), ("ble", "refresh_locked")],
+    "bluetooth_service_forget_one": BT_SERVICE + [("ble", "ble_hid_forget_bond_request"),
+        ("ble", "target_editable_locked"), ("ble", "single_forget_busy_locked")],
+    "bluetooth_service_forget_one_key": BT_SERVICE + [("ble", "ble_hid_forget_bond_request"), ("ble", "target_key_matches")],
+    "bluetooth_service_forget_one_name": BT_SERVICE + [("ble", "ble_hid_forget_bond_request"),
+        ("ble", "target_editable_locked"), ("ble", "name_busy_locked")],
+    "bluetooth_service_forget_one_receipt": BT_SERVICE + [("ble", "ble_hid_bond_forget_snapshot")],
+    "bluetooth_service_manifest_bonds": BT_SERVICE + [("bluetooth_management", "manifest_matches"), ("bluetooth_management", "same_bond")],
+    "bluetooth_service_manifest_target": BT_SERVICE + [("bluetooth_management", "manifest_matches"), ("bluetooth_management", "target_matches")],
+    "bluetooth_service_pairing_open": BT_SERVICE + [("ble", "ble_hid_pairing_open"), ("ble", "open_pairing_locked")],
+    "bluetooth_service_pairing_guard": BT_SERVICE + [("ble", "ble_hid_pairing_open"), ("ble", "target_blocked_locked")],
+    "bluetooth_service_pairing_delete_guard": BT_SERVICE + [("ble", "ble_hid_pairing_open"), ("ble", "single_forget_busy_locked")],
+    "bluetooth_service_finish_message": BT_SERVICE + [("bluetooth_management", "finish"), ("bluetooth_management", "message")],
+    "bluetooth_service_finish_close": BT_SERVICE + [("bluetooth_management", "finish"), ("ble", "ble_hid_pairing_close")],
+    "bluetooth_poll_snapshot": CORE + [("main", "service_connectivity"),
+        ("connectivity", "app_connectivity_controls_poll"), ("bluetooth_management", "app_bluetooth_management_snapshot")],
+    "bluetooth_render_snapshot": CORE + [("main", "render_view"),
+        ("connectivity", "app_connectivity_controls_fill"), ("bluetooth_management", "app_bluetooth_management_snapshot")],
+    "bluetooth_render_rebuild": CORE + [("main", "render_view"),
+        ("connectivity", "app_connectivity_controls_fill"), ("connectivity", "rebuild"),
+        ("connectivity", "write_line"), ("connectivity", "write_char"), ("connectivity", "write_char")],
+    "bluetooth_begin_revision_copy": LOCAL_INTENT + [("connectivity", "app_connectivity_controls_bluetooth_revisions"),
+        ("connectivity", "refresh_owners"), ("ble", "ble_hid_copy_bond_list")],
+    "bluetooth_intent_busy_snapshot": LOCAL_INTENT + [("connectivity", "app_connectivity_controls_bluetooth_busy"),
+        ("bluetooth_management", "app_bluetooth_management_snapshot")],
+    "bluetooth_exact_forget_review": LOCAL_INTENT + [("connectivity", "app_connectivity_controls_handle"),
+        ("connectivity", "handle_bluetooth"), ("connectivity", "owner_key")],
+    "audio_select_connection_submit": LOCAL_INTENT + [("media_controls", "app_media_controls_handle"),
+        ("media_controls", "submit_runtime"), ("media_runtime", "app_media_runtime_submit_local")],
+    "audio_select_connection_resolve": LOCAL_INTENT + [("media_controls", "app_media_controls_handle"),
+        ("media_controls", "connection_route")],
+}
+for _name, _prefix in (("begin", BT_BEGIN), ("exact_begin", BT_EXACT_BEGIN)):
+    for _leaf, _tail in {
+        "stable": [("bluetooth_management", "policy_stable")],
+        "close": [("ble", "ble_hid_pairing_close")],
+        "message": [("bluetooth_management", "message")],
+    }.items():
+        MANAGEMENT_PATHS[f"bluetooth_{_name}_{_leaf}"] = _prefix + _tail
+for _leaf in ("name_busy_locked", "target_blocked_locked", "single_forget_busy_locked", "advance_generation_locked"):
+    MANAGEMENT_PATHS[f"bluetooth_forget_all_{_leaf}"] = BT_SERVICE + [
+        ("ble", "ble_hid_forget_bonds_without_pairing"), ("ble", "request_forget_bonds"), ("ble", _leaf)]
+for _leaf in ("target_blocked_locked", "advance_generation_locked", "bond_list_status_locked", "refresh_locked"):
+    MANAGEMENT_PATHS[f"bluetooth_forget_one_{_leaf}"] = BT_SERVICE + [
+        ("ble", "ble_hid_forget_bond_request"), ("ble", _leaf)]
+for _name, _prefix in (("begin", BT_BEGIN), ("exact_begin", BT_EXACT_BEGIN), ("service", BT_SERVICE)):
+    for _leaf, _tail in {
+        "state": [("ble", "ble_hid_snapshot"), ("ble", "pairing_allowed_locked"), ("ble", "single_forget_busy_locked")],
+        "policy": [("ble", "ble_hid_target_snapshot"), ("ble", "target_key_matches")],
+        "policy_blocked": [("ble", "ble_hid_target_snapshot"), ("ble", "target_blocked_locked")],
+        "bonds": [("ble", "ble_hid_copy_bond_list")],
+    }.items():
+        MANAGEMENT_PATHS[f"bluetooth_{_name}_{_leaf}"] = _prefix + _tail
+for _name, _prefix in {
+    "stop": BT_CANCEL_STOP, "context": BT_CANCEL_CONTEXT,
+    "intent_context": LOCAL_INTENT + [("main", "refresh_connectivity_context"),
+        ("connectivity", "app_connectivity_controls_context"), ("bluetooth_management", "app_bluetooth_management_cancel")],
+    "poll": CORE + [("main", "service_connectivity"), ("connectivity", "app_connectivity_controls_poll"),
+        ("bluetooth_management", "app_bluetooth_management_cancel")],
+    "service": BT_SERVICE + [("bluetooth_management", "app_bluetooth_management_cancel")],
+}.items():
+    for _leaf, _tail in {
+        "close": [("ble", "ble_hid_pairing_close")],
+        "delete": [("ble", "ble_hid_forget_bond_cancel"), ("ble", "refresh_locked")],
+        "delete_status": [("ble", "ble_hid_forget_bond_cancel"), ("ble", "bond_list_status_locked")],
+        "message": [("bluetooth_management", "message")],
+    }.items():
+        MANAGEMENT_PATHS[f"bluetooth_cancel_{_name}_{_leaf}"] = _prefix + _tail
+PATHS.update(MANAGEMENT_PATHS)
+AUDIO_OBSERVER = CORE + [("main", "service_media"), ("audio_diagnostics", "app_audio_diagnostics_poll")]
+AUDIO_DIAGNOSTIC_PATHS = {
+    "audio_diagnostics_media_snapshot": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
+        ("media_runtime", "app_media_runtime_snapshot")],
+    "audio_diagnostics_usb_snapshot": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
+        ("usb_audio", "usb_audio_snapshot")],
+    "audio_diagnostics_codec_snapshot": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
+        ("board_audio", "board_audio_mosaico_status")],
+    "audio_diagnostics_job_copy": AUDIO_OBSERVER + [("audio_diagnostics", "observe"), ("audio_diagnostics", "observe_job")],
+    "audio_diagnostics_scratch_wipe": AUDIO_OBSERVER + [("audio_diagnostics", "observe"), ("audio_diagnostics", "clear_scratch")],
+}
+for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec"):
+    AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_logger}"] = AUDIO_OBSERVER + [("audio_diagnostics", _logger)]
+for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed"):
+    AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_comparison}"] = AUDIO_OBSERVER + [("audio_diagnostics", _comparison)]
+AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_format"] = AUDIO_OBSERVER + [
+    ("audio_diagnostics", "codec_changed"), ("audio_helpers", "ae_format_equal")]
+PATHS.update(AUDIO_DIAGNOSTIC_PATHS)
+AUDIO_ADAPTER_PATHS = {
+    "audio_select_connection_ready": MANAGEMENT_PATHS["audio_select_connection_resolve"] + [("media_controls", "route_ready")],
+    "audio_select_connection_submit_wipe": MANAGEMENT_PATHS["audio_select_connection_submit"] + [("audio_helpers", "ae_secure_zero")],
+    "audio_live_start_route": LOCAL_INTENT + [("media_controls", "app_media_controls_handle"),
+        ("media_controls", "submit_start"), ("media_controls", "live_route"), ("media_controls", "route_ready")],
+    "audio_live_start_submit_wipe": LOCAL_INTENT + [("media_controls", "app_media_controls_handle"),
+        ("media_controls", "submit_start"), ("media_controls", "submit_runtime"),
+        ("media_runtime", "app_media_runtime_submit_local"), ("audio_helpers", "ae_secure_zero")],
+}
+for _name, _prefix in {
+    "poll": CORE + [("main", "service_media"), ("media_controls", "app_media_controls_poll"), ("media_controls", "rebuild")],
+    "intent": LOCAL_INTENT + [("media_controls", "app_media_controls_handle"), ("media_controls", "rebuild")],
+    "render": CORE + [("main", "render_view"), ("media_controls", "app_media_controls_fill"), ("media_controls", "rebuild")],
+}.items():
+    for _leaf, _tail in {
+        "connection_ready": [("media_controls", "connection_route"), ("media_controls", "route_ready")],
+        "live_profile": [("media_controls", "live_start_block"), ("media_controls", "live_route"), ("media_controls", "route_ready")],
+        "live_format": [("media_controls", "live_start_block"), ("media_controls", "format_supported"), ("audio_helpers", "ae_format_equal")],
+        "peer_present": [("media_controls", "live_start_block"), ("audio_helpers", "ae_id_empty")],
+        "token_valid": [("media_controls", "live_start_block"), ("audio_helpers", "ae_route_token_valid"), ("audio_helpers", "ae_id_empty")],
+        "same_peer": [("media_controls", "live_start_block"), ("audio_helpers", "ae_id_equal")],
+        "any_jobs": [("media_controls", "live_start_block"), ("media_controls", "any_jobs"), ("media_controls", "job_active")],
+        "capture_jobs": [("media_controls", "live_start_block"), ("media_controls", "capture_jobs"), ("media_controls", "job_active")],
+        "live_job": [("media_controls", "live_start_block"), ("media_controls", "job_active")],
+    }.items():
+        AUDIO_ADAPTER_PATHS[f"audio_connection_{_name}_{_leaf}"] = _prefix + _tail
+PATHS.update(AUDIO_ADAPTER_PATHS)
+MEDIA_PROCESS = [("media_runtime", "worker"), ("media_runtime", "media_step"),
+    ("media_runtime", "process_command")]
+MEDIA_START = MEDIA_PROCESS + [("media_runtime", "start_job")]
+MEDIA_SEND = [("media_runtime", "send_audio"), ("audio_manager", "app_audio_submit")]
+AUDIO_RUNTIME_PATHS = {
+    "audio_worker_route_submit": ("media_control", MEDIA_PROCESS + MEDIA_SEND + [("audio_helpers", "ae_secure_zero")]),
+    "audio_worker_start_submit": ("media_control", MEDIA_START + MEDIA_SEND + [("audio_helpers", "ae_secure_zero")]),
+    "audio_worker_start_wake": ("media_control", MEDIA_START + MEDIA_SEND + [("audio_manager", "wake")]),
+    "audio_worker_route_ack": ("media_control", MEDIA_PROCESS + [("audio_manager", "app_audio_take_result"), ("audio_helpers", "ae_secure_zero")]),
+    "audio_worker_route_ack_snapshot": ("media_control", MEDIA_PROCESS + [("audio_manager", "app_audio_snapshot")]),
+    "audio_worker_identity_failure": ("media_control", MEDIA_PROCESS + [("media_runtime", "finish"), ("audio_helpers", "ae_secure_zero")]),
+}
+for _name, (_owner, _prefix) in {
+    "live_admission": ("main", LOCAL_INTENT + [("media_controls", "app_media_controls_handle"),
+        ("media_controls", "submit_start"), ("media_controls", "submit_runtime"),
+        ("media_runtime", "app_media_runtime_submit_local"), ("media_runtime", "local_start_identity")]),
+    "worker_identity": ("media_control", MEDIA_PROCESS + [("media_runtime", "local_start_identity")]),
+    "worker_start": ("media_control", MEDIA_START),
+}.items():
+    for _leaf, _tail in {
+        "token_valid": [("audio_helpers", "ae_route_token_valid"), ("audio_helpers", "ae_id_empty")],
+        "token_equal": [("audio_helpers", "ae_route_token_equal"), ("audio_helpers", "ae_id_equal")],
+        "usb_factory": [("media_runtime", "route_caps"), ("media_runtime", "route_port"), ("usb_audio", "usb_audio_route_port")],
+        "bluetooth_factory": [("media_runtime", "route_caps"), ("media_runtime", "route_port"), ("classic", "bt_audio_route_port")],
+        "usb_capabilities": [("media_runtime", "route_caps"), ("usb_audio", "capabilities"), ("usb_audio", "live_locked")],
+        "bluetooth_capabilities": [("media_runtime", "route_caps"), ("classic", "port_capabilities"), ("classic", "route_live_locked")],
+        "bluetooth_token": [("media_runtime", "route_caps"), ("classic", "port_capabilities"), ("classic", "token_locked")],
+        "bluetooth_format": [("media_runtime", "route_caps"), ("classic", "port_capabilities"), ("classic", "format_locked")],
+    }.items():
+        AUDIO_RUNTIME_PATHS[f"audio_{_name}_{_leaf}"] = (_owner, _prefix + _tail)
+for _label, (_owner, _steps) in AUDIO_RUNTIME_PATHS.items():
+    PATHS[_label] = _steps
+# Conversion and queue admission return before the coordinator services HID.
+# The residual splitter adds no task; even its send callback runs on main.
+TOUCH_REMOTE = CORE + [("main", "remote_control_service"),
+    ("bridge", "app_command_bridge_service"), ("bridge", "execute_flight"),
+    ("main", "command_execute"), ("remote_input", "app_remote_input_execute"), ("remote_input", "virtual_touch")]
+TOUCH_STEP = CORE + [("hid_engine", "hid_engine_step")]
+TOUCH_OBSERVE = CORE + [("main", "observe_input_link"), ("hid_engine", "hid_engine_observe_transport")]
+TOUCH_SEND = TOUCH_STEP + [("main", "send_report")]
+TOUCH_PATHS = {
+    "touch_motion_ready": CORE + [("main", "sync_interaction"), ("interaction", "interaction_set_touch_motion_ready")],
+    "touch_remote_rollback_wipe": TOUCH_REMOTE + [("remote_input", "secure_zero")],
+    "touch_step_retained_age": TOUCH_STEP + [("hid_engine", "refresh_motion_age")],
+    "touch_step_emit_guard": TOUCH_STEP + [("input_core", "input_can_emit")],
+    "touch_step_release_ack": TOUCH_STEP + [("input_core", "input_ack_release")],
+    "touch_send_trace": TOUCH_SEND + [("main", "motion_trace_count")],
+    "touch_send_ble_refresh": TOUCH_SEND + [("ble", "ble_hid_send_generation"), ("ble", "refresh_locked")],
+    "touch_send_ble_failure": TOUCH_SEND + [("ble", "ble_hid_send_generation"), ("ble", "record_failure_locked")],
+    "touch_send_usb_validate": TOUCH_SEND + [("usb_hid", "usb_hid_send_generation"), ("usb_hid", "report_valid")],
+    "touch_send_usb_ready": TOUCH_SEND + [("usb_hid", "usb_hid_send_generation"), ("usb_hid", "ready_locked")],
+    "touch_send_usb_fault": TOUCH_SEND + [("usb_hid", "usb_hid_send_generation"), ("usb_hid", "fault_locked"),
+        ("usb_hid", "invalidate_locked"), ("usb_hid", "clear_reports_locked")],
+}
+for _name, _prefix in (("local", LOCAL_INTENT), ("remote", TOUCH_REMOTE)):
+    TOUCH_PATHS[f"touch_{_name}_conversion"] = _prefix + [
+        ("interaction", "interaction_touch_displacement_owned"), ("interaction", "valid_source")]
+    for _leaf, _tail in {
+        "buttons": [("hid_engine", "queued_mouse_buttons")],
+        "guard": [("hid_engine", "check_enqueue"), ("input_core", "input_can_emit")],
+        "push": [("hid_engine", "push")],
+        "age": [("hid_engine", "refresh_motion_age")],
+    }.items():
+        TOUCH_PATHS[f"touch_{_name}_enqueue_{_leaf}"] = _prefix + [
+            ("hid_engine", "hid_engine_enqueue_mouse_displacement")] + _tail
+for _name, _prefix in {
+    "rejected": LOCAL_INTENT + [("main", "cancel_input")],
+    "expired": TOUCH_OBSERVE,
+    "step_guard": TOUCH_STEP,
+    "send_failed": TOUCH_STEP + [("hid_engine", "send_failed")],
+}.items():
+    for _leaf, _tail in {
+        "queue": [("hid_engine", "clear_queue")],
+        "release": [("input_core", "input_invalidate")],
+    }.items():
+        TOUCH_PATHS[f"touch_cancel_{_name}_{_leaf}"] = _prefix + [("hid_engine", "hid_engine_cancel")] + _tail
+TOUCH_REMOTE_STOP = TOUCH_REMOTE + [("remote_input", "safety_stop")]
+TOUCH_REMOTE_WAIT = TOUCH_REMOTE_STOP + [("remote_input", "safety_wait")]
+TOUCH_REMOTE_REVOKE = TOUCH_REMOTE_WAIT + [("remote_input", "revoke")]
+TOUCH_REMOTE_CHANGED = TOUCH_REMOTE_REVOKE + [("remote_input", "changed")]
+# An authenticated CANCEL enters the owning neutral-release lifecycle. Owner
+# transfer clears the queue now; actual zero reports run in a later HID step.
+# changed() invokes the coordinator callback and then observes state separately.
+TOUCH_REMOTE_CANCEL_PATHS = {
+    "touch_remote_cancel_rejected_result": TOUCH_REMOTE_STOP + [("remote_input", "result_for")],
+    "touch_remote_cancel_pending_result": TOUCH_REMOTE_WAIT + [("remote_input", "result_for")],
+    "touch_remote_cancel_job_sample": TOUCH_REMOTE_REVOKE + [("remote_input", "end_job"), ("remote_input", "sample_text")],
+    "touch_remote_cancel_job_preview": TOUCH_REMOTE_REVOKE + [("remote_input", "end_job"), ("interaction", "interaction_send_update")],
+    "touch_remote_cancel_job_wipe": TOUCH_REMOTE_REVOKE + [("remote_input", "end_job"), ("remote_input", "secure_zero")],
+    "touch_remote_cancel_contact_effect": TOUCH_REMOTE_REVOKE + [("interaction", "interaction_touch_cancel"), ("interaction", "touch_effect")],
+    "touch_remote_cancel_contact_none": TOUCH_REMOTE_REVOKE + [("interaction", "interaction_touch_cancel"), ("interaction", "touch_none")],
+    "touch_remote_cancel_owner_queue": TOUCH_REMOTE_REVOKE + [("hid_engine", "hid_engine_set_owner"), ("hid_engine", "clear_queue")],
+    "touch_remote_cancel_owner_release": TOUCH_REMOTE_REVOKE + [("hid_engine", "hid_engine_set_owner"),
+        ("input_core", "input_set_owner"), ("input_core", "input_invalidate")],
+    "touch_remote_cancel_release_admit": TOUCH_REMOTE_REVOKE + [("interaction", "interaction_touch_admit"), ("interaction", "touch_none")],
+    "touch_remote_cancel_observe_guard": TOUCH_REMOTE_CHANGED + [("remote_input", "observe"), ("remote_input", "terminated")],
+    "touch_remote_cancel_observe_ble": TOUCH_REMOTE_CHANGED + [("remote_input", "observe"), ("main", "remote_observe"),
+        ("ble", "ble_hid_snapshot"), ("ble", "pairing_allowed_locked"), ("ble", "single_forget_busy_locked")],
+    "touch_remote_cancel_observe_usb": TOUCH_REMOTE_CHANGED + [("remote_input", "observe"), ("main", "remote_observe"),
+        ("main", "input_link_snapshot"), ("usb_hid", "usb_hid_snapshot")],
+    "touch_remote_cancel_callback_ready": TOUCH_REMOTE_CHANGED + [("main", "remote_changed"), ("main", "sync_interaction"),
+        ("interaction", "interaction_set_touch_motion_ready")],
+}
+for _name, _prefix in {
+    "model": TOUCH_REMOTE_REVOKE + [("remote_input", "sync_model"), ("interaction", "interaction_sync")],
+    "callback": TOUCH_REMOTE_CHANGED + [("main", "remote_changed"), ("main", "sync_interaction"), ("interaction", "interaction_sync")],
+}.items():
+    for _leaf, _tail in {
+        "contact": [("interaction", "interaction_touch_cancel"), ("interaction", "touch_effect")],
+        "grid": [("interaction", "reset_grid")],
+        "clock": [("interaction", "observe_clock"), ("interaction", "reference_begin")],
+    }.items():
+        TOUCH_REMOTE_CANCEL_PATHS[f"touch_remote_cancel_sync_{_name}_{_leaf}"] = _prefix + _tail
+TOUCH_PATHS.update(TOUCH_REMOTE_CANCEL_PATHS)
+PATHS.update(TOUCH_PATHS)
+PATH_OWNERS = {label: "main" for label in PATHS}
+PATH_OWNERS.update({label: owner for label, (owner, _) in AUDIO_RUNTIME_PATHS.items()})
+SENSOR = [("board", "sensor_worker"), ("board", "imu_update")]
+STARTUP_IMU = [("main", "app_main"), ("board", "board_init"), ("board", "init_optional_imu")]
+APPEND = [("sensor_journal", "board_sensor_journal_append")]
+PUBLISH_INPUT = [("board", "board_sensor_journal_publish_input")] + APPEND
+USB_POLL = [("control_runtime", "worker"), ("control_runtime", "poll_usb")]
+USB_RECEIVE = USB_POLL + [("sensor_usb", "cp_sensor_usb_receive")]
+USB_BATCH = USB_RECEIVE + [("control_runtime", "sensor_usb_batch"),
+    ("sensor_api", "app_sensor_api_read_batch"), ("sensor_api", "read_page")]
+USB_READ = USB_RECEIVE + [("control_runtime", "sensor_usb_read"), ("sensor_api", "app_sensor_api_read")]
+HTTP_READ = [("server", "handle_request"), ("protocol", "cp_http"), ("protocol", "http_inner"),
+    ("protocol", "get_resource"), ("protocol", "provider_read"), ("server", "read_state"),
+    ("control_runtime", "read_resource"), ("sensor_api", "app_sensor_api_read")]
+JOURNAL_READ = [("board", "board_sensor_journal_read"),
+    ("sensor_journal", "board_sensor_journal_copy"), ("sensor_journal", "board_sensor_journal_bounds")]
+LVGL_TOUCH = [("vendor_lvgl_adapter", "lvgl_worker"), ("lvgl_timer", "lv_timer_handler"),
+    ("lvgl_timer", "lv_timer_exec"), ("lvgl_indev", "lv_indev_read_timer_cb"),
+    ("lvgl_indev", "lv_indev_read"), ("lvgl_indev", "indev_read_core"),
+    ("vendor_lvgl_touch", "lvgl_touch_read"), ("touch", "read_contacts")]
+BUTTON = [("sdk_timer", "timer_task"), ("sdk_timer", "timer_process_alarm"),
+    ("vendor_button", "button_cb"), ("vendor_button", "button_handler")]
+
+# Callback and provider edges are synchronous. Separate branches below avoid
+# summing sequential hardware-read, publication, encoding and validation calls
+# as if they were all nested on one stack.
+SENSOR_PATHS = {
+    "sensor_acquisition": ("sensor", SENSOR + [("board", "imu_read_hardware"), ("board", "sensor_u64")]),
+    "sensor_rejection": ("sensor", SENSOR + [("board", "imu_read_hardware"),
+        ("board", "imu_observation_rejected"), ("board", "sensor_u64")]),
+    "sensor_rejection_stage": ("sensor", SENSOR + [("board", "imu_read_hardware"), ("board", "sensor_stage")]),
+    "sensor_publication_rejection": ("sensor", SENSOR + [("board", "imu_observation_rejected"), ("board", "sensor_u64")]),
+    "sensor_journal_append": ("sensor", SENSOR + [("board", "imu_observation_publish_locked")] + APPEND),
+    "sensor_power_read": ("sensor", [("board", "sensor_worker"), ("board", "power_update"),
+        ("board", "power_read_hardware"), ("board", "gauge_word")]),
+    "sensor_power_journal": ("sensor", [("board", "sensor_worker"), ("board", "power_update")] + APPEND),
+    "brightness_worker": ("power", [("board", "power_worker"), ("board", "brightness_update")]),
+    "sensor_startup_acquisition": ("main", STARTUP_IMU + [("board", "imu_read_hardware"), ("board", "sensor_u64")]),
+    "sensor_startup_rejection": ("main", STARTUP_IMU + [("board", "imu_read_hardware"),
+        ("board", "imu_observation_rejected"), ("board", "sensor_u64")]),
+    "sensor_startup_journal": ("main", STARTUP_IMU + [("board", "imu_observation_publish_locked")] + APPEND),
+    "sensor_startup_failure": ("main", STARTUP_IMU + [("board", "imu_observation_startup_failure"),
+        ("board", "imu_observation_rejected"), ("board", "sensor_u64")]),
+    "sensor_startup_power": ("main", [("main", "app_main"), ("board", "board_init"),
+        ("board", "init_optional_power"), ("board", "power_update")] + APPEND),
+    "sensor_lvgl_touch_publish": ("lvgl", LVGL_TOUCH + [("main", "submit_contacts"),
+        ("sensor_api", "app_sensor_api_touch")] + PUBLISH_INPUT),
+    "sensor_lvgl_touch_reject": ("lvgl", LVGL_TOUCH + [("touch", "reject_scan"),
+        ("main", "submit_contacts"), ("sensor_api", "app_sensor_api_touch")] + PUBLISH_INPUT),
+    "sensor_lvgl_touch_context": ("lvgl", LVGL_TOUCH + [("main", "submit_contacts"), ("ui", "app_ui_touch_context")]),
+    "sensor_button_down_publish": ("esp_timer", BUTTON + [("board", "button_down_callback"),
+        ("main", "physical_button"), ("sensor_api", "app_sensor_api_button")] + PUBLISH_INPUT),
+    "sensor_button_up_publish": ("esp_timer", BUTTON + [("board", "button_up_callback"),
+        ("main", "physical_button"), ("sensor_api", "app_sensor_api_button")] + PUBLISH_INPUT),
+    "sensor_usb_batch_read": ("control_runtime", USB_BATCH + JOURNAL_READ),
+    "sensor_usb_batch_encode": ("control_runtime", USB_BATCH + [("sensor_wire", "sensor_wire_encode"),
+        ("sensor_wire", "sensor_wire_crc32")]),
+    "sensor_usb_catalog": ("control_runtime", USB_READ + [("sensor_api", "catalog")]),
+    "sensor_usb_latest_imu": ("control_runtime", USB_READ + [("sensor_api", "latest"), ("board", "board_imu_status")]),
+    "sensor_usb_latest_power": ("control_runtime", USB_READ + [("sensor_api", "latest"), ("board", "board_power_observe")]),
+    "sensor_usb_latest_haptics": ("control_runtime", USB_READ + [("sensor_api", "latest"), ("board", "board_haptics_status")]),
+    "sensor_usb_latest_bounds": ("control_runtime", USB_READ + [("sensor_api", "latest"),
+        ("board", "board_sensor_journal_status"), ("sensor_journal", "board_sensor_journal_bounds")]),
+    "sensor_usb_receive_trust": ("control_runtime", USB_RECEIVE + [("control_runtime", "sensor_usb_allowed"),
+        ("control_trust", "app_control_trust_snapshot")]),
+    "sensor_usb_receive_link": ("control_runtime", USB_RECEIVE + [("control_runtime", "sensor_usb_allowed"),
+        ("usb_hid", "usb_hid_snapshot")]),
+    "sensor_usb_service_encode": ("control_runtime", USB_POLL + [("sensor_usb", "cp_sensor_usb_service"), ("sensor_usb", "base64")]),
+    "sensor_usb_service_write": ("control_runtime", USB_POLL + [("sensor_usb", "cp_sensor_usb_service"),
+        ("control_runtime", "sensor_usb_write")]),
+    "sensor_http_batch_read": ("https", HTTP_READ + [("sensor_api", "read_page")] + JOURNAL_READ),
+    "sensor_http_batch_encode": ("https", HTTP_READ + [("sensor_api", "read_page"),
+        ("sensor_wire", "sensor_wire_encode"), ("sensor_wire", "sensor_wire_crc32")]),
+    "sensor_http_base64": ("https", HTTP_READ + [("sensor_wire", "sensor_wire_base64")]),
+    "sensor_http_catalog": ("https", HTTP_READ + [("sensor_api", "catalog")]),
+    "sensor_http_latest_imu": ("https", HTTP_READ + [("sensor_api", "latest"), ("board", "board_imu_status")]),
+    "sensor_http_latest_power": ("https", HTTP_READ + [("sensor_api", "latest"), ("board", "board_power_observe")]),
+    "sensor_http_latest_haptics": ("https", HTTP_READ + [("sensor_api", "latest"), ("board", "board_haptics_status")]),
+    "sensor_http_latest_bounds": ("https", HTTP_READ + [("sensor_api", "latest"),
+        ("board", "board_sensor_journal_status"), ("sensor_journal", "board_sensor_journal_bounds")]),
+}
+for _publish in ("sensor_lvgl_touch_publish", "sensor_lvgl_touch_reject",
+                 "sensor_button_down_publish", "sensor_button_up_publish"):
+    _owner, _steps = SENSOR_PATHS[_publish]
+    SENSOR_PATHS[_publish + "_validation"] = (_owner,
+        _steps[:-1] + [("sensor_journal", "board_sensor_input_valid")])
+for _label, (_owner, _steps) in SENSOR_PATHS.items():
+    PATHS[_label] = _steps
+    PATH_OWNERS[_label] = _owner
+
 REQUIRED = set(CORE + [("main", "render_view"), ("main", "report_runtime_diagnostics"),
                        ("main", "report_motion_diagnostics"), ("main", "observe_motion_sample"),
                        ("main", "report_scan_observation"), ("main", "report_reference_diagnostics"),
@@ -222,8 +601,33 @@ REQUIRED = set(CORE + [("main", "render_view"), ("main", "report_runtime_diagnos
                        ("interaction", "reference_rejected"), ("interaction", "invalidate_reference"),
                        ("interaction", "recenter_reference")]) | {
     step for path in PATHS.values() for step in path
-    if step[1].startswith(("app_", "ble_", "bt_", "settings_", "device_settings_", "interaction_"))
+    if step[1].startswith(("app_", "ble_", "bt_", "settings_", "device_settings_", "interaction_",
+                           "board_", "sensor_wire_", "cp_"))
 }
+# LVGL's lv_ prefix also names file-static helpers. In the pinned optimized
+# object lv_timer_exec is inlined into lv_timer_handler (including its timer
+# callback dispatch), so its stack is already in that required caller frame.
+# Require the actual public/callback entries explicitly; any emitted helper or
+# clone is still conservatively counted by variants_for/evaluate_paths.
+REQUIRED.update({("lvgl_timer", "lv_timer_handler"),
+    ("lvgl_indev", "lv_indev_read_timer_cb"), ("lvgl_indev", "lv_indev_read")})
+REQUIRED.update({("usb_audio", "usb_audio_snapshot"), ("audio_helpers", "ae_secure_zero"),
+    ("usb_audio", "usb_audio_route_port"), ("usb_audio", "capabilities"),
+    ("classic", "port_capabilities"), ("media_runtime", "worker"),
+    ("audio_helpers", "ae_id_empty"), ("audio_helpers", "ae_id_equal"),
+    ("audio_helpers", "ae_route_token_valid"), ("audio_helpers", "ae_route_token_equal"),
+    ("audio_helpers", "ae_format_equal")})
+REQUIRED.update({("board", "sensor_worker"), ("board", "power_worker"),
+    ("board", "button_down_callback"), ("board", "button_up_callback"),
+    ("main", "physical_button"), ("main", "submit_contacts"),
+    ("control_runtime", "worker"), ("server", "handle_request"),
+    ("touch", "read_contacts"), ("vendor_button", "button_cb"),
+    ("vendor_lvgl_adapter", "lvgl_worker"), ("vendor_lvgl_touch", "lvgl_touch_read"),
+    ("sdk_timer", "timer_task"), ("sdk_timer", "timer_process_alarm")})
+REQUIRED.update(step for path in TOUCH_PATHS.values() for step in path
+    if step[0] == "input_core" or (step[0] == "hid_engine" and step[1].startswith("hid_engine_")))
+REQUIRED.update({("main", "send_report"), ("main", "remote_changed"), ("main", "remote_observe"),
+    ("usb_hid", "usb_hid_send_generation"), ("usb_hid", "usb_hid_snapshot")})
 CONSUMERS = [
     "firmware/main/app_motion_capture.inc",
     "firmware/main/main.c", "firmware/main/app_remote_device_bindings.inc",
@@ -232,6 +636,178 @@ CONSUMERS = [
     "firmware/main/app_media_controls.c",
     "firmware/main/app_connectivity_controls.c", "firmware/main/app_media_runtime.c",
 ]
+
+BUDGET_FILES = {
+    "board": "firmware/main/board_mosaico.c",
+    "main": "firmware/main/main.c",
+    "runtime": "firmware/main/app_control_runtime.c",
+    "media_runtime": "firmware/main/app_media_runtime.c",
+    "server": "firmware/main/app_control_server.c",
+    "bsp_display": "third_party/esp-mosaico-bsp/components/esp-mosaico-bsp/onboard/display.c",
+    "bsp_display_header": "third_party/esp-mosaico-bsp/components/esp-mosaico-bsp/include/bsp/display.h",
+    "lvgl_header": "firmware/managed_components/espressif__esp_lvgl_adapter/include/esp_lv_adapter.h",
+    "lvgl_adapter": UNITS["vendor_lvgl_adapter"],
+    "button": UNITS["vendor_button"],
+    "sdk_tasks": ".tools/esp-idf/components/esp_system/include/esp_task.h",
+    "sdk_startup": ".tools/esp-idf/components/freertos/app_startup.c",
+    "sdk_timer": UNITS["sdk_timer"],
+}
+
+
+def integer_expression(expression):
+    """Only the positive literal arithmetic used by the pinned stack sources."""
+    expression = re.sub(r"(?<=\d)[uUlL]+\b", "", expression.strip())
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError as error:
+        raise RuntimeError(f"Unsupported stack expression: {expression}") from error
+
+    def value(node):
+        if isinstance(node, ast.Constant) and type(node.value) is int:
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mult)):
+            left, right = value(node.left), value(node.right)
+            return left + right if isinstance(node.op, ast.Add) else left * right
+        raise RuntimeError(f"Unsupported stack expression: {expression}")
+
+    result = value(tree.body)
+    if result < 0 or result > 1024 * 1024:
+        raise RuntimeError(f"Stack expression out of bounds: {expression}")
+    return result
+
+
+def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
+    """Resolve allocations from their owning source; never default a task to main.
+
+    ESP-IDF adds a libc supplement to main/timer allocations. Report that real
+    allocation, but retain the configured base as the checked application
+    budget. This preserves the previous main gate and does not consume SDK's
+    extra bytes in addition to the unchanged 2 KiB reserve.
+    """
+    text = {key: (root / path).read_text() for key, path in BUDGET_FILES.items()}
+
+    def match(key, pattern):
+        found = re.search(pattern, text[key], re.M | re.S)
+        if not found:
+            raise RuntimeError(f"Cannot verify task ownership/budget in {BUDGET_FILES[key]}: {pattern}")
+        return found
+
+    def single(key, pattern):
+        found = list(re.finditer(pattern, text[key], re.M | re.S))
+        if len(found) != 1:
+            raise RuntimeError(f"Ambiguous or missing task budget in {BUDGET_FILES[key]}: {pattern}")
+        return found[0]
+
+    def configured(name):
+        found = list(re.finditer(r"^#define " + re.escape(name) + r" ([^\n]+)$", config, re.M))
+        if len(found) != 1:
+            raise RuntimeError(f"Configured task stack unavailable: {name}")
+        return integer_expression(found[0][1])
+
+    def evidence(keys, expressions):
+        return [{"file": BUDGET_FILES[key], "sha256": digest(root / BUDGET_FILES[key])}
+                for key in keys] + [{"file": str(config_path),
+                    "sha256": hashlib.sha256(config.encode()).hexdigest(),
+                    "expressions": expressions}]
+
+    extra_branch = match("sdk_tasks", r"#ifdef CONFIG_LIBC_NEWLIB_NANO_FORMAT\s*"
+        r"#define TASK_EXTRA_STACK_SIZE\s+([^\n]+)\s*#else\s*"
+        r"#define TASK_EXTRA_STACK_SIZE\s+([^\n]+)\s*#endif")
+    nano_defined = bool(re.search(r"^#define CONFIG_LIBC_NEWLIB_NANO_FORMAT(?:\s|$)", config, re.M))
+    extra = integer_expression(extra_branch[1 if nano_defined else 2])
+    match("sdk_tasks", r"#define ESP_TASK_MAIN_STACK\s+\(CONFIG_ESP_MAIN_TASK_STACK_SIZE\s*\+\s*TASK_EXTRA_STACK_SIZE\)")
+    match("sdk_tasks", r"#define ESP_TASK_TIMER_STACK\s+\(CONFIG_ESP_TIMER_TASK_STACK_SIZE\s*\+\s*TASK_EXTRA_STACK_SIZE\)")
+    match("sdk_startup", r"ESP_TASK_MAIN_STACK\s*,")
+    match("sdk_timer", r"&?timer_task\s*,\s*\"esp_timer\"\s*,\s*ESP_TASK_TIMER_STACK\s*,")
+    main, timer = configured("CONFIG_ESP_MAIN_TASK_STACK_SIZE"), configured("CONFIG_ESP_TIMER_TASK_STACK_SIZE")
+
+    board = {}
+    for owner, symbol, entry, name in (("sensor", "SENSOR_STACK_BYTES", "sensor_worker", "board_sensor"),
+                                       ("power", "POWER_STACK_BYTES", "power_worker", "board_power")):
+        size = integer_expression(single("board", rf"\b{symbol}\s*=\s*([^,\n]+)")[1])
+        match("board", rf"xTaskCreate\s*\(\s*{entry}\s*,\s*\"{name}\"\s*,\s*{symbol}\s*,")
+        board[owner] = (size, symbol)
+    runtime = integer_expression(single("runtime", r"xTaskCreate\s*\(\s*worker\s*,\s*\"control_runtime\"\s*,\s*(\d+)\s*,")[1])
+    media_stacks = re.findall(r"xTaskCreate(?:WithCaps)?\s*\(\s*worker\s*,\s*\"media_control\"\s*,\s*(\d+)\s*,",
+        text["media_runtime"])
+    if not media_stacks or len(set(media_stacks)) != 1:
+        raise RuntimeError("Cannot verify the media_control worker stack across allocation branches")
+    media_stack = integer_expression(media_stacks[0])
+    https = integer_expression(single("server", r"config\.httpd\.stack_size\s*=\s*([^;]+);")[1])
+    match("server", r"httpd_ssl_start\s*\(\s*&s->listener\s*,\s*&config\s*\)")
+    match("main", r"board_button_events_register\s*\(\s*physical_button\s*\)")
+    match("button", r"button_timer\.callback\s*=\s*button_cb\s*;")
+    match("button", r"button_timer\.dispatch_method\s*=\s*ESP_TIMER_TASK\s*;")
+
+    lvgl = integer_expression(single("lvgl_header", r"^#define ESP_LV_ADAPTER_DEFAULT_STACK_SIZE\s+(\([^\n]+?\))")[1])
+    match("lvgl_header", r"\.task_stack_size\s*=\s*ESP_LV_ADAPTER_DEFAULT_STACK_SIZE\s*,")
+    match("lvgl_adapter", r"s_ctx\.config\.task_stack_size\s*\?\s*s_ctx\.config\.task_stack_size\s*:\s*ESP_LV_ADAPTER_DEFAULT_STACK_SIZE")
+    match("lvgl_adapter", r"lvgl_worker\s*,\s*\"lvgl\"\s*,\s*stack_size\s*,")
+    match("bsp_display_header", r"\.task_stack_size\s*=\s*0\s*,")
+    match("bsp_display", r"adapter\.task_stack_size\s*=\s*active\.task_stack_size\s*;")
+    match("board", r"bsp_display_config_t\s+display_config\s*=\s*BSP_DISPLAY_DEFAULT_CONFIG\s*\(\s*\)")
+    if re.search(r"display_config\.task_stack_size\s*=", text["board"]):
+        raise RuntimeError("Board LVGL stack override requires an explicit ownership update")
+
+    def budget(name, size, keys, expressions, supplement=0):
+        if size <= 0:
+            raise RuntimeError(f"Invalid task stack budget for {name}: {size}")
+        return {"task": name, "budget_bytes": size, "allocated_bytes": size + supplement,
+                "sdk_supplement_excluded_bytes": supplement,
+                "evidence": evidence(keys, expressions)}
+
+    return {
+        "main": budget("main", main, ["sdk_tasks", "sdk_startup"],
+            ["CONFIG_ESP_MAIN_TASK_STACK_SIZE", "ESP_TASK_MAIN_STACK"], extra),
+        "esp_timer": budget("esp_timer", timer, ["sdk_tasks", "sdk_timer", "button", "board", "main"],
+            ["CONFIG_ESP_TIMER_TASK_STACK_SIZE", "ESP_TASK_TIMER_STACK", "ESP_TIMER_TASK"], extra),
+        "sensor": budget("board_sensor", board["sensor"][0], ["board"], [board["sensor"][1]]),
+        "power": budget("board_power (brightness)", board["power"][0], ["board"], [board["power"][1]]),
+        "control_runtime": budget("control_runtime", runtime, ["runtime"], ["xTaskCreate(worker, control_runtime)"]),
+        "media_control": budget("media_control", media_stack, ["media_runtime"],
+            ["xTaskCreate[WithCaps](worker, media_control)"]),
+        "https": budget("HTTPS request task", https, ["server"], ["config.httpd.stack_size", "httpd_ssl_start"]),
+        "lvgl": budget("lvgl", lvgl, ["board", "bsp_display", "bsp_display_header", "lvgl_header", "lvgl_adapter"],
+            ["BSP_DISPLAY_DEFAULT_CONFIG", "ESP_LV_ADAPTER_DEFAULT_STACK_SIZE"]),
+    }
+
+
+def variants_for(frames, module, function):
+    return {name: data for name, data in frames[module].items()
+            if name == function or name.startswith(function + ".")}
+
+
+def evaluate_paths(frames, budgets, paths=PATHS, owners=PATH_OWNERS, required=REQUIRED):
+    """Pure accounting used by measurement and regression tests."""
+    errors, chains = [], {}
+    if paths.keys() != owners.keys():
+        raise RuntimeError("Each declared stack path requires exactly one task owner")
+    for label, steps in paths.items():
+        owner = owners[label]
+        if owner not in budgets:
+            raise RuntimeError(f"Unknown task owner for {label}: {owner}")
+        stack_bytes = budgets[owner]["budget_bytes"]
+        entries = []
+        for module, function in steps:
+            variants = variants_for(frames, module, function)
+            if not variants and (module, function) in required:
+                errors.append(f"Required emitted frame missing: {module}:{function}")
+            for data in variants.values():
+                if data["kind"] != "static":
+                    errors.append(f"Non-static frame requires review: {data['location']}")
+            entries.append({"module": module, "function": function,
+                "bytes": sum(data["bytes"] for data in variants.values()), "variants": variants,
+                "note": "" if variants else "private helper inlined/not emitted"})
+        total = sum(entry["bytes"] for entry in entries)
+        chains[label] = {"task_owner": owner, "budget_bytes": stack_bytes,
+            "allocated_bytes": budgets[owner]["allocated_bytes"],
+            "known_bytes": total, "reserve_bytes": SDK_ISR_RESERVE_BYTES,
+            "remaining_bytes": stack_bytes - total,
+            "remaining_after_reserve_bytes": stack_bytes - total - SDK_ISR_RESERVE_BYTES,
+            "frames": entries}
+        if total + SDK_ISR_RESERVE_BYTES > stack_bytes:
+            errors.append(f"{label} ({owner}): {total} + {SDK_ISR_RESERVE_BYTES} reserve > {stack_bytes}")
+    return chains, errors
 
 
 def digest(path):
@@ -245,6 +821,8 @@ def input_snapshot(build, database):
     for directory in (ROOT / "firmware/main", ROOT / "components"):
         paths.update(path for path in directory.rglob("*")
                      if path.is_file() and path.suffix in (".c", ".h", ".inc", ".S"))
+    paths.update(ROOT / path for path in UNITS.values())
+    paths.update(ROOT / path for path in BUDGET_FILES.values())
     paths.update(path for path in (build / "toolchain").glob("*") if path.is_file())
     # Forced headers and response files can live outside the first-party tree.
     measured_sources = {ROOT / path for path in UNITS.values()}
@@ -330,38 +908,21 @@ def main():
         if hashlib.sha256(content).hexdigest() != before[key]:
             raise SystemExit(f"Compilation input changed while being read: {path}")
     config = config_bytes.decode()
-    match = re.search(r"^#define CONFIG_ESP_MAIN_TASK_STACK_SIZE (\d+)$", config, re.M)
-    if not match:
-        raise SystemExit("Configured main task stack size unavailable")
-    stack_bytes = int(match[1])
-    paths = set(UNITS.values()) | set(CONSUMERS)
+    try:
+        budgets = task_budgets(config, config_path=build / "config/sdkconfig.h")
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error
+    stack_bytes = budgets["main"]["budget_bytes"]
+    paths = set(UNITS.values()) | set(CONSUMERS) | set(BUDGET_FILES.values())
     legacy = [path for path in CONSUMERS if re.search(
         r"\b(?:ble_hid_bond_list|bt_audio_bond_list)\s*\(", (ROOT / path).read_text())]
     with ThreadPoolExecutor(max_workers=3) as pool:
         frames = dict(pool.map(lambda unit: compile_unit(unit, database, output), UNITS.items()))
-    errors, chains = [], {}
+    chains, errors = evaluate_paths(frames, budgets)
     if legacy:
         errors.append("Large by-value bond getter remains in: " + ", ".join(sorted(legacy)))
-    for label, steps in PATHS.items():
-        entries = []
-        for module, function in steps:
-            variants = {name: data for name, data in frames[module].items()
-                        if name == function or name.startswith(function + ".")}
-            if not variants and (module, function) in REQUIRED:
-                errors.append(f"Required emitted frame missing: {module}:{function}")
-            for data in variants.values():
-                if data["kind"] != "static":
-                    errors.append(f"Non-static frame requires review: {data['location']}")
-            entries.append({"module": module, "function": function,
-                            "bytes": sum(data["bytes"] for data in variants.values()),
-                            "variants": variants,
-                            "note": "" if variants else "private helper inlined/not emitted"})
-        total = sum(entry["bytes"] for entry in entries)
-        chains[label] = {"known_bytes": total, "reserve_bytes": SDK_ISR_RESERVE_BYTES,
-                         "remaining_bytes": stack_bytes - total, "frames": entries}
-        if total + SDK_ISR_RESERVE_BYTES > stack_bytes:
-            errors.append(f"{label}: {total} + {SDK_ISR_RESERVE_BYTES} reserve > {stack_bytes}")
-    startup = frames["main"].get("app_main", {}).get("bytes")
+    startup_variants = variants_for(frames, "main", "app_main")
+    startup = sum(frame["bytes"] for frame in startup_variants.values()) if startup_variants else None
     if startup is None or startup > STARTUP_FRAME_LIMIT_BYTES:
         errors.append(f"Startup frame {startup} exceeds {STARTUP_FRAME_LIMIT_BYTES} bytes")
     after = input_snapshot(build, database)
@@ -370,21 +931,26 @@ def main():
     if changed:
         errors.append("Compilation inputs changed during measurement: " + ", ".join(sorted(changed)))
     report = {"status": "FAIL" if errors else "PASS", "configured_stack_bytes": stack_bytes,
+              "task_budgets": budgets,
               "sdk_isr_reserve_bytes": SDK_ISR_RESERVE_BYTES,
               "startup_frame_limit_bytes": STARTUP_FRAME_LIMIT_BYTES,
               "source_hashes": {path: after[path] for path in sorted(paths)},
               "input_hashes": after, "changed_during_measurement": sorted(changed),
               "input_scope": "First-party firmware/main and components C/headers/includes, "
+                             "measured vendor/SDK translation units and task-ownership budget sources, "
                              "this checker, compile database, sdkconfig, generated config header, "
                              "toolchain files, command response files and forced headers. "
                              "Other SDK/vendor dependencies are not covered by this drift check.",
               "paths": chains, "all_frames": frames, "errors": errors,
-              "limits": "Declared first-party paths only. Clone sums are conservative; no "
+              "limits": "Declared task/callback paths only, including named measured vendor wrappers. "
+                        "Main/timer SDK libc stack supplements are reported but excluded from the checked "
+                        "application budget. Clone sums are conservative; no "
                         "SDK/binary/ISR high-water proof or device qualification is claimed."}
     (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
     for label, chain in chains.items():
         print(f"{label}: {chain['known_bytes']} known + {SDK_ISR_RESERVE_BYTES} reserved "
-              f"/ {stack_bytes} bytes")
+              f"/ {chain['budget_bytes']} bytes ({chain['task_owner']}; "
+              f"allocated {chain['allocated_bytes']})")
     print(f"{report['status']}: stack budget; evidence {output}")
     if errors:
         raise SystemExit("\n".join(errors))

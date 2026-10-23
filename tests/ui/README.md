@@ -35,7 +35,7 @@ Private editor cases enter all 95 printable ASCII characters through actual two-
 
 Both fixtures use FULL rendering, RGB565, a 480 x 480 draw buffer, a 15 ms refresh period and 60 DPI, matching the relevant pinned firmware settings. The resource fixture advances the normal LVGL timer path for 100 snapshots over 10 simulated seconds after settling; it does not force a redraw to manufacture either activity or a pass. It counts actual flush callbacks/bytes, objects, timers, allocator calls, live blocks, requested live bytes and peak requested bytes. Visible-change and allocator positive controls ensure the observers work. It requires zero new flushes, allocations, reallocations and frees for settled identical state, hidden About/bond changes, screen-off updates and target changes behind Settings Home. All panels and Settings categories also receive identical-state checks in both themes.
 
-The documented ceilings are 106 objects for the fixed core (the persistent Keys button and caption add two to the prior 104-object core) and 160 with one dynamic panel. The resource fixture warms bounded label capacities, then performs 1,000 panel open/close cycles per theme across 39 variants on the same UI instance, including native list/detail, both private editor purposes, Common keys and remote review. Each close must return to the same core objects, timers, live blocks and requested bytes with cleared private drafts; teardown must release every tracked block. Hidden Wi-Fi labels and Bluetooth-name metadata join the existing hidden-only checks. Rendering and deferred-touch lifecycle checks remain separate so a safe final allocation total cannot hide a stale action.
+The documented ceilings are 112 objects for the fixed core (the independent Mic/Speaker cards add six to the prior 106-object core) and 160 with one dynamic panel. The resource fixture warms bounded label capacities, then performs 1,000 panel open/close cycles per theme across the registered variants on the same UI instance, including native list/detail, both private editor purposes, Common keys and remote review. Each close must return to the same core objects, timers, live blocks and requested bytes with cleared private drafts; teardown must release every tracked block. Hidden Wi-Fi labels, Bluetooth-name metadata and audio connection/volume metadata join the existing hidden-only checks. Rendering and deferred-touch lifecycle checks remain separate so a safe final allocation total cannot hide a stale action.
 
 `ui_memory.c` observes the CLIB allocator boundary and delegates allocation/reallocation/free to the unchanged managed LVGL backend. CMake renames only that backend's three entry points so the observer can interpose; production `app_ui.c` and LVGL decisions are unchanged. The observer uses bounded static bookkeeping and fails on overflow or unknown pointers. Counts include LVGL drawing work, exclude test output/framebuffers and allocator overhead, and do not measure target internal/DMA memory or PSRAM. No source-only product branches, replay corrections or success-returning device doubles are used.
 
@@ -50,7 +50,22 @@ spoken-letter confirmation/rejection. Synthetic snapshots are UI evidence only.
 The UI submits typed requests; it never starts a codec, storage or recognizer.
 Press-time identities must survive asynchronous updates without retargeting.
 
-`ui_media.inc` covers both themes and all media panels. The fixed core has 106
+`--suite audio` runs `ui_audio_core.inc`, retained media/speech/storage checks and shared
+navigation checks in both themes. Actual pointer hits independently start/stop
+Mic and Speaker, preserve immutable jobs, reject stale/wake/lock actions, enforce
+safe speaker volume and keep unknown mute acknowledgement truthful. USB/Bluetooth
+selection uses the owner operation and does not start capture or change HID.
+Disabled Start renders the owner's per-role admission reason, distinguishes an
+unopened USB host stream from unavailable hardware or link, and keeps active
+jobs and errors authoritative. Longest reason labels and their two-role footer
+are checked against actual font/layout bounds in both themes; unknown reason
+codes stay unavailable and disabled hits cannot emit a start.
+Both cards stay visible regardless of the legacy audio-kind setting. Recording
+and spoken-letter checks remain separate from primary Audio navigation. Storage
+tests assert that its entry is absent from primary Audio, then exercise the
+retained owner-supplied panel and every existing preparation/privacy assertion.
+
+`ui_media.inc` covers both themes and all retained media panels. The fixed core has 112
 objects; one dynamic panel remains bounded by 160. Identical owner snapshots
 must have zero idle allocation and flushes. This requirement also covers expired
 confirmations, so rendering an invalid review cannot oscillate label contents.
@@ -79,9 +94,10 @@ hit targets and bounded dynamic panel as the original UI.
 Each saved Wi-Fi row exposes Join, First and Forget. Forget emits only the typed
 review request with the captured profile ID and catalogue revision; the helper
 owns its separate confirmation. Pending/uncertain state and replaced or removed
-rows reject stale actions. The voice route has separate Connect voice and
-Disconnect audio buttons, so an existing service link can request its voice
-channel or be disconnected after a failed voice request.
+rows reject stale actions. The Bluetooth audio connection page has separate Connect and Disconnect
+buttons. The owner can complete an existing service link's audio channel or
+disconnect it after a failed request; the UI does not equate that service link
+with live Mic/Speaker readiness.
 
 
 `ui_presenter_integration` composes production UI, presenter and display observer

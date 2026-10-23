@@ -86,6 +86,12 @@ def generate():
     for name in ['state','capabilities','operations','config','config/schema','jobs/{id}','requests/{id}','wifi/scans/{id}','wifi/profiles','bluetooth/peers','firmware/releases','audio/state','audio/capabilities','imu','firmware/policy','speech/state','recordings','capture/grants','clock','trust','sessions/current','firmware/state']:
         openapi['paths']['/api/v1/'+name]={'get':{'responses':{'200':{'description':'Scoped bounded resource; paginate metadata'},'401':{'description':'Unauthenticated'},'403':{'description':'Forbidden'},'503':{'description':'Provider unavailable'}}}}
         if '{id}' in name:openapi['paths']['/api/v1/'+name]['get']['parameters']=[{'name':'id','in':'path','required':True,'schema':{'type':'string','maxLength':64}}]
+    for operation in data['operations']:
+        if operation['name'].startswith('sensors.'):
+            route={'responses':{'200':{'description':'Bounded sensor observation; acceptance does not prove delivery'},'400':{'description':'Invalid canonical query'},'401':{'description':'Unauthenticated'},'403':{'description':'diagnostics.read scope required'},'409':{'description':'Wrong boot or future cursor'},'503':{'description':'Observation unavailable'}},'x-required-scopes':operation['scopes']}
+            if operation['name']=='sensors.samples':
+                route['parameters']=[{'name':key,'in':'query','required':True,'schema':schema} for key,schema in operation['arguments']['properties'].items()]
+            openapi['paths'][operation['resource']]={'get':route}
     openapi['paths']['/api/v1/ws-ticket']={'post':{'description':'Browser cookie, exact Origin and X-CSRF-Token required. Empty JSON-content-type POST issues one random ticket, replacing the previous ticket for this session. Consume once before WSS upgrade within 10000 ms.','parameters':[{'name':'X-CSRF-Token','in':'header','required':True,'schema':{'type':'string','pattern':'^[0-9a-f]{32}$'}}],'responses':{'200':{'description':'Single-use ticket; never log or put in URL','content':{'application/json':{'schema':O({'ticket':{'type':'string','pattern':'^[0-9a-f]{64}$'},'expires_in_ms':{'const':10000}},['ticket','expires_in_ms'])}}},'401':{'description':'Session or CSRF rejected'},'503':{'description':'WSS unavailable'}}}}
     tools=[]
     context=O({k:v for k,v in envelope.items() if k in ['management_generation','resource_revision','epoch','transport_generation','target_id','ui_revision']})

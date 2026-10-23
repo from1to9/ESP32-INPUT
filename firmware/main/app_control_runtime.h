@@ -18,7 +18,7 @@
  * - audio.*, speech.*, recording.*, recordings.*, job.get/cancel for those jobs;
  * - system.restart, preferences.reset, device.factory_reset.request.
  * Runtime owns Wi-Fi profiles/scans/join, firmware.*, local trust/session
- * administration and network clock/status. Neither side bypasses the other's
+ * administration, copied sensor telemetry and network clock/status. Neither side bypasses the other's
  * production gates; local override revokes input, not independent media. */
 typedef struct {
     uint32_t abi_version;

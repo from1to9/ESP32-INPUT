@@ -121,6 +121,15 @@ static ae_result_t route_caps(void *context, ae_route_t route, ae_route_capabili
     if (!port.capabilities) { *caps = (ae_route_capabilities_t){.reason = AE_UNAVAILABLE}; return AE_UNAVAILABLE; }
     return port.capabilities(port.context, route, caps);
 }
+static ae_result_t local_start_identity(const app_media_local_request_t *request)
+{
+    if (request->action != APP_MEDIA_START || request->route == AE_ROUTE_LOCAL) return AE_OK;
+    if (!ae_route_token_valid(&request->expected_route_token, false)) return AE_STALE;
+    ae_route_capabilities_t route = {0};
+    ae_result_t result = route_caps(NULL, request->route, &route);
+    if (result != AE_OK || !route.available || !route.connected) return AE_UNAVAILABLE;
+    return ae_route_token_equal(&request->expected_route_token, &route.token) ? AE_OK : AE_STALE;
+}
 static ae_result_t route_prepare(void *context, ae_route_t route, const ae_format_t *format,
     uint8_t roles, uint64_t generation, const ae_route_token_t *token)
 {
@@ -447,13 +456,17 @@ static ae_result_t start_job(media_state_t *state, const ae_snapshot_t *audio)
     ae_route_capabilities_t route;
     ae_result_t result = route_caps(NULL, command->route, &route);
     if (result != AE_OK || !route.available || !route.connected) return AE_UNAVAILABLE;
+    if (!state->command_remote && command->route != AE_ROUTE_LOCAL &&
+        (!ae_route_token_valid(&command->expected_route_token, false) ||
+         !ae_route_token_equal(&command->expected_route_token, &route.token))) return AE_STALE;
     const unsigned slot = command->kind <= AE_CAPTURE_RECOGNITION ? (unsigned)command->kind : AE_CONSUMERS_MAX;
     if (active_job(slot == AE_CONSUMERS_MAX ? &audio->playback : &audio->capture[slot])) return AE_BUSY;
     app_audio_command_t request = {.kind = APP_AUDIO_CMD_START};
     ae_start_request_t *start = &request.start;
     *start = (ae_start_request_t){.principal_id = local_principal, .owner_session_id = state->boot_session,
         .expected_audio_generation = audio->audio_generation, .expected_revision = audio->revision,
-        .kind = command->kind, .route = command->route, .route_token = route.token,
+        .kind = command->kind, .route = command->route,
+        .route_token = !state->command_remote && command->route != AE_ROUTE_LOCAL ? command->expected_route_token : route.token,
         .format = command->format, .duration_seconds = command->duration_seconds,
         .byte_limit = command->byte_limit, .retention_seconds = command->retention_seconds,
         .export_policy = command->export_policy, .storage = command->storage,
@@ -522,6 +535,10 @@ static void process_command(media_state_t *state, const ae_snapshot_t *audio)
         if ((command->expected_audio_generation && command->expected_audio_generation != audio->audio_generation) ||
             (command->expected_audio_revision && command->expected_audio_revision != audio->revision)) {
             finish(state, AE_STALE); return;
+        }
+        if (!state->command_remote) {
+            ae_result_t identity = local_start_identity(command);
+            if (identity != AE_OK) { finish(state, identity); return; }
         }
     }
     if (state->phase==MEDIA_PHYSICAL_WAIT) {
@@ -863,6 +880,8 @@ ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *requ
 {
     if (!request || !request->token || request->action > APP_MEDIA_LINK_CONTROL || request->action < APP_MEDIA_START ||
         request->kind < AE_CAPTURE_LIVE || request->kind > AE_PLAYBACK_RECORDING) return AE_INVALID;
+    ae_result_t identity = local_start_identity(request);
+    if (identity != AE_OK) return identity;
     portENTER_CRITICAL(&media_lock);
     ae_result_t result = AE_OK;
     if (!media || !media->view.initialized) result = AE_UNAVAILABLE;

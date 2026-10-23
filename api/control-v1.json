@@ -5431,6 +5431,87 @@
       "safety": false,
       "read_only": false,
       "sensitive": false
+    },
+    {
+      "id": 149,
+      "name": "sensors.catalog",
+      "scopes": [
+        "diagnostics.read"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/sensors/catalog"
+    },
+    {
+      "id": 150,
+      "name": "sensors.latest",
+      "scopes": [
+        "diagnostics.read"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/sensors/latest"
+    },
+    {
+      "id": 151,
+      "name": "sensors.samples",
+      "scopes": [
+        "diagnostics.read"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "boot": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32,
+            "format": "id128"
+          },
+          "after": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20,
+            "format": "uint64"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          }
+        },
+        "required": [
+          "boot",
+          "after"
+        ],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/sensors/samples"
     }
   ],
   "configuration": [

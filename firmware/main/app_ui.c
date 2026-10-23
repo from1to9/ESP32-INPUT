@@ -67,8 +67,8 @@ static lv_obj_t *s_submodes[4], *s_preview, *s_progress, *s_clear;
 static lv_obj_t *s_grid_page, *s_grid[APP_UI_GRID_CELLS], *s_back, *s_case, *s_symbols;
 static lv_obj_t *s_voice_page, *s_voice_candidate, *s_voice_hint, *s_voice_confirm;
 static lv_obj_t *s_shortcut_page, *s_shortcuts[6], *s_delete, *s_space, *s_send;
-static lv_obj_t *s_audio_kinds[2], *s_audio_title, *s_audio_profile, *s_audio_power;
-static lv_obj_t *s_audio_mute, *s_volume, *s_volume_text, *s_audio_note, *s_audio_capability;
+static lv_obj_t *s_audio_power[2], *s_audio_state[2];
+static lv_obj_t *s_audio_mute, *s_volume, *s_volume_text, *s_audio_note;
 static lv_obj_t *s_overlay, *s_overlay_target, *s_overlay_critical;
 static lv_obj_t *s_telemetry, *s_overlay_state;
 static lv_obj_t *s_settings_title, *s_settings_back, *s_save_status;
@@ -552,8 +552,7 @@ static void on_action(lv_event_t *event)
     }
     if (binding->action == APP_API_COMMISSIONING || binding->action == APP_WIFI_PROFILE_CONTROL ||
         binding->action == APP_BLUETOOTH_TARGET_CONTROL || binding->action == APP_API_INPUT_ALLOW_SET) { connection_action(binding->object); return; }
-    if (binding->action == APP_MEDIA_CONTROL || binding->object == s_audio_power ||
-        binding->object == s_audio_mute || binding->object == s_voice_confirm ||
+    if (binding->action == APP_MEDIA_CONTROL || binding->object == s_voice_confirm ||
         (binding->action == APP_CONFIRM && binding->value == 1 &&
          s_view.confirmation >= APP_CONFIRM_RECORDING_START && s_view.confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD)) {
         media_action(binding->object, -1);
@@ -1154,22 +1153,30 @@ static void create_keyboard(lv_obj_t *panel)
 
 static void create_audio(lv_obj_t *panel)
 {
-    s_audio_mute = button(panel, "Microphone muted", 0, 0, 456, 200, APP_AUDIO_MUTE, 0);
-    s_audio_title = lv_obj_get_child(s_audio_mute, 0);
-    lv_obj_set_style_text_font(s_audio_title, TITLE_FONT, 0);
-    lv_obj_set_height(s_audio_title, lv_font_get_line_height(TITLE_FONT));
-    lv_obj_set_align(s_audio_title, LV_ALIGN_TOP_MID);
-    lv_obj_set_y(s_audio_title, 52);
-    s_audio_profile = label(s_audio_mute, "Voice and meetings", 16, 104, 424, MUTED);
-    lv_obj_set_style_text_align(s_audio_profile, LV_TEXT_ALIGN_CENTER, 0);
-    s_audio_capability = metadata(s_audio_mute, "Unavailable", 16, 144, 424);
-    lv_obj_set_style_text_align(s_audio_capability, LV_TEXT_ALIGN_CENTER, 0);
-    s_audio_power = button(panel, "Start audio", 0, 216, 456, 56, APP_AUDIO_POWER, 0);
-    label(panel, "Volume", 0, 302, 76, INK);
-    s_volume = slider(panel, 96, 308, 264, 0, 100, on_volume);
-    s_volume_text = label(panel, "--", 392, 302, 64, MUTED);
+    for (unsigned i = 0; i < 2; ++i) {
+        lv_obj_t *surface = box(panel, 0, (int)i * 180, 456, 168, SOFT);
+        lv_obj_set_style_radius(surface, 16, 0);
+        heading(surface, i ? "Speaker" : "Mic", 16, 12, 268);
+        s_audio_state[i] = label(surface, "Status unknown", 16, 48, 424, MUTED);
+        lv_obj_set_height(s_audio_state[i], 44);
+        lv_label_set_long_mode(s_audio_state[i], LV_LABEL_LONG_DOT);
+        s_audio_power[i] = button(surface, i ? "Start speaker" : "Start mic", 304, 16, 136, 48, APP_MEDIA_CONTROL, 0);
+        lv_obj_set_style_border_width(s_audio_power[i], 1, 0);
+        border(s_audio_power[i], LINE, 0);
+        if (!i) {
+            s_audio_mute = button(surface, "Mute mic", 16, 104, 424, 48, APP_MEDIA_CONTROL, 0);
+            lv_obj_set_style_border_width(s_audio_mute, 1, 0);
+            border(s_audio_mute, LINE, 0);
+        }
+        else {
+            label(surface, "Volume", 16, 94, 268, INK);
+            s_volume_text = label(surface, "--", 376, 94, 64, MUTED);
+            s_volume = slider(surface, 24, 132, 408, 0, 100, on_volume);
+        }
+    }
     s_audio_note = label(panel, "Audio unavailable", 0, 360, 456, MUTED);
     lv_obj_set_height(s_audio_note, 48);
+    lv_label_set_long_mode(s_audio_note, LV_LABEL_LONG_DOT);
 }
 
 static lv_obj_t *card(lv_obj_t *parent, int y, int height)
@@ -1403,7 +1410,6 @@ static void clear_panel_bindings(void)
     s_editor_preview = s_editor_context = s_editor_source = s_editor_status = NULL;
     s_editor_back = s_editor_case = s_editor_symbol = s_editor_delete = s_editor_space = s_editor_apply = NULL;
     memset(&s_submodes, 0, sizeof(s_submodes));
-    memset(&s_audio_kinds, 0, sizeof(s_audio_kinds));
     memset(&s_overlay_target, 0, sizeof(s_overlay_target));
     s_overlay_critical = NULL;
     memset(&s_telemetry, 0, sizeof(s_telemetry));
@@ -1594,27 +1600,21 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
     } else if (kind == APP_OVERLAY_SETTINGS) {
         s_settings_title = title;
         create_settings(body, page);
-    } else if (kind == APP_OVERLAY_KEYBOARD || kind == APP_OVERLAY_AUDIO) {
-        bool keyboard = kind == APP_OVERLAY_KEYBOARD;
-        label_text(title, keyboard ? "Keyboard entry" : "Audio kind");
+    } else if (kind == APP_OVERLAY_KEYBOARD) {
+        label_text(title, "Keyboard entry");
         const char *names[] = {"Motion", "Touch", "Spoken letters", "Shortcuts"};
-        const char *audio[] = {"Voice / meeting", "Speaker"};
-        for (int i = 0; i < (keyboard ? 4 : 2); ++i) {
-            lv_obj_t *choice = button(body, keyboard ? names[i] : audio[i], 0, i * (keyboard ? 72 : 88), 456, keyboard ? 64 : 76,
-                                     keyboard ? APP_KEYBOARD_SUBMODE : APP_AUDIO_KIND, i);
-            if (keyboard) s_submodes[i] = choice;
-            else s_audio_kinds[i] = choice;
-        }
-        if (keyboard) button(body, "Common keys", 0, 288, 456, 64, APP_MENU, APP_OVERLAY_COMMON_KEYS);
-        else {
-            button(body, "Routes and roles", 0, 176, 224, 64, APP_MENU, APP_OVERLAY_MEDIA_OPTIONS);
-            button(body, "Record", 232, 176, 224, 64, APP_MENU, APP_OVERLAY_RECORDING_START);
-            button(body, "Recordings", 0, 252, 456, 64, APP_MENU, APP_OVERLAY_RECORDINGS);
-            button(body, "Recording storage", 0, 328, 456, 64, APP_MENU, APP_OVERLAY_RECORDING_STORAGE);
-        }
+        for (int i = 0; i < 4; ++i)
+            s_submodes[i] = button(body, names[i], 0, i * 72, 456, 64, APP_KEYBOARD_SUBMODE, i);
+        button(body, "Common keys", 0, 288, 456, 64, APP_MENU, APP_OVERLAY_COMMON_KEYS);
+    } else if (kind == APP_OVERLAY_AUDIO) {
+        label_text(title, "Audio");
+        heading(body, "Mic and Speaker", 0, 12, 456);
+        label(body, "Use the Audio screen to start or stop either one.", 0, 64, 456, MUTED);
+        button(body, "Audio connection", 0, 144, 456, 56, APP_MENU, APP_OVERLAY_MEDIA_OPTIONS);
+        button(body, "Back to Audio", 0, 360, 456, 48, APP_CLOSE, 0);
     } else if (kind >= APP_OVERLAY_MEDIA_OPTIONS && kind <= APP_OVERLAY_RECORDING_START) {
         create_media_panel(body, title, kind);
-    } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_BLUETOOTH_TARGET) {
+    } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_BLUETOOTH_PAIRING) {
         create_connection_panel(body, title, kind);
     } else if (kind == APP_OVERLAY_RECORDING_STORAGE) {
         label_text(title, "Recording storage");
@@ -1748,7 +1748,7 @@ void app_ui_create(lv_display_t *display, app_submit_fn callback)
     button(s_screen, "Menu", 404, 8, 64, 48, APP_MENU, APP_OVERLAY_MODES);
     s_keyboard_choice = button(s_screen, "Touch", 140, 8, 132, 48, APP_MENU, APP_OVERLAY_KEYBOARD);
     s_host_keys = button(s_screen, "Keys", 224, 8, 48, 48, APP_MENU, APP_OVERLAY_COMMON_KEYS);
-    s_audio_choice = button(s_screen, "Voice", 140, 8, 132, 48, APP_MENU, APP_OVERLAY_AUDIO);
+    s_audio_choice = button(s_screen, "Connection", 140, 8, 132, 48, APP_MENU, APP_OVERLAY_MEDIA_OPTIONS);
     for (int i = 0; i < 3; ++i) s_panels[i] = box(s_screen, 12, 64, 456, 408, SURFACE);
     create_mouse(s_panels[INPUT_MOUSE]);
     create_keyboard(s_panels[INPUT_KEYBOARD]);
@@ -1950,7 +1950,8 @@ static void render_device(const app_view_t *view, const char *link)
         snprintf(countdown, sizeof(countdown), " / %us left", view->pairing_seconds_left);
     snprintf(summary, sizeof(summary), "%s / %s%s", pairing, bonds, countdown);
     label_text(s_bluetooth_pairing, summary);
-    bool pairing_available = view->pairing_state != APP_PAIRING_UNAVAILABLE && view->pairing_state != APP_PAIRING_CLEARING;
+    bool pairing_available = view->pairing_state != APP_PAIRING_UNAVAILABLE && view->pairing_state != APP_PAIRING_CLEARING &&
+        view->pairing_state != APP_PAIRING_ERROR;
     visible(s_pairing_buttons[0], view->pairing_state != APP_PAIRING_OPEN);
     visible(s_pairing_buttons[1], view->pairing_state == APP_PAIRING_OPEN);
     enabled(s_pairing_buttons[0], pairing_available && pairing_room && view->pairing_state != APP_PAIRING_OPEN);
@@ -1958,7 +1959,8 @@ static void render_device(const app_view_t *view, const char *link)
     enabled(s_pairing_buttons[2], pairing_available && view->paired_host_count != 0);
     text(s_bond_add, !capacity_known ? "Limit unknown" : !count_known ? "Count unknown" :
          pairings_full ? "Pairings full" : "Add host");
-    enabled(s_bond_add, pairing_available && pairing_room && view->pairing_state != APP_PAIRING_OPEN);
+    enabled(s_bond_add, view->bluetooth_management.known && view->bluetooth_management.can_add &&
+        pairing_available && pairing_room && view->pairing_state != APP_PAIRING_OPEN);
     enabled(s_bond_disconnect, view->bluetooth_connected);
     size_t host_count = view->bluetooth_host_count > APP_UI_BOND_CAPACITY ? APP_UI_BOND_CAPACITY : view->bluetooth_host_count;
     unsigned page_count = (unsigned)((host_count + APP_UI_BONDS_PER_PAGE - 1) / APP_UI_BONDS_PER_PAGE);
@@ -2087,15 +2089,15 @@ static void render_device(const app_view_t *view, const char *link)
     char pairing_detail[192];
     switch (view->confirmation) {
     case APP_CONFIRM_PAIR_OPEN:
-        title = "Open Bluetooth pairing?";
+        title = "Disconnect and add host?";
         {
             char name[APP_UI_BLUETOOTH_NAME_CAPACITY * 4];
             name_label(name, sizeof(name), view->bluetooth_name.effective);
-            snprintf(pairing_detail, sizeof(pairing_detail), "Nearby hosts can pair while pairing is open.\nDevice name: %s\nChoose it in the host's Bluetooth settings.",
+            snprintf(pairing_detail, sizeof(pairing_detail), "Release input; disconnect current host.\nAllow pairing for 2 minutes. Saved hosts remain.\nDevice: %s",
                 view->bluetooth_name.effective_valid ? name : "unavailable");
             detail = pairing_detail;
         }
-        accept = "Open pairing";
+        accept = "Disconnect and add";
         break;
     case APP_CONFIRM_PAIR_CLOSE:
         title = "Close Bluetooth pairing?";
@@ -2104,8 +2106,13 @@ static void render_device(const app_view_t *view, const char *link)
         break;
     case APP_CONFIRM_PAIR_FORGET_ALL:
         title = "Forget Bluetooth pairings?";
-        detail = "All saved Bluetooth pairings will be removed.\nA connected Bluetooth host may disconnect.\nPair again before using Bluetooth input.";
+        detail = "Disconnect the current input host and remove all saved input pairings.\nWait for removal and target policy verification.\nUse Add host afterward to pair again.";
         accept = "Forget pairings";
+        break;
+    case APP_CONFIRM_BLUETOOTH_FORGET_ONE:
+        title = "Forget this saved device?";
+        snprintf(pairing_detail, sizeof(pairing_detail), "Disconnect the current input host.\nForget only: %s\nOther saved pairings remain. This cannot be undone.", view->bluetooth_management.forget_identity);
+        detail = pairing_detail; accept = "Forget this device";
         break;
     case APP_CONFIRM_DISCONNECT:
         title = "Disconnect Bluetooth host?";
@@ -2324,8 +2331,6 @@ void app_ui_render(const app_view_t *view)
             !view->connected ? "\nDisconnected" : "");
         for (int i = 0; i < 3; ++i) selected(s_mode_choices[i], (input_mode_t)i == view->mode);
         for (int i = 0; i < 4; ++i) selected(s_submodes[i], (app_keyboard_submode_t)i == view->keyboard_submode);
-        selected(s_audio_kinds[0], view->audio_kind == APP_AUDIO_VOICE);
-        selected(s_audio_kinds[1], view->audio_kind == APP_AUDIO_SPEAKER);
         selected(s_themes[0], !view->dark_theme);
         selected(s_themes[1], view->dark_theme);
         selected(s_hosts[0], view->host_os == APP_HOST_CTRL);
@@ -2394,7 +2399,7 @@ void app_ui_render(const app_view_t *view)
     const char *mode_names[] = {"Mouse", "Keyboard", "Audio"};
     const char *entry_names[] = {"Motion", "Touch", "Spoken", "Hotkeys"};
     label_text(s_mode_title, (unsigned)view->mode < 3 ? mode_names[view->mode] : "Input");
-    label_format(s_context, "%s / %s", usb ? "USB" : "BT", s_target_text);
+    if (view->mode != INPUT_AUDIO) label_format(s_context, "%s / %s", usb ? "USB" : "BT", s_target_text);
     critical_state(s_critical, alert, capture, provider_available);
     visible(s_keyboard_choice, view->mode == INPUT_KEYBOARD || view->mode == INPUT_MOUSE);
     visible(s_host_keys, view->mode == INPUT_KEYBOARD);
@@ -2409,7 +2414,11 @@ void app_ui_render(const app_view_t *view)
     if (view->mode == INPUT_KEYBOARD)
         text(s_keyboard_choice, (unsigned)view->keyboard_submode < 4 ? entry_names[view->keyboard_submode] : "Entry");
     enabled(s_keyboard_choice, view->mode != INPUT_MOUSE || view->motion_recenter_available);
-    if (view->mode == INPUT_AUDIO) text(s_audio_choice, view->audio_kind == APP_AUDIO_SPEAKER ? "Speaker" : "Voice");
+    if (view->mode == INPUT_AUDIO) {
+        text(s_audio_choice, media_connection_name(&view->media));
+        label_text(s_context, !view->media.known ? "Status unknown" :
+            view->media.command_pending ? "Updating" : view->media.state == APP_MEDIA_FAULT ? "Audio error" : "Mic / Speaker");
+    }
     for (int i = 0; i < 3; ++i) visible(s_panels[i], (input_mode_t)i == view->mode);
 
     /* Only the foreground mode is refreshed. Hidden uptime/settings changes

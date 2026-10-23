@@ -26,7 +26,14 @@ bool app_media_controls_init(void);
 void app_media_controls_context(const app_media_controls_context_t *);
 /* Parent must first validate normal physical-touch/current input identity.
  * This layer also validates mode/panel, media/object/candidate identity and
- * explicit immutable confirmations. Return false for an unrelated UI action. */
+ * explicit immutable confirmations. Connection selection uses audio-only
+ * routes, preserves usable Bluetooth profiles, and waits for acknowledged
+ * hardware stop before admitting a change. It never changes the HID target
+ * or treats selected transport/profile support as an active audio stream.
+ * Live role profile changes require the same observed Bluetooth peer.
+ * Each role's start_block is the owning admission result; can_start is true
+ * exactly for ALLOWED. UI copy must not infer a different readiness state.
+ * Return false for an unrelated UI action. */
 bool app_media_controls_handle(const app_intent_t *, app_media_controls_effect_t *);
 /* Run from the coordinator. Poll consumes only this layer's retained tokens,
  * copies query payload before acknowledging, and never retries a mutation. */

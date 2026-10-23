@@ -11,6 +11,8 @@ static ae_codec_capabilities_t hardware;
 static bt_audio_snapshot_t bluetooth;
 static bt_audio_bond_list_t bonds;
 static ae_route_capabilities_t route;
+static ae_route_capabilities_t routes_by_id[AE_ROUTE_COUNT];
+static bool distinct_routes;
 static app_media_local_request_t submitted;
 static unsigned submissions, confirmations, rejections;
 static struct { bt_audio_command_t command; uint64_t generation, bond_revision, token; uint8_t peer[6]; } links[8];
@@ -46,7 +48,7 @@ esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t revision, bt_audi
 static ae_result_t codec_caps(void *unused, ae_codec_capabilities_t *out) { (void)unused; *out = hardware; return AE_OK; }
 ae_codec_port_t board_audio_mosaico_port(void) { return (ae_codec_port_t){.capabilities = codec_caps}; }
 ae_result_t app_media_runtime_route(ae_route_t selected, ae_route_capabilities_t *out)
-{ (void)selected; *out = route; return AE_OK; }
+{ assert((unsigned)selected < AE_ROUTE_COUNT); *out = distinct_routes ? routes_by_id[selected] : route; return AE_OK; }
 ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *request)
 { ++submissions; submitted = *request; return submit_result; }
 ae_result_t app_media_runtime_copy_records(uint64_t token, ae_record_metadata_t *out, size_t capacity)
@@ -83,7 +85,8 @@ static void setup(void)
     hardware = (ae_codec_capabilities_t){.implemented = true, .available = true, .safe_volume_max = 60, .format_count = 1,
         .formats = {{{16000, 1, 10, AE_PCM_S16_LE}, AE_MICROPHONE | AE_SPEAKER, false}}};
     route = (ae_route_capabilities_t){.implemented = true, .available = true, .connected = true,
-        .capture = true, .playback = true, .format = {16000, 1, 10, AE_PCM_S16_LE}};
+        .capture = true, .playback = true, .format = {16000, 1, 10, AE_PCM_S16_LE},
+        .token = {.peer_id = {{1}}, .stream_id = {{2}}, .link_generation = 3}};
     context = (app_media_controls_context_t){.epoch = 11, .ui_revision = 13, .mode = INPUT_AUDIO,
         .overlay = APP_OVERLAY_RECORDING_START};
     assert(app_media_controls_init()); assert(!app_media_controls_init()); poll_at(1000);
@@ -237,6 +240,216 @@ static void test_live_and_saved_peer(void)
         links[0].generation == 19 && links[0].bond_revision == 30);
     bonds.known = false; poll_at(1060); assert(!controls.voice_link.active);
     assert(!view.media.can_select_peer && !view.media.routes[APP_MEDIA_ROUTE_HFP].can_connect);
+}
+static void test_connection_observed_completion(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; poll_at(1010);
+    assert(!view.media.connection_known && view.media.can_select_connection[APP_MEDIA_CONNECTION_USB] &&
+        view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH]);
+    app_intent_t select = intent(APP_MEDIA_SELECT_CONNECTION);
+    select.media.value.connection = APP_MEDIA_CONNECTION_USB;
+    handle(select); app_media_controls_fill(&view);
+    assert(submissions == 1 && submitted.action == APP_MEDIA_ROUTE && submitted.route == AE_ROUTE_USB_UAC &&
+        submitted.expected_audio_generation == 3 && submitted.expected_audio_revision == 5);
+    assert(view.media.command_pending && !view.media.connection_known &&
+        !view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH]);
+    handle(select); assert(submissions == 1);
+    complete(AE_OK); /* A command result alone does not invent an observed route. */
+    assert(!view.media.connection_known);
+    owner.audio.route = AE_ROUTE_USB_UAC; ++owner.audio.audio_generation; ++owner.audio.revision;
+    poll_at(1030);
+    assert(view.media.connection_known && view.media.connection == APP_MEDIA_CONNECTION_USB &&
+        !view.media.can_select_connection[APP_MEDIA_CONNECTION_USB]);
+    select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_BLUETOOTH;
+    handle(select); app_media_controls_fill(&view);
+    assert(submissions == 2 && submitted.route == AE_ROUTE_HFP_HF &&
+        view.media.connection_known && view.media.connection == APP_MEDIA_CONNECTION_USB);
+    complete(AE_UNCERTAIN); poll_at(1050);
+    assert(submissions == 2 && view.media.connection == APP_MEDIA_CONNECTION_USB);
+    snapshot_available = false; poll_at(1060);
+    assert(!view.media.connection_known && !view.media.can_select_connection[APP_MEDIA_CONNECTION_USB] &&
+        !view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH]);
+}
+static void test_connection_profile_capabilities(void)
+{
+    setup(); distinct_routes = true;
+    route.token.peer_id.bytes[0] = 17;
+    routes_by_id[AE_ROUTE_USB_UAC] = (ae_route_capabilities_t){.implemented = true, .reason = AE_UNAVAILABLE};
+    routes_by_id[AE_ROUTE_HFP_HF] = (ae_route_capabilities_t){.implemented = true, .full_duplex = true, .reason = AE_UNAVAILABLE};
+    routes_by_id[AE_ROUTE_A2DP_SINK] = route;
+    routes_by_id[AE_ROUTE_A2DP_SINK].capture = false;
+    context.overlay = APP_OVERLAY_MEDIA_OPTIONS; poll_at(1010);
+    assert(view.media.can_select_connection[APP_MEDIA_CONNECTION_USB] &&
+        view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH]);
+    app_intent_t select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_BLUETOOTH;
+    handle(select); assert(submissions == 1 && submitted.route == AE_ROUTE_A2DP_SINK);
+    owner.audio.route = AE_ROUTE_A2DP_SINK; ++owner.audio.revision; complete(AE_OK);
+    assert(view.media.connection_known && view.media.connection == APP_MEDIA_CONNECTION_BLUETOOTH &&
+        !view.media.microphone.can_start && view.media.speaker.can_start);
+    poll_at(1030);
+    assert(!view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH] && !view.media.microphone.can_start && view.media.speaker.can_start);
+    select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_BLUETOOTH;
+    handle(select); assert(submissions == 1); /* Preserve the usable speaker profile. */
+    routes_by_id[AE_ROUTE_HFP_HF] = route; /* Both profiles really negotiated. */
+    context.overlay = APP_OVERLAY_NONE; ++context.ui_revision; poll_at(1040);
+    assert(!view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH] && view.media.microphone.can_start);
+    routes_by_id[AE_ROUTE_HFP_HF].token.peer_id.bytes[0] = 18; poll_at(1041);
+    assert(!view.media.microphone.can_start && view.media.microphone.start_block == APP_MEDIA_START_PEER_MISMATCH);
+    routes_by_id[AE_ROUTE_HFP_HF].token.peer_id.bytes[0] = 17; poll_at(1042);
+    owner.audio.playback = (ae_job_snapshot_t){.kind = AE_PLAYBACK_STREAM, .state = AE_JOB_RUNNING};
+    owner.audio.hardware_off_confirmed = false; ++owner.audio.revision; poll_at(1050);
+    assert(!view.media.microphone.can_start && view.media.microphone.start_block == APP_MEDIA_START_STOP_REQUIRED);
+    app_intent_t start = intent(APP_MEDIA_LIVE_START); start.media.value.role.role = APP_MEDIA_MICROPHONE;
+    handle(start); assert(submissions == 1 && !link_count);
+    owner.audio.playback = (ae_job_snapshot_t){0}; owner.audio.hardware_off_confirmed = true;
+    ++owner.audio.revision; poll_at(1060); handle(start); assert(submissions == 1); /* Old admission is stale. */
+    start = intent(APP_MEDIA_LIVE_START); start.media.value.role.role = APP_MEDIA_MICROPHONE;
+    handle(start); assert(submissions == 2 && submitted.action == APP_MEDIA_START &&
+        submitted.kind == AE_CAPTURE_LIVE && submitted.route == AE_ROUTE_HFP_HF && !link_count &&
+        ae_route_token_equal(&submitted.expected_route_token, &routes_by_id[AE_ROUTE_HFP_HF].token));
+    owner.audio.route = AE_ROUTE_HFP_HF; ++owner.audio.revision; complete(AE_OK);
+    assert(view.media.connection_known && view.media.microphone.can_start && view.media.speaker.can_start);
+    select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_USB;
+    handle(select); owner.audio.route = AE_ROUTE_USB_UAC; ++owner.audio.revision; complete(AE_OK);
+    assert(submissions == 3 && view.media.connection == APP_MEDIA_CONNECTION_USB &&
+        !view.media.microphone.can_start && !view.media.speaker.can_start);
+    routes_by_id[AE_ROUTE_HFP_HF].implemented = routes_by_id[AE_ROUTE_A2DP_SINK].implemented = false;
+    poll_at(1090); assert(!view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH]);
+    select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_BLUETOOTH;
+    handle(select); assert(submissions == 3);
+}
+static void test_connection_stop_and_privacy_barriers(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE;
+    for (unsigned gate = 0; gate < 8; ++gate) {
+        owner.audio.capture[AE_CAPTURE_LIVE] = (ae_job_snapshot_t){0};
+        owner.audio.playback = (ae_job_snapshot_t){0};
+        owner.audio.hardware_off_confirmed = true; owner.audio.quarantined = false; owner.busy = false;
+        context.locked = context.screen_off = false; owner.audio_known = true;
+        if (gate == 0) owner.audio.capture[AE_CAPTURE_LIVE].state = AE_JOB_RUNNING;
+        if (gate == 1) owner.audio.playback.cleanup_pending = true;
+        if (gate == 2) owner.audio.hardware_off_confirmed = false;
+        if (gate == 3) owner.audio.quarantined = true;
+        if (gate == 4) owner.busy = true;
+        if (gate == 5) context.locked = true;
+        if (gate == 6) context.screen_off = true;
+        if (gate == 7) owner.audio_known = false;
+        ++owner.audio.revision; poll_at(1010 + gate * 10U);
+        assert(!view.media.can_select_connection[APP_MEDIA_CONNECTION_USB] &&
+            !view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH]);
+        app_intent_t select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_USB;
+        handle(select); assert(!submissions);
+    }
+}
+static void test_connection_context_and_stale_requests(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; poll_at(1010);
+    app_intent_t select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_USB;
+    app_intent_t changed = select; ++changed.epoch; handle(changed);
+    changed = select; ++changed.ui_revision; handle(changed);
+    changed = select; ++changed.media.audio_generation; handle(changed);
+    changed = select; ++changed.media.resource_revision; handle(changed);
+    changed = select; changed.media.value.connection = (app_media_connection_t)-1; handle(changed);
+    changed.media.value.connection = APP_MEDIA_CONNECTION_COUNT; handle(changed);
+    assert(!submissions);
+    const app_overlay_t panels[] = {APP_OVERLAY_AUDIO, APP_OVERLAY_RECORDING_START, APP_OVERLAY_CONFIRM, APP_OVERLAY_MODES};
+    for (size_t i = 0; i < sizeof(panels) / sizeof(panels[0]); ++i) {
+        context.overlay = panels[i]; ++context.ui_revision; poll_at(1020 + i * 10U);
+        select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_USB;
+        handle(select); assert(!submissions);
+    }
+    context.overlay = APP_OVERLAY_MEDIA_OPTIONS; context.mode = INPUT_MOUSE; ++context.ui_revision; poll_at(1060);
+    select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_USB;
+    handle(select); assert(!submissions);
+    context.mode = INPUT_AUDIO; ++context.ui_revision; poll_at(1070);
+    select = intent(APP_MEDIA_SELECT_CONNECTION); select.media.value.connection = APP_MEDIA_CONNECTION_USB;
+    submit_result = AE_BUSY; handle(select); assert(submissions == 1 && !controls.pending);
+    poll_at(1080); assert(submissions == 1 && !view.media.connection_known);
+}
+static void test_live_start_block_matrix(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
+    app_media_snapshot_t baseline = owner;
+    ae_route_capabilities_t baseline_route = route;
+    ae_codec_capabilities_t baseline_codec = hardware;
+    const app_media_start_block_t expected[] = {APP_MEDIA_START_ALLOWED, APP_MEDIA_START_LOCKED,
+        APP_MEDIA_START_SCREEN_UNAVAILABLE, APP_MEDIA_START_UNKNOWN, APP_MEDIA_START_PENDING,
+        APP_MEDIA_START_QUARANTINED, APP_MEDIA_START_CONNECTION_REQUIRED, APP_MEDIA_START_UNSUPPORTED,
+        APP_MEDIA_START_ROUTE_UNAVAILABLE, APP_MEDIA_START_HOST_UNAVAILABLE, APP_MEDIA_START_HOST_STREAM_REQUIRED,
+        APP_MEDIA_START_CODEC_UNAVAILABLE, APP_MEDIA_START_FORMAT_UNSUPPORTED, APP_MEDIA_START_IDENTITY_UNAVAILABLE,
+        APP_MEDIA_START_CLEANUP, APP_MEDIA_START_OCCUPIED, APP_MEDIA_START_OCCUPIED, APP_MEDIA_START_PENDING,
+        APP_MEDIA_START_UNKNOWN, APP_MEDIA_START_PENDING, APP_MEDIA_START_UNKNOWN};
+    for (unsigned gate = 0; gate < sizeof(expected) / sizeof(expected[0]); ++gate) {
+        owner = baseline; route = baseline_route; hardware = baseline_codec;
+        context.locked = context.screen_off = false; snapshot_available = true;
+        owner.audio.revision += gate;
+        switch (gate) {
+        case 1: context.locked = true; break;
+        case 2: context.screen_off = true; break;
+        case 3: owner.audio_known = false; break;
+        case 4: owner.busy = true; break;
+        case 5: owner.audio.quarantined = true; break;
+        case 6: owner.audio.route = AE_ROUTE_LOCAL; break;
+        case 7: route.implemented = false; break;
+        case 8: route.available = false; break;
+        case 9: route.connected = false; break;
+        case 10: route.playback = false; break;
+        case 11: hardware.available = false; break;
+        case 12: hardware.format_count = 0; break;
+        case 13: route.token.stream_id = (ae_id_t){0}; break;
+        case 14: owner.audio.playback.cleanup_pending = true; break;
+        case 15: owner.audio.playback.state = AE_JOB_RUNNING; break;
+        case 16: owner.audio.capture[AE_CAPTURE_LIVE].state = AE_JOB_RUNNING; break;
+        case 17: hardware.available = false; hardware.reason = AE_AGAIN; break;
+        case 18: owner.initialized = false; break;
+        case 19: owner.result_ready = true; break;
+        case 20: snapshot_available = false; break;
+        default: break;
+        }
+        poll_at(1010 + gate * 10U);
+        assert(view.media.speaker.start_block == expected[gate]);
+        assert(view.media.speaker.can_start == (expected[gate] == APP_MEDIA_START_ALLOWED));
+        if (expected[gate] != APP_MEDIA_START_ALLOWED) {
+            app_intent_t start = intent(APP_MEDIA_LIVE_START); start.media.value.role.role = APP_MEDIA_SPEAKER;
+            handle(start); assert(!submissions);
+        }
+    }
+    owner = baseline; route = baseline_route; hardware = baseline_codec; snapshot_available = true;
+    poll_at(1300); poll_at(1299);
+    assert(view.media.speaker.start_block == APP_MEDIA_START_CLOCK_UNAVAILABLE && !view.media.speaker.can_start);
+}
+static void test_live_start_independent_host_roles(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
+    route.capture = false; ++owner.audio.revision; poll_at(1010);
+    assert(!view.media.microphone.can_start && view.media.microphone.start_block == APP_MEDIA_START_HOST_STREAM_REQUIRED);
+    assert(view.media.speaker.can_start && view.media.speaker.start_block == APP_MEDIA_START_ALLOWED &&
+        !view.media.speaker.enabled && !view.media.speaker.mute_confirmed);
+    route.capture = true; route.playback = false; poll_at(1020);
+    assert(view.media.microphone.can_start && view.media.speaker.start_block == APP_MEDIA_START_HOST_STREAM_REQUIRED);
+    route.playback = true; hardware.formats[0].roles = AE_SPEAKER; poll_at(1030);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_FORMAT_UNSUPPORTED && view.media.speaker.can_start);
+    hardware.formats[0].roles = AE_MICROPHONE | AE_SPEAKER;
+    route.token.link_generation = 0; poll_at(1040);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_IDENTITY_UNAVAILABLE &&
+        view.media.speaker.start_block == APP_MEDIA_START_IDENTITY_UNAVAILABLE);
+}
+static void test_live_start_pending_and_cleanup_reasons(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
+    route.full_duplex = hardware.full_duplex = true;
+    owner.audio.capture[AE_CAPTURE_LIVE].state = AE_JOB_RUNNING;
+    ++owner.audio.revision; poll_at(1010);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_OCCUPIED && view.media.speaker.can_start);
+    app_intent_t start = intent(APP_MEDIA_LIVE_START); start.media.value.role.role = APP_MEDIA_SPEAKER;
+    handle(start); app_media_controls_fill(&view);
+    assert(submissions == 1 && view.media.microphone.start_block == APP_MEDIA_START_PENDING &&
+        view.media.speaker.start_block == APP_MEDIA_START_PENDING);
+    complete(AE_OK); assert(view.media.speaker.can_start);
+    owner.audio.playback.cleanup_pending = true; ++owner.audio.revision; poll_at(1030);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_CLEANUP && view.media.speaker.start_block == APP_MEDIA_START_CLEANUP);
+    context.locked = true; poll_at(1040);
+    assert(view.media.speaker.start_block == APP_MEDIA_START_LOCKED && submissions == 1);
 }
 static void setup_voice(bool slc)
 {
@@ -399,8 +612,8 @@ static void test_record_copy_failure(void)
 }
 int main(int argc, char **argv)
 {
-    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure"};
-    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure};
+    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure"};
+    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: media controls %s\n", names[i]); return 0; }

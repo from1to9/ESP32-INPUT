@@ -61,6 +61,10 @@ def strict_json(data: bytes):
     except (UnicodeError, ValueError) as error:
         raise BridgeError("Invalid JSON response") from error
 
+def sensor_samples_path(path: str) -> bool:
+    match = re.fullmatch(r"/api/v1/sensors/samples\?boot=[0-9a-f]{32}&after=(0|[1-9][0-9]{0,19})&limit=[1-8]", path)
+    return bool(match and int(match[1]) <= 2**64 - 1)
+
 class PinnedHTTPS:
     def __init__(self, config: dict):
         if config.get("v") != 1 or not re.fullmatch(r"[A-Za-z0-9.-]{1,128}", config.get("host", "")):
@@ -80,11 +84,27 @@ class PinnedHTTPS:
         # fingerprint is an additional check, not a replacement for either.
 
     def request(self, method: str, path: str, body: dict | None = None, token: str | None = None) -> dict:
+        status, raw = self._request_bytes(method, path, body, token)
+        result = strict_json(raw)
+        if not isinstance(result, dict):
+            raise BridgeError("Invalid device response object")
+        return {**result, "http_status": status}
+
+    def sensor_get_raw(self, path: str, token: str) -> tuple[int, bytes]:
+        """Bounded sensor-response evidence only; never returns headers/secrets."""
+        if path not in {"/api/v1/sensors/catalog", "/api/v1/sensors/latest"} and not sensor_samples_path(path):
+            raise BridgeError("Invalid sensor resource")
+        if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{64}", token):
+            raise BridgeError("Invalid sensor session")
+        return self._request_bytes("GET", path, None, token)
+
+    def _request_bytes(self, method: str, path: str, body: dict | None, token: str | None) -> tuple[int, bytes]:
         if method not in {"GET", "POST", "DELETE"} or not path.startswith("/api/v1/") or "#" in path:
             raise BridgeError("Invalid device resource")
         if "?" in path:
             base, query = path.split("?", 1)
-            if base not in {"/api/v1/operations", "/api/v1/config/schema"} or not re.fullmatch(r"cursor=[0-9]{1,5}&limit=[1-8]", query):
+            metadata = base in {"/api/v1/operations", "/api/v1/config/schema"} and re.fullmatch(r"cursor=[0-9]{1,5}&limit=[1-8]", query)
+            if not metadata and not (method == "GET" and sensor_samples_path(path)):
                 raise BridgeError("Invalid bounded metadata pagination")
         encoded = None if body is None else json.dumps(body, separators=(",", ":"), ensure_ascii=False,
                                                      allow_nan=False).encode()
@@ -112,10 +132,10 @@ class PinnedHTTPS:
             raw = response.read(MAX_RESPONSE + 1)
             if len(raw) > MAX_RESPONSE:
                 raise BridgeError("Device response exceeds limit")
-            result = strict_json(raw)
-            if not isinstance(result, dict):
-                raise BridgeError("Invalid device response object")
-            return {"http_status": response.status, **result}
+            declared = response.getheader("Content-Length")
+            if declared is not None and (len(declared) > 4 or not re.fullmatch(r"0|[1-9][0-9]*", declared) or int(declared) != len(raw)):
+                raise BridgeError("Incomplete device response")
+            return response.status, raw
         except (OSError, ssl.SSLError, http.client.HTTPException) as error:
             # SDK/HTTP error strings may contain resource or credential data.
             raise BridgeError("Verified device connection failed") from error

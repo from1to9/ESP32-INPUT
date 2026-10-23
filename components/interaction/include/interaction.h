@@ -191,7 +191,7 @@ typedef struct {
     interaction_config_t config;
     interaction_touch_config_t touch_config;
     interaction_touch_state_t touch;
-    bool output_ready, clock_seen, sample_seen;
+    bool output_ready, touch_motion_ready, clock_seen, sample_seen;
     uint64_t now_ms, freeze_until_ms, sample_us;
     bool click_pending, second_click, hold_emitted, press_consumed;
     uint64_t down_ms, click_ms;
@@ -227,6 +227,10 @@ const interaction_reference_diagnostics_t *interaction_reference_diagnostics_get
  * preview editing; this may happen before or after sync changes the epoch. */
 void interaction_sync(interaction_t *model, const input_state_t *state,
                       bool output_ready, uint64_t now_ms);
+/* Local touch motion may use bounded coordinator buffering while the transport
+ * is transiently busy. This does not enable click, drag, gyro or remote output.
+ * sync resets this override; the coordinator reapplies its current lifecycle gate. */
+void interaction_set_touch_motion_ready(interaction_t *model, bool ready);
 bool interaction_configure(interaction_t *model, const interaction_config_t *config);
 bool interaction_set_motion(interaction_t *model, bool enabled);
 bool interaction_set_motion_owned(interaction_t *model, input_owner_t source, bool enabled);
@@ -248,6 +252,11 @@ void interaction_freeze_after(interaction_t *model, uint64_t event_ms);
 bool interaction_set_touch_divisor(interaction_t *model, unsigned int divisor);
 input_delta_t interaction_touch_move(interaction_t *model, float dx, float dy);
 input_delta_t interaction_touch_move_owned(interaction_t *model, input_owner_t source, float dx, float dy);
+typedef struct { int16_t x, y; } interaction_touch_delta_t;
+/* Preserve the whole validated touch displacement plus fractional carry.
+ * The HID engine owns bounded splitting into signed 8-bit relative reports. */
+interaction_touch_delta_t interaction_touch_displacement_owned(interaction_t *model,
+    input_owner_t source, float dx, float dy);
 
 /* Defaults: enabled, press <=250 ms, second BEGIN within 280 ms/16 px of the
  * first release, tap slop 8 px, fresh contact <=1000 ms, drag <=30000 ms.

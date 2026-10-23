@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
 #include "app_build_identity.h"
+#include "app_sensor_api.h"
 #include "app_presenter.h"
 #include "app_boot_ui.h"
 #include "app_media_runtime.h"
+#include "app_audio_diagnostics.h"
 #include "app_media_controls.h"
 #include "app_connectivity_controls.h"
 #include "app_recording_store.h"
@@ -163,6 +165,7 @@ static app_settings_page_t s_settings_page;
 static unsigned s_bluetooth_page;
 static app_confirmation_t s_confirmation;
 static uint64_t s_confirmation_generation;
+static uint64_t s_confirmation_bond_revision, s_confirmation_preference_revision;
 static char s_confirmation_ssid[33];
 static char s_confirmation_stored_ssid[33];
 static bool s_confirmation_storage_known, s_confirmation_storage_present;
@@ -417,6 +420,7 @@ static void physical_button(board_button_event_t event, uint64_t timestamp_us)
         s_button_overflow = true;
     }
     portEXIT_CRITICAL(&s_control_lock);
+    app_sensor_api_button(event == BOARD_BUTTON_DOWN, timestamp_us);
 }
 
 static void report_boot_fault(const char *operation, esp_err_t error)
@@ -496,6 +500,7 @@ static bool submit_contacts(const board_touch_snapshot_t *sample)
         if (point->x < visible.x1 || point->x > visible.x2 ||
             point->y < visible.y1 || point->y > visible.y2) event.value.touch.eligible = false;
     }
+    app_sensor_api_touch(sample, event.value.touch.eligible);
     /* Complete snapshots and primary events share one FIFO; a later sensor
      * update can never overtake an earlier primary pointer event. */
     if (xQueueSend(s_intents, &event, 0) == pdTRUE) return true;
@@ -559,6 +564,8 @@ static void sync_interaction(void)
     observe_model_clock(s_now_ms);
     interaction_sync(&s_interaction, &s_engine.state,
         s_engine.ready && !s_engine.state.release_pending && !s_engine.congested, s_now_ms);
+    interaction_set_touch_motion_ready(&s_interaction,
+        s_engine.ready && !s_engine.state.release_pending && !s_engine.congestion_cancelled);
     bool touch, physical;
     uint64_t transition;
     portENTER_CRITICAL(&s_control_lock);
@@ -699,6 +706,7 @@ static void service_media(void)
     app_media_controls_effect_t effect = {0};
     app_media_controls_poll(s_now_ms, &effect);
     apply_media_effect(&effect);
+    app_audio_diagnostics_poll(s_now_ms);
 }
 
 static void refresh_connectivity_context(void)
@@ -1101,6 +1109,7 @@ static bool allowed_in_overlay(app_action_t action)
     if (s_overlay == APP_OVERLAY_API_REVIEW) return action == APP_API_COMMISSIONING;
     if (s_overlay == APP_OVERLAY_WIFI_PROFILES) return action == APP_WIFI_PROFILE_CONTROL || action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_BLUETOOTH_TARGET) return action == APP_BLUETOOTH_TARGET_CONTROL || action == APP_SETTINGS_PAGE;
+    if (s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING) return action == APP_PAIRING_REQUEST || action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_COMMON_KEYS) return action == APP_KEY || action == APP_SHORTCUT;
     if (s_overlay == APP_OVERLAY_LOCAL_EDITOR) return false;
     if (s_overlay == APP_OVERLAY_WIFI_NETWORKS)
@@ -1684,13 +1693,28 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
     case APP_PAIRING_REQUEST:
         if (intent->x < APP_PAIR_OPEN || intent->x > APP_PAIR_DISCONNECT ||
             s_pair_operation != APP_CONFIRM_NONE) return;
-        if (s_overlay != APP_OVERLAY_TARGET &&
+        if (s_overlay != APP_OVERLAY_TARGET && s_overlay != APP_OVERLAY_BLUETOOTH_PAIRING &&
             !(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH)) return;
+        if (s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING && intent->x == APP_PAIR_CLOSE) {
+            app_connectivity_controls_effect_t effect = {0};
+            app_connectivity_controls_bluetooth_stop(&effect); apply_connectivity_effect(&effect); return;
+        }
+        if (app_connectivity_controls_bluetooth_busy()) { s_message = "A Bluetooth change is still pending."; return; }
         if (intent->x == APP_PAIR_DISCONNECT && !link->connected) return;
         if (intent->x == APP_PAIR_OPEN && link->bond_count_known &&
             link->bond_capacity && link->bond_count >= link->bond_capacity) {
             s_message = "Bluetooth pairings full; existing hosts are preserved.";
             return;
+        }
+        if ((intent->x == APP_PAIR_OPEN || intent->x == APP_PAIR_FORGET_ALL) &&
+            !app_connectivity_controls_bluetooth_revisions(&s_confirmation_bond_revision, &s_confirmation_preference_revision)) {
+            s_message = "Saved Bluetooth hosts or target policy are unavailable."; return;
+        }
+        if (intent->x == APP_PAIR_OPEN && !link->connected) {
+            app_connectivity_controls_effect_t effect = {0};
+            (void)app_connectivity_controls_bluetooth_start(APP_PAIR_OPEN, link->generation,
+                s_confirmation_bond_revision, s_confirmation_preference_revision, &effect);
+            apply_connectivity_effect(&effect); open_overlay(APP_OVERLAY_BLUETOOTH_PAIRING); return;
         }
         s_confirmation = intent->x == APP_PAIR_OPEN ? APP_CONFIRM_PAIR_OPEN :
             intent->x == APP_PAIR_CLOSE ? APP_CONFIRM_PAIR_CLOSE :
@@ -1717,7 +1741,8 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         app_confirmation_t confirmation = s_confirmation;
         s_confirmation = APP_CONFIRM_NONE;
         s_settings_page = confirmation == APP_CONFIRM_WIFI_FORGET ? APP_SETTINGS_WIFI : APP_SETTINGS_BLUETOOTH;
-        open_overlay(APP_OVERLAY_SETTINGS);
+        open_overlay(confirmation == APP_CONFIRM_PAIR_OPEN && intent->x == 1 && link->generation == s_confirmation_generation ?
+            APP_OVERLAY_BLUETOOTH_PAIRING : APP_OVERLAY_SETTINGS);
         if (!intent->x) return;
         if (confirmation == APP_CONFIRM_WIFI_FORGET) {
             app_wifi_snapshot_t wifi;
@@ -1742,6 +1767,12 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
                 ble_hid_pairing_close();
                 s_message = "Pairing window closed.";
                 return;
+            }
+            if (confirmation == APP_CONFIRM_PAIR_OPEN || confirmation == APP_CONFIRM_PAIR_FORGET_ALL) {
+                app_connectivity_controls_effect_t effect = {0};
+                (void)app_connectivity_controls_bluetooth_start(confirmation == APP_CONFIRM_PAIR_OPEN ? APP_PAIR_OPEN : APP_PAIR_FORGET_ALL,
+                    link->generation, s_confirmation_bond_revision, s_confirmation_preference_revision, &effect);
+                apply_connectivity_effect(&effect); return;
             }
             ble_hid_pairing_close();
             s_pair_operation = confirmation;
@@ -1795,11 +1826,17 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
             return;
         }
         if (!allow_motion) return;
-        input_delta_t delta = interaction_touch_move(&s_interaction,
-            (float)intent->x, (float)intent->y);
+        interaction_touch_delta_t delta = interaction_touch_displacement_owned(&s_interaction,
+            INPUT_LOCAL, (float)intent->x, (float)intent->y);
         if (!delta.x && !delta.y) return;
-        result = hid_engine_enqueue_mouse_move(&s_engine, intent->epoch, INPUT_LOCAL,
-            delta.x, delta.y);
+        result = hid_engine_enqueue_mouse_displacement(&s_engine, intent->epoch, INPUT_LOCAL,
+            delta.x, delta.y, intent->event_ms, s_now_ms);
+        if (result != HID_ENGINE_ENQUEUE_OK) {
+            cancel_input();
+            s_message = result == HID_ENGINE_ENQUEUE_FULL ?
+                "Touch movement capacity exceeded; pending input cancelled." :
+                "Touch movement expired or unavailable; pending input cancelled.";
+        }
         break;
     }
     case APP_DRAG:
@@ -2519,7 +2556,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
         !view.ready ? APP_MOTION_INPUT_NOT_READY : APP_MOTION_READY;
     (void)snprintf(view.transport_message, sizeof(view.transport_message), "%s",
         s_transport_switch_pending ? "Waiting for old-host releases to complete." :
-        s_engine.state.mode == INPUT_AUDIO ? "Choose the audio route in audio options." :
+        s_engine.state.mode == INPUT_AUDIO ? "Choose USB or Bluetooth on the Audio page." :
         "Input goes only to the selected connection.");
     view.confirmation = s_confirmation;
     view.battery_supported = capabilities.battery;
@@ -2648,7 +2685,7 @@ static void observe_input_link(const input_link_t *link, input_link_t *previous)
         update_send(true);
         s_drag_requested = false;
         discard_intents();
-        s_message = "Host stalled; pending input expired. Releases have priority.";
+        s_message = "Pending input expired; releases have priority.";
     }
 }
 
@@ -2778,6 +2815,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
 
 void app_main(void)
 {
+    app_sensor_api_init();
     esp_err_t diagnostic_error = heap_caps_register_failed_alloc_callback(record_allocation_failure);
     if (diagnostic_error != ESP_OK)
         ESP_LOGW(TAG, "Allocation diagnostics unavailable: %s", esp_err_to_name(diagnostic_error));

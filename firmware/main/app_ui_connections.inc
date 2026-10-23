@@ -145,6 +145,15 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
         s_connection_pages[0] = button(body, "Previous", 0, 360, 224, 48, APP_WIFI_PROFILE_CONTROL, 0);
         s_connection_pages[1] = button(body, "Next", 232, 360, 224, 48, APP_WIFI_PROFILE_CONTROL, 0);
+    } else if (kind == APP_OVERLAY_BLUETOOTH_PAIRING) {
+        label_text(title, "Add Bluetooth host");
+        s_connection_state = connection_label(body, 0, 56, INK);
+        s_connection_detail = connection_label(body, 64, 64, MUTED);
+        s_connection_reason = connection_label(body, 136, 144, MUTED);
+        lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
+        s_connection_actions[0] = button(body, "Stop pairing", 0, 304, 224, 48, APP_PAIRING_REQUEST, APP_PAIR_CLOSE);
+        s_connection_actions[1] = button(body, "Try again", 232, 304, 224, 48, APP_PAIRING_REQUEST, APP_PAIR_OPEN);
+        button(body, "Saved Bluetooth hosts", 0, 360, 456, 48, APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
     } else {
         label_text(title, "Bluetooth target");
         s_connection_state = connection_label(body, 0, 56, INK);
@@ -152,6 +161,9 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         s_connection_reason = connection_label(body, 144, 144, MUTED);
         s_connection_actions[0] = button(body, "Select target", 0, 304, 224, 48, APP_BLUETOOTH_TARGET_CONTROL, 0);
         s_connection_actions[1] = button(body, "Move to first", 232, 304, 224, 48, APP_BLUETOOTH_TARGET_CONTROL, 0);
+        s_connection_actions[2] = button(body, "Forget this device", 0, 248, 456, 44, APP_BLUETOOTH_TARGET_CONTROL, 0);
+        lv_obj_set_height(s_connection_reason, 96);
+        lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
         button(body, "Saved Bluetooth hosts", 0, 360, 456, 48, APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
     }
 }
@@ -246,6 +258,17 @@ static void render_connection_panel(void)
             connection_bind(s_connection_pages[i], APP_WIFI_PROFILE_CONTROL, request, known && !list->pending &&
                 (i ? (list->page + 1) * 4 < list->count : list->page > 0));
         }
+    } else if (s_view.overlay == APP_OVERLAY_BLUETOOTH_PAIRING) {
+        const app_bluetooth_management_view_t *pairing = &s_view.bluetooth_management;
+        label_text(s_connection_state, s_view.bluetooth_name.effective_valid ? s_view.bluetooth_name.effective : "Device name unavailable");
+        if (pairing->known && pairing->window_open && pairing->remaining_known && !pairing->connected)
+            label_format(s_connection_detail, "%s\n%us remaining", pairing->status, pairing->remaining_seconds);
+        else label_text(s_connection_detail, pairing->known ? pairing->status : "Bluetooth status unavailable");
+        if (!pairing->connected && (pairing->pending || pairing->window_open))
+            label_format(s_connection_reason, "%s\nStay on this page while pairing.", pairing->reason);
+        else label_text(s_connection_reason, pairing->reason);
+        enabled(s_connection_actions[0], pairing->known && pairing->can_stop);
+        enabled(s_connection_actions[1], pairing->known && pairing->can_add && !pairing->window_open && !pairing->pending);
     } else if (s_view.overlay == APP_OVERLAY_BLUETOOTH_TARGET) {
         const app_bluetooth_target_view_t *target = &s_view.bluetooth_target;
         label_text(s_connection_state, target->known ? target->name : "Saved target unavailable");
@@ -259,6 +282,9 @@ static void render_connection_panel(void)
         request.bluetooth.operation = APP_BLUETOOTH_TARGET_PREFER;
         connection_bind(s_connection_actions[1], APP_BLUETOOTH_TARGET_CONTROL, request,
             target->known && !target->pending && !target->uncertain && target->can_prefer);
+        request.bluetooth.operation = APP_BLUETOOTH_TARGET_FORGET_REQUEST;
+        connection_bind(s_connection_actions[2], APP_BLUETOOTH_TARGET_CONTROL, request,
+            target->known && !target->pending && !target->uncertain && target->can_forget);
     }
 }
 static void sanitize_connections(void)
@@ -278,4 +304,5 @@ static void sanitize_connections(void)
         row->id[32] = row->label[128] = 0;
     }
     s_view.bluetooth_target.name[48] = s_view.bluetooth_target.identity[48] = s_view.bluetooth_target.reason[96] = 0;
+    s_view.bluetooth_management.status[48] = s_view.bluetooth_management.reason[96] = s_view.bluetooth_management.forget_identity[48] = 0;
 }

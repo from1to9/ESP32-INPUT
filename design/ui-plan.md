@@ -12,7 +12,7 @@ Use a 480 x 480 logical canvas, 12 px side margins, minimum 8 px gaps, 12 px con
 | --- | --- | --- |
 | Mode title | x 12/y 8/w 120/h 24 | Mouse, Keyboard or Audio; not a navigation target |
 | Current input context | x 12/y 36/w 120/h 18 | Ellipsized BT/USB plus actual safe target label, or explicit unknown/disconnected; full identity in the quick panel |
-| Compact entry/kind selector | x 140/y 8/h 48; w 132 for Mouse/Audio, w 76 for Keyboard | Mouse Recenter, audio kind, or keyboard submode; Keyboard adds Keys at x 224/w 48 with the same 16 px font and baseline |
+| Compact entry/kind selector | x 140/y 8/h 48; w 132 for Mouse/Audio, w 76 for Keyboard | Mouse Recenter, audio connection, or keyboard submode; Keyboard adds Keys at x 224/w 48 with the same 16 px font and baseline |
 | Critical-state action | x 280/y 8/w 116/h 48 | Visible only for remote ownership, capture/recording, input errors or readiness blockers; bounded text/icon plus safe Stop/takeover/details action |
 | Menu launcher | x 404/y 8/w 64/h 48 | Always in the same position; opens the shared quick panel |
 | Core workspace | x 12/y 64/w 456/h 408 | Mode functions only; coordinates below include this area's controls |
@@ -65,13 +65,21 @@ Each cell grows from 112 x 44 to 112 x 76, with 44 px minimum targets retained e
 
 | Element | Geometry | Behavior |
 | --- | --- | --- |
-| Voice / Speaker chooser | x 140/y 8/w 132/h 48 | One compact kind selector |
-| Prominent mute/state control | x 12/y 64/w 456/h 200 | Large mute affordance when supported; truthful unavailable/off state otherwise |
-| Start / Stop | x 12/y 280/w 456/h 56 | Actual admitted capture/playback action only |
-| Volume | x 12/y 352/w 456/h 56 | Large horizontal control; actual value/capability or unavailable |
+| USB / Bluetooth connection entry | x 140/y 8/w 132/h 48 | Owner-observed connection, opening the two-choice connection page |
+| Mic card | x 12/y 64/w 456/h 168 | Independent observed state, 136 x 48 start/stop target and prominent microphone mute |
+| Speaker card | x 12/y 244/w 456/h 168 | Independent observed state, 136 x 48 start/stop target and speaker volume |
 | Capability / privacy note | x 12/y 424/w 456/h 48 | At most two lines; no fabricated stream state |
 
 Audio remains off/muted and unavailable where the actual driver/profile is absent. A future recording indicator is not evidence of recording support; the prototype's explicit fixture only exercises its visual Stop affordance. Supported capture must remain visible on the device and stoppable locally, including in another foreground mode. Speaker playback does not imply microphone upload. POWER and physical lock behavior are unchanged.
+
+This section is the explicitly authorized 2026-10-23 Audio simplification.
+Mic and Speaker appear together; Routes, Roles, Voice and recording setup are
+absent from primary Audio navigation. The owner chooses Bluetooth profiles and
+performs acknowledged transitions. Mouse and Keyboard geometry remain unchanged.
+The two independent cards add six fixed LVGL objects to the previous 106-object
+core, giving an expected 112-object core. The 160-object panel ceiling remains;
+native resource tests must verify the actual object delta, idle allocation/flush
+behavior and complete teardown on the combined implementation.
 
 ## 5. Shared quick panel, Status and Settings
 

@@ -6,11 +6,13 @@
 #include <limits.h>
 #include <math.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "bsp/esp_mosaico.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -89,6 +91,15 @@ static bsp_imu_config_t s_imu_config;
 static float s_imu_accel_scale, s_imu_gyro_scale;
 static board_imu_sample_t s_imu_sample;
 static board_imu_queue_t s_imu_stream; /* Serialized with cache/status by s_status_mux. */
+static EXT_RAM_BSS_ATTR board_sensor_record_t s_sensor_records[BOARD_SENSOR_JOURNAL_CAPACITY];
+static board_sensor_journal_t s_sensor_journal;
+/* Only the existing acquisition owner uses this scratch: board startup first,
+ * then its sensor worker. Keep observations out of the startup task frame. */
+static struct {
+    board_sensor_record_t record;
+    uint64_t started_us, ended_us;
+    bool pending, times_known;
+} s_imu_observation;
 static bool s_imu_sample_valid;
 static esp_err_t s_imu_error = ESP_ERR_INVALID_STATE;
 static board_imu_status_t s_imu_status = {
@@ -445,9 +456,98 @@ static void imu_cleanup(bool initialized)
 
 typedef enum { IMU_READ_FATAL, IMU_READ_COMMUNICATION, IMU_READ_NOT_READY, IMU_READ_LATE, IMU_READ_SAMPLE } imu_read_kind_t;
 
-static esp_err_t imu_read_hardware(board_imu_sample_t *sample, const char **stage, imu_read_kind_t *kind)
+static void sensor_u64(uint32_t *words, uint64_t value)
+{
+    words[0] = (uint32_t)value;
+    words[1] = (uint32_t)(value >> 32);
+}
+
+static uint8_t sensor_stage(const char *stage)
+{
+    static const struct { const char *name; uint8_t value; } stages[] = {
+        {"get_handle", BOARD_SENSOR_STAGE_HANDLE}, {"config", BOARD_SENSOR_STAGE_CONFIG},
+        {"frame", BOARD_SENSOR_STAGE_FRAME}, {"data_ready", BOARD_SENSOR_STAGE_DATA_READY},
+        {"batch_time", BOARD_SENSOR_STAGE_BATCH_TIME}, {"finite", BOARD_SENSOR_STAGE_FINITE},
+        {"sample", BOARD_SENSOR_STAGE_SAMPLE}, {"clock", BOARD_SENSOR_STAGE_CLOCK},
+        {"publication_clock", BOARD_SENSOR_STAGE_PUBLICATION_CLOCK},
+        {"publication_age", BOARD_SENSOR_STAGE_PUBLICATION_AGE}, {"sample_time", BOARD_SENSOR_STAGE_SAMPLE_TIME},
+        {"generation", BOARD_SENSOR_STAGE_GENERATION}, {"first_sample", BOARD_SENSOR_STAGE_FIRST_SAMPLE},
+        {"init", BOARD_SENSOR_STAGE_INIT}, {"start", BOARD_SENSOR_STAGE_START},
+    };
+    for (size_t i = 0; i < sizeof(stages) / sizeof(stages[0]); ++i)
+        if (!strcmp(stage, stages[i].name)) return stages[i].value;
+    return BOARD_SENSOR_STAGE_NONE;
+}
+
+static void imu_observation_rejected(uint8_t attempt, uint8_t stage, esp_err_t error)
+{
+    board_sensor_record_t *record = &s_imu_observation.record;
+    record->kind = BOARD_SENSOR_IMU_REJECTED;
+    record->error = error;
+    record->source_sequence = 0;
+    record->flags &= (uint16_t)~BOARD_SENSOR_FLAG_SOURCE_SEQ;
+    record->validity = 0;
+    memset(record->payload, 0, sizeof(record->payload));
+    if (s_imu_observation.times_known) {
+        sensor_u64(record->payload, s_imu_observation.started_us);
+        sensor_u64(record->payload + 2, s_imu_observation.ended_us);
+        record->validity |= BOARD_SENSOR_VALID_READ_START | BOARD_SENSOR_VALID_READ_END;
+        if (s_imu_observation.ended_us >= s_imu_observation.started_us) {
+            sensor_u64(record->payload + 4, s_imu_observation.ended_us - s_imu_observation.started_us);
+            record->validity |= BOARD_SENSOR_VALID_DURATION;
+        }
+        record->sample_us = s_imu_observation.ended_us;
+        record->flags |= BOARD_SENSOR_FLAG_SAMPLE_TIME;
+    }
+    record->payload[6] = ((record->flags & BOARD_SENSOR_FLAG_DRDY) ? 1U : 0U) |
+        ((uint32_t)(record->flags >> BOARD_SENSOR_FLAG_STATUS_SHIFT) << 8) |
+        ((uint32_t)attempt << 16) | ((uint32_t)stage << 24);
+    record->discontinuities = attempt == BOARD_SENSOR_ATTEMPT_NOT_READY || attempt == BOARD_SENSOR_ATTEMPT_LATE ?
+        BOARD_IMU_DISCONTINUITY_REJECTED : BOARD_IMU_DISCONTINUITY_SOURCE;
+    if (stage == BOARD_SENSOR_STAGE_CLOCK || stage == BOARD_SENSOR_STAGE_PUBLICATION_CLOCK)
+        record->discontinuities |= BOARD_IMU_DISCONTINUITY_CLOCK;
+    if (stage == BOARD_SENSOR_STAGE_SAMPLE_TIME) record->discontinuities |= BOARD_IMU_DISCONTINUITY_ORDER;
+}
+
+/* Caller holds the source-status lock. Retention failure affects observation
+ * only; never source acceptance, the actuation queue or first-fault history. */
+static void imu_observation_publish_locked(void)
+{
+    if (!s_imu_observation.pending) return;
+    board_sensor_record_t *record = &s_imu_observation.record;
+    if (record->kind == BOARD_SENSOR_IMU_REJECTED) {
+        record->payload[7] = (uint32_t)s_imu_error;
+        record->validity |= BOARD_SENSOR_VALID_SOURCE_ERROR;
+    }
+    record->observed_us = (uint64_t)esp_timer_get_time();
+    record->flags |= BOARD_SENSOR_FLAG_OBSERVED_TIME;
+    (void)board_sensor_journal_append(&s_sensor_journal, record);
+    s_imu_observation.pending = false;
+}
+
+static void imu_observation_startup_failure(const char *stage, esp_err_t error)
+{
+    portENTER_CRITICAL(&s_status_mux);
+    if (!s_imu_observation.pending) {
+        memset(&s_imu_observation, 0, sizeof(s_imu_observation));
+        s_imu_observation.pending = true;
+        s_imu_observation.record.source_epoch = s_imu_generation;
+        s_imu_observation.record.flags = BOARD_SENSOR_FLAG_SOURCE_EPOCH;
+    }
+    if (s_imu_observation.record.kind != BOARD_SENSOR_IMU_REJECTED)
+        imu_observation_rejected(BOARD_SENSOR_ATTEMPT_STARTUP, sensor_stage(stage), error);
+    imu_observation_publish_locked();
+    portEXIT_CRITICAL(&s_status_mux);
+}
+
+static esp_err_t imu_read_hardware(board_imu_sample_t *sample, const char **stage, imu_read_kind_t *kind, uint64_t generation)
 {
     const uint64_t started_us = (uint64_t)esp_timer_get_time();
+    memset(&s_imu_observation, 0, sizeof(s_imu_observation));
+    s_imu_observation.pending = true;
+    s_imu_observation.started_us = started_us;
+    s_imu_observation.record.source_epoch = generation;
+    s_imu_observation.record.flags = BOARD_SENSOR_FLAG_SOURCE_EPOCH;
     *kind = IMU_READ_FATAL;
     esp_err_t result = ESP_ERR_INVALID_STATE;
     bool status_known = false;
@@ -526,6 +626,26 @@ done:
         if (s_imu_status.late_batch_count != UINT64_MAX) ++s_imu_status.late_batch_count;
         else s_imu_status.late_batch_count_saturated = true;
     }
+    s_imu_observation.ended_us = ended_us;
+    s_imu_observation.times_known = true;
+    if (status_known) s_imu_observation.record.flags |= BOARD_SENSOR_FLAG_DRDY |
+        (uint16_t)((uint16_t)status << BOARD_SENSOR_FLAG_STATUS_SHIFT);
+    if (*kind == IMU_READ_SAMPLE) {
+        board_sensor_record_t *record = &s_imu_observation.record;
+        record->kind = BOARD_SENSOR_IMU_SAMPLE;
+        record->sample_us = sample->timestamp_us;
+        record->flags |= BOARD_SENSOR_FLAG_SAMPLE_TIME;
+        record->validity = BOARD_SENSOR_VALID_IMU_AXES | BOARD_SENSOR_VALID_READ_START;
+        const float axes[6] = {sample->x_dps, sample->y_dps, sample->z_dps, sample->x_g, sample->y_g, sample->z_g};
+        _Static_assert(sizeof axes == 24, "Journal requires float32 IMU axes");
+        memcpy(record->payload, axes, sizeof(axes));
+        sensor_u64(record->payload + 6, started_us);
+    } else {
+        const uint8_t attempt = *kind == IMU_READ_NOT_READY ? BOARD_SENSOR_ATTEMPT_NOT_READY :
+            *kind == IMU_READ_LATE ? BOARD_SENSOR_ATTEMPT_LATE :
+            *kind == IMU_READ_COMMUNICATION ? BOARD_SENSOR_ATTEMPT_COMMUNICATION : BOARD_SENSOR_ATTEMPT_FATAL;
+        imu_observation_rejected(attempt, sensor_stage(*stage), result);
+    }
     portEXIT_CRITICAL(&s_status_mux);
     return result;
 }
@@ -546,7 +666,9 @@ static esp_err_t imu_update(void)
     board_imu_sample_t candidate;
     const char *stage;
     imu_read_kind_t kind;
-    result = imu_read_hardware(&candidate, &stage, &kind);
+    result = imu_read_hardware(&candidate, &stage, &kind, generation);
+    bool accepted = false;
+    uint8_t publication_stage = BOARD_SENSOR_STAGE_GENERATION;
     portENTER_CRITICAL(&s_status_mux);
     if (s_imu_status.phase == BOARD_IMU_FATAL) {
         result = s_imu_error;
@@ -557,12 +679,15 @@ static esp_err_t imu_update(void)
     } else if (result == ESP_OK) {
         const uint64_t publish_us = (uint64_t)esp_timer_get_time();
         if (publish_us < candidate.timestamp_us) {
+            publication_stage = BOARD_SENSOR_STAGE_PUBLICATION_CLOCK;
             result = ESP_ERR_TIMEOUT;
             result = imu_failure_locked(result, "publication_clock", true, true);
         } else if (publish_us - candidate.timestamp_us > IMU_MAX_AGE_US) {
+            publication_stage = BOARD_SENSOR_STAGE_PUBLICATION_AGE;
             result = ESP_ERR_TIMEOUT;
             result = imu_failure_locked(result, "publication_age", false, true);
         } else if (s_imu_status.sample_count && candidate.timestamp_us <= s_imu_sample.timestamp_us) {
+            publication_stage = BOARD_SENSOR_STAGE_SAMPLE_TIME;
             result = ESP_ERR_INVALID_STATE;
             stage = "sample_time";
             result = imu_failure_locked(result, stage, true, true);
@@ -579,7 +704,13 @@ static esp_err_t imu_update(void)
             s_imu_error = ESP_OK;
             s_caps.imu = true;
             imu_count_sample_locked();
+            const bool sequence_known = s_imu_stream.latest_sequence != UINT64_MAX;
             board_imu_queue_publish(&s_imu_stream, delivery_ticket, &candidate);
+            if (sequence_known) {
+                s_imu_observation.record.source_sequence = s_imu_stream.latest_sequence;
+                s_imu_observation.record.flags |= BOARD_SENSOR_FLAG_SOURCE_SEQ;
+            }
+            accepted = true;
         }
     } else if (kind == IMU_READ_NOT_READY || kind == IMU_READ_LATE) {
         board_imu_queue_break(&s_imu_stream, BOARD_IMU_DISCONTINUITY_REJECTED);
@@ -593,6 +724,9 @@ static esp_err_t imu_update(void)
     } else {
         result = imu_failure_locked(result, stage, kind != IMU_READ_COMMUNICATION, true);
     }
+    if (!accepted && s_imu_observation.record.kind == BOARD_SENSOR_IMU_SAMPLE)
+        imu_observation_rejected(BOARD_SENSOR_ATTEMPT_PUBLICATION, publication_stage, result);
+    imu_observation_publish_locked();
     portEXIT_CRITICAL(&s_status_mux);
     return result;
 }
@@ -658,6 +792,7 @@ static void init_optional_imu(void)
     esp_err_t result = bsp_imu_init();
     if (result != ESP_OK) {
         imu_latch_fault(result, "init");
+        imu_observation_startup_failure("init", result);
         imu_cleanup(false);
         return;
     }
@@ -672,6 +807,7 @@ static void init_optional_imu(void)
     result = bsp_imu_start(&config);
     if (result != ESP_OK) {
         imu_latch_fault(result, "start");
+        imu_observation_startup_failure("start", result);
         imu_cleanup(true);
         return;
     }
@@ -697,7 +833,7 @@ static void init_optional_imu(void)
         portENTER_CRITICAL(&s_status_mux);
         delivery_ticket = board_imu_queue_ticket(&s_imu_stream);
         portEXIT_CRITICAL(&s_status_mux);
-        result = imu_read_hardware(&first, &stage, &kind);
+        result = imu_read_hardware(&first, &stage, &kind, s_imu_generation);
         if (result != ESP_OK && result != ESP_ERR_NOT_FOUND) {
             break;
         }
@@ -710,11 +846,15 @@ static void init_optional_imu(void)
         if (result == ESP_OK) {
             break;
         }
+        portENTER_CRITICAL(&s_status_mux);
+        imu_observation_publish_locked();
+        portEXIT_CRITICAL(&s_status_mux);
         TickType_t wait = pdMS_TO_TICKS(2);
         vTaskDelay(wait ? wait : 1);
     } while (true);
     if (result != ESP_OK) {
         imu_latch_fault(result, stage);
+        imu_observation_startup_failure(stage, result);
         imu_cleanup(true);
         return;
     }
@@ -725,8 +865,14 @@ static void init_optional_imu(void)
     s_imu_status.phase = BOARD_IMU_ACTIVE;
     s_imu_status.retry_delay_ms = IMU_POLL_MS;
     imu_count_sample_locked();
+    const bool sequence_known = s_imu_stream.latest_sequence != UINT64_MAX;
     board_imu_queue_publish(&s_imu_stream, delivery_ticket, &first);
+    if (sequence_known) {
+        s_imu_observation.record.source_sequence = s_imu_stream.latest_sequence;
+        s_imu_observation.record.flags |= BOARD_SENSOR_FLAG_SOURCE_SEQ;
+    }
     s_caps.imu = s_imu_error == ESP_OK;
+    imu_observation_publish_locked();
     portEXIT_CRITICAL(&s_status_mux);
 }
 
@@ -826,6 +972,27 @@ static void power_update(void)
     portENTER_CRITICAL(&s_status_mux);
     s_power = status;
     s_caps.battery = status.error == ESP_OK && status.gauge_available;
+    board_sensor_record_t observation = {
+        .kind = BOARD_SENSOR_POWER, .error = status.error,
+        .observed_us = (uint64_t)esp_timer_get_time(), .flags = BOARD_SENSOR_FLAG_OBSERVED_TIME,
+        .validity = BOARD_SENSOR_VALID_POWER_STATE,
+    };
+    if (status.timestamp_us) {
+        observation.sample_us = status.timestamp_us;
+        observation.flags |= BOARD_SENSOR_FLAG_SAMPLE_TIME;
+    }
+    memcpy(&observation.payload[0], &status.temperature_c, sizeof(float));
+    observation.payload[1] = (uint32_t)(int32_t)status.current_ma;
+    observation.payload[2] = status.voltage_mv;
+    observation.payload[3] = status.percent;
+    observation.payload[4] = status.gauge_available ? 1U : 0U;
+    observation.payload[5] = (uint32_t)status.battery_present | ((uint32_t)status.external_power << 2) |
+        ((uint32_t)status.charging << 4) | ((uint32_t)status.full << 6);
+    if (status.percent_valid) observation.validity |= BOARD_SENSOR_VALID_POWER_PERCENT;
+    if (status.voltage_valid) observation.validity |= BOARD_SENSOR_VALID_POWER_VOLTAGE;
+    if (status.current_valid) observation.validity |= BOARD_SENSOR_VALID_POWER_CURRENT;
+    if (status.temperature_valid) observation.validity |= BOARD_SENSOR_VALID_POWER_TEMPERATURE;
+    (void)board_sensor_journal_append(&s_sensor_journal, &observation);
     portEXIT_CRITICAL(&s_status_mux);
     if (status.error != ESP_OK && status.error != s_power_logged_error) {
         ESP_LOGW(TAG, "Battery telemetry unavailable: %s stage=%s command=0x%02x batch_us_known=%d batch_us=%llu packet_us_known=%d packet_us=%llu",
@@ -981,6 +1148,7 @@ esp_err_t board_init(void (*lock_callback)(void))
         return ESP_ERR_INVALID_STATE;
     }
     s_init_attempted = true;
+    (void)board_sensor_journal_init(&s_sensor_journal, s_sensor_records, BOARD_SENSOR_JOURNAL_CAPACITY);
     bsp_board_variant_t variant;
     esp_err_t result = bsp_board_variant_get(&variant);
     if (result != ESP_OK) {
@@ -1186,6 +1354,54 @@ esp_err_t board_power_read(board_power_status_t *status)
     *status = s_power;
     portEXIT_CRITICAL(&s_status_mux);
     return status->error;
+}
+
+esp_err_t board_power_observe(board_power_status_t *status)
+{
+    if (!status) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_status_mux);
+    *status = s_power;
+    const uint64_t time_us = (uint64_t)esp_timer_get_time();
+    if (status->gauge_available && (time_us < status->timestamp_us || time_us - status->timestamp_us > POWER_MAX_AGE_US)) {
+        const uint64_t timestamp_us = status->timestamp_us;
+        *status = power_unknown(ESP_ERR_TIMEOUT);
+        status->timestamp_us = timestamp_us;
+    }
+    portEXIT_CRITICAL(&s_status_mux);
+    return status->error;
+}
+
+esp_err_t board_sensor_journal_read(uint64_t after, board_sensor_record_t *records,
+    size_t capacity, board_sensor_batch_t *batch)
+{
+    if (!records || !batch || !capacity || capacity > BOARD_SENSOR_JOURNAL_READ_MAX) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_status_mux);
+    const bool result = board_sensor_journal_copy(&s_sensor_journal, after, records, capacity,
+        (uint64_t)esp_timer_get_time(), batch);
+    portEXIT_CRITICAL(&s_status_mux);
+    return result ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+
+esp_err_t board_sensor_journal_status(board_sensor_batch_t *batch)
+{
+    if (!batch) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_status_mux);
+    const bool result = board_sensor_journal_bounds(&s_sensor_journal, (uint64_t)esp_timer_get_time(), batch);
+    portEXIT_CRITICAL(&s_status_mux);
+    return result ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+
+esp_err_t board_sensor_journal_publish_input(const board_sensor_record_t *record)
+{
+    if (!record) return ESP_ERR_INVALID_ARG;
+    board_sensor_record_t copied = *record;
+    if (!board_sensor_input_valid(&copied)) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&s_status_mux);
+    copied.observed_us = (uint64_t)esp_timer_get_time();
+    copied.flags |= BOARD_SENSOR_FLAG_OBSERVED_TIME;
+    const bool retained = board_sensor_journal_append(&s_sensor_journal, &copied);
+    portEXIT_CRITICAL(&s_status_mux);
+    return retained ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t board_brightness_set(int percent)

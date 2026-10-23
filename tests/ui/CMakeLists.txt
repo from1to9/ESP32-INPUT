@@ -19,6 +19,7 @@ set_source_files_properties("${LVGL_SOURCE}/src/stdlib/clib/lv_mem_core_clib.c"
     TARGET_DIRECTORY lvgl PROPERTIES COMPILE_DEFINITIONS
     "lv_malloc_core=ui_clib_malloc_core;lv_realloc_core=ui_clib_realloc_core;lv_free_core=ui_clib_free_core")
 add_executable(ui_visual ui_visual.c ui_memory.c ui_private_probe.c ui_trust_review_fixture.c
+    "${REPOSITORY_ROOT}/firmware/main/app_bluetooth_management.c"
     "${REPOSITORY_ROOT}/components/control_protocol/control_registry.c")
 target_include_directories(ui_visual PRIVATE "${LVGL_SOURCE}" "${REPOSITORY_ROOT}/tests/bt_audio/stubs"
     "${REPOSITORY_ROOT}/components/control_protocol/include"

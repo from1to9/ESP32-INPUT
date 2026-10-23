@@ -1,11 +1,12 @@
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 idf_component_register(SRCS "main.c" "app_ui.c" "ble_hid.c" "board_mosaico.c" "usb_console.c" "usb_hid.c"
                            "settings_store.c" "app_wifi.c" "app_presenter.c" "app_boot_ui.c" "usb_audio.c" "board_touch_mosaico.c"
-                           "app_audio.c" "app_media_runtime.c" "board_display_transfer.c" "board_display_resources.c" "bt_audio.c" "board_audio_mosaico.c"
+                           "app_audio.c" "app_media_runtime.c" "app_audio_diagnostics.c" "board_display_transfer.c" "board_display_resources.c" "bt_audio.c" "board_audio_mosaico.c"
                            "board_recording_flash.c" "board_recording_nand.c" "app_spoken_letters.c"
                            "app_recording_store.c" "ble_hid_store.c" "app_command_bridge.c" "app_remote_input.c"
                            "app_media_controls.c" "app_control_runtime.c" "app_control_server.c" "app_control_trust.c" "app_clock.c" "app_firmware_update.c"
-                           "app_connectivity_controls.c" "board_imu_queue.c" "motion_capture.c"
+                           "app_connectivity_controls.c" "app_bluetooth_management.c" "board_imu_queue.c" "motion_capture.c"
+                           "board_sensor_journal.c" "sensor_wire.c" "app_sensor_api.c"
                            "app_remote_device.c" "app_device_restart.c"
                            "app_remote_media.c"
                        INCLUDE_DIRS "." "${CMAKE_CURRENT_BINARY_DIR}/generated"
@@ -20,6 +21,7 @@ get_filename_component(input_repository_root "${CMAKE_CURRENT_LIST_DIR}/../.." A
 add_custom_target(input_build_identity
     COMMAND "${PYTHON}" "${input_repository_root}/tools/build_identity.py"
             --root "${input_repository_root}"
+            --config "${SDKCONFIG}"
             --output "${CMAKE_CURRENT_BINARY_DIR}/generated/app_build_identity.h"
     BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/generated/app_build_identity.h"
     VERBATIM)

@@ -263,6 +263,77 @@ static bool capture_jobs(void)
     for (unsigned i = 0; i < AE_CONSUMERS_MAX; ++i) if (job_active(&controls.runtime.audio.capture[i])) return true;
     return false;
 }
+static bool route_ready(ae_route_t route, ae_role_t role)
+{
+    const ae_route_capabilities_t *caps = &controls.routes[route];
+    return caps->implemented && caps->available && caps->connected &&
+        (role == AE_MICROPHONE ? caps->capture : caps->playback);
+}
+static ae_route_t connection_route(app_media_connection_t connection)
+{
+    if (connection == APP_MEDIA_CONNECTION_USB) return AE_ROUTE_USB_UAC;
+    if (connection == APP_MEDIA_CONNECTION_BLUETOOTH) {
+        ae_route_t current = controls.runtime.audio.route;
+        if ((current == AE_ROUTE_HFP_HF || current == AE_ROUTE_A2DP_SINK) &&
+            (route_ready(current, AE_MICROPHONE) || route_ready(current, AE_SPEAKER))) return current;
+        if (route_ready(AE_ROUTE_HFP_HF, AE_MICROPHONE) || route_ready(AE_ROUTE_HFP_HF, AE_SPEAKER)) return AE_ROUTE_HFP_HF;
+        if (route_ready(AE_ROUTE_A2DP_SINK, AE_SPEAKER)) return AE_ROUTE_A2DP_SINK;
+        /* A supported profile can be selected for explicit link setup. It
+         * does not imply a negotiated connection or admit either live role. */
+        if (controls.routes[AE_ROUTE_HFP_HF].implemented) return AE_ROUTE_HFP_HF;
+        if (controls.routes[AE_ROUTE_A2DP_SINK].implemented) return AE_ROUTE_A2DP_SINK;
+    }
+    return AE_ROUTE_OFF;
+}
+static ae_route_t live_route(ae_role_t role)
+{
+    ae_route_t current = controls.runtime.audio.route;
+    if (current != AE_ROUTE_HFP_HF && current != AE_ROUTE_A2DP_SINK) return current;
+    if (role == AE_MICROPHONE) return AE_ROUTE_HFP_HF;
+    if (route_ready(current, role)) return current;
+    return route_ready(AE_ROUTE_A2DP_SINK, role) ? AE_ROUTE_A2DP_SINK : AE_ROUTE_HFP_HF;
+}
+static app_media_start_block_t live_start_block(ae_role_t role)
+{
+    if (!controls.initialized || !controls.runtime_known || !controls.runtime.initialized || !controls.runtime.audio_known)
+        return APP_MEDIA_START_UNKNOWN;
+    if (!controls.clock_known || controls.clock_failed) return APP_MEDIA_START_CLOCK_UNAVAILABLE;
+    if (controls.context.locked) return APP_MEDIA_START_LOCKED;
+    if (controls.context.screen_off) return APP_MEDIA_START_SCREEN_UNAVAILABLE;
+    if (controls.pending || controls.voice_link.active || controls.runtime.busy || controls.runtime.result_ready)
+        return APP_MEDIA_START_PENDING;
+    if (controls.runtime.audio.quarantined) return APP_MEDIA_START_QUARANTINED;
+    ae_route_t selected = live_route(role);
+    if (selected <= AE_ROUTE_LOCAL || selected >= AE_ROUTE_COUNT) return APP_MEDIA_START_CONNECTION_REQUIRED;
+    const ae_route_capabilities_t *next = &controls.routes[selected];
+    if (!next->implemented || next->reason == AE_NOT_SUPPORTED) return APP_MEDIA_START_UNSUPPORTED;
+    if (!next->available) return APP_MEDIA_START_ROUTE_UNAVAILABLE;
+    if (!next->connected) return APP_MEDIA_START_HOST_UNAVAILABLE;
+    if (!(role == AE_MICROPHONE ? next->capture : next->playback))
+        return selected == AE_ROUTE_USB_UAC ? APP_MEDIA_START_HOST_STREAM_REQUIRED : APP_MEDIA_START_UNSUPPORTED;
+    if (!controls.codec.implemented || !controls.codec.available)
+        return controls.codec.reason == AE_AGAIN ? APP_MEDIA_START_PENDING : APP_MEDIA_START_CODEC_UNAVAILABLE;
+    if (!format_supported(&next->format, role)) return APP_MEDIA_START_FORMAT_UNSUPPORTED;
+    if (!ae_route_token_valid(&next->token, false)) return APP_MEDIA_START_IDENTITY_UNAVAILABLE;
+    for (unsigned i = 0; i <= AE_CONSUMERS_MAX; ++i) {
+        const ae_job_snapshot_t *job = i == AE_CONSUMERS_MAX ? &controls.runtime.audio.playback : &controls.runtime.audio.capture[i];
+        if (job->cleanup_pending || job->state == AE_JOB_STOPPING || job->state == AE_JOB_FINALIZING)
+            return APP_MEDIA_START_CLEANUP;
+    }
+    /* The runtime may select an already negotiated Bluetooth profile before
+     * start. Never replace an active/prepared owner or connect another peer. */
+    if (selected != controls.runtime.audio.route) {
+        const ae_route_capabilities_t *current = &controls.routes[controls.runtime.audio.route];
+        if (any_jobs() || !controls.runtime.audio.hardware_off_confirmed) return APP_MEDIA_START_STOP_REQUIRED;
+        if (!current->connected) return APP_MEDIA_START_HOST_UNAVAILABLE;
+        if (ae_id_empty(&current->token.peer_id)) return APP_MEDIA_START_IDENTITY_UNAVAILABLE;
+        return ae_id_equal(&current->token.peer_id, &next->token.peer_id) ? APP_MEDIA_START_ALLOWED : APP_MEDIA_START_PEER_MISMATCH;
+    }
+    bool duplex = controls.routes[selected].full_duplex && controls.codec.full_duplex;
+    bool admitted = role == AE_MICROPHONE ? !capture_jobs() && (!job_active(&controls.runtime.audio.playback) || duplex) :
+        !job_active(&controls.runtime.audio.playback) && (!capture_jobs() || duplex);
+    return admitted ? APP_MEDIA_START_ALLOWED : APP_MEDIA_START_OCCUPIED;
+}
 static bool speech_context(void)
 {
     return controls.context.mode == INPUT_KEYBOARD && controls.context.keyboard_submode == APP_KEYBOARD_SPOKEN &&
@@ -449,10 +520,10 @@ static void rebuild(void)
         view->speaker.can_enable = editable && !any_jobs() && route && route->available && route->connected && route->playback;
         /* Live routes have an actual host sink/source. Local capture belongs
          * to separately bounded recording and recognition flows. */
-        bool live = editable && route && route->available && route->connected && audio->route != AE_ROUTE_LOCAL;
-        bool duplex = route && route->full_duplex && controls.codec.full_duplex;
-        view->microphone.can_start = live && route->capture && !capture_jobs() && (!job_active(&audio->playback) || duplex);
-        view->speaker.can_start = live && route->playback && !job_active(&audio->playback) && (!capture_jobs() || duplex);
+        view->microphone.start_block = live_start_block(AE_MICROPHONE);
+        view->speaker.start_block = live_start_block(AE_SPEAKER);
+        view->microphone.can_start = view->microphone.start_block == APP_MEDIA_START_ALLOWED;
+        view->speaker.can_start = view->speaker.start_block == APP_MEDIA_START_ALLOWED;
         view->volume_known = view->gain_known = true;
         view->volume_percent = audio->volume_percent; view->microphone_gain_db = audio->microphone_gain_db;
         view->safe_volume_max = controls.codec.safe_volume_max;
@@ -468,6 +539,20 @@ static void rebuild(void)
             .connected = route->connected, .can_select = idle_controls() && !any_jobs() && route->implemented &&
                 controls.runtime.audio.hardware_off_confirmed};
         snprintf(view->routes[i].reason, sizeof(view->routes[i].reason), "%.64s", result_text(route->reason));
+    }
+    if (view->known) {
+        if (audio->route == AE_ROUTE_USB_UAC) {
+            view->connection_known = true;
+            view->connection = APP_MEDIA_CONNECTION_USB;
+        } else if (audio->route == AE_ROUTE_HFP_HF || audio->route == AE_ROUTE_A2DP_SINK) {
+            view->connection_known = true;
+            view->connection = APP_MEDIA_CONNECTION_BLUETOOTH;
+        }
+        for (unsigned i = 0; i < APP_MEDIA_CONNECTION_COUNT; ++i) {
+            ae_route_t route = connection_route((app_media_connection_t)i);
+            view->can_select_connection[i] = route != AE_ROUTE_OFF && route != audio->route &&
+                view->routes[route].can_select && !audio->quarantined;
+        }
     }
     if (view->route == APP_MEDIA_ROUTE_HFP || view->route == APP_MEDIA_ROUTE_A2DP) {
         bool hfp = view->route == APP_MEDIA_ROUTE_HFP;
@@ -589,7 +674,7 @@ static ae_result_t submit_start(ae_job_kind_t kind, const ae_record_metadata_t *
 {
     const ae_format_t *format = selected_format();
     ae_route_t route = kind == AE_CAPTURE_RECORDING || kind == AE_CAPTURE_RECOGNITION || kind == AE_PLAYBACK_RECORDING ?
-        AE_ROUTE_LOCAL : controls.runtime.audio.route;
+        AE_ROUTE_LOCAL : live_route(kind == AE_CAPTURE_LIVE ? AE_MICROPHONE : AE_SPEAKER);
     if (kind == AE_CAPTURE_RECOGNITION) {
         static const ae_format_t speech_format = {16000, 1, 10, AE_PCM_S16_LE};
         format = &speech_format;
@@ -609,6 +694,7 @@ static ae_result_t submit_start(ae_job_kind_t kind, const ae_record_metadata_t *
         .duration_seconds = duration, .byte_limit = byte_limit, .retention_seconds = kind == AE_CAPTURE_RECORDING ? LOCAL_RETENTION_SECONDS : 0,
         .storage = kind == AE_CAPTURE_RECORDING ? AE_STORAGE_RECORDS_PARTITION : AE_STORAGE_NONE,
         .export_policy = AE_EXPORT_NONE};
+    if (route != AE_ROUTE_LOCAL) request.expected_route_token = controls.routes[route].token;
     if (record) request.recording_id = record->object_id;
     return submit_runtime(request);
 }
@@ -626,6 +712,7 @@ static bool allowed_panel(app_media_operation_t operation)
     if (operation >= APP_MEDIA_SPEECH_START && operation <= APP_MEDIA_SPEECH_CONFIRM) return speech_context();
     if (controls.context.mode != INPUT_AUDIO) return false;
     if (operation == APP_MEDIA_LIVE_START || operation == APP_MEDIA_LIVE_STOP) return panel == APP_OVERLAY_NONE;
+    if (operation == APP_MEDIA_SELECT_CONNECTION) return panel == APP_OVERLAY_NONE || panel == APP_OVERLAY_MEDIA_OPTIONS;
     if (operation == APP_MEDIA_SELECT_PEER) return panel == APP_OVERLAY_MEDIA_OPTIONS;
     if (operation <= APP_MEDIA_SET_GAIN) return panel == APP_OVERLAY_MEDIA_OPTIONS || panel == APP_OVERLAY_NONE;
     switch (operation) {
@@ -737,6 +824,13 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
     if (!valid_identity(request) || !allowed_panel(request->operation)) { effect_result(effect, AE_STALE); return true; }
     ae_result_t result = AE_DENIED;
     switch (request->operation) {
+    case APP_MEDIA_SELECT_CONNECTION:
+        if ((unsigned)request->value.connection < APP_MEDIA_CONNECTION_COUNT &&
+            controls.view.can_select_connection[request->value.connection]) {
+            ae_route_t route = connection_route(request->value.connection);
+            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_ROUTE, .route = route});
+        }
+        break;
     case APP_MEDIA_SELECT_PEER:
         if (controls.view.can_select_peer && same_ui_id(request->value.peer_id, controls.view.next_peer_id)) {
             memcpy(controls.selected_peer, request->value.peer_id.bytes + 10, 6);

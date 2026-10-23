@@ -13,6 +13,7 @@
 #define HID_ENGINE_TEXT_MAX_LENGTH 32U
 #define HID_ENGINE_MAX_SEND_FAILURES 3U
 #define HID_ENGINE_CONGESTION_TIMEOUT_MS 250U
+#define HID_ENGINE_MOUSE_DISPLACEMENT_MAX 4096
 #define HID_ENGINE_MOUSE_BUTTON_MASK 0x07U
 #define HID_ENGINE_KEY_USAGE_MAX 0x65U
 
@@ -43,7 +44,7 @@ typedef enum {
 } hid_engine_step_result_t;
 
 /* Internal queue storage is public only to allow static allocation. One action
- * is a movement/scroll/drag-state report or a tap AND its mandatory release. */
+ * is movement (possibly split), scroll/drag state, or a tap plus its release. */
 typedef struct {
     uint64_t epoch;
     input_owner_t owner;
@@ -55,6 +56,9 @@ typedef struct {
     bool release_next;
     bool text_character;
     bool sets_mouse_buttons;
+    bool buffered_motion;
+    int16_t remaining_x, remaining_y;
+    uint64_t motion_since_ms;
 } hid_engine_action_t;
 
 /* One coordinator owns ALL mutations; adapters may only read state/ready.
@@ -69,6 +73,8 @@ typedef struct {
     bool time_observed;
     uint64_t observed_ms;
     uint64_t congestion_since_ms;
+    uint64_t motion_since_ms;
+    size_t buffered_motion_count;
     hid_engine_action_t queue[HID_ENGINE_QUEUE_CAPACITY];
     size_t head;
     size_t count;
@@ -90,8 +96,8 @@ void hid_engine_init(hid_engine_t *engine);
 void hid_engine_set_link(hid_engine_t *engine, bool connected, bool ready);
 /* Call once each coordinator tick BEFORE action admission and step, with
  * monotonic milliseconds and the current transport backpressure snapshot.
- * Congestion blocks action admission except an explicit drag release (0),
- * which can use its reserved slot. All report submissions stay blocked without
+ * Congestion blocks ordinary action admission except explicit drag release (0)
+ * and bounded local touch displacement. All report submissions stay blocked without
  * spending send retries. An episode >=250 ms cancels once, advances the epoch and
  * preserves the zero-release barrier until congestion clears. Short episodes
  * preserve queued actions, including mandatory key/button releases.
@@ -100,7 +106,9 @@ void hid_engine_set_link(hid_engine_t *engine, bool connected, bool ready);
  * The first uncongested observation checks expiry BEFORE resetting the episode
  * timer/latch, so resuming after the deadline cannot replay stale work. Returns true
  * exactly when this observation invalidated work and requested fresh releases.
- * Link/mode/lock changes do not reset an ongoing congestion episode. */
+ * Retained touch displacement also expires at 250 ms from its oldest source
+ * sample, including across ready intervals. Link/mode/lock changes do not reset
+ * an ongoing congestion episode. */
 bool hid_engine_observe_transport(hid_engine_t *engine, uint64_t now_ms,
                                   bool congested);
 bool hid_engine_set_mode(hid_engine_t *engine, input_mode_t mode);
@@ -121,6 +129,15 @@ void hid_engine_cancel(hid_engine_t *engine);
  * with a nonzero modifier. Usages 1..3 are HID error codes, not keys. */
 hid_engine_enqueue_result_t hid_engine_enqueue_mouse_move(hid_engine_t *engine,
     uint64_t epoch, input_owner_t owner, int x, int y);
+/* Wide touch displacement, split into the unchanged signed 8-bit wire axes.
+ * Local samples may be retained during transient congestion; remote callers
+ * still receive BLOCKED so their command receipt can request a retry.
+ * Only adjacent local touch actions coalesce; buttons/clicks/scroll are barriers.
+ * Each axis is bounded by MOUSE_DISPLACEMENT_MAX, with atomic FULL on overflow.
+ * observe_transport expires all retained motion at the existing 250 ms limit,
+ * even across ready intervals. Callers must observe before servicing the queue. */
+hid_engine_enqueue_result_t hid_engine_enqueue_mouse_displacement(hid_engine_t *engine,
+    uint64_t epoch, input_owner_t owner, int x, int y, uint64_t sample_ms, uint64_t now_ms);
 hid_engine_enqueue_result_t hid_engine_enqueue_mouse_click(hid_engine_t *engine,
     uint64_t epoch, input_owner_t owner, unsigned int buttons);
 /* Explicit left-button drag state: buttons is 1 (hold) or 0 (release).

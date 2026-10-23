@@ -2,6 +2,8 @@
 #include "app_control_runtime.h"
 #include "control_json.h"
 #include "usb_hid.h"
+#include "app_sensor_api.h"
+#include "control_sensor_usb.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +46,9 @@ typedef struct {
     char clock_names[2][129];
     uint64_t clock_trust_revision;
     uint64_t update_trust_revision;
+    cp_sensor_usb_t sensor_usb;
+    unsigned usb_input_mode;
+    bool usb_discard_line;
 } runtime_t;
 static runtime_t *runtime;
 static portMUX_TYPE runtime_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -131,7 +136,8 @@ static bool available(void *unused, cp_operation_id_t op, char reason[CP_REASON_
     }
     if (op == CP_OP_CAPTURE_GRANTS_LIST || op == CP_OP_CLOCK_GET || op == CP_OP_SESSION_HEARTBEAT ||
         op == CP_OP_WIFI_PROFILES_LIST || op == CP_OP_WIFI_SCAN_RESULTS ||
-        op == CP_OP_FIRMWARE_STATE || op == CP_OP_FIRMWARE_RELEASES) {
+        op == CP_OP_FIRMWARE_STATE || op == CP_OP_FIRMWARE_RELEASES ||
+        op == CP_OP_SENSORS_CATALOG || op == CP_OP_SENSORS_LATEST || op == CP_OP_SENSORS_SAMPLES) {
         return true;
     }
     return runtime->host.available && runtime->host.available(runtime->host.user, op, reason);
@@ -214,6 +220,12 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
 {
     (void)unused;
     int n = -1;
+    cp_sensor_resource_t sensor = cp_sensor_resource(resource);
+    if (sensor != CP_SENSOR_RESOURCE_NONE) {
+        if (!(who->scopes & CP_SCOPE_DIAGNOSTICS_READ)) return CP_FORBIDDEN;
+        if (sensor == CP_SENSOR_RESOURCE_INVALID) return CP_INVALID;
+        return app_sensor_api_read(resource, json, capacity, length);
+    }
     if (!strcmp(resource, "/api/v1/firmware/policy")) {
         app_update_policy_t p;
         if (!app_control_trust_update_policy(who->principal_id, &p)) {
@@ -932,15 +944,62 @@ static void usb_line(void)
     }
     usb_reply("CP1 ERROR invalid_command\n");
 }
+static bool usb_local_unlocked(void)
+{
+    portENTER_CRITICAL(&runtime_lock);
+    bool unlocked = runtime->state_known && !runtime->state.locked;
+    portEXIT_CRITICAL(&runtime_lock);
+    return unlocked;
+}
+static bool sensor_usb_allowed(void *unused)
+{
+    (void)unused;
+    app_control_trust_snapshot_t trust_view;
+    app_control_trust_snapshot(&trust_view);
+    return runtime->usb_attached && usb_hid_snapshot().mounted && usb_local_unlocked() &&
+           !trust_view.import_window && !runtime->importing;
+}
+static cp_error_t sensor_usb_read(void *unused, const char *resource, char *json, size_t capacity, size_t *length)
+{
+    (void)unused;
+    return app_sensor_api_read(resource, json, capacity, length);
+}
+static cp_error_t sensor_usb_batch(void *unused, const char boot[33], uint64_t after, unsigned limit,
+                                  uint64_t id, uint8_t *raw, size_t capacity, size_t *length)
+{
+    (void)unused;
+    return app_sensor_api_read_batch(boot, after, limit, id, raw, capacity, length);
+}
+static size_t sensor_usb_write(void *unused, const char *bytes, size_t length)
+{
+    (void)unused;
+    ssize_t written = write(STDOUT_FILENO, bytes, length);
+    return written > 0 ? (size_t)written : 0;
+}
 static void poll_usb(bool open)
 {
     usb_hid_snapshot_t bus = usb_hid_snapshot();
-    if (!runtime->usb_attached || !open || !bus.mounted) {
+    app_control_trust_snapshot_t trust_view;
+    app_control_trust_snapshot(&trust_view);
+    bool connected = runtime->usb_attached && bus.mounted && usb_local_unlocked();
+    unsigned mode = !connected ? 0U : trust_view.import_window ? (open ? 1U : 0U) : 2U;
+    if (mode != runtime->usb_input_mode) {
+        if (runtime->line_length) runtime->usb_discard_line = true;
+        runtime->usb_input_mode = mode;
+        runtime->line_length = 0;
+        wipe(runtime->line, sizeof(runtime->line));
+    }
+    if (mode != 1U) abort_import();
+    if (mode != 2U) cp_sensor_usb_cancel(&runtime->sensor_usb);
+    if (!runtime->usb_attached || !bus.mounted) {
         abort_import();
         runtime->line_length = 0;
+        runtime->usb_discard_line = false;
         wipe(runtime->line, sizeof(runtime->line));
         return;
     }
+    cp_sensor_usb_port_t sensor = {.allowed = sensor_usb_allowed, .read = sensor_usb_read,
+        .batch = sensor_usb_batch, .write = sensor_usb_write};
     char bytes[128];
     ssize_t n = read(STDIN_FILENO, bytes, sizeof(bytes));
     for (ssize_t i = 0; i < n; ++i) {
@@ -950,18 +1009,28 @@ static void poll_usb(bool open)
         }
         if (c == '\n') {
             runtime->line[runtime->line_length] = 0;
-            usb_line();
+            if (!runtime->usb_discard_line) {
+                if (mode == 1U) {
+                    app_control_trust_snapshot(&trust_view);
+                    if (trust_view.import_window && usb_local_unlocked() && !strncmp(runtime->line, "CP1 ", 4)) usb_line();
+                } else if (mode == 2U) {
+                    (void)cp_sensor_usb_receive(&runtime->sensor_usb, runtime->line, now_ms(), &sensor);
+                }
+            }
             wipe(runtime->line, sizeof(runtime->line));
             runtime->line_length = 0;
-        } else if (runtime->line_length + 1 < sizeof(runtime->line) && c >= 32 && c <= 126) {
+            runtime->usb_discard_line = false;
+        } else if (!runtime->usb_discard_line && runtime->line_length + 1 < sizeof(runtime->line) && c >= 32 && c <= 126) {
             runtime->line[runtime->line_length++] = c;
         } else {
             abort_import();
             runtime->line_length = 0;
             wipe(runtime->line, sizeof(runtime->line));
+            runtime->usb_discard_line = true;
         }
     }
     wipe(bytes, sizeof(bytes));
+    cp_sensor_usb_service(&runtime->sensor_usb, now_ms(), &sensor);
 }
 static void worker(void *unused)
 {

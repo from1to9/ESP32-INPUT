@@ -12,6 +12,15 @@ transport binding forwarding. Remote cancellation is serialized through the
 same audio result owner and retains the original consumer identity during
 recording finalization; an irreversible commit is not reported as cancelled.
 
+Local external-route starts retain the full peer/stream/link-generation token
+observed at physical admission. The runtime checks it at submission, first
+execution and again before creating a grant after asynchronous route selection.
+It never authorizes a newly observed replacement token. Actual runtime tests
+cover USB, HFP and speaker-only A2DP: missing identity, replaced peer or stream,
+same-peer reconnect/reset, changes before the first step and between route ACK
+and START, unchanged-token success, and privacy/stop barriers. Local recording,
+recognition and authenticated remote binding use their existing contracts.
+
 Download tests exercise asynchronous metadata/read/metadata sequencing,
 principal and object authority, revision changes, expiry, clock rollback and
 session revocation immediately before publication. Denied content is cleared.

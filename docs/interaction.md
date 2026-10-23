@@ -16,6 +16,8 @@ The fixed header **Recenter** button requests a fresh grip reference through `AP
 
 Input settings provides **Tap to click**, default on. The input recognizer owns single tap, double tap and double-tap-and-hold drag; the UI forwards real touch boundaries, displacement and bounded stationary-contact freshness. With the setting off, the pad moves only; explicit mouse buttons and scroll still work. The pad hint and Status report the actual selected provider, readiness, calibration and sensor conditions. Selecting USB does not by itself establish that the sensor is calibrated or that USB input is ready.
 
+Preserve relative touch displacement and precision fractions across ordinary USB/BLE backpressure. Split large movement into the existing signed 8-bit reports, and merge only adjacent local movement without crossing click, scroll or button transitions. A contact beginning while busy may move once output resumes, but cannot grant a delayed tap or drag. Retained movement uses the existing 32-slot queue, a 4096-unit per-axis action bound and a 250 ms deadline from the oldest source sample; overflow or expiry cancels the pending epoch and prioritizes neutral releases. Cancellation, lock, mode/owner changes and target replacement discard residual movement. Remote touch uses the same displacement conversion and splitting, with explicit busy/capacity rejection before consuming a retryable request; lease revocation takes priority over retained movement.
+
 ### Keyboard
 
 One compact chooser opens **Motion**, **Touch**, **Spoken letters** and **Shortcuts**; four persistent submode tabs are unnecessary. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. The nine-cell layout is an explicit user revision of the original six-cell prototype. Motion moves local focus only; empty cells never receive focus or confirm input.
@@ -28,7 +30,15 @@ Spoken letters and arbitrary dictation are distinct features. The browser protot
 
 ### Microphone / speaker
 
-Offer **Voice / meeting** and **Speaker**, a prominent mute control and volume. Speaker mode never uploads microphone audio. Independent audio mode produces no motion or character output. Background audio becomes available in mouse/keyboard mode only after its concurrency capability is qualified.
+Offer **Mic** and **Speaker** together, with independent start/stop and observed
+state, a prominent microphone mute control and speaker volume. USB/Bluetooth is
+the connection choice, not another functional mode. Keep Routes/Roles/Voice and
+recording configuration out of the primary workspace. Bluetooth profile choice
+belongs to the audio owner and must reflect actual capabilities; HID connection
+does not prove an audio link. Speaker activation never enables the microphone.
+Independent audio mode produces no motion or character output. Background audio
+becomes available in mouse/keyboard mode only after its concurrency capability is
+qualified. This primary-workspace revision was explicitly requested on 2026-10-23.
 
 ## Physical controls
 

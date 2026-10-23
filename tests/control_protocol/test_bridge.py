@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
@@ -18,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bridge"))
 from commission import create_package, send_package
 from control_bridge import CATALOG_DIGEST, DeviceSession, TypedValidator, TOOLS, FORMAT
-from secure_transport import BridgeError, PinnedHTTPS
+from secure_transport import BridgeError, PinnedHTTPS, sensor_samples_path
 from sign_release import sign_release
 
 class FakeKeychain:
@@ -27,7 +28,7 @@ class FakeKeychain:
     def get(self, service, account): return self.values[service, account]
 
 class FakeHTTP:
-    def __init__(self): self.commands = []; self.fail_once = False
+    def __init__(self): self.commands = []; self.fail_once = False; self.sensor_reads = []
     def request(self, method, path, body=None, token=None):
         if path == "/api/v1/sessions":
             return dict(http_status=200, session_token="3"*64, session_id="4"*32,
@@ -36,6 +37,10 @@ class FakeHTTP:
         if path == "/api/v1/sessions/current": return dict(http_status=200, authenticated=True, state="completed")
         if path == "/api/v1/state":
             return dict(http_status=200, protocol={"boot_id": "6"*32, "now_ms": "1000", "lease_active": True, "lease_id": "7"*32})
+        if path.startswith("/api/v1/sensors/"):
+            assert method == "GET" and token == "3"*64 and body is None
+            self.sensor_reads.append(path)
+            return dict(http_status=200, schema=1)
         if path == "/api/v1/commands":
             self.commands.append(json.loads(json.dumps(body)))
             if self.fail_once:
@@ -66,6 +71,63 @@ class FakeSerial:
     def readline(self, limit): return self.responses.pop(0)
 
 class CompanionTests(unittest.TestCase):
+    def test_sensor_typed_reads_and_canonical_query(self):
+        keychain = FakeKeychain(); keychain.values["test", "1"*32] = "2"*64
+        http = FakeHTTP(); profile = dict(keychain_service="test", keychain_account="1"*32, principal_id="1"*32)
+        session = DeviceSession(profile, http, keychain)
+        for name in ("sensors_catalog", "sensors_latest"):
+            self.assertTrue(next(t for t in TOOLS if t["name"] == name)["annotations"]["readOnlyHint"])
+            session.invoke(name, {"context": {}, "args": {}})
+        arguments = {"context": {}, "args": {"boot": "a"*32, "after": "18446744073709551615"}}
+        session.invoke("sensors_samples", arguments)
+        self.assertEqual(http.sensor_reads[-1], "/api/v1/sensors/samples?boot="+"a"*32+"&after=18446744073709551615&limit=8")
+        self.assertTrue(sensor_samples_path(http.sensor_reads[-1])); self.assertEqual(http.commands, [])
+        for cursor in ("00", "18446744073709551616", "-1", "1&limit=1"):
+            with self.assertRaises(BridgeError):
+                session.invoke("sensors_samples", {"context": {}, "args": {"boot": "a"*32, "after": cursor}})
+        self.assertEqual(len(http.sensor_reads), 3)
+        for suffix in ("&x=1", "&limit=1", "/"):
+            self.assertFalse(sensor_samples_path(http.sensor_reads[-1] + suffix))
+
+    def test_sensor_raw_evidence_uses_existing_verified_tls_boundary(self):
+        transport = PinnedHTTPS.__new__(PinnedHTTPS)
+        transport.host, transport.port, transport.context = "device.test", 443, object()
+        transport.digest = hashlib.sha256(b"synthetic-leaf").hexdigest()
+        class Response:
+            status = 403
+            raw = b'{"error":"forbidden_scope","http_status":200}'
+            headers = {"Content-Type": "application/json", "Content-Length": str(len(raw))}
+            def getheader(self, name, default=None): return self.headers.get(name, default)
+            def read(self, maximum): self.maximum = maximum; return self.raw
+        class Socket:
+            def getpeercert(self, binary_form=False): assert binary_form; return b"synthetic-leaf"
+        class Connection:
+            def __init__(self): self.sock = Socket(); self.response = Response(); self.closed = False; self.calls = []
+            def connect(self): pass
+            def request(self, *args): self.calls.append(args)
+            def getresponse(self): return self.response
+            def close(self): self.closed = True
+        connection = Connection()
+        with patch("secure_transport.http.client.HTTPSConnection", return_value=connection):
+            status, raw = transport.sensor_get_raw("/api/v1/sensors/catalog", "1"*64)
+            self.assertEqual((status, raw), (403, Response.raw)); self.assertTrue(connection.closed)
+            self.assertEqual(connection.response.maximum, 4097)
+            self.assertEqual(transport.request("GET", "/api/v1/sensors/catalog", token="1"*64)["http_status"], 403)
+            connection.response.headers = {"Content-Type": "application/json", "Content-Length": "4096"}
+            with self.assertRaisesRegex(BridgeError, "Incomplete"):
+                transport.sensor_get_raw("/api/v1/sensors/latest", "1"*64)
+            connection.response.headers = {"Content-Type": "application/json", "Content-Encoding": "gzip"}
+            with self.assertRaises(BridgeError): transport.sensor_get_raw("/api/v1/sensors/latest", "1"*64)
+            connection.response.headers = {"Content-Type": "application/json"}; connection.response.status = 302
+            with self.assertRaisesRegex(BridgeError, "redirect"): transport.sensor_get_raw("/api/v1/sensors/latest", "1"*64)
+            connection.response.status = 200; connection.response.raw = b"x"*4097
+            with self.assertRaisesRegex(BridgeError, "exceeds"): transport.sensor_get_raw("/api/v1/sensors/latest", "1"*64)
+            before = len(connection.calls); transport.digest = "0"*64
+            with self.assertRaisesRegex(BridgeError, "pin mismatch"): transport.sensor_get_raw("/api/v1/sensors/catalog", "1"*64)
+            self.assertEqual(len(connection.calls), before)
+        with self.assertRaises(BridgeError): transport.sensor_get_raw("/api/v1/trust", "1"*64)
+        with self.assertRaises(BridgeError): transport.sensor_get_raw("/api/v1/sensors/catalog", "")
+
     def test_motion_recenter_uses_observed_input_lease_and_exact_retry(self):
         tool = next(tool for tool in TOOLS if tool["name"] == "input_motion_recenter")
         self.assertEqual(tool["x-device-operation"], "input.motion.recenter")

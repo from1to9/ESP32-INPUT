@@ -12,7 +12,7 @@
 #define IDLE_MS 10000
 #define FRAME_BYTES (WIDTH * HEIGHT * 2U)
 /* design/ui-plan.md: fixed input pages preserve gestures; one panel is dynamic. */
-#define CORE_OBJECT_LIMIT 106 /* Persistent Keys button and caption added to the 104-object core. */
+#define CORE_OBJECT_LIMIT 112 /* Two independent Audio cards add six objects to the approved 106-object core. */
 #define PANEL_OBJECT_LIMIT 160
 
 typedef struct {
@@ -61,6 +61,8 @@ static const panel_case_t s_panels[] = {
     {INPUT_MOUSE, APP_OVERLAY_API_REVIEW, 0, 0},
     {INPUT_MOUSE, APP_OVERLAY_WIFI_PROFILES, 0, 0},
     {INPUT_MOUSE, APP_OVERLAY_BLUETOOTH_TARGET, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_BLUETOOTH_PAIRING, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_BLUETOOTH_FORGET_ONE},
     {INPUT_MOUSE, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_REMOTE},
 };
 
@@ -210,6 +212,13 @@ static bool idle_case(app_view_t state, bool hidden_changes, bool covered_target
             strcpy(state.bluetooth_hosts[0].name, elapsed % 200 ? "Hidden peer A" : "Hidden peer B");
             strcpy(state.wifi_scan.rows[0].label, elapsed % 200 ? "Hidden Wi-Fi A" : "Hidden Wi-Fi B");
             strcpy(state.bluetooth_name.effective, elapsed % 200 ? "Hidden name A" : "Hidden name B");
+            strcpy(state.media.recording_options.reason, elapsed % 200 ? "Hidden recording A" : "Hidden recording B");
+            state.media.recordings.generation += 1;
+            if (state.mode != INPUT_AUDIO) {
+                state.media.connection = elapsed % 200 ? APP_MEDIA_CONNECTION_USB : APP_MEDIA_CONNECTION_BLUETOOTH;
+                state.media.volume_percent = elapsed % 200 ? 20 : 40;
+                strcpy(state.media.reason, elapsed % 200 ? "Hidden audio A" : "Hidden audio B");
+            }
         }
         if (covered_target)
             state.target_name = elapsed % 200 ? "Covered target A" : "Covered target B";
@@ -316,6 +325,33 @@ int main(int argc, char **argv)
             for (unsigned hidden = 0; hidden < 2; ++hidden)
                 if (!idle_case(view((input_mode_t)mode, dark != 0), hidden != 0, false)) passed = false;
     for (unsigned dark = 0; dark < 2; ++dark) {
+        for (unsigned scenario = 0; scenario < 9; ++scenario) {
+            app_view_t audio = view(INPUT_AUDIO, dark != 0);
+            ui_fixture_media(&audio);
+            if (scenario >= 1 && scenario <= 4) {
+                app_media_job_view_t job = {.known = true, .id = {{31}}, .consumer_generation = 47,
+                    .state = scenario == 4 ? APP_MEDIA_JOB_STOPPING : APP_MEDIA_JOB_RUNNING, .can_stop = scenario != 4};
+                if (scenario != 2) audio.media.live_capture = job;
+                if (scenario >= 2) { audio.media.playback = job; audio.media.playback.id.bytes[0] = 33; }
+                audio.media.microphone.can_start = audio.media.speaker.can_start = false;
+                audio.media.state = scenario == 4 ? APP_MEDIA_STOPPING : APP_MEDIA_RUNNING;
+                audio.capture_indicator_required = scenario != 2;
+                audio.capture_indicator_generation = 59;
+                audio.capture_state = scenario == 4 ? APP_CAPTURE_STOPPING : APP_CAPTURE_ACTIVE;
+            }
+            if (scenario == 5) {
+                audio.media.playback.known = true; audio.media.playback.state = APP_MEDIA_JOB_ERROR;
+                audio.media.speaker.can_start = false;
+                strcpy(audio.media.playback.reason, "USB host stopped sending audio.");
+            }
+            if (scenario >= 6) {
+                audio.media.command_pending = scenario == 6;
+                audio.media.microphone.can_start = audio.media.speaker.can_start = false;
+                audio.media.microphone.start_block = audio.media.speaker.start_block = scenario == 6 ?
+                    APP_MEDIA_START_PENDING : scenario == 7 ? APP_MEDIA_START_HOST_STREAM_REQUIRED : APP_MEDIA_START_UNSUPPORTED;
+            }
+            if (!idle_case(audio, true, false)) passed = false;
+        }
         const app_git_state_t git_states[] = {APP_GIT_DIRTY, APP_GIT_UNKNOWN, (app_git_state_t)99};
         for (unsigned i = 0; i < sizeof(git_states) / sizeof(git_states[0]); ++i) {
             panel_case_t about = {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_ABOUT, APP_CONFIRM_NONE};

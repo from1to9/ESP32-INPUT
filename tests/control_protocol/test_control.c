@@ -18,6 +18,8 @@ static uint64_t clock_ms;
 static char credential[65], client_id[33], session_id[33], token[65], prefix[17], boot[33],
     csrf[33];
 static unsigned seq;
+static cp_scope_mask_t enrolled_scopes;
+static unsigned resource_reads;
 static bool is_available = true, redaction_failure;
 static unsigned dispatch_override;
 static bool random_source(void *u, uint8_t *out, size_t length)
@@ -69,6 +71,7 @@ static cp_error_t read_resource(void *u, const cp_identity_t *who, const char *r
     (void)u;
     (void)who;
     (void)resource;
+    ++resource_reads;
     int n = snprintf(out, capacity,
                      redaction_failure ? "{\"password\":\"synthetic\"}"
                                        : "{\"wifi_backend\":\"available\",\"measurement\":null}");
@@ -112,6 +115,8 @@ static void reset(cp_scope_mask_t scopes, bool browser)
     redaction_failure = false;
     clock_ms = 100;
     seq = 0;
+    enrolled_scopes = scopes;
+    resource_reads = 0;
     cp_callbacks_t callbacks = {.random = random_source,
                                 .available = available,
                                 .dispatch = dispatch,
@@ -158,7 +163,8 @@ static void login_native(void)
     field(response.body, "request_prefix", prefix, sizeof(prefix));
     field(response.body, "boot_id", boot, sizeof(boot));
     field(response.body, "csrf", csrf, sizeof(csrf));
-    assert(request("GET", "/api/v1/state", NULL) == CP_OK);
+    assert(request("GET", "/api/v1/state", NULL) ==
+        ((enrolled_scopes & CP_SCOPE_VIEW) ? CP_OK : CP_FORBIDDEN));
 }
 static char envelope[CP_MAX_FRAME_BYTES + 1];
 static const char *command(const char *op, const char *args, bool input, bool lease,
@@ -748,8 +754,36 @@ static void test_context_storage_contract(void)
     free(before);
     free(raw);
 }
+static void test_authenticated_sensor_reads(void)
+{
+    const char *sample = "/api/v1/sensors/samples?boot=0123456789abcdef0123456789abcdef&after=18446744073709551615&limit=8";
+    reset(CP_SCOPE_DIAGNOSTICS_READ, false);
+    assert(request("GET", "/api/v1/sensors/catalog", NULL) == CP_UNAUTHENTICATED && !resource_reads);
+    login_native();
+    assert(request("GET", "/api/v1/capabilities", NULL) == CP_OK && !resource_reads);
+    assert(request("GET", "/api/v1/sensors/catalog", NULL) == CP_OK);
+    assert(request("GET", "/api/v1/sensors/latest", NULL) == CP_OK);
+    assert(request("GET", sample, NULL) == CP_OK && resource_reads == 3 && !dispatches);
+    unsigned before = resource_reads;
+    const char *bad[] = {"/api/v1/sensors/latest?cursor=0", "/api/v1/sensors/catalog/", "/api/v1/sensors/samples",
+        "/api/v1/sensors/samples?boot=0123456789abcdef0123456789abcdef&after=01&limit=8",
+        "/api/v1/sensors/samples?boot=0123456789abcdef0123456789abcdef&after=18446744073709551616&limit=8",
+        "/api/v1/sensors/samples?boot=0123456789abcdef0123456789abcdef&after=0&limit=8&limit=1"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i)
+        assert(request("GET", bad[i], NULL) == CP_INVALID && resource_reads == before);
+    assert(request("POST", "/api/v1/sensors/catalog", "{}") == CP_NOT_IMPLEMENTED && !dispatches);
+    assert(send("sensors.catalog", "{}", false, false) == CP_NOT_IMPLEMENTED && !dispatches);
+    redaction_failure = true;
+    assert(request("GET", "/api/v1/sensors/catalog", NULL) == CP_INTERNAL);
+    reset(CP_SCOPE_VIEW, false); login_native(); before = resource_reads;
+    assert(request("GET", sample, NULL) == CP_FORBIDDEN && resource_reads == before);
+    reset(CP_SCOPE_ALL, false); login_native();
+    cp_http_security_t no_tls = native_security(); no_tls.tls = false;
+    assert(cp_http(context, "GET", sample, &no_tls, NULL, 0, clock_ms, &response) != CP_OK);
+}
 int main(void)
 {
+    test_authenticated_sensor_reads();
     test_context_storage_contract();
     test_explicit_motion_recenter_schema_lease_and_replay();
     test_json_sha();

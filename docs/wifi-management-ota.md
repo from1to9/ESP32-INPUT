@@ -18,6 +18,32 @@ One network manager owns the Wi-Fi driver, station/AP interfaces, scans, profile
 
 Implemented build ceilings: **8 saved profiles, 32 scan records, one scan/join radio job, one firmware job, two authenticated LAN clients, 64 retained protocol results and eight retained Wi-Fi profile operation results**. Practical requested limits and scheduling preferences use shared configuration metadata within these ceilings; no duplicate hardcoded UI/API/MCP choices. Capacities and timing below require qualification. Profiles, scans and fallback setup share the same station worker; no second network stack owns credentials or radio jobs.
 
+### Development update and diagnostic workflow
+
+The requested development workflow prefers LAN OTA and diagnostic retrieval after
+commissioning, with USB retained for startup/network recovery. Joining a saved
+network does not activate or authorize management services. First enrollment uses
+the running device's CDC interface and local review as described in the
+[companion instructions](../bridge/README.md#local-enrollment); it does not require
+ROM download mode. Preserve existing network profiles, bonds and preferences.
+
+As of the 2026-10-23 capture image, signed OTA, authenticated status and their
+host-tested workers exist in source, but physical commissioning/update/rollback
+are not qualified. The API catalog's diagnostic operations are not an implemented
+raw-log download provider. The [ordered IMU capture](motion-capture.md) currently
+exports over USB only. Neither catalog presence nor a LAN address establishes
+remote debugging availability.
+
+The next diagnostic provider must retain a bounded completed capture while a
+separate network owner transfers it. Bind downloads to an authenticated principal,
+an immutable capture/image/configuration identity and explicit sequence/loss
+metadata. Report capacity exhaustion and interrupted transfer without claiming a
+complete movement segment; do not erase or replace retained data merely because
+a socket write was accepted. No network work runs in sensor callbacks or the
+input coordinator, and diagnostic permission must not imply HID or microphone
+permission. Qualify timing, memory, cancellation, concurrent input and recovery
+on the actual device before making this the normal update/debug path.
+
 ## 2. Pinned SDK feasibility
 
 Inspected clean ESP-IDF checkout `383dda6c182e3dabf6355160166fe007df775629` (6.2.0, S31). Executable dependencies remain pinned; these links point to that source revision.

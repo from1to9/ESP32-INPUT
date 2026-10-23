@@ -4584,6 +4584,66 @@
                         "additionalProperties": false
                       }
                     }
+                  },
+                  {
+                    "properties": {
+                      "op": {
+                        "const": "sensors.catalog"
+                      },
+                      "args": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "op": {
+                        "const": "sensors.latest"
+                      },
+                      "args": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "op": {
+                        "const": "sensors.samples"
+                      },
+                      "args": {
+                        "type": "object",
+                        "properties": {
+                          "boot": {
+                            "type": "string",
+                            "minLength": 32,
+                            "maxLength": 32,
+                            "format": "id128"
+                          },
+                          "after": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 20,
+                            "format": "uint64"
+                          },
+                          "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 8
+                          }
+                        },
+                        "required": [
+                          "boot",
+                          "after"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
                   }
                 ]
               }
@@ -5042,6 +5102,121 @@
             "description": "Provider unavailable"
           }
         }
+      }
+    },
+    "/api/v1/sensors/catalog": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Bounded sensor observation; acceptance does not prove delivery"
+          },
+          "400": {
+            "description": "Invalid canonical query"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "diagnostics.read scope required"
+          },
+          "409": {
+            "description": "Wrong boot or future cursor"
+          },
+          "503": {
+            "description": "Observation unavailable"
+          }
+        },
+        "x-required-scopes": [
+          "diagnostics.read"
+        ]
+      }
+    },
+    "/api/v1/sensors/latest": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Bounded sensor observation; acceptance does not prove delivery"
+          },
+          "400": {
+            "description": "Invalid canonical query"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "diagnostics.read scope required"
+          },
+          "409": {
+            "description": "Wrong boot or future cursor"
+          },
+          "503": {
+            "description": "Observation unavailable"
+          }
+        },
+        "x-required-scopes": [
+          "diagnostics.read"
+        ]
+      }
+    },
+    "/api/v1/sensors/samples": {
+      "get": {
+        "responses": {
+          "200": {
+            "description": "Bounded sensor observation; acceptance does not prove delivery"
+          },
+          "400": {
+            "description": "Invalid canonical query"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "diagnostics.read scope required"
+          },
+          "409": {
+            "description": "Wrong boot or future cursor"
+          },
+          "503": {
+            "description": "Observation unavailable"
+          }
+        },
+        "x-required-scopes": [
+          "diagnostics.read"
+        ],
+        "parameters": [
+          {
+            "name": "boot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 32,
+              "maxLength": 32,
+              "format": "id128"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20,
+              "format": "uint64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8
+            }
+          }
+        ]
       }
     },
     "/api/v1/ws-ticket": {

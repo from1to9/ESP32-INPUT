@@ -1163,111 +1163,122 @@ static const cs_property_t schema_535_properties[] = {
 static const cs_node_t schema_535 = {.type = CJ_OBJECT, .properties = schema_535_properties, .property_count = 1};
 static const cs_node_t schema_537 = {.type = CJ_OBJECT};
 static const cs_node_t schema_538 = {.type = CJ_OBJECT};
-static const cs_node_t schema_539 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "light|dark"};
-static const cs_node_t schema_540 = {.type = CJ_INTEGER, .minimum = 10, .maximum = 100, .multiple = 10, .multiple_decimal = "10"};
-static const cs_node_t schema_541 = {.type = CJ_INTEGER, .minimum = -DBL_MAX, .maximum = DBL_MAX, .enumeration = "0|60|300|600|1800"};
-static const cs_node_t schema_542 = {.type = CJ_BOOL};
-static const cs_node_t schema_543 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "ctrl|command"};
-static const cs_node_t schema_544 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "bluetooth|usb"};
-static const cs_node_t schema_545 = {.type = CJ_BOOL};
-static const cs_node_t schema_546 = {.type = CJ_STRING, .max_length = 18, .min_length = 1, .format = "device_name"};
-static const cs_node_t schema_547 = {.type = CJ_INTEGER, .minimum = -DBL_MAX, .maximum = DBL_MAX, .enumeration = "1|4|8"};
+static const cs_node_t schema_539 = {.type = CJ_OBJECT};
+static const cs_node_t schema_540 = {.type = CJ_OBJECT};
+static const cs_node_t schema_542 = {.type = CJ_STRING, .max_length = 32, .min_length = 32, .format = "id128"};
+static const cs_node_t schema_543 = {.type = CJ_STRING, .max_length = 20, .min_length = 1, .format = "uint64"};
+static const cs_node_t schema_544 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 8};
+static const cs_property_t schema_541_properties[] = {
+    {"boot", &schema_542, true},
+    {"after", &schema_543, true},
+    {"limit", &schema_544, false},
+};
+static const cs_node_t schema_541 = {.type = CJ_OBJECT, .properties = schema_541_properties, .property_count = 3};
+static const cs_node_t schema_545 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "light|dark"};
+static const cs_node_t schema_546 = {.type = CJ_INTEGER, .minimum = 10, .maximum = 100, .multiple = 10, .multiple_decimal = "10"};
+static const cs_node_t schema_547 = {.type = CJ_INTEGER, .minimum = -DBL_MAX, .maximum = DBL_MAX, .enumeration = "0|60|300|600|1800"};
 static const cs_node_t schema_548 = {.type = CJ_BOOL};
-static const cs_node_t schema_549 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "script|device_imu|device_touch|selection"};
-static const cs_node_t schema_550 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 64};
-static const cs_node_t schema_551 = {.type = CJ_NUMBER, .minimum = 0.25, .maximum = 100, .multiple = 0.01, .multiple_decimal = "0.01"};
-static const cs_node_t schema_552 = {.type = CJ_NUMBER, .minimum = 0, .maximum = 10, .multiple = 0.001, .multiple_decimal = "0.001"};
-static const cs_node_t schema_553 = {.type = CJ_NUMBER, .minimum = 0, .maximum = 1, .multiple = 0.001, .multiple_decimal = "0.001"};
-static const cs_node_t schema_554 = {.type = CJ_NUMBER, .minimum = 1, .maximum = 45};
-static const cs_node_t schema_555 = {.type = CJ_NUMBER, .minimum = 0, .maximum = 22.5};
-static const cs_node_t schema_556 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_557 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_558 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_559 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_560 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_561 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_549 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "ctrl|command"};
+static const cs_node_t schema_550 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "bluetooth|usb"};
+static const cs_node_t schema_551 = {.type = CJ_BOOL};
+static const cs_node_t schema_552 = {.type = CJ_STRING, .max_length = 18, .min_length = 1, .format = "device_name"};
+static const cs_node_t schema_553 = {.type = CJ_INTEGER, .minimum = -DBL_MAX, .maximum = DBL_MAX, .enumeration = "1|4|8"};
+static const cs_node_t schema_554 = {.type = CJ_BOOL};
+static const cs_node_t schema_555 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "script|device_imu|device_touch|selection"};
+static const cs_node_t schema_556 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 64};
+static const cs_node_t schema_557 = {.type = CJ_NUMBER, .minimum = 0.25, .maximum = 100, .multiple = 0.01, .multiple_decimal = "0.01"};
+static const cs_node_t schema_558 = {.type = CJ_NUMBER, .minimum = 0, .maximum = 10, .multiple = 0.001, .multiple_decimal = "0.001"};
+static const cs_node_t schema_559 = {.type = CJ_NUMBER, .minimum = 0, .maximum = 1, .multiple = 0.001, .multiple_decimal = "0.001"};
+static const cs_node_t schema_560 = {.type = CJ_NUMBER, .minimum = 1, .maximum = 45};
+static const cs_node_t schema_561 = {.type = CJ_NUMBER, .minimum = 0, .maximum = 22.5};
 static const cs_node_t schema_562 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_563 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_564 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_565 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_566 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 300};
-static const cs_node_t schema_567 = {.type = CJ_BOOL};
-static const cs_node_t schema_568 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 32};
-static const cs_node_t schema_569 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 600};
-static const cs_node_t schema_572 = {.type = CJ_STRING, .max_length = 32, .min_length = 1, .format = "id128"};
-static const cs_node_t schema_573 = {.type = CJ_STRING, .max_length = 32, .min_length = 1, .format = "ssid"};
-static const cs_node_t schema_574 = {.type = CJ_STRING, .max_length = 63, .min_length = 1, .format = "passphrase"};
-static const cs_node_t schema_575 = {.type = CJ_BOOL};
-static const cs_node_t schema_576 = {.type = CJ_BOOL};
-static const cs_node_t schema_577 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "wpa2_minimum"};
-static const cs_property_t schema_571_properties[] = {
-    {"profile_id", &schema_572, true},
-    {"ssid", &schema_573, true},
-    {"password", &schema_574, false},
-    {"keep_secret", &schema_575, false},
-    {"enabled", &schema_576, true},
-    {"security", &schema_577, true},
+static const cs_node_t schema_566 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_567 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_568 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_569 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_570 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_571 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_572 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 300};
+static const cs_node_t schema_573 = {.type = CJ_BOOL};
+static const cs_node_t schema_574 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 32};
+static const cs_node_t schema_575 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 600};
+static const cs_node_t schema_578 = {.type = CJ_STRING, .max_length = 32, .min_length = 1, .format = "id128"};
+static const cs_node_t schema_579 = {.type = CJ_STRING, .max_length = 32, .min_length = 1, .format = "ssid"};
+static const cs_node_t schema_580 = {.type = CJ_STRING, .max_length = 63, .min_length = 1, .format = "passphrase"};
+static const cs_node_t schema_581 = {.type = CJ_BOOL};
+static const cs_node_t schema_582 = {.type = CJ_BOOL};
+static const cs_node_t schema_583 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "wpa2_minimum"};
+static const cs_property_t schema_577_properties[] = {
+    {"profile_id", &schema_578, true},
+    {"ssid", &schema_579, true},
+    {"password", &schema_580, false},
+    {"keep_secret", &schema_581, false},
+    {"enabled", &schema_582, true},
+    {"security", &schema_583, true},
 };
-static const cs_node_t schema_571 = {.type = CJ_OBJECT, .properties = schema_571_properties, .property_count = 6};
-static const cs_node_t schema_570 = {.type = CJ_ARRAY, .items = &schema_571, .max_items = 8};
-static const cs_node_t schema_579 = {.type = CJ_STRING, .max_length = 32, .min_length = 1, .format = "id128"};
-static const cs_node_t schema_578 = {.type = CJ_ARRAY, .items = &schema_579, .max_items = 8};
-static const cs_node_t schema_580 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "input_first|balanced|management_first"};
-static const cs_node_t schema_581 = {.type = CJ_INTEGER, .minimum = 100, .maximum = 5000};
-static const cs_node_t schema_582 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_583 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_584 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_585 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_586 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_587 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_577 = {.type = CJ_OBJECT, .properties = schema_577_properties, .property_count = 6};
+static const cs_node_t schema_576 = {.type = CJ_ARRAY, .items = &schema_577, .max_items = 8};
+static const cs_node_t schema_585 = {.type = CJ_STRING, .max_length = 32, .min_length = 1, .format = "id128"};
+static const cs_node_t schema_584 = {.type = CJ_ARRAY, .items = &schema_585, .max_items = 8};
+static const cs_node_t schema_586 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "input_first|balanced|management_first"};
+static const cs_node_t schema_587 = {.type = CJ_INTEGER, .minimum = 100, .maximum = 5000};
 static const cs_node_t schema_588 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_589 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_590 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_591 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_592 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_593 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_594 = {.type = CJ_INTEGER, .minimum = 0, .maximum = 100};
-static const cs_node_t schema_595 = {.type = CJ_BOOL};
-static const cs_node_t schema_596 = {.type = CJ_BOOL};
-static const cs_node_t schema_598 = {.type = CJ_BOOL};
-static const cs_node_t schema_599 = {.type = CJ_BOOL};
-static const cs_property_t schema_597_properties[] = {
-    {"microphone", &schema_598, false},
-    {"speaker", &schema_599, false},
-};
-static const cs_node_t schema_597 = {.type = CJ_OBJECT, .properties = schema_597_properties, .property_count = 2};
-static const cs_node_t schema_600 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 1800};
-static const cs_node_t schema_601 = {.type = CJ_INTEGER, .minimum = 65536, .maximum = 33554432};
-static const cs_node_t schema_602 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "volatile|nand"};
-static const cs_node_t schema_604 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "expire_after"};
-static const cs_node_t schema_605 = {.type = CJ_INTEGER, .minimum = 3600, .maximum = 2592000};
+static const cs_node_t schema_594 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_595 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_596 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_597 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_598 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_599 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_600 = {.type = CJ_INTEGER, .minimum = 0, .maximum = 100};
+static const cs_node_t schema_601 = {.type = CJ_BOOL};
+static const cs_node_t schema_602 = {.type = CJ_BOOL};
+static const cs_node_t schema_604 = {.type = CJ_BOOL};
+static const cs_node_t schema_605 = {.type = CJ_BOOL};
 static const cs_property_t schema_603_properties[] = {
-    {"policy", &schema_604, true},
-    {"duration_seconds", &schema_605, true},
+    {"microphone", &schema_604, false},
+    {"speaker", &schema_605, false},
 };
 static const cs_node_t schema_603 = {.type = CJ_OBJECT, .properties = schema_603_properties, .property_count = 2};
-static const cs_node_t schema_606 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "none|owner_download"};
-static const cs_node_t schema_607 = {.type = CJ_BOOL};
-static const cs_node_t schema_608 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_609 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_610 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_611 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_612 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
-static const cs_node_t schema_613 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
-static const cs_node_t schema_614 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
-static const cs_node_t schema_615 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
-static const cs_node_t schema_616 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
-static const cs_node_t schema_617 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
-static const cs_node_t schema_618 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
+static const cs_node_t schema_606 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 1800};
+static const cs_node_t schema_607 = {.type = CJ_INTEGER, .minimum = 65536, .maximum = 33554432};
+static const cs_node_t schema_608 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "volatile|nand"};
+static const cs_node_t schema_610 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "expire_after"};
+static const cs_node_t schema_611 = {.type = CJ_INTEGER, .minimum = 3600, .maximum = 2592000};
+static const cs_property_t schema_609_properties[] = {
+    {"policy", &schema_610, true},
+    {"duration_seconds", &schema_611, true},
+};
+static const cs_node_t schema_609 = {.type = CJ_OBJECT, .properties = schema_609_properties, .property_count = 2};
+static const cs_node_t schema_612 = {.type = CJ_STRING, .max_length = 64, .min_length = 1, .enumeration = "none|owner_download"};
+static const cs_node_t schema_613 = {.type = CJ_BOOL};
+static const cs_node_t schema_614 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_615 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_616 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_617 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
+static const cs_node_t schema_618 = {.type = CJ_STRING, .max_length = 32, .min_length = 1};
 static const cs_node_t schema_619 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
 static const cs_node_t schema_620 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
 static const cs_node_t schema_621 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
-static const cs_node_t schema_622 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 10};
-static const cs_node_t schema_623 = {.type = CJ_NUMBER, .minimum = 0.25, .maximum = 100, .multiple = 0.01, .multiple_decimal = "0.01"};
-static const cs_node_t schema_624 = {.type = CJ_NUMBER, .minimum = 0.25, .maximum = 100, .multiple = 0.01, .multiple_decimal = "0.01"};
-static const cs_node_t schema_625 = {.type = CJ_BOOL};
-static const cs_node_t schema_626 = {.type = CJ_BOOL};
-static const cs_node_t schema_627 = {.type = CJ_INTEGER, .minimum = 0, .maximum = 1000};
+static const cs_node_t schema_622 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
+static const cs_node_t schema_623 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
+static const cs_node_t schema_624 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
+static const cs_node_t schema_625 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
+static const cs_node_t schema_626 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
+static const cs_node_t schema_627 = {.type = CJ_STRING, .max_length = 64, .min_length = 1};
+static const cs_node_t schema_628 = {.type = CJ_INTEGER, .minimum = 1, .maximum = 10};
+static const cs_node_t schema_629 = {.type = CJ_NUMBER, .minimum = 0.25, .maximum = 100, .multiple = 0.01, .multiple_decimal = "0.01"};
+static const cs_node_t schema_630 = {.type = CJ_NUMBER, .minimum = 0.25, .maximum = 100, .multiple = 0.01, .multiple_decimal = "0.01"};
+static const cs_node_t schema_631 = {.type = CJ_BOOL};
+static const cs_node_t schema_632 = {.type = CJ_BOOL};
+static const cs_node_t schema_633 = {.type = CJ_INTEGER, .minimum = 0, .maximum = 1000};
 static const cp_operation_info_t operations[] = {
     {.id=1, .name="state.get", .scopes=CP_SCOPE_VIEW, .input=false, .ui_context=false, .safety=false, .read_only=true, .sensitive=false, .initial_v1_supported=true},
     {.id=2, .name="capabilities.get", .scopes=CP_SCOPE_VIEW, .input=false, .ui_context=false, .safety=false, .read_only=true, .sensitive=false, .initial_v1_supported=true},
@@ -1417,6 +1428,9 @@ static const cp_operation_info_t operations[] = {
     {.id=146, .name="firmware.cancel", .scopes=CP_SCOPE_UPDATE_STAGE, .input=false, .ui_context=false, .safety=false, .read_only=false, .sensitive=false, .initial_v1_supported=true},
     {.id=147, .name="firmware.policy.get", .scopes=CP_SCOPE_VIEW, .input=false, .ui_context=false, .safety=false, .read_only=true, .sensitive=false, .initial_v1_supported=true},
     {.id=148, .name="input.motion.recenter", .scopes=CP_SCOPE_INPUT_CONTROL, .input=true, .ui_context=false, .safety=false, .read_only=false, .sensitive=false, .initial_v1_supported=true},
+    {.id=149, .name="sensors.catalog", .scopes=CP_SCOPE_DIAGNOSTICS_READ, .input=false, .ui_context=false, .safety=false, .read_only=true, .sensitive=false, .initial_v1_supported=true},
+    {.id=150, .name="sensors.latest", .scopes=CP_SCOPE_DIAGNOSTICS_READ, .input=false, .ui_context=false, .safety=false, .read_only=true, .sensitive=false, .initial_v1_supported=true},
+    {.id=151, .name="sensors.samples", .scopes=CP_SCOPE_DIAGNOSTICS_READ, .input=false, .ui_context=false, .safety=false, .read_only=true, .sensitive=false, .initial_v1_supported=true},
 };
 static const cs_node_t *const argument_schemas[] = {
     &schema_0,
@@ -1567,6 +1581,9 @@ static const cs_node_t *const argument_schemas[] = {
     &schema_535,
     &schema_537,
     &schema_538,
+    &schema_539,
+    &schema_540,
+    &schema_541,
 };
 bool cp_operation_flag(cp_operation_id_t id, const char *flag) {
     switch (id) {
@@ -1602,88 +1619,88 @@ size_t cp_operation_count(void) { return sizeof(operations)/sizeof(operations[0]
 const cp_operation_info_t *cp_operation_at(size_t i) { return i < cp_operation_count() ? &operations[i] : NULL; }
 const cp_operation_info_t *cp_operation_find(const char *name) { for (size_t i=0;i<cp_operation_count();++i) if (strcmp(name,operations[i].name)==0) return &operations[i]; return NULL; }
 const cs_node_t *cp_argument_schema(cp_operation_id_t id) { return id && id <= cp_operation_count() ? argument_schemas[id-1] : NULL; }
-const char *cp_catalog_sha256(void) { return "8ed9db4a990bc9d53b0cc410a1072fe609ad1563e6900748874289165da64613"; }
+const char *cp_catalog_sha256(void) { return "516ae0e41f2f9ec8802548ac4001727d6ab75675ea5739b72433619a1619a87d"; }
 static const char *const scopes[] = {"view", "input.control", "input.configure", "config.write", "connections.manage", "wifi.configure", "audio.control", "audio.capture", "audio.playback", "recording.control", "recording.configure", "recording.read", "recording.export", "recording.delete", "capture.consent", "admin.clients", "admin.policy", "admin.privacy", "update.check", "update.stage", "update.activate", "diagnostics.read", "diagnostics.control", "system.restart", "system.reset"};
 const char *cp_scope_name(size_t i) { return i < sizeof(scopes)/sizeof(scopes[0]) ? scopes[i] : NULL; }
 cp_scope_mask_t cp_scope_from_name(const char *name) { for(size_t i=0;i<sizeof(scopes)/sizeof(scopes[0]);++i) if(strcmp(name,scopes[i])==0) return UINT64_C(1)<<i; return 0; }
 static const cp_config_info_t config_fields[] = {
-    {"display.theme", &schema_539, CP_SCOPE_CONFIG_WRITE, "\"dark\"", "now", "durable", false},
-    {"display.brightness_percent", &schema_540, CP_SCOPE_CONFIG_WRITE, "50", "now", "durable", false},
-    {"display.idle_timeout_seconds", &schema_541, CP_SCOPE_CONFIG_WRITE, "300", "now", "durable", false},
-    {"haptics.enabled", &schema_542, CP_SCOPE_CONFIG_WRITE, "true", "now", "durable", false},
-    {"keyboard.shortcut_modifier", &schema_543, CP_SCOPE_CONFIG_WRITE, "\"ctrl\"", "release", "durable", false},
-    {"input.preferred_transport", &schema_544, CP_SCOPE_INPUT_CONFIGURE, "\"bluetooth\"", "link", "durable", false},
-    {"touch.tap_to_click", &schema_545, CP_SCOPE_INPUT_CONFIGURE, "true", "release", "durable", false},
-    {"bluetooth.device_name", &schema_546, CP_SCOPE_CONNECTIONS_MANAGE, "\"ESP32-INPUT\"", "link", "durable", false},
-    {"touch.gain_divisor", &schema_547, CP_SCOPE_CONFIG_WRITE, "1", "release", "volatile", false},
-    {"input.motion_enabled", &schema_548, CP_SCOPE_INPUT_CONTROL, "false", "release", "volatile", false},
-    {"input.producer", &schema_549, CP_SCOPE_INPUT_CONTROL, "\"script\"", "release", "volatile", false},
-    {"keyboard.preview_limit_chars", &schema_550, CP_SCOPE_INPUT_CONFIGURE, "64", "release", "durable", false},
-    {"pointer.gain_hid_per_degree", &schema_551, CP_SCOPE_INPUT_CONFIGURE, "4", "release", "durable", false},
-    {"pointer.deadzone_dps", &schema_552, CP_SCOPE_INPUT_CONFIGURE, "0.5", "release", "durable", false},
-    {"pointer.filter_seconds", &schema_553, CP_SCOPE_INPUT_CONFIGURE, "0.03", "release", "durable", false},
-    {"selection.cell_degrees", &schema_554, CP_SCOPE_INPUT_CONFIGURE, "6", "release", "durable", false},
-    {"selection.hysteresis_degrees", &schema_555, CP_SCOPE_INPUT_CONFIGURE, "1", "release", "durable", false},
-    {"keyboard.layout_profile", &schema_556, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
-    {"keyboard.cell_map_profile", &schema_557, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
-    {"imu.axis_profile", &schema_558, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
-    {"imu.sample_profile", &schema_559, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
-    {"imu.calibration_profile", &schema_560, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
-    {"touch.scroll_profile", &schema_561, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
-    {"buttons.mapping_profile", &schema_562, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
-    {"haptics.pattern_profile", &schema_563, CP_SCOPE_CONFIG_WRITE, "null", "link", "durable", false},
-    {"wifi.reconnect_profile", &schema_564, CP_SCOPE_WIFI_CONFIGURE, "null", "link", "durable", false},
-    {"wifi.scan_profile", &schema_565, CP_SCOPE_WIFI_CONFIGURE, "null", "link", "durable", false},
-    {"bluetooth.pairing_window_seconds", &schema_566, CP_SCOPE_CONNECTIONS_MANAGE, "120", "link", "durable", false},
-    {"wifi.enabled", &schema_567, CP_SCOPE_WIFI_CONFIGURE, "true", "link", "durable", false},
-    {"wifi.scan_result_limit", &schema_568, CP_SCOPE_WIFI_CONFIGURE, "32", "now", "durable", false},
-    {"wifi.setup_window_seconds", &schema_569, CP_SCOPE_WIFI_CONFIGURE, "600", "now", "durable", false},
-    {"wifi.profiles", &schema_570, CP_SCOPE_WIFI_CONFIGURE, "null", "link", "durable", true},
-    {"wifi.profile_order", &schema_578, CP_SCOPE_WIFI_CONFIGURE, "null", "now", "durable", false},
-    {"work.policy", &schema_580, CP_SCOPE_ADMIN_POLICY, "\"input_first\"", "now", "durable", false},
-    {"work.quiet_interval_ms", &schema_581, CP_SCOPE_ADMIN_POLICY, "500", "now", "durable", false},
-    {"audio.route", &schema_582, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
-    {"audio.profile", &schema_583, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
-    {"audio.microphone_gain_profile", &schema_584, CP_SCOPE_AUDIO_CAPTURE, "null", "link", "durable", false},
-    {"audio.sample", &schema_585, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
-    {"audio.channels", &schema_586, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
-    {"audio.codec", &schema_587, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
-    {"audio.mix", &schema_588, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
-    {"audio.aec_profile", &schema_589, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
-    {"speech.profile", &schema_590, CP_SCOPE_AUDIO_CAPTURE, "null", "link", "durable", false},
-    {"speech.vocabulary", &schema_591, CP_SCOPE_AUDIO_CAPTURE, "null", "link", "durable", false},
-    {"recording.format", &schema_592, CP_SCOPE_RECORDING_CONFIGURE, "null", "link", "durable", false},
-    {"recording.sample_profile", &schema_593, CP_SCOPE_RECORDING_CONFIGURE, "null", "link", "durable", false},
-    {"audio.output_volume_percent", &schema_594, CP_SCOPE_AUDIO_CONTROL, "30", "now", "durable", false},
-    {"audio.microphone_muted", &schema_595, CP_SCOPE_AUDIO_CONTROL, "true", "now", "volatile", false},
-    {"audio.speaker_muted", &schema_596, CP_SCOPE_AUDIO_CONTROL, "true", "now", "volatile", false},
-    {"audio.enabled", &schema_597, CP_SCOPE_AUDIO_CONTROL, "null", "link", "volatile", false},
-    {"recording.duration_seconds", &schema_600, CP_SCOPE_RECORDING_CONFIGURE, "300", "next_job", "durable", false},
-    {"recording.byte_limit", &schema_601, CP_SCOPE_RECORDING_CONFIGURE, "16777216", "next_job", "durable", false},
-    {"recording.storage", &schema_602, CP_SCOPE_RECORDING_CONFIGURE, "\"volatile\"", "next_job", "durable", false},
-    {"recording.retention", &schema_603, CP_SCOPE_RECORDING_CONFIGURE, "null", "next_job", "durable", false},
-    {"recording.export_policy", &schema_606, CP_SCOPE_RECORDING_CONFIGURE, "\"none\"", "next_job", "durable", false},
-    {"lan.enabled", &schema_607, CP_SCOPE_ADMIN_POLICY, "false", "link", "durable", false},
-    {"lan.listener_profile", &schema_608, CP_SCOPE_ADMIN_POLICY, "null", "link", "durable", false},
-    {"lan.principals", &schema_609, CP_SCOPE_ADMIN_CLIENTS, "null", "now", "durable", false},
-    {"lan.scopes", &schema_610, CP_SCOPE_ADMIN_CLIENTS, "null", "now", "durable", false},
-    {"capture.consent_policy", &schema_611, CP_SCOPE_ADMIN_PRIVACY, "null", "now", "durable", false},
-    {"update.policy", &schema_612, CP_SCOPE_ADMIN_POLICY, "null", "now", "durable", false},
-    {"update.source", &schema_613, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
-    {"update.channel", &schema_614, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
-    {"update.download_budget", &schema_615, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
-    {"diagnostics.level", &schema_616, CP_SCOPE_DIAGNOSTICS_CONTROL, "null", "next_job", "durable", false},
-    {"diagnostics.period", &schema_617, CP_SCOPE_DIAGNOSTICS_CONTROL, "null", "next_job", "durable", false},
-    {"diagnostics.bytes", &schema_618, CP_SCOPE_DIAGNOSTICS_CONTROL, "null", "next_job", "durable", false},
-    {"diagnostics.duration", &schema_619, CP_SCOPE_DIAGNOSTICS_CONTROL, "null", "next_job", "durable", false},
-    {"remote.lease_profile", &schema_620, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
-    {"remote.deadman_profile", &schema_621, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
-    {"remote.events_rate_hz", &schema_622, CP_SCOPE_ADMIN_POLICY, "10", "now", "durable", false},
-    {"pointer.gain_x_hid_per_degree", &schema_623, CP_SCOPE_INPUT_CONFIGURE, "4", "release", "durable", false},
-    {"pointer.gain_y_hid_per_degree", &schema_624, CP_SCOPE_INPUT_CONFIGURE, "4", "release", "durable", false},
-    {"pointer.invert_x", &schema_625, CP_SCOPE_INPUT_CONFIGURE, "false", "release", "durable", false},
-    {"pointer.invert_y", &schema_626, CP_SCOPE_INPUT_CONFIGURE, "false", "release", "durable", false},
-    {"pointer.freeze_ms", &schema_627, CP_SCOPE_INPUT_CONFIGURE, "150", "release", "durable", false},
+    {"display.theme", &schema_545, CP_SCOPE_CONFIG_WRITE, "\"dark\"", "now", "durable", false},
+    {"display.brightness_percent", &schema_546, CP_SCOPE_CONFIG_WRITE, "50", "now", "durable", false},
+    {"display.idle_timeout_seconds", &schema_547, CP_SCOPE_CONFIG_WRITE, "300", "now", "durable", false},
+    {"haptics.enabled", &schema_548, CP_SCOPE_CONFIG_WRITE, "true", "now", "durable", false},
+    {"keyboard.shortcut_modifier", &schema_549, CP_SCOPE_CONFIG_WRITE, "\"ctrl\"", "release", "durable", false},
+    {"input.preferred_transport", &schema_550, CP_SCOPE_INPUT_CONFIGURE, "\"bluetooth\"", "link", "durable", false},
+    {"touch.tap_to_click", &schema_551, CP_SCOPE_INPUT_CONFIGURE, "true", "release", "durable", false},
+    {"bluetooth.device_name", &schema_552, CP_SCOPE_CONNECTIONS_MANAGE, "\"ESP32-INPUT\"", "link", "durable", false},
+    {"touch.gain_divisor", &schema_553, CP_SCOPE_CONFIG_WRITE, "1", "release", "volatile", false},
+    {"input.motion_enabled", &schema_554, CP_SCOPE_INPUT_CONTROL, "false", "release", "volatile", false},
+    {"input.producer", &schema_555, CP_SCOPE_INPUT_CONTROL, "\"script\"", "release", "volatile", false},
+    {"keyboard.preview_limit_chars", &schema_556, CP_SCOPE_INPUT_CONFIGURE, "64", "release", "durable", false},
+    {"pointer.gain_hid_per_degree", &schema_557, CP_SCOPE_INPUT_CONFIGURE, "4", "release", "durable", false},
+    {"pointer.deadzone_dps", &schema_558, CP_SCOPE_INPUT_CONFIGURE, "0.5", "release", "durable", false},
+    {"pointer.filter_seconds", &schema_559, CP_SCOPE_INPUT_CONFIGURE, "0.03", "release", "durable", false},
+    {"selection.cell_degrees", &schema_560, CP_SCOPE_INPUT_CONFIGURE, "6", "release", "durable", false},
+    {"selection.hysteresis_degrees", &schema_561, CP_SCOPE_INPUT_CONFIGURE, "1", "release", "durable", false},
+    {"keyboard.layout_profile", &schema_562, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
+    {"keyboard.cell_map_profile", &schema_563, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
+    {"imu.axis_profile", &schema_564, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
+    {"imu.sample_profile", &schema_565, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
+    {"imu.calibration_profile", &schema_566, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
+    {"touch.scroll_profile", &schema_567, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
+    {"buttons.mapping_profile", &schema_568, CP_SCOPE_INPUT_CONFIGURE, "null", "link", "durable", false},
+    {"haptics.pattern_profile", &schema_569, CP_SCOPE_CONFIG_WRITE, "null", "link", "durable", false},
+    {"wifi.reconnect_profile", &schema_570, CP_SCOPE_WIFI_CONFIGURE, "null", "link", "durable", false},
+    {"wifi.scan_profile", &schema_571, CP_SCOPE_WIFI_CONFIGURE, "null", "link", "durable", false},
+    {"bluetooth.pairing_window_seconds", &schema_572, CP_SCOPE_CONNECTIONS_MANAGE, "120", "link", "durable", false},
+    {"wifi.enabled", &schema_573, CP_SCOPE_WIFI_CONFIGURE, "true", "link", "durable", false},
+    {"wifi.scan_result_limit", &schema_574, CP_SCOPE_WIFI_CONFIGURE, "32", "now", "durable", false},
+    {"wifi.setup_window_seconds", &schema_575, CP_SCOPE_WIFI_CONFIGURE, "600", "now", "durable", false},
+    {"wifi.profiles", &schema_576, CP_SCOPE_WIFI_CONFIGURE, "null", "link", "durable", true},
+    {"wifi.profile_order", &schema_584, CP_SCOPE_WIFI_CONFIGURE, "null", "now", "durable", false},
+    {"work.policy", &schema_586, CP_SCOPE_ADMIN_POLICY, "\"input_first\"", "now", "durable", false},
+    {"work.quiet_interval_ms", &schema_587, CP_SCOPE_ADMIN_POLICY, "500", "now", "durable", false},
+    {"audio.route", &schema_588, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
+    {"audio.profile", &schema_589, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
+    {"audio.microphone_gain_profile", &schema_590, CP_SCOPE_AUDIO_CAPTURE, "null", "link", "durable", false},
+    {"audio.sample", &schema_591, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
+    {"audio.channels", &schema_592, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
+    {"audio.codec", &schema_593, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
+    {"audio.mix", &schema_594, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
+    {"audio.aec_profile", &schema_595, CP_SCOPE_AUDIO_CONTROL, "null", "link", "durable", false},
+    {"speech.profile", &schema_596, CP_SCOPE_AUDIO_CAPTURE, "null", "link", "durable", false},
+    {"speech.vocabulary", &schema_597, CP_SCOPE_AUDIO_CAPTURE, "null", "link", "durable", false},
+    {"recording.format", &schema_598, CP_SCOPE_RECORDING_CONFIGURE, "null", "link", "durable", false},
+    {"recording.sample_profile", &schema_599, CP_SCOPE_RECORDING_CONFIGURE, "null", "link", "durable", false},
+    {"audio.output_volume_percent", &schema_600, CP_SCOPE_AUDIO_CONTROL, "30", "now", "durable", false},
+    {"audio.microphone_muted", &schema_601, CP_SCOPE_AUDIO_CONTROL, "true", "now", "volatile", false},
+    {"audio.speaker_muted", &schema_602, CP_SCOPE_AUDIO_CONTROL, "true", "now", "volatile", false},
+    {"audio.enabled", &schema_603, CP_SCOPE_AUDIO_CONTROL, "null", "link", "volatile", false},
+    {"recording.duration_seconds", &schema_606, CP_SCOPE_RECORDING_CONFIGURE, "300", "next_job", "durable", false},
+    {"recording.byte_limit", &schema_607, CP_SCOPE_RECORDING_CONFIGURE, "16777216", "next_job", "durable", false},
+    {"recording.storage", &schema_608, CP_SCOPE_RECORDING_CONFIGURE, "\"volatile\"", "next_job", "durable", false},
+    {"recording.retention", &schema_609, CP_SCOPE_RECORDING_CONFIGURE, "null", "next_job", "durable", false},
+    {"recording.export_policy", &schema_612, CP_SCOPE_RECORDING_CONFIGURE, "\"none\"", "next_job", "durable", false},
+    {"lan.enabled", &schema_613, CP_SCOPE_ADMIN_POLICY, "false", "link", "durable", false},
+    {"lan.listener_profile", &schema_614, CP_SCOPE_ADMIN_POLICY, "null", "link", "durable", false},
+    {"lan.principals", &schema_615, CP_SCOPE_ADMIN_CLIENTS, "null", "now", "durable", false},
+    {"lan.scopes", &schema_616, CP_SCOPE_ADMIN_CLIENTS, "null", "now", "durable", false},
+    {"capture.consent_policy", &schema_617, CP_SCOPE_ADMIN_PRIVACY, "null", "now", "durable", false},
+    {"update.policy", &schema_618, CP_SCOPE_ADMIN_POLICY, "null", "now", "durable", false},
+    {"update.source", &schema_619, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
+    {"update.channel", &schema_620, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
+    {"update.download_budget", &schema_621, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
+    {"diagnostics.level", &schema_622, CP_SCOPE_DIAGNOSTICS_CONTROL, "null", "next_job", "durable", false},
+    {"diagnostics.period", &schema_623, CP_SCOPE_DIAGNOSTICS_CONTROL, "null", "next_job", "durable", false},
+    {"diagnostics.bytes", &schema_624, CP_SCOPE_DIAGNOSTICS_CONTROL, "null", "next_job", "durable", false},
+    {"diagnostics.duration", &schema_625, CP_SCOPE_DIAGNOSTICS_CONTROL, "null", "next_job", "durable", false},
+    {"remote.lease_profile", &schema_626, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
+    {"remote.deadman_profile", &schema_627, CP_SCOPE_ADMIN_POLICY, "null", "next_job", "durable", false},
+    {"remote.events_rate_hz", &schema_628, CP_SCOPE_ADMIN_POLICY, "10", "now", "durable", false},
+    {"pointer.gain_x_hid_per_degree", &schema_629, CP_SCOPE_INPUT_CONFIGURE, "4", "release", "durable", false},
+    {"pointer.gain_y_hid_per_degree", &schema_630, CP_SCOPE_INPUT_CONFIGURE, "4", "release", "durable", false},
+    {"pointer.invert_x", &schema_631, CP_SCOPE_INPUT_CONFIGURE, "false", "release", "durable", false},
+    {"pointer.invert_y", &schema_632, CP_SCOPE_INPUT_CONFIGURE, "false", "release", "durable", false},
+    {"pointer.freeze_ms", &schema_633, CP_SCOPE_INPUT_CONFIGURE, "150", "release", "durable", false},
 };
 size_t cp_config_count(void) { return sizeof(config_fields)/sizeof(config_fields[0]); }
 const cp_config_info_t *cp_config_at(size_t i) { return i < cp_config_count() ? &config_fields[i] : NULL; }

@@ -12,6 +12,20 @@ typedef struct { uint8_t bytes[16]; } app_media_id_t;
 typedef enum { APP_MEDIA_ROUTE_OFF, APP_MEDIA_ROUTE_LOCAL, APP_MEDIA_ROUTE_HFP,
     APP_MEDIA_ROUTE_A2DP, APP_MEDIA_ROUTE_UAC, APP_MEDIA_ROUTE_COUNT } app_media_route_t;
 typedef enum { APP_MEDIA_MICROPHONE, APP_MEDIA_SPEAKER } app_media_role_t;
+typedef enum { APP_MEDIA_CONNECTION_USB, APP_MEDIA_CONNECTION_BLUETOOTH,
+    APP_MEDIA_CONNECTION_COUNT } app_media_connection_t;
+typedef enum {
+    APP_MEDIA_START_UNKNOWN = 0, APP_MEDIA_START_ALLOWED,
+    APP_MEDIA_START_LOCKED, APP_MEDIA_START_SCREEN_UNAVAILABLE,
+    APP_MEDIA_START_CLOCK_UNAVAILABLE, APP_MEDIA_START_PENDING,
+    APP_MEDIA_START_QUARANTINED, APP_MEDIA_START_CONNECTION_REQUIRED,
+    APP_MEDIA_START_UNSUPPORTED, APP_MEDIA_START_ROUTE_UNAVAILABLE,
+    APP_MEDIA_START_HOST_UNAVAILABLE, APP_MEDIA_START_HOST_STREAM_REQUIRED,
+    APP_MEDIA_START_IDENTITY_UNAVAILABLE, APP_MEDIA_START_PEER_MISMATCH,
+    APP_MEDIA_START_CLEANUP, APP_MEDIA_START_OCCUPIED,
+    APP_MEDIA_START_STOP_REQUIRED, APP_MEDIA_START_CODEC_UNAVAILABLE,
+    APP_MEDIA_START_FORMAT_UNSUPPORTED
+} app_media_start_block_t;
 typedef enum { APP_MEDIA_UNKNOWN, APP_MEDIA_OFF, APP_MEDIA_PREPARING,
     APP_MEDIA_READY_MUTED, APP_MEDIA_RUNNING, APP_MEDIA_STOPPING, APP_MEDIA_FAULT } app_media_state_t;
 typedef enum { APP_MEDIA_JOB_UNKNOWN, APP_MEDIA_JOB_STARTING, APP_MEDIA_JOB_RUNNING,
@@ -30,7 +44,8 @@ typedef enum {
     APP_MEDIA_RECORD_SELECT, APP_MEDIA_RECORD_PLAY, APP_MEDIA_RECORD_DELETE_REQUEST,
     APP_MEDIA_PLAYBACK_STOP, APP_MEDIA_SPEECH_START, APP_MEDIA_SPEECH_STOP,
     APP_MEDIA_SPEECH_REJECT, APP_MEDIA_SPEECH_CONFIRM,
-    APP_MEDIA_LIVE_START, APP_MEDIA_LIVE_STOP, APP_MEDIA_SELECT_PEER
+    APP_MEDIA_LIVE_START, APP_MEDIA_LIVE_STOP, APP_MEDIA_SELECT_PEER,
+    APP_MEDIA_SELECT_CONNECTION
 } app_media_operation_t;
 
 typedef struct {
@@ -42,6 +57,7 @@ typedef struct {
     uint64_t speech_generation, speech_revision, candidate_id;
     union {
         app_media_route_t route;
+        app_media_connection_t connection;
         struct { app_media_role_t role; bool value; } role;
         uint8_t level; /* Applied volume percent or exact discrete microphone dB. */
         uint16_t profile_id; /* Immutable owner-advertised profile ID. */
@@ -59,6 +75,8 @@ typedef struct {
 typedef struct {
     bool known, enabled, muted, mute_confirmed;
     bool can_enable, can_disable, can_mute, can_unmute, can_start;
+    /* Owner-produced result of the same admission predicate as can_start. */
+    app_media_start_block_t start_block;
 } app_media_role_view_t;
 typedef struct {
     uint16_t id;
@@ -137,6 +155,11 @@ typedef struct {
     app_media_record_list_view_t recordings;
     app_media_record_view_t selected_recording;
     app_media_speech_view_t speech;
+    /* Owner-applied selection, not evidence of a link, stream or profile.
+     * The owner resolves Bluetooth profiles and completes release barriers. */
+    bool connection_known;
+    app_media_connection_t connection;
+    bool can_select_connection[APP_MEDIA_CONNECTION_COUNT];
 } app_media_view_t;
 
 typedef struct {

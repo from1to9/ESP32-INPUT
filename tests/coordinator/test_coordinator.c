@@ -23,6 +23,13 @@ static size_t trace_count;
 static ble_hid_snapshot_t test_link;
 static bool test_haptics_enabled;
 static bool test_haptic_active;
+static unsigned test_sensor_buttons, test_sensor_contacts;
+static bool test_sensor_public;
+void app_sensor_api_init(void) {}
+void app_sensor_api_touch(const board_touch_snapshot_t *sample, bool public_coordinates)
+{ assert(sample); ++test_sensor_contacts; test_sensor_public = public_coordinates; }
+void app_sensor_api_button(bool down, uint64_t timestamp_us)
+{ (void)down; (void)timestamp_us; ++test_sensor_buttons; }
 static bool test_send_failure;
 static board_capabilities_t test_capabilities;
 static board_imu_sample_t test_sample;
@@ -55,6 +62,10 @@ static bool test_pair_accept, test_disconnect_accept;
 static unsigned test_pair_opens, test_pair_closes, test_pair_forgets, test_disconnects;
 static uint64_t test_disconnect_generation, test_forget_generation;
 static size_t test_disconnect_trace_count;
+static unsigned test_native_management_starts, test_native_management_stops;
+static bool test_native_management_active, test_native_start_release_pending;
+static app_pairing_operation_t test_native_operation;
+static uint64_t test_native_generation, test_native_bond_revision, test_native_preference_revision;
 static ble_hid_bond_list_t test_bonds;
 static usb_hid_snapshot_t test_usb;
 static bool test_usb_send_failure, test_usb_recover_accept;
@@ -299,6 +310,9 @@ bool app_media_runtime_snapshot(app_media_snapshot_t *snapshot)
     *snapshot = test_media_snapshot;
     return snapshot->initialized;
 }
+/* The observer has a separate production-code suite; this boundary never
+ * grants audio or input authority to coordinator tests. */
+void app_audio_diagnostics_poll(uint64_t now_ms) { (void)now_ms; }
 void app_media_runtime_environment(const ae_environment_t *environment, uint64_t epoch,
     uint64_t revision, bool speech)
 { (void)epoch; (void)revision; test_media_environment = *environment; test_media_speech_context = speech; }
@@ -324,6 +338,29 @@ bool app_connectivity_controls_handle(const app_intent_t *intent, app_connectivi
 void app_connectivity_controls_poll(uint64_t now, app_connectivity_controls_effect_t *effect)
 { (void)now; (void)effect; }
 void app_connectivity_controls_fill(app_view_t *view) { (void)view; }
+bool app_connectivity_controls_bluetooth_revisions(uint64_t *bond, uint64_t *preference)
+{
+    if (!test_bonds.known || test_bonds.updating || !test_update_target.loaded) return false;
+    *bond = test_bonds.revision; *preference = test_update_target.revision; return true;
+}
+bool app_connectivity_controls_bluetooth_busy(void) { return test_native_management_active; }
+bool app_connectivity_controls_bluetooth_start(app_pairing_operation_t operation, uint64_t generation,
+    uint64_t bond, uint64_t preference, app_connectivity_controls_effect_t *effect)
+{
+    ++test_native_management_starts; test_native_operation = operation; test_native_generation = generation;
+    test_native_bond_revision = bond; test_native_preference_revision = preference;
+    test_native_start_release_pending = s_engine.state.release_pending;
+    bool valid = test_bonds.known && bond == test_bonds.revision && preference == test_update_target.revision;
+    test_native_management_active = valid;
+    *effect = (app_connectivity_controls_effect_t){.handled = true};
+    strcpy(effect->message, valid ? "Bluetooth change admitted; wait for owner observations." : "Saved host revision changed.");
+    return valid;
+}
+void app_connectivity_controls_bluetooth_stop(app_connectivity_controls_effect_t *effect)
+{
+    ++test_native_management_stops; test_native_management_active = false;
+    *effect = (app_connectivity_controls_effect_t){.handled = true}; strcpy(effect->message, "Pairing stopped.");
+}
 
 usb_hid_snapshot_t usb_hid_snapshot(void) { return test_usb; }
 void usb_hid_set_enabled(bool enabled)
@@ -1013,6 +1050,8 @@ static void setup(input_mode_t mode)
     test_wifi_starts = test_wifi_stops = test_wifi_forgets = test_wifi_info_reads = 0;
     test_pair_accept = test_disconnect_accept = false;
     test_pair_opens = test_pair_closes = test_pair_forgets = test_disconnects = 0;
+    test_native_management_starts = test_native_management_stops = 0;
+    test_native_management_active = test_native_start_release_pending = false;
     test_disconnect_generation = test_forget_generation = 0;
     test_disconnect_trace_count = 0;
     test_bonds = (ble_hid_bond_list_t){0};
@@ -2531,90 +2570,52 @@ static void wifi_forget_requires_current_explicit_confirmation(void)
 
 static void pairing_confirmation_releases_before_disconnect_and_forget(void)
 {
-    for (int operation = APP_PAIR_OPEN; operation <= APP_PAIR_FORGET_ALL; ++operation) {
-        setup(INPUT_KEYBOARD);
-        fill_preview(2);
-        press(INPUT_KEYBOARD);
-        action(APP_MENU, APP_OVERLAY_TARGET);
-        release_barrier();
-        action(APP_PAIRING_REQUEST, operation);
-        release_barrier();
-        assert(s_overlay == APP_OVERLAY_CONFIRM && test_pair_opens == 0 && test_pair_forgets == 0);
+    const app_pairing_operation_t operations[] = {APP_PAIR_OPEN, APP_PAIR_FORGET_ALL};
+    for (unsigned i = 0; i < sizeof(operations) / sizeof(operations[0]); ++i) {
+        setup(INPUT_KEYBOARD); fill_preview(2); press(INPUT_KEYBOARD);
+        test_bonds = (ble_hid_bond_list_t){.known = true, .count = 2, .revision = 51};
+        test_update_target = (ble_hid_target_snapshot_t){.loaded = true, .durable = true, .revision = 61};
+        action(APP_MENU, APP_OVERLAY_TARGET); release_barrier();
+        action(APP_PAIRING_REQUEST, (int)operations[i]); release_barrier();
+        assert(s_overlay == APP_OVERLAY_CONFIRM && !test_native_management_starts);
         app_intent_t approve = make_intent(APP_CONFIRM, 1, 0, NULL);
         deliver(approve);
-        assert(test_pair_closes == 1);
-        service_pair_operation(&test_link);
-        assert(test_disconnects == 0); /* Approval itself created another release barrier. */
-        static const uint8_t zero[8] = {0};
-        expect_report(1, zero, 8);
-        service_pair_operation(&test_link);
-        assert(test_disconnects == 0); /* Both keyboard and mouse must be released. */
-        expect_report(2, zero, 4);
-        if (operation == APP_PAIR_CLOSE) {
-            assert(s_pair_operation == APP_CONFIRM_NONE);
-            service_pair_operation(&test_link);
-            assert(test_disconnects == 0 && test_pair_opens == 0 && test_pair_forgets == 0);
-            continue;
+        assert(test_native_management_starts == 1 && test_native_operation == operations[i]);
+        assert(test_native_generation == test_link.generation && test_native_bond_revision == 51 && test_native_preference_revision == 61);
+        assert(test_native_start_release_pending && !test_disconnects && !test_pair_opens && !test_pair_forgets);
+        release_barrier();
+        assert(s_overlay == (operations[i] == APP_PAIR_OPEN ? APP_OVERLAY_BLUETOOTH_PAIRING : APP_OVERLAY_SETTINGS));
+        deliver(approve); assert(test_native_management_starts == 1);
+        assert(!strcmp(s_interaction.view.preview, "AB"));
+        if (operations[i] == APP_PAIR_OPEN) {
+            action(APP_PAIRING_REQUEST, APP_PAIR_CLOSE);
+            assert(test_native_management_stops == 1 && !test_native_management_active && s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING);
         }
-        test_disconnect_accept = true;
-        const uint64_t disconnect_generation = test_link.generation;
-        service_pair_operation(&test_link);
-        assert(test_disconnects == 1 && test_disconnect_generation == disconnect_generation);
-        assert(test_link.generation == disconnect_generation + 1 && test_link.connected && !test_link.ready);
-        assert(test_disconnect_trace_count == trace_count);
-        service_pair_operation(&test_link);
-        assert(test_disconnects == 1 && test_pair_forgets == 0 && test_pair_opens == 0);
-        assert(s_pair_operation != APP_CONFIRM_NONE);
-        test_link.connected = test_link.ready = false;
-        ++test_link.generation;
-        hid_engine_set_link(&s_engine, false, false);
-        test_pair_accept = true;
-        service_pair_operation(&test_link);
-        assert(s_pair_operation == APP_CONFIRM_NONE);
-        assert(test_pair_forgets == (operation == APP_PAIR_FORGET_ALL ? 1U : 0U));
-        assert(test_pair_opens == (operation == APP_PAIR_OPEN ? 1U : 0U));
-        if (operation == APP_PAIR_FORGET_ALL) assert(test_forget_generation == test_link.generation);
-        deliver(approve);
-        service_pair_operation(&test_link);
-        assert(test_pair_closes == 1 && test_storage_requests == 0 && test_wifi_forgets == 0);
-        assert(strcmp(s_interaction.view.preview, "AB") == 0);
     }
+    setup(INPUT_MOUSE); settings_page(APP_SETTINGS_BLUETOOTH);
+    test_link.connected = test_link.ready = false; hid_engine_set_link(&s_engine, false, false);
+    test_bonds = (ble_hid_bond_list_t){.known = true, .count = 2, .revision = 71};
+    test_update_target = (ble_hid_target_snapshot_t){.loaded = true, .revision = 81};
+    action(APP_PAIRING_REQUEST, APP_PAIR_OPEN);
+    assert(s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING && test_native_management_starts == 1 && s_confirmation != APP_CONFIRM_PAIR_OPEN);
 }
 
 static void pairing_stale_generation_failure_and_lock_cancel(void)
 {
     setup(INPUT_MOUSE);
-    action(APP_MENU, APP_OVERLAY_TARGET);
-    release_barrier();
-    action(APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL);
-    release_barrier();
-    ++test_link.generation;
-    action(APP_CONFIRM, 1);
-    release_barrier();
-    assert(s_pair_operation == APP_CONFIRM_NONE && test_pair_closes == 0);
-    settings_page(APP_SETTINGS_BLUETOOTH);
-    action(APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL);
-    release_barrier();
-    action(APP_CONFIRM, 1);
-    release_barrier();
-    test_link.congested = true;
-    test_send_failure = true;
-    /* Refused close does not become success and expires at a bounded deadline. */
-    s_now_ms = 5999;
-    service_pair_operation(&test_link);
-    assert(s_pair_operation != APP_CONFIRM_NONE && test_pair_forgets == 0);
-    s_now_ms = 6000;
-    service_pair_operation(&test_link);
-    assert(s_pair_operation == APP_CONFIRM_NONE && test_pair_forgets == 0);
-    action(APP_PAIRING_REQUEST, APP_PAIR_OPEN);
-    action(APP_CONFIRM, 1);
-    physical_lock();
-    assert(process_priority());
-    assert(s_engine.state.locked && s_pair_operation == APP_CONFIRM_NONE);
-    test_link.connected = false;
-    test_pair_accept = true;
-    service_pair_operation(&test_link);
-    assert(test_pair_opens == 0 && test_pair_forgets == 0);
+    test_bonds = (ble_hid_bond_list_t){.known = true, .count = 2, .revision = 51};
+    test_update_target = (ble_hid_target_snapshot_t){.loaded = true, .revision = 61};
+    action(APP_MENU, APP_OVERLAY_TARGET); release_barrier();
+    action(APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL); release_barrier();
+    ++test_link.generation; action(APP_CONFIRM, 1); release_barrier();
+    assert(!test_native_management_starts && !test_pair_forgets);
+    settings_page(APP_SETTINGS_BLUETOOTH); action(APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL); release_barrier();
+    ++test_bonds.revision; action(APP_CONFIRM, 1); release_barrier();
+    assert(test_native_management_starts == 1 && !test_native_management_active && test_native_bond_revision == 51);
+    settings_page(APP_SETTINGS_BLUETOOTH); action(APP_PAIRING_REQUEST, APP_PAIR_OPEN); release_barrier();
+    app_intent_t old = make_intent(APP_CONFIRM, 1, 0, NULL);
+    physical_lock(); assert(process_priority()); deliver(old);
+    assert(s_engine.state.locked && test_native_management_starts == 1 && !test_pair_opens && !test_pair_forgets);
 }
 
 static void extended_status_views_do_not_invent_evidence_or_writes(void)
@@ -3735,7 +3736,10 @@ static void assert_pair_change_completion(app_pairing_operation_t operation, boo
 
 static void pairing_admission_generation_change_waits_for_actual_link_down(void)
 {
-    const app_pairing_operation_t operations[] = {APP_PAIR_OPEN, APP_PAIR_FORGET_ALL, APP_PAIR_DISCONNECT};
+    /* Add/ForgetAll now use the native management owner. Their corresponding
+     * generation/replacement cases live in ble_hid/native_management_cases.inc
+     * with the actual BLE worker; this path still owns Disconnect. */
+    const app_pairing_operation_t operations[] = {APP_PAIR_DISCONNECT};
     for (size_t i = 0; i < sizeof operations / sizeof operations[0]; ++i) {
         start_confirmed_pair_change(operations[i]);
         const ble_hid_snapshot_t original = test_link;
@@ -3767,9 +3771,9 @@ static void pairing_admission_generation_change_waits_for_actual_link_down(void)
     }
 }
 
-static void pairing_replacement_before_acceptance_aborts_all_operation_kinds(void)
+static void pairing_disconnect_replacement_before_acceptance_aborts(void)
 {
-    const app_pairing_operation_t operations[] = {APP_PAIR_OPEN, APP_PAIR_FORGET_ALL, APP_PAIR_DISCONNECT};
+    const app_pairing_operation_t operations[] = {APP_PAIR_DISCONNECT};
     for (size_t i = 0; i < sizeof operations / sizeof operations[0]; ++i) {
         start_confirmed_pair_change(operations[i]);
         const ble_hid_snapshot_t original = test_link;
@@ -3785,9 +3789,9 @@ static void pairing_replacement_before_acceptance_aborts_all_operation_kinds(voi
     }
 }
 
-static void pairing_replacement_after_acceptance_never_issues_another_disconnect(void)
+static void pairing_disconnect_replacement_after_acceptance_never_issues_another_disconnect(void)
 {
-    const app_pairing_operation_t operations[] = {APP_PAIR_OPEN, APP_PAIR_FORGET_ALL, APP_PAIR_DISCONNECT};
+    const app_pairing_operation_t operations[] = {APP_PAIR_DISCONNECT};
     for (size_t i = 0; i < sizeof operations / sizeof operations[0]; ++i) {
         for (unsigned link_down = 0; link_down < 2; ++link_down) {
             start_confirmed_pair_change(operations[i]);
@@ -4544,6 +4548,8 @@ static void confirmation_owns_navigation_choices_and_physical_double_click(void)
             action(APP_MENU, APP_OVERLAY_TARGET);
             release_barrier();
             sync_interaction();
+            test_bonds = (ble_hid_bond_list_t){.known = true, .count = 2, .revision = 51};
+            test_update_target = (ble_hid_target_snapshot_t){.loaded = true, .durable = true, .revision = 61};
             action(APP_PAIRING_REQUEST, APP_PAIR_OPEN);
         }
         release_barrier();
@@ -4575,7 +4581,7 @@ static void confirmation_owns_navigation_choices_and_physical_double_click(void)
         sync_interaction();
         deliver(stale_confirm);
         assert(s_pair_operation == APP_CONFIRM_NONE && !s_send_token);
-        assert(test_wifi_starts == 0 && test_wifi_forgets == 0 && test_pair_opens == 0);
+        assert(test_wifi_starts == 0 && test_wifi_forgets == 0 && test_pair_opens == 0 && !test_native_management_starts);
         expect_idle();
         expect_neutral_navigation_trace();
     }
@@ -5832,6 +5838,29 @@ static void build_identity_is_independent_of_link_and_artifact_version(void)
 #include "motion_capture_cases.inc"
 #endif
 
+static void sensor_observers_preserve_input_queue_and_redact_non_pad_context(void)
+{
+    setup(INPUT_MOUSE);
+    test_sensor_buttons = test_sensor_contacts = 0;
+    board_touch_snapshot_t sample = {.sequence = 1, .timestamp_ms = 2000, .count = 1, .valid = true,
+        .contacts = {{.id = 0, .x = 100, .y = 100}}};
+    unsigned queued = uxQueueMessagesWaiting(s_intents);
+    assert(submit_contacts(&sample) && test_sensor_public && test_sensor_contacts == 1);
+    assert(uxQueueMessagesWaiting(s_intents) == queued + 1);
+    s_overlay = APP_OVERLAY_SETTINGS;
+    ++sample.sequence;
+    assert(submit_contacts(&sample) && !test_sensor_public && test_sensor_contacts == 2);
+    assert(uxQueueMessagesWaiting(s_intents) == queued + 2);
+    s_overlay = APP_OVERLAY_NONE;
+    sample.contacts[0].x = 600;
+    assert(submit_contacts(&sample) && !test_sensor_public && test_sensor_contacts == 3);
+    unsigned edges = s_button_count;
+    physical_button(BOARD_BUTTON_DOWN, 3000000);
+    physical_button(BOARD_BUTTON_UP, 3100000);
+    assert(test_sensor_buttons == 2 && s_button_count == edges + 2 && !s_physical_down);
+    assert(trace_count == 0);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -5937,8 +5966,8 @@ int main(int argc, char **argv)
     RUN(confirmed_disconnect_cannot_retarget_a_replacement_peer);
     RUN(origin_disconnect_allows_explicit_switch_without_release_claim);
     RUN(pairing_admission_generation_change_waits_for_actual_link_down);
-    RUN(pairing_replacement_before_acceptance_aborts_all_operation_kinds);
-    RUN(pairing_replacement_after_acceptance_never_issues_another_disconnect);
+    RUN(pairing_disconnect_replacement_before_acceptance_aborts);
+    RUN(pairing_disconnect_replacement_after_acceptance_never_issues_another_disconnect);
     RUN(allocation_diagnostics_retain_only_first_complete_failure);
     RUN(allocation_diagnostics_ignore_an_unpublished_record);
     RUN(boot_memory_diagnostics_preserve_bounded_capability_history);
@@ -5987,6 +6016,7 @@ int main(int argc, char **argv)
     RUN(full_contact_right_click_and_cancelled_drag);
     RUN(contact_overflow_stale_context_and_motion_keep_safe_defaults);
     RUN(consumed_event_workspace_does_not_retain_private_payloads);
+    RUN(sensor_observers_preserve_input_queue_and_redact_non_pad_context);
 #undef RUN
     assert(passed);
     if (argc == 2) printf("PASS: coordinator case %s\n", argv[1]);
