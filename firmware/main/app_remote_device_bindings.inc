@@ -698,10 +698,15 @@ static cp_error_t remote_device_board_read(void *context, const cp_identity_t *i
     if (peers != CP_NOT_IMPLEMENTED) return peers;
     if (!strcmp(resource, "/api/v1/imu")) {
         board_imu_status_t imu = board_imu_status();
+        static const char *const reference_names[] = {"unknown", "unavailable", "acquiring", "ready", "unstable"};
+        const app_motion_reference_t reference = motion_reference_state();
         used = snprintf(json, capacity, "{\"resource_revision\":\"%" PRIu64 "\",\"available\":%s,\"calibrating\":%s,\"calibrated\":%s,"
-            "\"sample_count\":\"%" PRIu64 "\",\"sample_age_known\":%s,\"sample_age_us\":\"%" PRIu64 "\",\"error\":%d}",
+            "\"sample_count\":\"%" PRIu64 "\",\"sample_age_known\":%s,\"sample_age_us\":\"%" PRIu64 "\",\"error\":%d,"
+            "\"motion_requested\":%s,\"input_ready\":%s,\"output_ready\":%s,\"reference_state\":\"%s\"}",
             s_ui_revision, imu.available ? "true":"false", s_interaction.view.calibrating ? "true":"false", s_interaction.view.calibrated ? "true":"false",
-            imu.sample_count, imu.sample_age_known ? "true":"false", imu.sample_age_us, imu.error);
+            imu.sample_count, imu.sample_age_known ? "true":"false", imu.sample_age_us, imu.error,
+            s_engine.state.gyro_enabled ? "true":"false", s_engine.ready ? "true":"false",
+            s_interaction.output_ready ? "true":"false", reference_names[reference]);
     } else if (!strcmp(resource, "/api/v1/display")) {
         board_brightness_status_t brightness = board_brightness_status(); char applied[8];
         if (brightness.applied_known) (void)snprintf(applied, sizeof(applied), "%u", brightness.applied_percent);

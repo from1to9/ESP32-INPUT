@@ -17,7 +17,7 @@ typedef struct {
     cp_result_t completions[512]; size_t completions_count;
     uint8_t reports[512][8], report_ids[512]; size_t reports_count;
     bool block_completion, observe_failure, delegate_enabled;
-    size_t fail_report, delegated;
+    size_t fail_report, delegated, recentered;
 } fixture_t;
 
 static bool observe(void *p, app_remote_input_state_t *out)
@@ -51,6 +51,12 @@ static cp_error_t delegate(void *p, const cp_command_t *cmd, cp_result_t *result
         assert(cp_command_boolean(cmd,"enabled",&enabled));
         assert(hid_engine_set_gyro_owned(&f->engine,INPUT_REMOTE,enabled));
         assert(interaction_set_motion_owned(&f->model,INPUT_REMOTE,enabled));
+    } else if (cmd->operation == CP_OP_INPUT_MOTION_RECENTER) {
+        if (!interaction_recenter_owned(&f->model, INPUT_REMOTE)) return CP_UNAVAILABLE;
+        ++f->recentered;
+        *result=(cp_result_t){.state=CP_RESULT_APPLIED,.error=CP_OK,.uncertain_index=-1};
+        strcpy(result->reason, "motion_reference_reset");
+        return CP_OK;
     } else if (cmd->operation == CP_OP_KEYBOARD_SUBMODE_SELECT) {
         assert(cp_command_string(cmd,"submode",value,sizeof value));
         assert(!strcmp(value,"touch"));
@@ -127,7 +133,9 @@ static cp_command_t command(fixture_t *f, cp_operation_id_t op, const char *args
 static cp_result_t execute(fixture_t *f, cp_operation_id_t op, const char *args)
 {
     cp_command_t cmd=command(f,op,args); cp_result_t result;
-    assert(app_remote_input_execute(f->remote,&cmd,f->now,&result)==CP_OK); return result;
+    cp_error_t error=app_remote_input_execute(f->remote,&cmd,f->now,&result);
+    if (error!=CP_OK) fprintf(stderr,"Test command operation=%u rejected: %s\n",(unsigned)op,cp_error_name(error));
+    assert(error==CP_OK); return result;
 }
 static uint64_t acquire(fixture_t *f, const char *producer)
 {
@@ -530,8 +538,111 @@ static void rejected_virtual_end_is_consumed_without_contact_or_click_replay(voi
     finish(&f);
 }
 
+static void prepare_recenter(fixture_t *f)
+{
+    setup(f, INPUT_MOUSE);
+    for (unsigned i=0; i<64; ++i) {
+        const interaction_imu_sample_t sample={.timestamp_us=100000+i*10000,.az_g=1};
+        (void)interaction_motion_sample(&f->model, &sample);
+    }
+    assert(f->model.view.calibrated);
+    f->now=740;
+    acquire(f, "device_imu");
+    (void)execute(f, CP_OP_INPUT_MOTION_SET, "{\"enabled\":true}");
+    /* Actual stable samples establish the reference after intentional enable;
+     * the delegate never fabricates acquisition or skips its recovery frame. */
+    for (unsigned i=0; i<32; ++i) {
+        f->now+=10;
+        const interaction_imu_sample_t sample={.timestamp_us=f->now*1000,.az_g=1};
+        assert(app_remote_input_motion_sample(f->remote, &sample, f->now));
+    }
+    assert(f->model.gravity_ready && !f->engine.count);
+}
+
+static void recenter_applies_once_without_claiming_acquisition(void)
+{
+    fixture_t f; prepare_recenter(&f);
+    const uint64_t epoch=f.engine.state.epoch, sample_time=f.model.sample_us;
+    const interaction_config_t config=f.model.config;
+    float bias[3]; memcpy(bias, f.model.bias, sizeof(bias));
+    app_remote_input_view_t before; app_remote_input_snapshot(f.remote, &before);
+    const size_t reports=f.reports_count;
+    cp_command_t cmd=command(&f, CP_OP_INPUT_MOTION_RECENTER, "{}");
+    cp_result_t result;
+    assert(app_remote_input_execute(f.remote, &cmd, f.now, &result)==CP_OK &&
+        result.state==CP_RESULT_APPLIED && !strcmp(result.reason,"motion_reference_reset"));
+    assert(f.recentered==1 && f.engine.state.epoch==epoch && f.model.sample_us==sample_time &&
+        f.engine.state.gyro_enabled && f.model.view.motion_enabled && f.model.view.calibrated &&
+        !f.model.gravity_ready && !f.model.geometry_ready && !f.engine.count &&
+        f.reports_count==reports && !memcmp(&config,&f.model.config,sizeof(config)) &&
+        !memcmp(bias,f.model.bias,sizeof(bias)));
+    app_remote_input_view_t after; app_remote_input_snapshot(f.remote, &after);
+    assert(after.active && after.producer==APP_REMOTE_PRODUCER_DEVICE_IMU &&
+        after.lease_expires_ms==before.lease_expires_ms && after.pending_jobs==before.pending_jobs);
+    f.now+=10;
+    interaction_imu_sample_t sample={.timestamp_us=f.now*1000,.az_g=1};
+    assert(app_remote_input_motion_sample(f.remote,&sample,f.now));
+    const uint64_t acquiring_since=f.model.gravity_acquire_us;
+    const size_t samples=f.model.gravity_acquire_samples;
+    assert(app_remote_input_execute(f.remote,&cmd,f.now,&result)==CP_OK &&
+        result.state==CP_RESULT_APPLIED && f.recentered==1 &&
+        f.model.gravity_acquire_us==acquiring_since && f.model.gravity_acquire_samples==samples);
+    cp_command_t expired=command(&f,CP_OP_INPUT_MOTION_RECENTER,"{}"); expired.deadline_ms=f.now;
+    assert(app_remote_input_execute(f.remote,&expired,f.now,&result)==CP_EXPIRED && f.recentered==1);
+    for (unsigned i=0;i<16;++i) {
+        f.now+=10; sample.timestamp_us=f.now*1000;
+        assert(app_remote_input_motion_sample(f.remote,&sample,f.now));
+        assert(!f.engine.count && f.reports_count==reports);
+    }
+    assert(f.model.gravity_ready && f.recentered==1);
+    finish(&f);
+}
+
+static void recenter_rejects_authority_mode_and_held_work(void)
+{
+    for (unsigned fault=0;fault<18;++fault) {
+        fixture_t f; prepare_recenter(&f);
+        if (fault==4) hid_engine_set_locked(&f.engine,true);
+        if (fault==5) hid_engine_set_link(&f.engine,true,false);
+        if (fault==6) hid_engine_cancel(&f.engine);
+        if (fault==7) assert(hid_engine_enqueue_mouse_move(&f.engine,f.engine.state.epoch,INPUT_REMOTE,1,0)==HID_ENGINE_ENQUEUE_OK);
+        if (fault==8) {
+            assert(hid_engine_enqueue_mouse_buttons(&f.engine,f.engine.state.epoch,INPUT_REMOTE,1)==HID_ENGINE_ENQUEUE_OK);
+            step(&f); assert(f.engine.mouse_buttons==1 && !f.engine.count);
+        }
+        if (fault==9) (void)execute(&f,CP_OP_TOUCH_BEGIN,
+            "{\"gesture_id\":\"00000000000000000000000000000001\",\"x\":100,\"y\":100}");
+        if (fault==10) {
+            (void)execute(&f,CP_OP_MOUSE_DRAG_BEGIN,"{\"button\":\"left\"}"); step(&f);
+        }
+        if (fault==11) {
+            (void)execute(&f,CP_OP_CONTROL_RELEASE,"{}");step(&f);step(&f);acquire(&f,"script");
+        }
+        if (fault==12) { (void)execute(&f,CP_OP_INPUT_MOTION_SET,"{\"enabled\":false}");step(&f);step(&f); }
+        if (fault==13) { (void)execute(&f,CP_OP_MODE_SELECT,"{\"mode\":\"keyboard\"}");step(&f);step(&f); }
+        if (fault==14) f.state.local_busy=true;
+        if (fault==16) f.delegate_enabled=false;
+        if (fault==17) f.model.view.calibrating=true;
+        cp_command_t cmd=command(&f,CP_OP_INPUT_MOTION_RECENTER,"{}");
+        if (fault==0) cmd.identity.scopes=0;
+        if (fault==1) cmd.deadline_ms=f.now;
+        if (fault==2) cmd.lease_id[0]^=1;
+        if (fault==3) ++cmd.transport_generation;
+        if (fault==15) cmd.identity.session_id[0]^=1;
+        const size_t queued=f.engine.count;
+        cp_result_t result;
+        cp_error_t error=app_remote_input_execute(f.remote,&cmd,f.now,&result);
+        assert(error!=CP_OK && result.state==CP_RESULT_REJECTED && !f.recentered);
+        if (fault>=7 && fault<=11) assert(error==CP_BUSY && f.engine.count==queued);
+        if (fault==12 || fault==13) assert(error==CP_STALE);
+        finish(&f);
+    }
+}
+
 int main(void)
 {
+    recenter_applies_once_without_claiming_acquisition();
+    recenter_rejects_authority_mode_and_held_work();
     storage_alignment_rejects_without_mutation_and_recovers();
     lease_barrier_renewal_and_safety();
     mouse_keyboard_admission_sent_and_deadman();

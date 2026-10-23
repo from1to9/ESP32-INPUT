@@ -37,3 +37,13 @@ clutches a live IMU stream past the ordinary settling interval and still emits
 its normal click. Physical contact retains the parent's immediate local
 priority. The coordinator must call the routing API once and skip its old
 motion-model/enqueue path when the sample is consumed.
+
+Recenter uses the no-argument input.motion.recenter operation under an active
+Device IMU lease. Its delegate calls the actual shared reference-reset API.
+Tests verify that APPLIED precedes acquisition readiness, stable real samples
+restore the reference without a recovery delta, and replay/expiry cannot invoke
+the reset again. Bias, configuration, calibration, Motion intent, epoch and
+lease expiry are preserved. Scope/lease/target/owner/mode/readiness and
+queued/held/drag/virtual-contact conflicts reject without applying a reset or
+purging queued work. Provider/hardware admission is separately covered by the
+coordinator suite; this harness does not simulate a physical sensor or host.

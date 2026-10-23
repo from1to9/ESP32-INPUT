@@ -532,8 +532,14 @@ static void on_action(lv_event_t *event)
     default: break;
     }
     app_action_t action = binding->action;
-    if (binding->object == s_keyboard_choice && s_view.mode == INPUT_MOUSE)
-        value = APP_OVERLAY_TARGET;
+    if (binding->object == s_keyboard_choice) {
+        if (s_touch_epoch != s_view.epoch || s_touch_revision != s_view.ui_revision) return;
+        if (s_view.mode == INPUT_MOUSE) {
+            if (s_touch_local_blocked || !s_view.motion_recenter_available) return;
+            action = APP_RECENTER;
+            value = 0;
+        }
+    }
     if (action == APP_SETTINGS_PAGE && value == APP_SETTINGS_HOME && s_view.overlay == APP_OVERLAY_SETTINGS) {
         if (s_view.settings_page == APP_SETTINGS_HOME) { action = APP_MENU; value = APP_OVERLAY_MODES; }
         else if (s_view.settings_page == APP_SETTINGS_BLUETOOTH || s_view.settings_page == APP_SETTINGS_WIFI) value = APP_SETTINGS_CONNECTIVITY;
@@ -768,10 +774,18 @@ static void motion_adjustment(lv_obj_t *parent, app_motion_field_t field,
 static const char *motion_reason(const app_view_t *view)
 {
     switch (view->motion_reason) {
-    case APP_MOTION_READY: return "Touch pauses motion.";
+    case APP_MOTION_READY:
+        if (!view->motion_enabled) return "Enable Motion to set your grip.";
+        switch (view->motion_settings.reference) {
+        case APP_REFERENCE_READY: return "Grip ready. Touch pauses motion.";
+        case APP_REFERENCE_ACQUIRING: return "Hold still to set your grip.";
+        case APP_REFERENCE_UNSTABLE: return "Hold still to restore your grip.";
+        case APP_REFERENCE_UNAVAILABLE: return "Grip unavailable. Open Status.";
+        default: return "Grip status unavailable. Open Status.";
+        }
     case APP_MOTION_SENSOR_UNAVAILABLE: return "Motion sensor unavailable.";
-    case APP_MOTION_CALIBRATION_REQUIRED: return "Calibrate motion in Input settings.";
-    case APP_MOTION_CALIBRATING: return "Keep the device still to calibrate.";
+    case APP_MOTION_CALIBRATION_REQUIRED: return "Calibrate sensor in Input settings.";
+    case APP_MOTION_CALIBRATING: return "Keep the device still to calibrate sensor.";
     case APP_MOTION_PROVIDER_UNAVAILABLE: return "Selected input provider unavailable.";
     case APP_MOTION_DISCONNECTED: return view->input_transport == APP_INPUT_USB ?
         "Connect a USB data host." : "Connect a Bluetooth input host.";
@@ -780,6 +794,18 @@ static const char *motion_reason(const app_view_t *view)
     case APP_MOTION_TRANSPORT_SWITCHING: return "Switching input connection.";
     case APP_MOTION_TRANSPORT_ERROR: return "Input connection error. Open Status.";
     default: return "Motion status unavailable. Open Status.";
+    }
+}
+
+static const char *motion_caption(const app_view_t *view)
+{
+    if (view->calibrating) return "Calibrating...";
+    if (!view->motion_enabled) return "Motion / off";
+    if (view->motion_reason != APP_MOTION_READY) return "Motion / paused";
+    switch (view->motion_settings.reference) {
+    case APP_REFERENCE_READY: return "Motion / on";
+    case APP_REFERENCE_ACQUIRING: case APP_REFERENCE_UNSTABLE: return "Motion / waiting";
+    default: return "Motion / unavailable";
     }
 }
 
@@ -1228,7 +1254,7 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         background(s_haptics, ON_ACCENT, LV_PART_KNOB);
         lv_obj_add_flag(s_haptics, LV_OBJ_FLAG_EVENT_BUBBLE);
         lv_obj_add_event_cb(s_haptics, on_haptics, LV_EVENT_VALUE_CHANGED, NULL);
-        s_calibrate = button(input, "Calibrate motion", 0, 144, 448, 44, APP_CALIBRATE, 0);
+        s_calibrate = button(input, "Calibrate sensor", 0, 144, 448, 44, APP_CALIBRATE, 0);
         s_tap_click = button(input, "Tap to click / unavailable", 0, 200, 448, 44, APP_TAP_TO_CLICK, 0);
         button(input, "Motion settings", 0, 256, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_MOTION);
         button(input, "Gesture help", 228, 256, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_GESTURES);
@@ -1238,7 +1264,7 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         return;
     }
     if (page == APP_SETTINGS_MOTION) {
-        s_motion_reference = label(settings, "Automatic reference unavailable", 0, 0, 448, MUTED);
+        s_motion_reference = label(settings, "Auto grip unavailable", 0, 0, 448, MUTED);
         lv_obj_set_height(s_motion_reference, 36);
         lv_obj_set_style_text_font(s_motion_reference, META_FONT, 0);
         const char *presets[] = {"Slow", "Default", "Fast"};
@@ -2236,7 +2262,7 @@ void app_ui_render(const app_view_t *view)
             else lv_obj_remove_state(s_haptics, LV_STATE_CHECKED);
             enabled(s_haptics, view->haptics_available);
         }
-        text(s_calibrate, view->calibrating ? "Calibrating... keep still" : "Calibrate motion");
+        text(s_calibrate, view->calibrating ? "Calibrating... keep still" : "Calibrate sensor");
         enabled(s_calibrate, (view->calibration_available || view->motion_available) && !view->calibrating);
         text(s_tap_click, !view->tap_to_click_available ? "Tap to click / unavailable" :
             view->tap_to_click_enabled ? "Tap to click / on" : "Tap to click / off");
@@ -2245,11 +2271,11 @@ void app_ui_render(const app_view_t *view)
         label_text(s_motion_detail, motion_reason(view));
         bool settings_known = motion_settings_valid(&view->motion_settings);
         bool settings_editable = settings_known && view->motion_settings.editable;
-        const char *reference = view->motion_settings.reference == APP_REFERENCE_READY ? "Automatic orientation / ready" :
-            view->motion_settings.reference == APP_REFERENCE_ACQUIRING ? "Automatic orientation / finding a reference" :
-            view->motion_settings.reference == APP_REFERENCE_UNSTABLE ? "Automatic orientation / hold still briefly" :
-            view->motion_settings.reference == APP_REFERENCE_UNAVAILABLE ? "Automatic orientation unavailable" :
-            "Automatic orientation status unknown";
+        const char *reference = view->motion_settings.reference == APP_REFERENCE_READY ? "Auto grip / ready" :
+            view->motion_settings.reference == APP_REFERENCE_ACQUIRING ? "Auto grip / hold still to set" :
+            view->motion_settings.reference == APP_REFERENCE_UNSTABLE ? "Auto grip / hold still to restore" :
+            view->motion_settings.reference == APP_REFERENCE_UNAVAILABLE ? "Auto grip unavailable" :
+            "Auto grip status unknown";
         label_text(s_motion_reference, reference);
         for (unsigned field = 0; field < 5; ++field) {
             int value = motion_setting((app_motion_field_t)field);
@@ -2308,16 +2334,17 @@ void app_ui_render(const app_view_t *view)
     visible(s_audio_choice, view->mode == INPUT_AUDIO);
     if (view->mode == INPUT_KEYBOARD)
         text(s_keyboard_choice, (unsigned)view->keyboard_submode < 4 ? entry_names[view->keyboard_submode] : "Entry");
+    enabled(s_keyboard_choice, view->mode != INPUT_MOUSE || view->motion_recenter_available);
     if (view->mode == INPUT_AUDIO) text(s_audio_choice, view->audio_kind == APP_AUDIO_SPEAKER ? "Speaker" : "Voice");
     for (int i = 0; i < 3; ++i) visible(s_panels[i], (input_mode_t)i == view->mode);
 
     /* Only the foreground mode is refreshed. Hidden uptime/settings changes
      * cannot invalidate primary input pixels, even with FULL rendering. */
     if (view->mode == INPUT_MOUSE) {
-        text(s_keyboard_choice, "Motion help");
+        text(s_keyboard_choice, "Recenter");
         label_format(s_pad_hint, "%s\n\n%s", motion_reason(view), !view->tap_to_click_available ? "Tap gestures unavailable" : view->tap_to_click_enabled ?
             "Tap / double tap / double-tap hold to drag" : "Tap to click off / movement only");
-        text(s_motion, view->calibrating ? "Calibrating..." : view->motion_enabled ? "Motion / on" : "Motion / off");
+        text(s_motion, motion_caption(view));
         selected(s_motion, view->motion_enabled);
         enabled(s_motion, view->motion_enabled || (view->motion_available && hid_ready &&
             !view->calibrating && view->motion_reason == APP_MOTION_READY));

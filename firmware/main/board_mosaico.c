@@ -1078,14 +1078,11 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
             result = imu_failure_locked(result, "cache_age", time_us < s_imu_sample.timestamp_us, false);
         } else {
             *sample = s_imu_sample;
-            /* The factory firmware documents a 90-degree clockwise sensor
-             * mounting relative to the display. Rotate both vectors with the
-             * same proper rotation; keep acquisition and diagnostics raw.
-             * Provenance and deferred physical checks: tests/board_port/README.md. */
-            sample->x_dps = -s_imu_sample.y_dps;
-            sample->y_dps = s_imu_sample.x_dps;
-            sample->x_g = -s_imu_sample.y_g;
-            sample->y_g = s_imu_sample.x_g;
+            /* Flat and text-upright holds place native Z outward and native Y
+             * toward the screen top. Both vectors therefore use the native
+             * basis here. The factory UI's Euler Pitch/Roll remap does not
+             * define this three-dimensional body basis. Evidence and remaining
+             * physical checks: tests/board_port/README.md. */
         }
     }
     s_imu_status.read_seen = true;

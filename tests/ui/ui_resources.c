@@ -221,14 +221,16 @@ static bool idle_case(app_view_t state, bool hidden_changes, bool covered_target
     size_t limit = state.overlay == APP_OVERLAY_NONE ? CORE_OBJECT_LIMIT : PANEL_OBJECT_LIMIT;
     bool passed = quiet && bounded && objects <= limit && after.failures == 0;
     fprintf(s_report, "%s\n    {\"mode\":%d,\"dark\":%s,\"hidden_changes\":%s,"
-        "\"covered_target_changes\":%s,\"overlay\":%d,\"settings_page\":%d,\"confirmation\":%d,\"screen_off\":%s,\"object_limit\":%zu,"
+        "\"covered_target_changes\":%s,\"overlay\":%d,\"settings_page\":%d,\"confirmation\":%d,\"screen_off\":%s,"
+        "\"motion_enabled\":%s,\"motion_reference\":%d,\"motion_recenter_available\":%s,\"object_limit\":%zu,"
         "\"simulated_ms\":%u,\"snapshots\":100,\"objects\":%zu,\"timers\":%zu,"
         "\"allocations\":%zu,\"reallocations\":%zu,\"frees\":%zu,\"flushes\":%zu,"
         "\"flush_bytes\":%zu,\"live_bytes_before\":%zu,\"live_bytes_after\":%zu,"
         "\"peak_live_bytes\":%zu,\"quiet\":%s,\"bounded\":%s,\"passed\":%s}",
         s_first_result ? "" : ",", (int)state.mode, state.dark_theme ? "true" : "false", hidden_changes ? "true" : "false",
         covered_target ? "true" : "false", (int)state.overlay, (int)state.settings_page,
-        (int)state.confirmation, state.screen_off ? "true" : "false", limit,
+        (int)state.confirmation, state.screen_off ? "true" : "false", state.motion_enabled ? "true" : "false",
+        (int)state.motion_settings.reference, state.motion_recenter_available ? "true" : "false", limit,
         IDLE_MS, objects, timers, allocations, reallocations, frees, flushes, s_flush_bytes - bytes_before,
         before.live_bytes, after.live_bytes, after.peak_live_bytes, quiet ? "true" : "false",
         bounded ? "true" : "false", passed ? "true" : "false");
@@ -308,6 +310,14 @@ int main(int argc, char **argv)
             for (unsigned hidden = 0; hidden < 2; ++hidden)
                 if (!idle_case(view((input_mode_t)mode, dark != 0), hidden != 0, false)) passed = false;
     for (unsigned dark = 0; dark < 2; ++dark) {
+        for (unsigned reference = APP_REFERENCE_UNKNOWN; reference <= APP_REFERENCE_UNSTABLE; ++reference) {
+            app_view_t grip = view(INPUT_MOUSE, dark != 0);
+            grip.motion_reason = APP_MOTION_READY;
+            grip.motion_enabled = true;
+            grip.motion_recenter_available = reference >= APP_REFERENCE_ACQUIRING;
+            grip.motion_settings.reference = (app_motion_reference_t)reference;
+            if (!idle_case(grip, false, false)) passed = false;
+        }
         for (size_t i = 0; i < sizeof s_panels / sizeof s_panels[0]; ++i)
             if (!idle_case(panel_view(&s_panels[i], dark != 0), false, false)) passed = false;
         app_view_t sleeping = view(INPUT_MOUSE, dark != 0);

@@ -57,6 +57,66 @@ typedef enum {
     INTERACTION_MOTION_BLOCK_GEOMETRY, INTERACTION_MOTION_BLOCK_CONTROL
 } interaction_motion_block_t;
 
+/* Observation only. Reasons identify the actual invalidation call site; counts
+ * include ready->unavailable transitions, never repeated unavailable samples. */
+typedef enum {
+    INTERACTION_REFERENCE_NONE, INTERACTION_REFERENCE_CLOCK,
+    INTERACTION_REFERENCE_CALIBRATE, INTERACTION_REFERENCE_CANCEL,
+    INTERACTION_REFERENCE_MISSING, INTERACTION_REFERENCE_INVALID_SAMPLE,
+    INTERACTION_REFERENCE_SAMPLE_TIME, INTERACTION_REFERENCE_HAPTIC_AGE,
+    INTERACTION_REFERENCE_HAPTIC_NORMALIZE, INTERACTION_REFERENCE_ACCEL_NORM,
+    INTERACTION_REFERENCE_PREDICT_NORMALIZE, INTERACTION_REFERENCE_CORRECT_NORMALIZE,
+    INTERACTION_REFERENCE_TRUST_AGE, INTERACTION_REFERENCE_REASON_COUNT
+} interaction_reference_reason_t;
+enum {
+    INTERACTION_REFERENCE_SAFE_NORM = 1U, INTERACTION_REFERENCE_NEAR_ONE = 2U,
+    INTERACTION_REFERENCE_GENTLE = 4U, INTERACTION_REFERENCE_INNOVATION = 8U
+};
+enum {
+    INTERACTION_REFERENCE_ENABLED = 1U, INTERACTION_REFERENCE_OUTPUT_READY = 2U,
+    INTERACTION_REFERENCE_MOUSE = 4U, INTERACTION_REFERENCE_OWNER = 8U,
+    INTERACTION_REFERENCE_LOCKED = 16U, INTERACTION_REFERENCE_TOUCH = 32U,
+    INTERACTION_REFERENCE_GESTURE = 64U, INTERACTION_REFERENCE_MENU = 128U,
+    INTERACTION_REFERENCE_HAPTIC = 256U, INTERACTION_REFERENCE_BUTTON = 512U,
+    INTERACTION_REFERENCE_FREEZE = 1024U
+};
+typedef struct {
+    interaction_imu_sample_t sample, previous;
+    float bias[3], gravity_before[3], previous_accel[3], dt, norm;
+    uint64_t trusted_us, now_ms;
+    uint32_t context, checks_known, checks_pass;
+    bool sample_known, previous_known, gravity_ready, accel_seen, dt_known, norm_known;
+} interaction_reference_frame_t;
+typedef struct {
+    uint32_t rejected, near_one, gentle, innovation, haptic;
+    bool saturated, first_known;
+    interaction_reference_frame_t first;
+} interaction_reference_episode_t;
+typedef struct {
+    bool known;
+    interaction_reference_reason_t reason;
+    interaction_reference_episode_t episode;
+    interaction_reference_frame_t terminal;
+} interaction_reference_incident_t;
+typedef enum {
+    INTERACTION_REFERENCE_RESET_NONE, INTERACTION_REFERENCE_RESET_ENABLE,
+    INTERACTION_REFERENCE_RESET_RECENTER
+} interaction_reference_reset_t;
+typedef struct {
+    /* Binding identity rejects copied preview models. Borrowed storage must
+     * outlive its model and is owned by that same coordinator, not an ISR. */
+    const void *owner;
+    uint32_t losses[INTERACTION_REFERENCE_REASON_COUNT], active_losses;
+    bool saturated, previous_known;
+    interaction_imu_sample_t previous;
+    interaction_reference_frame_t work;
+    interaction_reference_episode_t episode;
+    interaction_reference_incident_t first_active;
+    uint32_t enable_resets, recenter_resets;
+    interaction_reference_reset_t last_reset;
+    uint64_t last_reset_ms; /* Model clock; known only when last_reset != NONE. */
+} interaction_reference_diagnostics_t;
+
 typedef struct {
     bool tap_to_click;
     uint32_t tap_max_ms, double_window_ms, contact_timeout_ms, drag_max_ms;
@@ -147,10 +207,19 @@ typedef struct {
     float filtered[2], selector_angle[2], touch_carry[2];
     int selector_cell[2];
     input_motion_t pointer_motion;
+    interaction_reference_diagnostics_t *reference_diagnostics;
 } interaction_t;
 
 void interaction_init(interaction_t *model);
 void interaction_get_view(const interaction_t *model, interaction_view_t *view);
+/* Optional fixed caller storage. Bind/reset only observations, never control
+ * state. Init detaches; copied models cannot write their original's evidence.
+ * Getter returns NULL for absent/stale binding. No allocation or I/O occurs. */
+void interaction_reference_diagnostics_bind(interaction_t *model,
+    interaction_reference_diagnostics_t *storage);
+void interaction_reference_diagnostics_reset(interaction_t *model);
+const interaction_reference_diagnostics_t *interaction_reference_diagnostics_get(
+    const interaction_t *model);
 /* Copy canonical coordinator state each tick. output_ready includes the HID
  * release gate/congestion. Epoch/mode/owner/link/lock changes reset motion and
  * local selection, cancel pending clicks and mark active sends for settlement.
@@ -161,6 +230,11 @@ void interaction_sync(interaction_t *model, const input_state_t *state,
 bool interaction_configure(interaction_t *model, const interaction_config_t *config);
 bool interaction_set_motion(interaction_t *model, bool enabled);
 bool interaction_set_motion_owned(interaction_t *model, input_owner_t source, bool enabled);
+/* Intentional current-grip reference reset, distinct from gyro bias calibration.
+ * Requires enabled Mouse intent, matching owner/source, calibration and output
+ * readiness. Preserves bias/config/intent/sample-time guards and fault history.
+ * Next real stable samples use ordinary acquisition; recovery emits no delta. */
+bool interaction_recenter_owned(interaction_t *model, input_owner_t source);
 void interaction_set_keyboard_motion(interaction_t *model, bool enabled);
 void interaction_set_suppressed(interaction_t *model, bool touch, bool menu,
                                 bool haptic, uint64_t now_ms);

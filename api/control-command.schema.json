@@ -4539,6 +4539,19 @@
           "additionalProperties": false
         }
       }
+    },
+    {
+      "properties": {
+        "op": {
+          "const": "input.motion.recenter"
+        },
+        "args": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      }
     }
   ]
 }

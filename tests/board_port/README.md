@@ -1,7 +1,8 @@
 # Board adapter host regressions
 
 Run `python3 tests/board_port/run.py`. The suite compiles the actual
-`board_mosaico.c` implementation and portable haptic component with strict C11
+`board_mosaico.c` implementation and portable haptic, input and interaction
+components with strict C11
 diagnostics, AddressSanitizer and UndefinedBehaviorSanitizer. Controllable
 driver doubles model the ESP-IDF/BSP boundary; they do not claim hardware or
 radio success. Task creation records ownership and allocation, while the sensor
@@ -83,22 +84,42 @@ attempts bounded cleanup, retaining any failed-cleanup handle. Fatal IMU cleanup
 runs once; the sensor owner may continue battery polling. Memory qualification
 must charge the live sensor stack and TCB, including after a recoverable fault.
 
-`board_imu_read` rotates both acceleration and angular velocity into the same
+`board_imu_read` supplies both acceleration and angular velocity in the same
 right-handed display frame (X right, Y top, Z toward the viewer):
-`(-sensorY, sensorX, sensorZ)`. Acquisition/cache diagnostics stay in sensor
-coordinates. The basis-vector regression checks both vectors, orthonormality,
+`(sensorX, sensorY, sensorZ)` for the current Mosaico panel orientation. The
+identity transform has determinant +1; both vectors use the same basis.
+The basis-vector regression checks both vectors, orthonormality,
 the determinant +1 cross-product invariant, unchanged raw cache and timestamps,
-and no sensor access during consumption. This replaces the former improper
-permutation at the application boundary; consumers must use these fields
-directly rather than rotate them again.
+and no sensor access during consumption. Consumers use these fields directly.
 
-Provenance: the [official factory orientation code at commit 2e1017e](https://github.com/esp-mosaico/esp-mosaico-claw/blob/2e1017e42d507cd9216d4da5b2c7d45cb2007971/main/platform/mosaic_imu_platform.c#L113-L125)
-documents a 90-degree clockwise BMI270 mounting and maps screen pitch to sensor
-roll, screen roll to negative sensor pitch, and leaves yaw unchanged. The vector
-rotation follows that code's roll/pitch conventions. This is source-grounded
-evidence; installed display orientation, positive physical direction and air
-pointer feel remain pending physical qualification. The BSP getters themselves
-only scale sensor values and do not establish chip placement.
+Physical evidence from Mosaico v1.2 selects this basis. These poses do not
+physically qualify v1.0 or other board profiles. Flat screen-up observations put
+specific force on native +Z. A confirmed text-upright, screen-facing inclined hold put it
+on native +Y with positive Z, while the former extra `(-Y,X,Z)` rotation reported
+X=-0.851..-0.816 g, Y=-0.032..0.023 g and Z=0.502..0.562 g. A native-boundary
+fixture derived from that hold fails the former mapping. It checks the screen
+top axis, rather than merely asserting the chosen matrix. The first captured
+window included movement; only the subsequent settled windows support this
+fixture. Earlier mislabeled edge-lift trials are not mounting evidence.
+
+The [factory orientation code at commit 2e1017e](https://github.com/esp-mosaico/esp-mosaico-claw/blob/2e1017e42d507cd9216d4da5b2c7d45cb2007971/main/platform/mosaic_imu_platform.c#L113-L125)
+describes a 90-degree mounting and remaps Euler UI Pitch/Roll. Its
+[bubble widget](https://github.com/esp-mosaico/esp-mosaico-claw/blob/2e1017e42d507cd9216d4da5b2c7d45cb2007971/components/mosaic_ui/apps/imu/imu_app.c#L70-L75)
+uses those angles as pixel positions. These UI labels do not independently
+define this product's three-dimensional body axes; translating them into an
+additional vector rotation was not supported by the physical hold evidence.
+
+The cross-layer regression links the actual board adapter to the production
+interaction model. It calibrates at flat, observed inclined and upright grips,
+enables Motion, then feeds twelve new matching zero-gyro frames for intentional
+reference acquisition. It checks that the reference remains unavailable before
+100 ms and that the acquisition-completion frame still reports reference
+suppression, while calibrated bias and Motion intent are preserved. Only then
+does it supply single-axis pitch and world-up yaw in both directions through
+the Bosch integer boundary. It checks independent horizontal/vertical output, fresh
+gravity tracking and geometry through every frame. This is host evidence;
+dynamic physical direction and feel still need device qualification. Removing
+the mounting error does not fix or qualify fast-motion reference loss.
 
 Power checks use controllable checked I2C responses at the BSP-owned bus
 boundary. They verify little-endian readings, signed current, gauge readiness,

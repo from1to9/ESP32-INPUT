@@ -14147,6 +14147,85 @@
       ],
       "x-initial-v1-supported": true,
       "x-device-resource": "/api/v1/firmware/policy"
+    },
+    {
+      "name": "input_motion_recenter",
+      "description": "input.motion.recenter; authenticated device scopes and availability apply. Acceptance is not completion.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "type": "object",
+            "properties": {
+              "management_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "resource_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "epoch": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "transport_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "target_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "ui_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "args": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "context",
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "idempotentHint": false
+      },
+      "x-device-operation": "input.motion.recenter",
+      "x-required-scopes": [
+        "input.control"
+      ],
+      "x-initial-v1-supported": true,
+      "x-device-resource": null
     }
   ]
 }

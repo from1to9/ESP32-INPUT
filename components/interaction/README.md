@@ -52,6 +52,39 @@ Board input is already axis-mapped angular velocity in degrees/second and accele
 
 Calibrated rates pass through a deadzone and a first-order filter. The deadzone clears a stopped axis immediately, preventing filter tails from moving a stationary pointer. Mouse integration uses production `input_motion_step` with actual sample intervals and bounded fractional carry. Keyboard Motion integrates local angular focus with configurable boundary hysteresis and returns zero host movement. Audio always returns zero. Touch, button down, menus and haptics suppress gyro output; touch release has a 150 ms freeze. Touch/haptic suppression preserves prior mouse intent; menus and canonical state boundaries clear it. Returning to Mouse requires explicit enabling.
 
+A new Mouse motion enable intentionally clears its old orientation reference
+and waits for the current stable grip using the same recovery criteria below.
+Repeated enable is idempotent and does not restart acquisition. Motion remains
+requested while waiting and can always be disabled. `interaction_recenter_owned`
+applies the same reset to already enabled Mouse motion from its current owner;
+it requires calibrated, non-calibrating, unlocked and output-ready state without
+a menu. It preserves gyro bias, tuning, canonical state/epoch, motion intent and
+sample-time continuity checks, while clearing gravity/geometry acquisition and
+filter/fraction carry. Actual fresh stable samples establish the new reference;
+the acquisition frame emits no movement. This is a gravity reference for relative
+rotation, not an absolute heading or moving neutral-angle baseline.
+
+The coordinator rechecks actual sensor, route, epoch/UI revision, release,
+maintenance, wake, overlay and ownership gates. Explicit Recenter is busy with
+queued or held input; it never purges input or cancels mandatory releases. UI
+eligibility excludes per-report queue flicker, with real occupancy rechecked on
+admission. Remote `input.motion.recenter` uses the same owner path under an active
+device-IMU input-control lease. APPLIED acknowledges the reset only; observed
+reference readiness is separate. Duplicate commands cannot restart acquisition.
+Bias calibration remains a distinct operation that disables motion and gathers
+new bias evidence.
+
+The existing `imu.state` (`/api/v1/imu`) response adds `motion_requested`,
+`input_ready`, `output_ready` booleans and `reference_state` with values
+`unknown`, `unavailable`, `acquiring`, `unstable` or `ready`. The coordinator
+uses one shared derivation for UI and this encoder: unknown before its model
+clock has been observed, unavailable without actual IMU capability, acquiring
+without gravity, unstable with unavailable/limited geometry, otherwise ready.
+Calibration fields remain separate. Reference readiness does not imply route
+readiness, absence of touch/freeze suppression, or host delivery. Input/output
+readiness retain their existing route/model meanings. Too-small responses fail
+with `CP_TOO_LARGE`, zero length and an empty body when capacity permits.
+
 Keyboard angular position spans all three rows and columns. Selection compares only available cell centers and retains the current cell on ties. A candidate must become closer by the configured angular hysteresis along the line between centers before focus switches. This applies to horizontal, vertical and diagonal boundaries, including gaps in sparse child grids. Empty cells have no selection region, and a saturated angular position cannot trap focus on an unavailable cell. Calibration and all motion tuning still require physical measurement.
 
 Touch movement accepts finite relative displacements in +/-4096 HID units per call, with gain divisors 1, 4 or 8, fractional carry and output bounded to +/-127. It requires active touch, Mouse mode, a current local owner and output readiness. Invalid/suppressed intervals and gain changes discard residual motion. HID units are not screen pixels. Calibration, axis orientation, default gain, filtering, freeze and selector thresholds still require actual-board tuning; host regressions do not establish physical accuracy.
@@ -61,6 +94,53 @@ Mouse samples use a right-handed display body frame: X right, Y top and Z outwar
 A gyro-propagated gravity reference accepts bounded acceleration correction only near one g with suitable innovation and gyro-compensated jerk. Ordinary acceleration can use prediction for at most 250 ms. Freefall, impact, sensor saturation, invalid samples and sample-time discontinuity invalidate the reference; recovery requires at least eight stable samples spanning 100 ms and discards the recovery sample's output. Haptic intervals use gyro-only prediction without acceleration correction for at most 250 ms; longer vibration invalidates the reference until stable recovery. Touch suppresses output while valid orientation tracking continues. Near vertical display-right, vertical sensitivity fades between projected lengths 0.35 and 0.15; below 0.15 pointer output pauses, with a stable 100 ms geometry reanchor beyond 0.35. These numerical profile bounds are source/host checked and remain physically unqualified.
 
 Configuration accepts independent X/Y gains 0.25..100 HID units/degree, deadzone 0..10 dps, filter time constant 0..1 seconds, settling freeze 0..1000 ms, selector cell width 1..45 degrees and hysteresis from zero up to half a cell (exclusive). Defaults are X=Y=4, no inversion, deadzone 0.5 dps, filter 0.03 seconds, freeze 150 ms, cell width 6 degrees and hysteresis 1 degree. `interaction_freeze_after` applies the configured duration to original event time with saturating arithmetic; `interaction_freeze_until` still accepts an explicit later deadline. Configuration changes clear filters and carry. Status flags distinguish calibrated, gravity ready, gyro-predicted, limited geometry and suppressed output, with a reason for suppression. Calls and snapshots must remain on the coordinator; the model is not thread-safe.
+
+### Optional reference-loss evidence
+
+`interaction_reference_diagnostics_bind` attaches fixed caller-owned storage;
+the model only gains one pointer. Storage and model must share a coordinator
+and lifetime. A copied preview model cannot write or read the original binding.
+Init detaches, bind/reset clears observations only, and the getter returns NULL
+for absent or copied bindings. No allocation, sensor access, logging or extra
+clock observation occurs in the sample path. Trust calculations, short-circuit
+evaluation and admission remain unchanged.
+
+Loss counters count actual ready-to-unavailable transitions by call-site reason;
+repeated samples while unavailable are not new losses. All counters saturate
+with explicit flags. The first active incident is immutable until diagnostic
+reset/rebind: Mouse motion was enabled, its source owned input, output was ready
+and control was unlocked at the transition. Touch/haptic/button/freeze context
+is retained, not silently excluded. Explicit calibration/cancel disables intent
+before invalidation and therefore cannot occupy this active incident slot.
+Inactive losses remain counted without occupying it.
+Intentional enable/Recenter resets have separate saturating counters and a
+last-reset reason/model timestamp; they do not count as losses or clear the
+first unexpected incident. They clear only the current rejection episode.
+
+An episode starts at the first rejected correction while reference is ready and
+ends on a trusted correction, reacquisition or invalidation. Its near-one-g,
+gentle and innovation rejection counts can overlap. Innovation remains unknown
+when the existing near-one-g/gentle short circuit did not evaluate it; haptic
+prediction does not evaluate correction checks. A hard norm rejection records
+only that safe-norm check. The incident retains the episode's first rejection
+and terminal frame, including original sample pair/timestamps, actual previous
+acceleration, bias, gravity before prediction, dt, norm, last trusted timestamp,
+control context and known/pass masks. Binding midstream cannot invent a previous
+sample; previous-known stays false until a matching sample has been observed.
+Non-sample losses have sample-known false and do not reuse an old work frame.
+
+The coordinator emits one `MotionRef` row at the existing ten-second cadence,
+plus at most two `MotionRefFrame` rows for the frozen incident. Rows stay below
+1024 payload bytes; repeating the immutable incident allows late attachment.
+`losses` lists reason indices 1..12 from the header enum (clock, calibrate,
+cancel, missing, invalid sample, sample time, haptic age, haptic normalization,
+hard acceleration norm, prediction normalization, correction normalization,
+ordinary trust age). Frame vectors are comma-separated exact IEEE binary32
+hex bits, in gyro X/Y/Z then acceleration X/Y/Z order for samples, and X/Y/Z
+for bias/gravity/previous acceleration. Unknown fields must be interpreted via
+their known flags, never as measured zero. These observations identify executed
+rejections and loss branches; they do not alone establish physical sensor phase,
+mounting, translation versus rotation, or host pointer delivery.
 
 ## Focused host regression
 

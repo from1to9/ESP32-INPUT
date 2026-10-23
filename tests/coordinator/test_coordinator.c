@@ -976,6 +976,7 @@ static void setup(input_mode_t mode)
     memset(s_button_edges, 0, sizeof s_button_edges);
     hid_engine_init(&s_engine);
     interaction_init(&s_interaction);
+    interaction_reference_diagnostics_bind(&s_interaction, &s_reference_diagnostics);
     assert(configure_motion_preferences(&s_settings));
     test_link = (ble_hid_snapshot_t){
         .initialized = true, .connected = true, .ready = true,
@@ -1287,6 +1288,13 @@ static void calibrate(void)
     assert(interaction_configure(&s_interaction, &config));
 }
 
+static void settle_motion_reference(void)
+{
+    assert(s_engine.state.gyro_enabled && !s_interaction.gravity_ready);
+    for (unsigned i = 0; i < 12; ++i) { sample_after(10, 0, 0); expect_idle(); }
+    assert(s_interaction.gravity_ready && s_interaction.geometry_ready);
+}
+
 static void stale_context_and_modal_focus(void)
 {
     setup(INPUT_KEYBOARD);
@@ -1535,9 +1543,11 @@ static void motion_gates_and_local_keyboard_focus(void)
     }
     setup(INPUT_MOUSE);
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     assert(!s_engine.state.gyro_enabled); /* Uncalibrated. */
     calibrate();
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     assert(s_engine.state.gyro_enabled);
     sample_after(10, 25, 0);
     const uint8_t moved[] = {0, 2, 0, 0};
@@ -1591,6 +1601,7 @@ static void fresh_sensor_after_consumer_gap_requires_new_reference(void)
     remote_control_init(false);
     calibrate();
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     const uint8_t moved[] = {0, 2, 0, 0};
     /* Yaw about gravity is a physically coherent constant-1g trajectory. */
     for (unsigned i = 0; i < 200; ++i) {
@@ -1647,6 +1658,7 @@ static void motion_recovery_requires_fresh_samples_and_explicit_enable(void)
     setup(INPUT_MOUSE);
     calibrate();
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     assert(s_engine.state.gyro_enabled);
     const uint64_t accepted_timestamp = s_last_imu_us;
     test_capabilities.imu = false;
@@ -1675,6 +1687,7 @@ static void motion_recovery_requires_fresh_samples_and_explicit_enable(void)
     assert(test_view.motion_available && test_view.motion_reason == APP_MOTION_READY);
     assert(!test_view.motion_enabled && !s_interaction.view.motion_enabled);
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     sample_after(10, 25, 0);
     const uint8_t moved[] = {0, 2, 0, 0};
     expect_report(2, moved, sizeof moved);
@@ -1725,6 +1738,7 @@ static void touch_release_has_one_freeze_interval(void)
     setup(INPUT_MOUSE);
     calibrate();
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     app_intent_t control = make_intent(APP_TOUCH_BEGIN, 0, 0, NULL);
     control.gesture = 17;
     control.surface = APP_SURFACE_CONTROL;
@@ -1745,6 +1759,7 @@ static void physical_down_freezes_before_classification(void)
     setup(INPUT_MOUSE);
     calibrate();
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     /* Snapshot gate acts immediately, even before queued down is classified. */
     physical_button(BOARD_BUTTON_DOWN, (s_now_ms + 10) * 1000U);
     sample_after(10, 25, 0);
@@ -1817,6 +1832,7 @@ static void short_congestion_preserves_motion_intent(void)
     setup(INPUT_MOUSE);
     calibrate();
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     test_link.congested = true;
     assert(!hid_engine_observe_transport(&s_engine, s_now_ms, true));
     sync_interaction();
@@ -2040,6 +2056,7 @@ static void completed_quick_touch_still_freezes_motion(void)
     setup(INPUT_MOUSE);
     calibrate();
     action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     app_intent_t begin = make_intent(APP_TOUCH_BEGIN, 0, 0, NULL);
     begin.gesture = 41;
     app_intent_t end = begin;
@@ -3960,6 +3977,7 @@ static void runtime_diagnostics_keep_unknowns_private_and_observation_only(void)
 static void motion_and_scan_diagnostics_are_bounded_observations(void)
 {
     setup(INPUT_MOUSE); calibrate(); action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
     sample_after(10, 25, 0);
     const uint8_t moved[] = {0, 2, 0, 0}; expect_report(2, moved, sizeof moved);
     const uint32_t processed = s_motion_trace.processed;
@@ -3976,12 +3994,14 @@ static void motion_and_scan_diagnostics_are_bounded_observations(void)
     input_link_t link = input_link_snapshot(&test_link);
     test_diagnostic_logs_enabled = true;
     report_motion_diagnostics(&link);
-    assert(test_diagnostic_log_count == 2);
+    assert(test_diagnostic_log_count == 4);
     assert(strstr(test_diagnostic_logs[0], "engine_motion=1 model_motion=1"));
     assert(strstr(test_diagnostic_logs[0], "consumer_gaps=1"));
     assert(strstr(test_diagnostic_logs[0], "last_gap_us=100000"));
     assert(strstr(test_diagnostic_logs[1], "raw_known=1"));
     assert(strstr(test_diagnostic_logs[1], "gz_max_mdps=25000"));
+    assert(strstr(test_diagnostic_logs[2], "first_known=1 reason=6 active_losses=1"));
+    assert(strstr(test_diagnostic_logs[3], "kind=terminal sample_known=1"));
     assert(memcmp(&engine, &s_engine, sizeof engine) == 0);
     assert(memcmp(&interaction, &s_interaction, sizeof interaction) == 0 && s_last_imu_us == last_sample);
     assert(!s_motion_trace.range_known && !s_motion_trace.window_samples);
@@ -4016,6 +4036,176 @@ static void motion_and_scan_diagnostics_are_bounded_observations(void)
         report_motion_diagnostics(&link);
         puts(test_diagnostic_logs[0]); puts(test_diagnostic_logs[1]);
     }
+}
+
+static void reference_incident_logs_are_exact_bounded_and_observation_only(void)
+{
+    setup(INPUT_MOUSE); calibrate(); action(APP_MOTION, 0);
+    if (s_engine.state.gyro_enabled && !s_interaction.gravity_ready) settle_motion_reference();
+    for (unsigned i = 0; i < 26; ++i) {
+        s_now_ms += 10;
+        test_sample = (board_imu_sample_t){.timestamp_us = s_now_ms * 1000U, .z_g = 1.2f};
+        sync_interaction(); process_motion(); expect_idle();
+    }
+    assert(s_reference_diagnostics.first_active.reason == INTERACTION_REFERENCE_TRUST_AGE);
+    const interaction_reference_diagnostics_t diagnostics = s_reference_diagnostics;
+    const interaction_t model = s_interaction;
+    const hid_engine_t engine = s_engine;
+    input_link_t link = input_link_snapshot(&test_link);
+    test_diagnostic_logs_enabled = true;
+    report_motion_diagnostics(&link);
+    assert(test_diagnostic_log_count == 5);
+    assert(strstr(test_diagnostic_logs[2], "first_known=1 reason=12 active_losses=1"));
+    assert(strstr(test_diagnostic_logs[2], "rejected=26 near_one=26 gentle=1 innovation=0"));
+    assert(strstr(test_diagnostic_logs[3], "kind=first_reject sample_known=1"));
+    assert(strstr(test_diagnostic_logs[4], "kind=terminal sample_known=1"));
+    unsigned bits[6];
+    const char *sample_bits = strstr(test_diagnostic_logs[3], "sample_bits=");
+    assert(sample_bits && sscanf(sample_bits, "sample_bits=%x,%x,%x,%x,%x,%x",
+        &bits[0], &bits[1], &bits[2], &bits[3], &bits[4], &bits[5]) == 6);
+    assert(bits[0] == 0 && bits[5] == reference_float_bits(1.2f));
+    assert(memcmp(&diagnostics, &s_reference_diagnostics, sizeof diagnostics) == 0);
+    assert(memcmp(&model, &s_interaction, sizeof model) == 0);
+    assert(memcmp(&engine, &s_engine, sizeof engine) == 0);
+    char frozen[3][1024];
+    for (size_t i = 0; i < 3; ++i) {
+        assert(strlen(test_diagnostic_logs[i + 2]) < sizeof frozen[i]);
+        strcpy(frozen[i], test_diagnostic_logs[i + 2]);
+    }
+    test_diagnostic_log_count = 0;
+    report_motion_diagnostics(&link);
+    for (size_t i = 0; i < 3; ++i) assert(strcmp(frozen[i], test_diagnostic_logs[i + 2]) == 0);
+    /* Worst-width timestamps and nonfinite bit patterns remain bounded data. */
+    s_reference_diagnostics.first_active.terminal.sample.timestamp_us = UINT64_MAX;
+    s_reference_diagnostics.first_active.terminal.previous.timestamp_us = UINT64_MAX;
+    s_reference_diagnostics.first_active.terminal.trusted_us = UINT64_MAX;
+    s_reference_diagnostics.first_active.terminal.now_ms = UINT64_MAX;
+    s_reference_diagnostics.first_active.terminal.sample.gx_dps = NAN;
+    test_diagnostic_log_count = 0;
+    report_motion_diagnostics(&link);
+    for (size_t i = 2; i < 5; ++i) assert(strlen(test_diagnostic_logs[i]) < 1024);
+    interaction_reference_diagnostics_bind(&s_interaction, NULL);
+    test_diagnostic_log_count = 0;
+    report_motion_diagnostics(&link);
+    assert(test_diagnostic_log_count == 3 && strcmp(test_diagnostic_logs[2], "MotionRef attached=0") == 0);
+}
+
+static void native_recenter_waits_for_current_grip_and_keeps_intent_stoppable(void)
+{
+    setup(INPUT_MOUSE); calibrate();
+    action(APP_MOTION, 0);
+    assert(s_engine.state.gyro_enabled && !s_interaction.gravity_ready);
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_enabled && test_view.motion_settings.reference == APP_REFERENCE_ACQUIRING);
+    for (unsigned i = 0; i < 30; ++i) { sample_after(10, 25, 0); expect_idle(); }
+    assert(!s_interaction.gravity_ready);
+    action(APP_MOTION, 0);
+    assert(!s_engine.state.gyro_enabled);
+    action(APP_MOTION, 0); settle_motion_reference();
+    const uint64_t epoch = s_engine.state.epoch;
+    const interaction_config_t config = s_interaction.config;
+    float bias[3]; memcpy(bias, s_interaction.bias, sizeof bias);
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_recenter_available && test_view.motion_settings.reference == APP_REFERENCE_READY);
+    /* Production UI emits control BEGIN, END, then the press-bound action. */
+    app_intent_t control_touch = make_intent(APP_TOUCH_BEGIN, 0, 0, NULL);
+    control_touch.gesture = 901; control_touch.surface = APP_SURFACE_CONTROL;
+    deliver(control_touch);
+    control_touch.action = APP_TOUCH_END; deliver(control_touch);
+    control_touch.action = APP_RECENTER; deliver(control_touch);
+    assert(s_reference_diagnostics.recenter_resets == 1 && !s_reference_diagnostics.first_active.known);
+    assert(s_engine.state.epoch == epoch && s_engine.state.gyro_enabled && s_interaction.view.motion_enabled);
+    assert(memcmp(bias, s_interaction.bias, sizeof bias) == 0);
+    assert(memcmp(&config, &s_interaction.config, sizeof config) == 0);
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_enabled && test_view.motion_settings.reference == APP_REFERENCE_ACQUIRING);
+    settle_motion_reference();
+    /* Stable acquisition must not bypass the control tap's release freeze. */
+    for (unsigned i = 0; i < 3; ++i) { sample_after(10, 0, 0); expect_idle(); }
+    assert(s_now_ms >= s_interaction.freeze_until_ms);
+    sample_after(10, 25, 0);
+    const uint8_t moved[] = {0, 2, 0, 0}; expect_report(2, moved, sizeof moved);
+    app_intent_t stale = make_intent(APP_RECENTER, 0, 0, NULL);
+    ++s_ui_revision; deliver(stale);
+    assert(s_reference_diagnostics.recenter_resets == 1 && s_interaction.gravity_ready);
+    action(APP_MENU, APP_OVERLAY_SETTINGS); action(APP_RECENTER, 0);
+    assert(s_reference_diagnostics.recenter_resets == 1);
+}
+
+static void recenter_rechecks_busy_input_without_purging_or_false_availability(void)
+{
+    for (unsigned fault = 0; fault < 10; ++fault) {
+        setup(INPUT_MOUSE); calibrate(); action(APP_MOTION, 0); settle_motion_reference();
+        if (fault == 0) assert(hid_engine_enqueue_mouse_move(&s_engine, s_engine.state.epoch,
+            INPUT_LOCAL, 1, 0) == HID_ENGINE_ENQUEUE_OK);
+        if (fault == 1) s_engine.mouse_buttons = 1;
+        if (fault == 2) s_drag_requested = true;
+        if (fault == 3) s_interaction.touch.active = true;
+        if (fault == 4) s_touch_down = true;
+        if (fault == 5) s_physical_down = true;
+        if (fault == 6) s_engine.state.release_pending = true;
+        if (fault == 7) s_engine.congested = true;
+        if (fault == 8) s_engine.ready = false;
+        if (fault == 9) test_capabilities.imu = false;
+        sync_interaction();
+        const hid_engine_t engine = s_engine;
+        const interaction_t model = s_interaction;
+        const interaction_reference_diagnostics_t diagnostics = s_reference_diagnostics;
+        if (fault == 0) {
+            render_view(&test_link, ESP_OK);
+            assert(test_view.motion_recenter_available); /* Queue is checked on admission. */
+        }
+        assert(recenter_motion(INPUT_LOCAL) != CP_OK);
+        assert(memcmp(&engine, &s_engine, sizeof engine) == 0);
+        assert(memcmp(&model, &s_interaction, sizeof model) == 0);
+        assert(memcmp(&diagnostics, &s_reference_diagnostics, sizeof diagnostics) == 0);
+        assert(!s_reference_diagnostics.recenter_resets);
+    }
+}
+
+static void imu_state_observes_actual_grip_transitions_and_bounds_its_response(void)
+{
+    setup(INPUT_MOUSE); calibrate(); action(APP_MOTION, 0);
+    test_update_imu = (board_imu_status_t){.available = true, .error = ESP_OK,
+        .sample_count = 1000, .sample_age_known = true, .sample_age_us = 1000};
+    char json[512]; size_t length = 0;
+    assert(remote_device_board_read(NULL, NULL, "/api/v1/imu", json, sizeof json, &length) == CP_OK);
+    assert(length == strlen(json) && strstr(json, "\"reference_state\":\"acquiring\""));
+    assert(strstr(json, "\"motion_requested\":true,\"input_ready\":true,\"output_ready\":true"));
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_settings.reference == APP_REFERENCE_ACQUIRING);
+    settle_motion_reference();
+    const interaction_t ready_model = s_interaction;
+    const hid_engine_t ready_engine = s_engine;
+    assert(remote_device_board_read(NULL, NULL, "/api/v1/imu", json, sizeof json, &length) == CP_OK);
+    assert(strstr(json, "\"reference_state\":\"ready\""));
+    assert(memcmp(&ready_model, &s_interaction, sizeof ready_model) == 0);
+    assert(memcmp(&ready_engine, &s_engine, sizeof ready_engine) == 0);
+    s_engine.ready = false; sync_interaction();
+    assert(remote_device_board_read(NULL, NULL, "/api/v1/imu", json, sizeof json, &length) == CP_OK);
+    assert(strstr(json, "\"input_ready\":false,\"output_ready\":false,\"reference_state\":\"ready\""));
+    /* Existing orientation and route readiness are independently observed. */
+    s_interaction.geometry_ready = false;
+    assert(remote_device_board_read(NULL, NULL, "/api/v1/imu", json, sizeof json, &length) == CP_OK);
+    assert(strstr(json, "\"reference_state\":\"unstable\""));
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_settings.reference == APP_REFERENCE_UNSTABLE);
+    test_capabilities.imu = false; test_update_imu.available = false;
+    assert(remote_device_board_read(NULL, NULL, "/api/v1/imu", json, sizeof json, &length) == CP_OK);
+    assert(strstr(json, "\"available\":false") && strstr(json, "\"reference_state\":\"unavailable\""));
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_settings.reference == APP_REFERENCE_UNAVAILABLE);
+    test_capabilities.imu = true; s_interaction.clock_seen = false;
+    assert(remote_device_board_read(NULL, NULL, "/api/v1/imu", json, sizeof json, &length) == CP_OK);
+    assert(strstr(json, "\"reference_state\":\"unknown\""));
+    render_view(&test_link, ESP_OK);
+    assert(test_view.motion_settings.reference == APP_REFERENCE_UNKNOWN);
+    char small[8] = "guard"; length = 99;
+    assert(remote_device_board_read(NULL, NULL, "/api/v1/imu", small, sizeof small, &length) == CP_TOO_LARGE);
+    assert(!length && !small[0]);
+    small[0] = 'x'; length = 99;
+    assert(remote_device_board_read(NULL, NULL, "/api/v1/imu", small, 0, &length) == CP_TOO_LARGE);
+    assert(!length && small[0] == 'x');
 }
 
 static void expect_neutral_navigation_trace(void)
@@ -5377,6 +5567,35 @@ static void remote_imu_uses_the_single_board_sample_and_hid_queue(void)
     sample_after(10, 25, 0); expect_idle();
     assert(!s_engine.state.gyro_enabled && !s_remote_allowed);
 }
+static void remote_recenter_uses_shared_owner_and_duplicate_never_restarts_acquisition(void)
+{
+    setup(INPUT_MOUSE); calibrate(); remote_acquire_producer("device_imu");
+    cp_command_t command = remote_test_command(CP_OP_INPUT_MOTION_SET, 2, "{\"enabled\":true}");
+    cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service(); settle_motion_reference();
+    const uint64_t epoch = s_engine.state.epoch;
+    command = remote_test_command(CP_OP_INPUT_MOTION_RECENTER, 3, "{}");
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service();
+    assert(test_control_result.state == CP_RESULT_APPLIED && test_control_result.error == CP_OK);
+    assert(strcmp(test_control_result.reason, "motion_reference_reset") == 0);
+    assert(s_reference_diagnostics.recenter_resets == 1 && !s_interaction.gravity_ready);
+    assert(s_engine.state.epoch == epoch && s_engine.state.gyro_enabled);
+    sample_after(10, 0, 0); expect_idle();
+    const size_t acquire_samples = s_interaction.gravity_acquire_samples;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service();
+    assert(s_reference_diagnostics.recenter_resets == 1 && s_interaction.gravity_acquire_samples == acquire_samples);
+    for (unsigned i = 0; i < 12; ++i) { sample_after(10, 0, 0); expect_idle(); }
+    assert(s_interaction.gravity_ready && !s_reference_diagnostics.first_active.known);
+    command = remote_test_command(CP_OP_INPUT_MOTION_RECENTER, 4, "{}");
+    --command.input_epoch;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service();
+    assert(s_reference_diagnostics.recenter_resets == 1 && s_interaction.gravity_ready);
+}
+
 static void remote_commands_share_actual_hid_queue_and_physical_takeover(void)
 {
     setup(INPUT_MOUSE); remote_acquire_current_host();
@@ -5596,6 +5815,7 @@ int main(int argc, char **argv)
     RUN(remote_device_routes_and_state_survive_missing_media);
     RUN(remote_commands_share_actual_hid_queue_and_physical_takeover);
     RUN(remote_imu_uses_the_single_board_sample_and_hid_queue);
+    RUN(remote_recenter_uses_shared_owner_and_duplicate_never_restarts_acquisition);
     RUN(remote_allowance_requires_local_restore_after_takeover);
     RUN(remote_allowance_ui_checks_identity_and_returns_core);
     RUN(capture_display_permission_requires_actual_receipt_and_brightness);
@@ -5686,6 +5906,10 @@ int main(int argc, char **argv)
     RUN(boot_memory_diagnostics_preserve_bounded_capability_history);
     RUN(runtime_diagnostics_keep_unknowns_private_and_observation_only);
     RUN(motion_and_scan_diagnostics_are_bounded_observations);
+    RUN(reference_incident_logs_are_exact_bounded_and_observation_only);
+    RUN(native_recenter_waits_for_current_grip_and_keeps_intent_stoppable);
+    RUN(recenter_rechecks_busy_input_without_purging_or_false_availability);
+    RUN(imu_state_observes_actual_grip_transitions_and_bounds_its_response);
     RUN(remote_initializers_honor_alignment_and_clean_allocation_failures);
     RUN(quick_status_settings_back_preserves_primary_context);
     RUN(chooser_entry_rejects_wrong_mode_and_invalid_payload_without_cancelling_send);

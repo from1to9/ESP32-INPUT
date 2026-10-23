@@ -217,6 +217,8 @@ typedef struct {
     bool range_known, first_active_gap_known, saturated;
 } motion_trace_t;
 static EXT_RAM_BSS_ATTR motion_trace_t s_motion_trace;
+static EXT_RAM_BSS_ATTR interaction_reference_diagnostics_t s_reference_diagnostics;
+_Static_assert(sizeof(s_reference_diagnostics) <= 1024, "Reference evidence must stay bounded");
 typedef struct { bool down; uint64_t time_ms; } button_edge_t;
 static button_edge_t s_button_edges[8];
 static unsigned s_button_head, s_button_count;
@@ -742,11 +744,55 @@ static bool set_motion(input_owner_t source, bool enable)
         (void)hid_engine_set_gyro_owned(&s_engine, source, false);
         return false;
     }
-    s_message = enable ? "Motion on. Touch pauses motion." : "Motion off.";
+    s_message = enable ? "Motion on. Hold still briefly to find your grip." : "Motion off.";
     board_haptic_feedback(BOARD_FEEDBACK_CONFIRM);
     return true;
 }
 static void toggle_motion(void) { (void)set_motion(INPUT_LOCAL, !s_engine.state.gyro_enabled); }
+
+/* One coarse observation shared by native UI and the existing IMU resource.
+ * Transient touch/freeze and transport readiness remain separate gates. */
+static app_motion_reference_t motion_reference_state(void)
+{
+    if (!s_interaction.clock_seen) return APP_REFERENCE_UNKNOWN;
+    if (!board_capabilities().imu) return APP_REFERENCE_UNAVAILABLE;
+    if (!s_interaction.gravity_ready) return APP_REFERENCE_ACQUIRING;
+    if (!s_interaction.geometry_ready ||
+        (s_interaction.view.motion_status & INTERACTION_MOTION_GEOMETRY_LIMITED)) return APP_REFERENCE_UNSTABLE;
+    return APP_REFERENCE_READY;
+}
+
+static cp_error_t motion_recenter_status(input_owner_t source, bool immediate)
+{
+    if (s_engine.state.locked) return CP_LOCKED;
+    if (s_engine.state.mode != INPUT_MOUSE || s_engine.state.owner != source ||
+        !s_engine.state.gyro_enabled || !s_interaction.view.motion_enabled ||
+        s_interaction.motion_source != source) return CP_STALE;
+    if (!board_capabilities().imu || !s_interaction.view.calibrated || s_interaction.view.calibrating)
+        return CP_UNAVAILABLE;
+    if (s_engine.state.release_pending) return CP_RELEASE_PENDING;
+    if (!s_engine.ready || !s_interaction.output_ready) return CP_UNAVAILABLE;
+    if (s_engine.congested || s_overlay != APP_OVERLAY_NONE || remote_update_maintenance() ||
+        s_transport_switch_pending || s_idle.asleep || s_idle.wake_capture || s_drag_requested ||
+        s_engine.mouse_buttons || interaction_touch_holding(&s_interaction)) return CP_BUSY;
+    if (immediate) {
+        portENTER_CRITICAL(&s_control_lock);
+        bool held = s_touch_down || s_physical_down;
+        portEXIT_CRITICAL(&s_control_lock);
+        if (held || s_engine.count || s_interaction.touch.active || s_interaction.view.button_down) return CP_BUSY;
+    }
+    return CP_OK;
+}
+
+static cp_error_t recenter_motion(input_owner_t source)
+{
+    sync_interaction();
+    cp_error_t error = motion_recenter_status(source, true);
+    if (error != CP_OK) return error;
+    if (!interaction_recenter_owned(&s_interaction, source)) return CP_BUSY;
+    s_message = "Reference reset. Hold still briefly; sensor calibration is unchanged.";
+    return CP_OK;
+}
 
 static bool activate_primary(input_owner_t source)
 {
@@ -1724,6 +1770,11 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
     case APP_MOTION:
         if (s_engine.state.mode == INPUT_MOUSE) toggle_motion();
         return;
+    case APP_RECENTER: {
+        cp_error_t error = recenter_motion(INPUT_LOCAL);
+        if (error != CP_OK) s_message = "Recenter unavailable. Release input and wait for Motion readiness.";
+        return;
+    }
     case APP_GAIN:
         if (s_engine.state.mode != INPUT_MOUSE) return;
         (void)interaction_set_touch_divisor(&s_interaction, (unsigned)intent->x);
@@ -2110,6 +2161,66 @@ static int32_t motion_trace_fixed(float value)
     return isfinite(value) && fabsf(value) <= 2000000.0f ? (int32_t)(value * 1000.0f) : INT32_MIN;
 }
 
+static unsigned reference_float_bits(float value)
+{
+    uint32_t bits;
+    _Static_assert(sizeof bits == sizeof value, "Reference evidence requires 32-bit floats");
+    memcpy(&bits, &value, sizeof bits);
+    return (unsigned)bits;
+}
+
+/* Exact float representations avoid inventing a rounded threshold crossing.
+ * Known masks distinguish absent samples and short-circuited predicates. */
+static void __attribute__((noinline)) report_reference_frame(const char *kind,
+    const interaction_reference_frame_t *f)
+{
+    ESP_LOGI(TAG, "MotionRefFrame kind=%s sample_known=%d sample_us=%llu previous_known=%d previous_us=%llu "
+             "sample_bits=%08x,%08x,%08x,%08x,%08x,%08x previous_bits=%08x,%08x,%08x,%08x,%08x,%08x "
+             "bias_bits=%08x,%08x,%08x gravity_bits=%08x,%08x,%08x accel_bits=%08x,%08x,%08x "
+             "dt_known=%d dt_bits=%08x norm_known=%d norm_bits=%08x prior_ready=%d accel_seen=%d "
+             "trusted_us=%llu now_ms=%llu context=%u checks_known=%u checks_pass=%u",
+             kind, f->sample_known, (unsigned long long)f->sample.timestamp_us,
+             f->previous_known, (unsigned long long)f->previous.timestamp_us,
+             reference_float_bits(f->sample.gx_dps), reference_float_bits(f->sample.gy_dps),
+             reference_float_bits(f->sample.gz_dps), reference_float_bits(f->sample.ax_g),
+             reference_float_bits(f->sample.ay_g), reference_float_bits(f->sample.az_g),
+             reference_float_bits(f->previous.gx_dps), reference_float_bits(f->previous.gy_dps),
+             reference_float_bits(f->previous.gz_dps), reference_float_bits(f->previous.ax_g),
+             reference_float_bits(f->previous.ay_g), reference_float_bits(f->previous.az_g),
+             reference_float_bits(f->bias[0]), reference_float_bits(f->bias[1]), reference_float_bits(f->bias[2]),
+             reference_float_bits(f->gravity_before[0]), reference_float_bits(f->gravity_before[1]),
+             reference_float_bits(f->gravity_before[2]), reference_float_bits(f->previous_accel[0]),
+             reference_float_bits(f->previous_accel[1]), reference_float_bits(f->previous_accel[2]),
+             f->dt_known, reference_float_bits(f->dt), f->norm_known, reference_float_bits(f->norm),
+             f->gravity_ready, f->accel_seen, (unsigned long long)f->trusted_us,
+             (unsigned long long)f->now_ms, (unsigned)f->context,
+             (unsigned)f->checks_known, (unsigned)f->checks_pass);
+}
+
+static void __attribute__((noinline)) report_reference_diagnostics(void)
+{
+    const interaction_reference_diagnostics_t *d = interaction_reference_diagnostics_get(&s_interaction);
+    if (!d) { ESP_LOGI(TAG, "MotionRef attached=0"); return; }
+    const interaction_reference_incident_t *i = &d->first_active;
+    const interaction_reference_episode_t *e = &i->episode;
+    ESP_LOGI(TAG, "MotionRef attached=1 first_known=%d reason=%u active_losses=%u saturated=%d "
+             "losses=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u "
+             "first_reject_known=%d rejected=%u near_one=%u gentle=%u innovation=%u haptic=%u episode_saturated=%d "
+             "enable_resets=%u recenter_resets=%u last_reset=%u last_reset_ms=%llu",
+             i->known, (unsigned)i->reason, (unsigned)d->active_losses, d->saturated,
+             (unsigned)d->losses[1], (unsigned)d->losses[2], (unsigned)d->losses[3], (unsigned)d->losses[4],
+             (unsigned)d->losses[5], (unsigned)d->losses[6], (unsigned)d->losses[7], (unsigned)d->losses[8],
+             (unsigned)d->losses[9], (unsigned)d->losses[10], (unsigned)d->losses[11], (unsigned)d->losses[12],
+             e->first_known, (unsigned)e->rejected, (unsigned)e->near_one, (unsigned)e->gentle,
+             (unsigned)e->innovation, (unsigned)e->haptic, e->saturated,
+             (unsigned)d->enable_resets, (unsigned)d->recenter_resets, (unsigned)d->last_reset,
+             (unsigned long long)d->last_reset_ms);
+    if (i->known) {
+        if (e->first_known) report_reference_frame("first_reject", &e->first);
+        report_reference_frame("terminal", &i->terminal);
+    }
+}
+
 static void __attribute__((noinline)) report_motion_diagnostics(const input_link_t *link)
 {
     static EXT_RAM_BSS_ATTR board_imu_status_t imu;
@@ -2175,6 +2286,7 @@ static void __attribute__((noinline)) report_motion_diagnostics(const input_link
     else ESP_LOGI(TAG, "MotionWindow samples=%u enabled=%u raw_known=0 invalid_raw=%u",
                   (unsigned)s_motion_trace.window_samples, (unsigned)s_motion_trace.window_enabled,
                   (unsigned)s_motion_trace.invalid_raw);
+    report_reference_diagnostics();
     /* Only observation-window storage changes after reporting. Lifetime totals
      * and the first active gap remain available to a late USB reader. Movement
      * report counts include touch/remote movement and mean transport admission,
@@ -2308,7 +2420,8 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
         (void)snprintf(view->bluetooth_name.message, sizeof(view->bluetooth_name.message), "Name: %s", esp_err_to_name(name.error));
     view->tap_to_click_available = true;
     view->tap_to_click_enabled = s_settings.tap_to_click;
-    const uint32_t motion_status = s_interaction.view.motion_status;
+    /* Queue occupancy is rechecked on admission, not rendered per report. */
+    view->motion_recenter_available = motion_recenter_status(INPUT_LOCAL, false) == CP_OK;
     view->two_finger_scroll_available = s_multitouch_available;
     view->swipe_scroll_available = s_multitouch_available;
     view->motion_settings = (app_motion_settings_view_t){
@@ -2319,9 +2432,7 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
         .deadzone_mdps = s_settings.motion_deadzone_mdps,
         .filter_ms = s_settings.motion_filter_ms, .freeze_ms = s_settings.motion_freeze_ms,
         .invert_x = s_settings.motion_invert_x, .invert_y = s_settings.motion_invert_y,
-        .reference = !board_capabilities().imu ? APP_REFERENCE_UNAVAILABLE :
-            (motion_status & INTERACTION_MOTION_GEOMETRY_LIMITED) ? APP_REFERENCE_UNSTABLE :
-            (motion_status & INTERACTION_MOTION_GRAVITY_READY) ? APP_REFERENCE_READY : APP_REFERENCE_ACQUIRING,
+        .reference = motion_reference_state(),
     };
     if (s_overlay == APP_OVERLAY_LOCAL_EDITOR && !s_engine.state.locked && !s_idle.asleep) {
         view->local_editor = s_local_editor;
@@ -2673,6 +2784,7 @@ void app_main(void)
     configASSERT(s_intents);
     hid_engine_init(&s_engine);
     interaction_init(&s_interaction);
+    interaction_reference_diagnostics_bind(&s_interaction, &s_reference_diagnostics);
     interaction_multitouch_init(&s_multitouch);
     s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
     device_settings_defaults(&s_settings);

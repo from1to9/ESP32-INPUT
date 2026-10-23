@@ -12,7 +12,7 @@ Use a 480 x 480 logical canvas, 12 px side margins, minimum 8 px gaps, 12 px con
 | --- | --- | --- |
 | Mode title | x 12/y 8/w 120/h 24 | Mouse, Keyboard or Audio; not a navigation target |
 | Current input context | x 12/y 36/w 120/h 18 | Ellipsized BT/USB plus actual safe target label, or explicit unknown/disconnected; full identity in the quick panel |
-| Compact entry/kind selector | x 140/y 8/h 48; w 132 for Mouse/Audio, w 76 for Keyboard | Mouse help, audio kind, or keyboard submode; Keyboard adds Keys at x 224/w 48 with the same 16 px font and baseline |
+| Compact entry/kind selector | x 140/y 8/h 48; w 132 for Mouse/Audio, w 76 for Keyboard | Mouse Recenter, audio kind, or keyboard submode; Keyboard adds Keys at x 224/w 48 with the same 16 px font and baseline |
 | Critical-state action | x 280/y 8/w 116/h 48 | Visible only for remote ownership, capture/recording, input errors or readiness blockers; bounded text/icon plus safe Stop/takeover/details action |
 | Menu launcher | x 404/y 8/w 64/h 48 | Always in the same position; opens the shared quick panel |
 | Core workspace | x 12/y 64/w 456/h 408 | Mode functions only; coordinates below include this area's controls |
@@ -35,6 +35,8 @@ Opening Menu or the same panel through AI double-click suppresses motion, cancel
 The touchpad grows from 384 x 156 = 59, 904 px to 396 x 292 = 115, 632 px: **93% more touch area**. This is geometric area, not a claim about pointer precision or latency. A tiny local marker/caption is noninteractive and does not shrink hit testing. Gain remains easy to change; a compact chooser or deliberate cycle displays the selected value and never changes on passive rendering.
 
 Touch start and physical AI down suppress motion. Existing click freeze, relative deltas, fractional carry, congestion handling and release recovery stay coordinator-owned. Disabled input needs an actual reason in the critical-state area. The browser's synthetic ready fixture is explicitly distinct from an offline production boot.
+
+The 2026-10-23 grip-reference revision reuses the Mouse header slot at x 140/y 8/w 132/h 48 for `Recenter`. Auto grip is automatic behavior, with its acknowledged state in the existing noninteractive pad caption. `Motion / waiting` means Motion is requested but the reference is acquiring or restoring; it remains tappable to stop. `Motion / on` requires the coordinator's ready reference, while sensor, calibration and connection blockers retain priority. Ordinary touch pauses and zero-delta samples do not change this coarse reference state. `Recenter` is available only while Motion is requested, uses a distinct coordinator-admitted intent, preserves sensor bias, settings and the current Motion request, and never enables Motion while off. Input settings retains `Calibrate sensor` for bias calibration. The 106-object core, 160-object dynamic ceiling and all pad, scroll, click and bottom-row rectangles remain unchanged.
 
 ## 3. Keyboard geometry and workflow
 

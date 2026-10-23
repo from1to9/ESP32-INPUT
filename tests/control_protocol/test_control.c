@@ -699,6 +699,34 @@ static void test_transport_and_media(void)
     h.sequence = 0;
     assert(!cp_media_encode(&h, pcm, packet, sizeof(packet), &length));
 }
+static void test_explicit_motion_recenter_schema_lease_and_replay(void)
+{
+    const cp_operation_info_t *op=cp_operation_find("input.motion.recenter");
+    assert(op && op->id==148 && op->input && op->scopes==CP_SCOPE_INPUT_CONTROL &&
+        !op->safety && !op->ui_context && !op->read_only);
+    reset(CP_SCOPE_ALL,false); login_native(); acquire();
+    unsigned before=dispatches;
+    assert(send("input.motion.recenter","{\"timeout_ms\":1000}",true,true)==CP_INVALID &&
+        dispatches==before);
+    assert(send("input.motion.recenter","{}",true,false)==CP_FORBIDDEN && dispatches==before);
+    uint64_t epoch=device.input_epoch;
+    assert(send("input.motion.recenter","{}",true,true)==CP_OK && dispatches==before+1 &&
+        last_command.operation==CP_OP_INPUT_MOTION_RECENTER);
+    char duplicate[CP_MAX_FRAME_BYTES+1]; strcpy(duplicate,envelope);
+    cp_result_t applied={.state=CP_RESULT_APPLIED,.error=CP_OK,.uncertain_index=-1};
+    strcpy(applied.reason,"motion_reference_reset");
+    assert(cp_complete(context,last_command.command_key,&applied,clock_ms)==CP_OK &&
+        device.input_epoch==epoch);
+    assert(request("POST","/api/v1/commands",duplicate)==CP_OK && dispatches==before+1 &&
+        strstr(response.body,"motion_reference_reset"));
+    const char *expired=command("input.motion.recenter","{}",true,true,++seq);
+    char saved[CP_MAX_FRAME_BYTES+1]; strcpy(saved,expired);
+    clock_ms+=101;
+    assert(request("POST","/api/v1/commands",saved)==CP_EXPIRED && dispatches==before+1);
+    reset(CP_SCOPE_VIEW,false); login_native(); before=dispatches;
+    assert(send("input.motion.recenter","{}",true,false)==CP_FORBIDDEN && dispatches==before);
+}
+
 static void test_context_storage_contract(void)
 {
     const size_t alignment = cp_context_alignment(), bytes = cp_context_size();
@@ -723,6 +751,7 @@ static void test_context_storage_contract(void)
 int main(void)
 {
     test_context_storage_contract();
+    test_explicit_motion_recenter_schema_lease_and_replay();
     test_json_sha();
     test_exact_decimal_configuration();
     test_transport_and_media();

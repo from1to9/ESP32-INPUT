@@ -387,6 +387,59 @@ distinguish acquisition, consumed-sample timing, reference validity, pause
 conditions, generated motion and HID admission/delivery. Exact scan failure
 phase and error were not available in these logs.
 
+### Reference-loss and physical-axis observations: 2026-10-23
+
+Reviewed source `327c8c624edb2c86ab726c3521b657f14cdfd1f8` was published with
+tree `a4979ca7489e08087d1e7233e3917a4e35c3d219`, then its 4,654,688-byte
+application (`19b2605166104db54ed084bcb20b59da333ff8711769df5c2cb0fc4ffb79b7be`)
+was written and separately digest-verified. The table and NVS/PHY were preserved
+without a new backup. This candidate adds the symmetric fifteen-key panel and
+observation of consumed samples, control gates, reference state and scan stages;
+it does not change the Motion estimator or Wi-Fi scan policy.
+
+Its immediate 90.002-second capture still **failed** on the two retained GPIO
+ISR-service error lines. The eight observations showed fresh, calibrated IMU
+sampling, no recovery, and a maximum consumed-sample interval of 40,883 us.
+Only the last two observations had Motion enabled. A subsequent 90.005-second
+capture passed the bounded serial checks but captured two active-Motion
+observations with both engine and model enabled, input ready, no instantaneous
+control gate, `reference=0`, and reference suppression. Movement admissions
+stopped increasing between those observations and increased after the reference
+recovered. Lifetime consumed-sample gaps, sample blocks and clock backsteps
+remained zero. This establishes reference suppression at the observed instants;
+it does not identify which acceleration/trust predicate invalidated reference,
+prove continuous suppression between records, or establish host receipt.
+
+The user still reported fast tilts producing no pointer movement, slow side
+tilts moving vertically, and no movement from forward/back tilts or upright
+hand-held use. The first two actions of a compound orientation test were later
+reported incorrect. Their physical labels are withdrawn; the raw records remain
+available locally. Mixed ten-second extrema cannot reconstruct paired sensor
+samples, exact transition times or acceleration norms.
+
+A separate confirmed pose placed the screen facing the user with text upright.
+Three settled windows in a 45.005-second capture reported mapped acceleration
+X between -0.851 and -0.816 g, Y between -0.032 and 0.023 g, and Z between 0.502
+and 0.562 g. This is a tilted upright pose, not a measured exact 90-degree hold;
+the preceding moving window is excluded from the static comparison. Together
+with the confirmed reading orientation and screen-up positive Z, the result
+supports removing the adapter's extra 90-degree transform: the corresponding
+native vector is approximately (0, +0.84, +0.53) g, consistent with display
+Y pointing toward the top of the screen. The factory demonstration's Euler/UI
+labels alone had not established this body-frame mapping.
+
+A common proper rotation of acceleration and gyro preserves the reference
+estimator's norms, dot products and propagated change. Correcting screen axes
+therefore does not by itself resolve the separately observed reference loss.
+In a later scan capture, the user reported three successful requests. Diagnostic
+generations 1, 2 and 3 completed with driver/read counts of 15, 15 and 14, SDK
+event status zero and connected LAN state. No failure was retained in this boot.
+These successes do not identify or clear the earlier intermittent failure.
+
+The changed adapter, automatic grip recovery, pointer directions and fast-motion
+response still need validation on the resulting image. No physical Motion,
+intermittent scan, audio or endurance qualification is claimed by these captures.
+
 ## Historical evidence
 
 Evidence date: 2026-10-21. The pinned S31 toolchain has built the minimal composite HID firmware. Portable behavior, report layout and production BLE callback logic have executable host coverage. The physical development board is identified as Mosaico v1.2 (eFuse `0x0102`) with 16 MB flash, and its original flash contents have been backed up locally. Runtime deployment and host compatibility evidence are recorded separately below; a build does not establish a working HID device or long-term reliability.

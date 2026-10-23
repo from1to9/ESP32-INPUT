@@ -31,6 +31,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 | M02 | Touch fine control | Relative single-finger movement; quarter/eighth gain; touch priority and a short release freeze |
 | M03 | Mouse buttons | Left/right click, explicit drag and separate scroll; interruptions release drag |
 | M04 | Touchpad gestures | Configurable tap-to-click: single tap, double tap and double-tap-and-hold drag; movement-only when disabled |
+| M05 | Automatic grip reference | Establish a stable grip when Motion starts; recover after reference loss without jumps; expose waiting/ready states and a separate Recenter action that preserves sensor bias |
 | K01 | Composite HID | One stable HID service with separate mouse/keyboard report IDs; no re-pairing when changing modes |
 | K02 | Motion character selection | Group -> character -> explicit confirmation into preview; local focus only |
 | K03 | Character entry | A-Z/a-z, digits, space, delete, common ASCII punctuation and clear-preview action |
@@ -43,6 +44,24 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 ### Mouse behavior
 
 Convert calibrated angular velocity to relative HID movement using actual monotonic sample intervals and fractional carry. Automatically adapt horizontal motion to both screen-up and tilted screen-facing grips using a validated gravity reference; posture changes must not cause pointer jumps. Horizontal and vertical gains are independently configurable, alongside axis directions, deadzone, filtering and click freeze. The current physical feedback reports fast vertical motion but slow horizontal motion, so raising a shared gain is not an adequate correction. Initial proposals are a 150 ms freeze and quarter-speed fine control; actual values need hardware tuning. HID units are not screen pixels.
+
+Normal hand-held use follows a remote-control grip: turning left/right moves
+horizontally, and pitching up/down moves vertically. Starting Motion establishes
+a grip reference from actual stable observations. Automatic reference recovery
+after a changed grip or invalid reference must not replay old movement or emit
+a recovery jump. Tracking during valid rotation must not continually redefine
+the user's gesture as stationary. This is relative pointer control, not an
+absolute heading or screen-position calibration.
+
+Expose manual **Recenter** separately from **Calibrate sensor**. Recenter preserves
+the established gyro bias and settings, clears pending motion carry, and waits
+for valid stable grip evidence before resuming the existing Motion intent.
+It never enables a disabled mode or treats unavailable hardware as calibrated.
+Show waiting while grip acquisition/recovery is pending, and distinguish that
+state from link, sensor, calibration and ownership failures. Ordinary touch
+pauses and zero movement do not indicate failed grip acquisition. The same
+operation must be available through the authenticated Wi-Fi input API with the
+existing ownership, lease, readiness and stale-request checks.
 
 Touch start, physical button down, menus, calibration and keyboard selection suppress host pointer output. Entering keyboard/audio clears the motion intent; returning to mouse requires explicit re-enabling. Leaving fine control may restore the previous motion intent. Haptic feedback must also suppress IMU output during vibration.
 

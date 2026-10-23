@@ -54,6 +54,16 @@ static input_delta_t motion(interaction_t *m, uint64_t *time, uint64_t dt,
     return interaction_motion_sample(m, &s);
 }
 
+static void settle_mouse_reference(interaction_t *m, uint64_t *time)
+{
+    assert(!m->gravity_ready && m->view.motion_enabled);
+    for (unsigned i = 0; i < 13; ++i) {
+        const input_delta_t d = motion(m, time, 10000, 1, -2);
+        assert(!d.x && !d.y);
+    }
+    assert(m->gravity_ready && m->geometry_ready);
+}
+
 static void assert_valid_focus(const interaction_t *m)
 {
     assert(m->view.focus < INTERACTION_GRID_CELLS);
@@ -309,6 +319,7 @@ static int pointer_second(uint64_t dt, size_t count)
     setup(&m, INPUT_MOUSE);
     uint64_t time = calibrate(&m);
     assert(interaction_set_motion(&m, true));
+    settle_mouse_reference(&m, &time);
     int total = 0;
     for (size_t i = 0; i < count; ++i) total += motion(&m, &time, dt, 26, -2).x;
     return total;
@@ -414,6 +425,7 @@ static void pending_selection_double_hold_and_mouse(void)
     setup(&mouse, INPUT_MOUSE);
     uint64_t time = calibrate(&mouse);
     assert(interaction_set_motion(&mouse, true));
+    settle_mouse_reference(&mouse, &time);
     const uint64_t down_ms = time / 1000 + 10;
     const uint64_t up_ms = down_ms + 20;
     assert(interaction_button_update(&mouse, true, down_ms) == INTERACTION_EVENT_DOWN);
@@ -435,6 +447,7 @@ static void motion_calibration_and_focus(void)
     setup(&m, INPUT_MOUSE);
     uint64_t time = calibrate(&m);
     assert(interaction_set_motion(&m, true));
+    settle_mouse_reference(&m, &time);
     for (size_t i = 0; i < 1000; ++i) {
         const input_delta_t delta = motion(&m, &time, 10000, 1.2f, -1.8f);
         assert(delta.x == 0 && delta.y == 0); /* Corrected stationary bias/deadzone. */
@@ -636,6 +649,7 @@ static void suppression_and_touch(void)
     setup(&m, INPUT_MOUSE);
     uint64_t time = calibrate(&m);
     assert(interaction_set_motion(&m, true));
+    settle_mouse_reference(&m, &time);
     assert(motion(&m, &time, 10000, 26, -2).x == 1);
     interaction_set_suppressed(&m, true, false, false, time / 1000);
     assert(motion(&m, &time, 10000, 26, -2).x == 0);
@@ -666,6 +680,7 @@ static void suppression_and_touch(void)
     interaction_set_suppressed(&m, false, false, false, time / 1000);
     for (size_t i = 0; i < 20; ++i) assert(motion(&m, &time, 10000, 26, -2).x == 0);
     assert(interaction_set_motion(&m, true));
+    settle_mouse_reference(&m, &time);
     interaction_set_suppressed(&m, false, false, true, time / 1000);
     assert(motion(&m, &time, 10000, 26, -2).x == 0);
     assert(m.view.motion_enabled);
@@ -689,21 +704,23 @@ static void asynchronous_freeze(void)
     config.pointer_gain_x = 1;
     assert(interaction_configure(&m, &config));
     assert(interaction_set_motion(&m, true));
+    settle_mouse_reference(&m, &time);
+    const uint64_t deadline = time / 1000 + 70;
     for (size_t i = 0; i < 3; ++i) assert(motion(&m, &time, 10000, 26, -2).x == 0);
-    interaction_freeze_until(&m, 700);
+    interaction_freeze_until(&m, deadline);
     assert(interaction_tick(&m, 100) == 0 && m.view.motion_enabled); /* No clock observation. */
     for (size_t i = 0; i < 3; ++i) assert(motion(&m, &time, 10000, 26, -2).x == 0);
     for (size_t i = 0; i < 3; ++i) {
-        interaction_freeze_until(&m, 700); /* Repeated delivery must preserve new fractional carry. */
+        interaction_freeze_until(&m, deadline); /* Repeated delivery must preserve new fractional carry. */
         assert(motion(&m, &time, 10000, 26, -2).x == 0);
     }
-    interaction_freeze_until(&m, 699);
+    interaction_freeze_until(&m, deadline - 1);
     assert(motion(&m, &time, 10000, 26, -2).x == 1);
     assert(m.view.motion_enabled && !m.view.touch_active);
     interaction_set_suppressed(&m, true, false, false, time / 1000);
     assert(interaction_set_touch_divisor(&m, 4));
     for (size_t i = 0; i < 3; ++i) assert(interaction_touch_move(&m, 1, 0).x == 0);
-    interaction_freeze_until(&m, 1000);
+    interaction_freeze_until(&m, m.freeze_until_ms + 1);
     assert(interaction_touch_move(&m, 1, 0).x == 0); /* Old touch carry is also discarded. */
     assert(m.view.touch_active && m.view.motion_enabled);
 }
@@ -757,6 +774,7 @@ static void invalid_configuration_and_samples(void)
     assert(!interaction_configure(&m, NULL));
     uint64_t time = calibrate(&m);
     assert(interaction_set_motion(&m, true));
+    settle_mouse_reference(&m, &time);
     const interaction_imu_sample_t duplicate = sample(time, 26, -2);
     assert(interaction_motion_sample(&m, &duplicate).x == 0);
     const interaction_imu_sample_t backward = sample(time - 1, 26, -2);
@@ -1034,6 +1052,11 @@ static uint64_t physical_grip(interaction_t *m, float tilt)
     }
     assert(m->view.calibrated && m->gravity_ready);
     assert(interaction_set_motion(m, true));
+    for (unsigned i = 0; i < 12; ++i) {
+        const input_delta_t d = physical_sample(m, &time, 10000, 0, 0, 0, 0, sinf(tilt), cosf(tilt));
+        assert(d.x == 0 && d.y == 0);
+    }
+    assert(m->gravity_ready);
     return time;
 }
 
@@ -1191,6 +1214,281 @@ static void calibration_cancellation_requires_a_new_explicit_start(void)
     assert(m.view.calibrated && !m.view.calibrating && m.gravity_ready && !m.view.motion_enabled);
 }
 
+static uint64_t reference_fixture(interaction_t *m, interaction_reference_diagnostics_t *d)
+{
+    uint64_t time = physical_grip(m, 0);
+    interaction_reference_diagnostics_bind(m, d);
+    assert(interaction_tick(m, time / 1000) == INTERACTION_EVENT_NONE);
+    (void)physical_sample(m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    return time;
+}
+
+static void reference_incidents_preserve_exact_cause_and_first_evidence(void)
+{
+    interaction_t m;
+    interaction_reference_diagnostics_t d;
+    uint64_t time = reference_fixture(&m, &d);
+    assert(!d.first_active.known && !d.episode.first_known);
+    const uint64_t previous = time;
+    const input_delta_t stopped = physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 3);
+    assert(!stopped.x && !stopped.y && !m.gravity_ready && m.view.motion_enabled);
+    assert(d.first_active.known && d.first_active.reason == INTERACTION_REFERENCE_ACCEL_NORM);
+    assert(d.active_losses == 1 && d.losses[INTERACTION_REFERENCE_ACCEL_NORM] == 1);
+    const interaction_reference_frame_t *f = &d.first_active.terminal;
+    assert(f->sample_known && f->previous_known && f->sample.timestamp_us == time);
+    assert(f->previous.timestamp_us == previous && f->previous.az_g == 1 && f->sample.az_g == 3);
+    assert(f->gravity_ready && f->accel_seen && f->dt_known && f->norm_known && f->norm == 3);
+    assert(f->gravity_before[2] == 1 && f->previous_accel[2] == 1);
+    assert(f->checks_known == INTERACTION_REFERENCE_SAFE_NORM && f->checks_pass == 0);
+    assert(d.first_active.episode.first_known && d.first_active.episode.rejected == 1);
+    const interaction_reference_incident_t frozen = d.first_active;
+    (void)interaction_motion_sample(&m, NULL);
+    assert(!d.losses[INTERACTION_REFERENCE_MISSING]); /* Already unavailable, not a new loss. */
+    for (unsigned i = 0; i < 15; ++i)
+        (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    assert(m.gravity_ready);
+    (void)physical_sample(&m, &time, 60000, 0, 0, 0, 0, 0, 1);
+    assert(d.active_losses == 2 && d.losses[INTERACTION_REFERENCE_SAMPLE_TIME] == 1);
+    assert(memcmp(&frozen, &d.first_active, sizeof frozen) == 0);
+}
+
+static void reference_rejection_episodes_keep_unknown_checks_distinct(void)
+{
+    for (unsigned cause = 0; cause < 3; ++cause) {
+        interaction_t m;
+        interaction_reference_diagnostics_t d;
+        uint64_t time = reference_fixture(&m, &d);
+        const uint64_t trusted = m.gravity_trusted_us;
+        for (unsigned i = 0; i < 26; ++i) {
+            float ax = 0, az = 1.2f;
+            if (cause == 1) { ax = .8f; az = .6f; }
+            if (cause == 2) { ax = i % 2 ? -.04f : .04f; az = sqrtf(1 - .04f * .04f); }
+            (void)physical_sample(&m, &time, 10000, 0, 0, 0, ax, 0, az);
+            if (i < 25) assert(m.gravity_ready && m.gravity_predicted && !d.first_active.known);
+        }
+        assert(d.first_active.reason == INTERACTION_REFERENCE_TRUST_AGE && !m.gravity_ready);
+        const interaction_reference_episode_t *e = &d.first_active.episode;
+        assert(e->first_known && e->rejected == 26 && !e->saturated && !e->haptic);
+        assert(e->first.sample.timestamp_us == trusted + 10000);
+        assert(d.first_active.terminal.sample.timestamp_us - d.first_active.terminal.trusted_us == 260000);
+        assert(!(e->first.checks_known & INTERACTION_REFERENCE_INNOVATION));
+        if (cause == 0) {
+            assert(e->near_one == 26 && e->gentle == 1 && e->innovation == 0);
+            assert(!(d.first_active.terminal.checks_known & INTERACTION_REFERENCE_INNOVATION));
+        } else if (cause == 1) {
+            assert(e->near_one == 0 && e->gentle == 1 && e->innovation == 25);
+            assert(d.first_active.terminal.checks_known & INTERACTION_REFERENCE_INNOVATION);
+            assert(!(d.first_active.terminal.checks_pass & INTERACTION_REFERENCE_INNOVATION));
+        } else assert(e->near_one == 0 && e->gentle == 26 && e->innovation == 0);
+    }
+    interaction_t m;
+    interaction_reference_diagnostics_t d;
+    uint64_t time = reference_fixture(&m, &d);
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1.2f);
+    assert(d.episode.first_known);
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    assert(!d.episode.first_known && !d.episode.rejected && !d.first_active.known);
+    interaction_set_suppressed(&m, false, false, true, time / 1000);
+    for (unsigned i = 0; i < 26; ++i)
+        (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    assert(d.first_active.reason == INTERACTION_REFERENCE_HAPTIC_AGE);
+    assert(d.first_active.episode.haptic == 26 && !d.first_active.terminal.checks_known);
+    assert(d.first_active.terminal.context & INTERACTION_REFERENCE_HAPTIC);
+}
+
+static void reference_attachment_reset_staleness_and_saturation(void)
+{
+    interaction_t m;
+    interaction_reference_diagnostics_t d;
+    uint64_t time = reference_fixture(&m, &d);
+    interaction_t copy = m;
+    assert(interaction_reference_diagnostics_get(&copy) == NULL);
+    const interaction_reference_diagnostics_t saved = d;
+    interaction_reference_diagnostics_reset(&copy);
+    (void)physical_sample(&copy, &time, 10000, 0, 0, 0, 0, 0, 3);
+    assert(memcmp(&saved, &d, sizeof d) == 0);
+    d.losses[INTERACTION_REFERENCE_ACCEL_NORM] = UINT32_MAX;
+    d.active_losses = UINT32_MAX;
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 3);
+    assert(d.saturated && d.active_losses == UINT32_MAX);
+    assert(d.losses[INTERACTION_REFERENCE_ACCEL_NORM] == UINT32_MAX);
+    copy = m;
+    interaction_reference_diagnostics_reset(&m);
+    assert(!d.first_active.known && !d.previous_known && !d.active_losses && !d.saturated);
+    assert(!d.work.sample_known && !d.work.norm_known && !d.work.checks_known);
+    assert(memcmp(&copy, &m, sizeof m) == 0); /* Reset is observation-only. */
+    interaction_reference_diagnostics_bind(&m, NULL);
+    assert(interaction_reference_diagnostics_get(&m) == NULL);
+
+    time = reference_fixture(&m, &d);
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1.2f);
+    d.episode.rejected = d.episode.near_one = UINT32_MAX;
+    for (unsigned i = 0; i < 25; ++i)
+        (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1.2f);
+    assert(d.first_active.episode.saturated && d.first_active.episode.rejected == UINT32_MAX);
+    interaction_init(&m);
+    assert(interaction_reference_diagnostics_get(&m) == NULL);
+}
+
+static void reference_external_causes_and_inactive_losses_are_truthful(void)
+{
+    const interaction_reference_reason_t reasons[] = {INTERACTION_REFERENCE_MISSING,
+        INTERACTION_REFERENCE_INVALID_SAMPLE, INTERACTION_REFERENCE_SAMPLE_TIME, INTERACTION_REFERENCE_CLOCK};
+    for (size_t i = 0; i < sizeof reasons / sizeof reasons[0]; ++i) {
+        interaction_t m;
+        interaction_reference_diagnostics_t d;
+        uint64_t time = reference_fixture(&m, &d);
+        if (i == 0) (void)interaction_motion_sample(&m, NULL);
+        if (i == 1) (void)physical_sample(&m, &time, 10000, 2000, 0, 0, 0, 0, 1);
+        if (i == 2) (void)physical_sample(&m, &time, 50001, 0, 0, 0, 0, 0, 1);
+        if (i == 3) (void)interaction_tick(&m, 0);
+        assert(d.first_active.known && d.first_active.reason == reasons[i]);
+        assert(!d.first_active.episode.first_known && !d.first_active.terminal.dt_known);
+        assert(!d.first_active.terminal.norm_known && !d.first_active.terminal.checks_known);
+        assert(d.first_active.terminal.sample_known == (i == 1 || i == 2));
+    }
+    interaction_t m;
+    interaction_reference_diagnostics_t d;
+    uint64_t time = reference_fixture(&m, &d);
+    assert(interaction_set_motion(&m, false));
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 3);
+    assert(d.losses[INTERACTION_REFERENCE_ACCEL_NORM] == 1 && !d.first_active.known);
+    for (unsigned i = 0; i < 15; ++i)
+        (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    assert(m.gravity_ready && interaction_set_motion(&m, true));
+    for (unsigned i = 0; i < 12; ++i)
+        (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    assert(m.gravity_ready);
+    interaction_calibrate(&m);
+    assert(d.losses[INTERACTION_REFERENCE_CALIBRATE] == 1 && !d.first_active.known);
+    time = reference_fixture(&m, &d);
+    interaction_calibration_cancel(&m);
+    assert(d.losses[INTERACTION_REFERENCE_CANCEL] == 1 && !d.first_active.known);
+    /* Bind midstream without a prior observed sample: never fabricate its pair. */
+    time = physical_grip(&m, 0);
+    interaction_reference_diagnostics_bind(&m, &d);
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 3);
+    assert(!d.first_active.terminal.previous_known);
+    /* Corrupt orientation fault injection still fails closed, with its exact
+     * normalization branch, rather than presenting a plausible sensor cause. */
+    for (unsigned haptic = 0; haptic < 2; ++haptic) {
+        time = reference_fixture(&m, &d);
+        memset(m.gravity, 0, sizeof m.gravity);
+        interaction_set_suppressed(&m, false, false, haptic != 0, time / 1000);
+        (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+        assert(d.first_active.reason == (haptic ? INTERACTION_REFERENCE_HAPTIC_NORMALIZE :
+            INTERACTION_REFERENCE_PREDICT_NORMALIZE));
+        assert(!m.gravity_ready && d.first_active.terminal.gravity_before[2] == 0);
+    }
+}
+
+static void reference_observation_preserves_all_control_state_and_output(void)
+{
+    interaction_t observed, plain;
+    interaction_reference_diagnostics_t d;
+    uint64_t time = reference_fixture(&observed, &d);
+    plain = observed;
+    plain.reference_diagnostics = NULL;
+    for (unsigned i = 0; i < 800; ++i) {
+        time += i % 127 == 0 ? 60000 : 10000;
+        interaction_imu_sample_t s = {.timestamp_us = time, .az_g = 1,
+            .gz_dps = i % 50 < 25 ? 25 : -25};
+        if (i % 113 == 0) s.az_g = 3;
+        if (i % 97 == 0) s.ax_g = .8f;
+        if (i % 89 == 0) s.gx_dps = 2000;
+        const bool haptic = i % 79 < 30;
+        interaction_set_suppressed(&observed, false, false, haptic, time / 1000);
+        interaction_set_suppressed(&plain, false, false, haptic, time / 1000);
+        const input_delta_t a = interaction_motion_sample(&observed, i % 137 ? &s : NULL);
+        const input_delta_t b = interaction_motion_sample(&plain, i % 137 ? &s : NULL);
+        assert(a.x == b.x && a.y == b.y);
+        interaction_t control = observed;
+        control.reference_diagnostics = NULL;
+        assert(memcmp(&control, &plain, sizeof plain) == 0);
+    }
+}
+
+static void current_grip_enable_and_recenter_preserve_bias_intent_and_fault_history(void)
+{
+    interaction_t m;
+    uint64_t time = physical_grip(&m, 0);
+    interaction_reference_diagnostics_t d;
+    interaction_reference_diagnostics_bind(&m, &d);
+    const interaction_config_t config = m.config;
+    float bias[3]; memcpy(bias, m.bias, sizeof bias);
+    assert(interaction_set_motion(&m, false) && interaction_set_motion(&m, true));
+    assert(!m.gravity_ready && !m.geometry_ready && m.view.motion_enabled && m.view.calibrated);
+    assert(d.enable_resets == 1 && d.last_reset == INTERACTION_REFERENCE_RESET_ENABLE && !d.active_losses);
+    for (unsigned i = 0; i < 40; ++i) {
+        const input_delta_t out = physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1);
+        assert(!out.x && !out.y && !m.gravity_ready);
+    }
+    for (unsigned i = 0; i < 10; ++i) {
+        const input_delta_t out = physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+        assert(!out.x && !out.y && !m.gravity_ready);
+    }
+    assert(interaction_set_motion(&m, true)); /* Repeated enable cannot restart acquisition. */
+    assert(d.enable_resets == 1);
+    input_delta_t out = physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    assert(!out.x && !out.y && m.gravity_ready);
+    assert(physical_sample(&m, &time, 10000, 0, 0, 12.5f, 0, 0, 1).x == 0);
+    assert(m.pointer_motion.x > 0); /* Pending fraction must not cross the reset. */
+    const input_state_t control = m.control;
+    const uint64_t last_sample = m.sample_us;
+    assert(interaction_recenter_owned(&m, INPUT_LOCAL));
+    assert(!m.gravity_ready && !m.geometry_ready && m.pointer_motion.x == 0 && m.pointer_motion.y == 0);
+    assert(m.sample_seen && m.sample_us == last_sample && m.view.motion_enabled && m.view.calibrated);
+    assert(memcmp(&m.config, &config, sizeof config) == 0 && memcmp(m.bias, bias, sizeof bias) == 0);
+    assert(memcmp(&m.control, &control, sizeof control) == 0);
+    assert(d.recenter_resets == 1 && d.last_reset == INTERACTION_REFERENCE_RESET_RECENTER);
+    assert(!d.active_losses && !d.first_active.known);
+    const float tilt = .6f;
+    for (unsigned i = 0; i < 14; ++i) {
+        out = physical_sample(&m, &time, 10000, 0, 0, 0, 0, sinf(tilt), cosf(tilt));
+        assert(!out.x && !out.y);
+    }
+    assert(m.gravity_ready && fabsf(m.gravity[1] - sinf(tilt)) < .0001f);
+    out = physical_sample(&m, &time, 10000, 0, 25 * sinf(tilt), 25 * cosf(tilt), 0, sinf(tilt), cosf(tilt));
+    assert(out.x == 1 && out.y == 0);
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 3);
+    assert(d.first_active.known && d.first_active.reason == INTERACTION_REFERENCE_ACCEL_NORM);
+    const interaction_reference_incident_t incident = d.first_active;
+    const uint32_t losses = d.active_losses;
+    assert(interaction_recenter_owned(&m, INPUT_LOCAL));
+    assert(d.active_losses == losses && memcmp(&incident, &d.first_active, sizeof incident) == 0);
+    d.enable_resets = UINT32_MAX;
+    assert(interaction_set_motion(&m, false) && interaction_set_motion(&m, true));
+    assert(d.enable_resets == UINT32_MAX && d.saturated);
+    assert(memcmp(&incident, &d.first_active, sizeof incident) == 0);
+    assert(interaction_set_motion(&m, false)); /* Waiting is always stoppable. */
+    assert(!interaction_recenter_owned(&m, INPUT_LOCAL));
+}
+
+static void recenter_rejection_has_no_partial_effect(void)
+{
+    interaction_t base;
+    (void)physical_grip(&base, 0);
+    for (unsigned fault = 0; fault < 10; ++fault) {
+        interaction_t m = base;
+        if (fault == 0) m.view.mode = INPUT_KEYBOARD;
+        if (fault == 1) m.view.motion_enabled = false;
+        if (fault == 2) m.view.calibrated = false;
+        if (fault == 3) m.view.calibrating = true;
+        if (fault == 4) m.output_ready = false;
+        if (fault == 5) m.control.locked = true;
+        if (fault == 6) m.control.owner = INPUT_REMOTE;
+        if (fault == 7) m.motion_source = INPUT_REMOTE;
+        if (fault == 8) m.view.menu_open = true;
+        const interaction_t before = m;
+        assert(!interaction_recenter_owned(&m, fault == 9 ? (input_owner_t)99 : INPUT_LOCAL));
+        assert(memcmp(&before, &m, sizeof m) == 0);
+    }
+    base.control.owner = base.motion_source = INPUT_REMOTE;
+    assert(interaction_recenter_owned(&base, INPUT_REMOTE));
+    assert(base.view.motion_enabled && !base.gravity_ready);
+}
+
 int main(void)
 {
     nine_cell_grid_and_preview();
@@ -1219,6 +1517,13 @@ int main(void)
     gravity_transients_gaps_and_reacquisition();
     orientation_tracks_during_touch_and_guards_vertical_axes();
     calibration_cancellation_requires_a_new_explicit_start();
+    reference_incidents_preserve_exact_cause_and_first_evidence();
+    reference_rejection_episodes_keep_unknown_checks_distinct();
+    reference_attachment_reset_staleness_and_saturation();
+    reference_external_causes_and_inactive_losses_are_truthful();
+    reference_observation_preserves_all_control_state_and_output();
+    current_grip_enable_and_recenter_preserve_bias_intent_and_fault_history();
+    recenter_rejection_has_no_partial_effect();
     puts("PASS: nine-cell grid, 64-character preview, send prefixes, tap/double/drag admission and cleanup, calibration and motion suppression");
     return 0;
 }

@@ -855,6 +855,8 @@ static void congestion_checks(void)
     s_state.overlay = APP_OVERLAY_NONE;
     s_state.congested = true;
     s_state.motion_enabled = true;
+    s_state.motion_reason = APP_MOTION_READY;
+    s_state.motion_settings.reference = APP_REFERENCE_READY;
     render();
     clear_intents();
     tap_control("Left click");
@@ -1321,6 +1323,7 @@ static void setup_cache_lifetime_checks(void)
 
 #include "ui_extensions.inc"
 #include "ui_motion_settings.inc"
+#include "ui_motion_grip.inc"
 #include "ui_capture_indicator.inc"
 #include "ui_touch_context.inc"
 #include "ui_recording_storage.inc"
@@ -1331,8 +1334,9 @@ static void setup_cache_lifetime_checks(void)
 
 int main(int argc, char **argv)
 {
-    assert(argc == 2 || (argc == 3 && strcmp(argv[2], "keys") == 0));
-    bool keys_only = argc == 3;
+    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion"))));
+    bool keys_only = argc == 3 && !strcmp(argv[2], "keys");
+    bool motion_only = argc == 3 && !strcmp(argv[2], "motion");
     assert(!app_ui_touch_context().eligible_pad);
     s_output = argv[1];
     ui_memory_check_observer();
@@ -1373,6 +1377,14 @@ int main(int argc, char **argv)
         grid_groups();
         if (keys_only) {
             common_keys_checks();
+            continue;
+        }
+        if (motion_only) {
+            motion_grip_checks();
+            motion_reason_and_tap_setting_checks();
+            motion_settings_checks();
+            common_keys_checks();
+            congestion_checks();
             continue;
         }
         screenshot("mouse");
@@ -1459,6 +1471,7 @@ int main(int argc, char **argv)
         setup_cache_lifetime_checks();
         extension_checks();
         motion_settings_checks();
+        motion_grip_checks();
         capture_indicator_checks();
         touch_context_checks();
         recording_storage_checks();

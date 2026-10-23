@@ -44,6 +44,9 @@ typedef struct {
     /* Actual common coordinator paths for transport select/recover, mode,
      * keyboard submode, semantic ui.* and non-pad virtual touch. Mode/motion
      * delegates commit the desired engine epoch synchronously before returning;
+     * motion.recenter instead applies the explicit shared reference reset
+     * synchronously without changing epoch, Motion intent, bias or settings.
+     * APPLIED acknowledges that reset, not subsequent acquisition readiness.
      * parent owns later neutral-barrier/provider completions. No success stubs:
      * provider absence is unavailable. Parent owns their async completions. */
     bool (*delegate_available)(void *, cp_operation_id_t, char reason[CP_REASON_CAPACITY]);

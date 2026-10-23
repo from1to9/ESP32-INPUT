@@ -280,7 +280,8 @@ cp_error_t app_remote_input_init(void *memory, size_t bytes, const app_remote_in
 
 static bool delegated(cp_operation_id_t id)
 {
-    return id == CP_OP_MODE_SELECT || id == CP_OP_INPUT_MOTION_SET || id == CP_OP_INPUT_TRANSPORT_SELECT ||
+    return id == CP_OP_MODE_SELECT || id == CP_OP_INPUT_MOTION_SET || id == CP_OP_INPUT_MOTION_RECENTER ||
+        id == CP_OP_INPUT_TRANSPORT_SELECT ||
         id == CP_OP_INPUT_RECOVER || id == CP_OP_KEYBOARD_SUBMODE_SELECT ||
         id == CP_OP_UI_NAVIGATE || id == CP_OP_UI_CLOSE || id == CP_OP_UI_PRIMARY_ACTIVATE ||
         id == CP_OP_UI_MODE_PANEL_OPEN;
@@ -1013,6 +1014,14 @@ cp_error_t app_remote_input_execute(app_remote_input_t *m, const cp_command_t *c
         if (error == CP_OK && m->virtual_active && (cmd->operation == CP_OP_MOUSE_MOVE_RELATIVE ||
             cmd->operation == CP_OP_MOUSE_CLICK || cmd->operation == CP_OP_MOUSE_SCROLL ||
             cmd->operation == CP_OP_MOUSE_DRAG_BEGIN)) error=CP_BUSY;
+        if (error == CP_OK && cmd->operation == CP_OP_INPUT_MOTION_RECENTER) {
+            const hid_engine_t *engine = m->port.engine;
+            if (engine->state.mode != INPUT_MOUSE) error=CP_STALE;
+            else if (m->view.producer != APP_REMOTE_PRODUCER_DEVICE_IMU) error=CP_BUSY;
+            else if (!engine->state.gyro_enabled || !m->port.interaction->view.motion_enabled) error=CP_STALE;
+            else if (m->virtual_active || m->drag_requested || hid_busy(m) || engine->count ||
+                engine->mouse_buttons || interaction_touch_holding(m->port.interaction)) error=CP_BUSY;
+        }
         if (error == CP_OK) {
             if (cmd->operation == CP_OP_CONTROL_RENEW) error=renew(m,cmd,out);
             else if (delegated(cmd->operation)) {

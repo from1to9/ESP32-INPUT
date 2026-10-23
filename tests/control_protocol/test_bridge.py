@@ -66,6 +66,36 @@ class FakeSerial:
     def readline(self, limit): return self.responses.pop(0)
 
 class CompanionTests(unittest.TestCase):
+    def test_motion_recenter_uses_observed_input_lease_and_exact_retry(self):
+        tool = next(tool for tool in TOOLS if tool["name"] == "input_motion_recenter")
+        self.assertEqual(tool["x-device-operation"], "input.motion.recenter")
+        self.assertEqual(tool["x-required-scopes"], ["input.control"])
+        validator = TypedValidator(tool["inputSchema"], format_checker=FORMAT)
+        self.assertTrue(validator.is_valid({"context": {}, "args": {}}))
+        self.assertFalse(validator.is_valid({"context": {}, "args": {"enabled": True}}))
+        with tempfile.TemporaryDirectory(prefix="control-recenter-") as directory:
+            keychain = FakeKeychain()
+            destination = Path(directory) / "owner"
+            create_package(destination, "device.test", 443, ["view", "input.control"],
+                           ["clock.example"], [], keychain)
+            profile = json.loads((destination / "client-profile.json").read_text())
+            http = FakeHTTP()
+            session = DeviceSession(profile, http, keychain)
+            arguments = {"context": {"epoch": "2", "transport_generation": "7",
+                                     "target_id": "test-target"}, "args": {}}
+            http.fail_once = True
+            with self.assertRaises(BridgeError):
+                session.invoke("input_motion_recenter", arguments)
+            with self.assertRaises(BridgeError):
+                session.invoke("input_motion_recenter", arguments)
+            session.invoke("bridge_retry_pending", {})
+            self.assertEqual(len(http.commands), 2)
+            self.assertEqual(http.commands[0], http.commands[1])
+            self.assertEqual(http.commands[0]["op"], "input.motion.recenter")
+            self.assertEqual(http.commands[0]["args"], {})
+            self.assertEqual(http.commands[0]["lease_id"], "7" * 32)
+            session.close()
+
     def test_private_enrollment_and_protocol(self):
         with tempfile.TemporaryDirectory(prefix="control-private-") as directory:
             keychain = FakeKeychain(); destination = Path(directory) / "owner"

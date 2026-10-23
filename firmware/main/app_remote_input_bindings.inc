@@ -125,6 +125,7 @@ static bool remote_delegate_available(void *context, cp_operation_id_t operation
         operation == CP_OP_UI_PRIMARY_ACTIVATE || operation == CP_OP_UI_MODE_PANEL_OPEN)
         return remote_device_available(operation, reason);
     return operation == CP_OP_MODE_SELECT || operation == CP_OP_INPUT_MOTION_SET ||
+        operation == CP_OP_INPUT_MOTION_RECENTER ||
         operation == CP_OP_KEYBOARD_SUBMODE_SELECT || operation == CP_OP_INPUT_TRANSPORT_SELECT ||
         operation == CP_OP_INPUT_RECOVER;
 }
@@ -150,6 +151,11 @@ static cp_error_t remote_delegate(void *context, const cp_command_t *command, cp
         if (enabled && !s_interaction.view.calibrated) return CP_UNAVAILABLE;
         if (enabled != s_engine.state.gyro_enabled) (void)set_motion(INPUT_REMOTE, enabled);
         return s_engine.state.gyro_enabled == enabled ? CP_OK : CP_BUSY;
+    case CP_OP_INPUT_MOTION_RECENTER: {
+        cp_error_t error = recenter_motion(INPUT_REMOTE);
+        if (error == CP_OK) (void)snprintf(result->reason, sizeof result->reason, "motion_reference_reset");
+        return error;
+    }
     case CP_OP_KEYBOARD_SUBMODE_SELECT: {
         if (!cp_command_string(command, "submode", value, sizeof(value))) return CP_INVALID;
         static const char *const names[] = {"motion", "touch", "spoken", "shortcuts"};

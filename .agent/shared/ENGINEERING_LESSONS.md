@@ -207,3 +207,20 @@ timestamps from the same clock before attributing a delay to a startup phase.
 Evidence: [interaction model](../../components/interaction/interaction.c),
 [coordinator](../../firmware/main/main.c), [SDK pin](../../toolchain.lock.json)
 and the [dated device record](../../docs/validation.md#repeat-device-test-and-physical-failures-2026-10-23).
+
+## 10. Qualify sensor axes against an explicit physical pose
+
+A proper rotation applied equally to acceleration and gyro proves internal
+frame consistency, not the sensor's mounting relative to readable screen text.
+Factory bubble or Euler-angle labels are not a substitute for a documented
+body basis. Ground the transform in explicit screen-up and screen-facing poses,
+retain settled observations, and distinguish them from transition windows.
+If the operator corrects the action sequence, withdraw its earlier pose labels
+without deleting the raw observations. Do not infer vector norms or paired
+sensor behavior from independent window extrema.
+
+Correct mounting at the board boundary for both sensors. Pointer inversion,
+gain tuning and repeated calibration must not compensate for an incorrect
+physical basis. A common proper rotation leaves reference-estimator norms and
+dot products invariant, so an axis correction and reference-loss repair require
+separate evidence. See the [physical observations](../../docs/validation.md#reference-loss-and-physical-axis-observations-2026-10-23).

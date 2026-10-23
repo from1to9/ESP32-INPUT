@@ -19,8 +19,12 @@ with tempfile.TemporaryDirectory(prefix="esp32-board-test-") as tmp:
         "-I", str(root / "tests/board_port/stubs"),
         "-I", str(root / "firmware/main"),
         "-I", str(root / "components/haptics/include"),
+        "-I", str(root / "components/input_core/include"),
+        "-I", str(root / "components/interaction/include"),
         str(root / "tests/board_port/test_board_port.c"),
-        str(root / "components/haptics/haptics.c"), "-lm", "-o", binary,
+        str(root / "components/haptics/haptics.c"),
+        str(root / "components/input_core/input_core.c"),
+        str(root / "components/interaction/interaction.c"), "-lm", "-o", binary,
     ], check=True)
     subprocess.run([binary], check=True)
 subprocess.run([sys.executable, str(root / "tests/display_resources/run.py")], check=True)

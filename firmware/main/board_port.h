@@ -142,11 +142,13 @@ board_capabilities_t board_capabilities(void);
 
 /* Nonblocking latest sample from the 100 Hz BMI270 stream. Both acceleration
  * and angular velocity use the right-handed display frame: X right, Y top,
- * Z outward toward the viewer. The output rotation from BSP sensor coordinates
- * is (-sensorY, sensorX, sensorZ), determinant +1. Positive angular velocity
- * follows the right-hand rule. This is source-grounded; physical sign and
- * installed display orientation qualification remain pending. The acquisition
- * cache and hardware diagnostics retain raw BSP coordinates.
+ * Z outward toward the viewer. For the current Mosaico panel orientation this
+ * is the native BSP basis (sensorX, sensorY, sensorZ), determinant +1, selected
+ * from flat and text-upright hold observations on Mosaico v1.2. These poses do
+ * not physically qualify v1.0 or other board profiles. Both vectors and the
+ * cached timestamp are copied unchanged. Positive angular velocity follows the
+ * right-hand rule. Dynamic direction and pointer feel still require device
+ * qualification. The acquisition cache uses the same BSP coordinates.
  * One official corrected Bosch full-frame read supplies gyro/acceleration and
  * its data-ready status. The adapter explicitly configures 4 g/2000 dps and
  * applies the same range scales as the BSP. This burst is not proof of an

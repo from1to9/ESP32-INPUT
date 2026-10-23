@@ -5412,6 +5412,25 @@
       "read_only": true,
       "sensitive": false,
       "initial_v1_supported": true
+    },
+    {
+      "id": 148,
+      "name": "input.motion.recenter",
+      "scopes": [
+        "input.control"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "input": true,
+      "initial_v1_supported": true,
+      "ui_context": false,
+      "safety": false,
+      "read_only": false,
+      "sensitive": false
     }
   ],
   "configuration": [

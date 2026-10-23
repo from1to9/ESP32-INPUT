@@ -2,7 +2,7 @@
 
 Status: planning only, reviewed 2026-10-21 against the working source tree based on `0705a5f7d4067ced8439c54c157a202df6b4c229`. This document adds no server, command handler, configuration storage or hardware capability. Complete the API/function plan and reconcile the integration decisions below before implementing new API behavior.
 
-The [complete API matrix](api-function-matrix.md) owns registry names, field scopes and operation coverage; the [configuration contract](configuration.md) owns the common transaction and metadata model. The [remote-control design](remote-control.md) supplies the baseline authentication, browser/Mac, input-channel and resource contracts. Its older blanket physical-approval, per-field setter and navigation proposals are superseded where the complete matrix and latest owner decisions specify scoped remote authority. [Wi-Fi/OTA](wifi-management-ota.md) and [audio/recording](api-audio-recording.md) own their manager lifecycles. This companion defines input meaning, local/remote parity, every current application action and failure cases. Product intent remains in [requirements](requirements.md) and the shared [interaction contract](interaction.md); qualification evidence belongs in the [remote test plan](remote-control-test-plan.md). All API operations remain proposed.
+The [complete API matrix](api-function-matrix.md) owns registry names, field scopes and operation coverage; the [configuration contract](configuration.md) owns the common transaction and metadata model. The [remote-control design](remote-control.md) supplies the baseline authentication, browser/Mac, input-channel and resource contracts. Its older blanket physical-approval, per-field setter and navigation proposals are superseded where the complete matrix and latest owner decisions specify scoped remote authority. [Wi-Fi/OTA](wifi-management-ota.md) and [audio/recording](api-audio-recording.md) own their manager lifecycles. This companion defines input meaning, local/remote parity, every current application action and failure cases. Product intent remains in [requirements](requirements.md) and the shared [interaction contract](interaction.md); qualification evidence belongs in the [remote test plan](remote-control-test-plan.md). The historical planning status does not override the explicit Recenter extension below.
 
 ## 1. Source audit and implementation boundary
 
@@ -389,3 +389,39 @@ Required semantic cases supplement the remote test plan:
 18. PC06: recording blocks blanking while maintaining a readable actual indicator and local Stop; stalled/failed indication stops capture with truthful mute evidence. Explicit bounded file-only `continue_local` survives HID lease loss only with its background grant, emits no live media after owner loss, and still stops on privacy/lock/grant/resource/deadline limits. Default jobs stop; reconnect/boot never resumes them.
 
 Documentation hygiene, local-link checks and action-enum coverage can validate this plan's completeness against the audited source. They do not qualify a server, device, host, security implementation or any proposed configuration range.
+
+## Explicit Motion Recenter extension
+
+Accepted source/API contract, 2026-10-23: operation 148 is
+`input.motion.recenter`, with an empty argument object and `input.control`.
+It is an input operation under the existing live input lease, selected Device
+IMU producer, Mouse mode and requested Motion. It does not enter the management
+calibration job. The existing epoch, transport/target, owner, lock, deadline,
+release, readiness and local-activity guards apply. Nonempty HID queues, held
+mouse buttons, drag, held touch and virtual contacts are busy; admission never
+purges them to make room for a reset. The coordinator also checks real hardware,
+calibration, maintenance, transport, wake and physical-contact conditions.
+
+The shared reference-reset delegate preserves gyro bias, settings, calibration,
+Motion intent, input epoch and sample-time continuity. It clears the grip
+reference, acquisition state, filters and carry. `APPLIED` acknowledges that
+explicit reset; actual reference readiness follows the existing eight-stable-
+sample and 100 ms acquisition conditions, with no delta on the recovery frame.
+There is no completion timer or additional asynchronous job. Existing command
+identity/replay rules retain the prior result without invoking a second reset;
+stale, expired or foreign requests cannot reset the reference.
+
+The existing `imu.state` / `GET /api/v1/imu` observation adds these bounded
+fields, while preserving its availability, calibration, age and error fields:
+
+| Field | Meaning |
+| --- | --- |
+| `motion_requested` | Actual engine Motion intent, shared with the native UI. |
+| `reference_state` | `unknown`, `unavailable`, `acquiring`, `unstable` or `ready`, using the same coarse state as the UI. Unknown means no model clock observation; unavailable means the actual IMU is unavailable; acquiring means gravity is not ready; unstable means gravity is ready but geometry is not ready or is limited. Ready requires acquired gravity and geometry with no limited-reference condition. |
+| `input_ready` | Actual input engine/selected route readiness observation. |
+| `output_ready` | Interaction admission readiness, independently observed from grip/reference acquisition. |
+
+Transient touch, haptic or freeze suppression does not by itself relabel an
+acquired grip reference. A reset result and a later readiness observation are
+distinct evidence; clients observe this resource rather than waiting a success
+timer. Reference readiness alone does not establish host output.

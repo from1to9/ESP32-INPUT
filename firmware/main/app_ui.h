@@ -33,7 +33,8 @@ typedef enum {
     APP_BLUETOOTH_NAME_EDIT, APP_TAP_TO_CLICK,
     APP_MOTION_CONFIG, APP_RECORDING_STORAGE_PREPARE_REQUEST, APP_MEDIA_CONTROL,
     APP_API_COMMISSIONING, APP_WIFI_PROFILE_CONTROL, APP_BLUETOOTH_TARGET_CONTROL,
-    APP_API_INPUT_ALLOW_SET /* x = explicit Boolean; api.revision = allowance generation. */
+    APP_API_INPUT_ALLOW_SET, /* x = explicit Boolean; api.revision = allowance generation. */
+    APP_RECENTER /* Reacquire the grip reference; never recalibrate sensor bias. */
 } app_action_t;
 
 typedef enum {
@@ -141,6 +142,8 @@ typedef enum {
     APP_REFERENCE_UNKNOWN, APP_REFERENCE_UNAVAILABLE, APP_REFERENCE_ACQUIRING,
     APP_REFERENCE_READY, APP_REFERENCE_UNSTABLE
 } app_motion_reference_t;
+/* READY requires both gravity and geometry references, with no geometry limit.
+ * These are owner-derived coarse states, independent of transient touch/freeze. */
 typedef struct {
     bool available; /* Values below are actual validated settings, not defaults. */
     bool editable; /* Owner admits setting changes; independent of HID readiness. */
@@ -493,6 +496,7 @@ typedef struct {
     app_bluetooth_target_view_t bluetooth_target;
     app_media_view_t media;
     app_media_review_t media_review;
+    bool motion_recenter_available; /* Coordinator admits a local Mouse Recenter request. */
 } app_view_t;
 
 /* Call create/render while holding the display lock. Submit must only enqueue

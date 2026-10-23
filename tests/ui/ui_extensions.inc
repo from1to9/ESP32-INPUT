@@ -666,9 +666,9 @@ static void motion_reason_and_tap_setting_checks(void)
     app_view_t original = s_state;
     const struct { app_motion_reason_t reason; const char *name; const char *label; } cases[] = {
         {APP_MOTION_UNKNOWN, "unknown", "Motion status unavailable"},
-        {APP_MOTION_READY, "ready", "Touch pauses motion"},
+        {APP_MOTION_READY, "ready", "Enable Motion to set your grip"},
         {APP_MOTION_SENSOR_UNAVAILABLE, "sensor-unavailable", "Motion sensor unavailable"},
-        {APP_MOTION_CALIBRATION_REQUIRED, "calibration-required", "Calibrate motion"},
+        {APP_MOTION_CALIBRATION_REQUIRED, "calibration-required", "Calibrate sensor"},
         {APP_MOTION_CALIBRATING, "calibrating", "Keep the device still"},
         {APP_MOTION_PROVIDER_UNAVAILABLE, "provider-unavailable", "Selected input provider unavailable"},
         {APP_MOTION_DISCONNECTED, "usb-disconnected", "Connect a USB data host"},
@@ -685,6 +685,7 @@ static void motion_reason_and_tap_setting_checks(void)
         s_state.connected = s_state.ready = s_state.motion_available = s_state.calibration_available = true;
         s_state.transport_switch_pending = s_state.transport_error = s_state.release_pending = false;
         s_state.calibrating = false; s_state.motion_reason = cases[i].reason;
+        s_state.motion_recenter_available = cases[i].reason == APP_MOTION_READY;
         s_state.tap_to_click_available = s_state.tap_to_click_enabled = true;
         switch (cases[i].reason) {
         case APP_MOTION_UNKNOWN: case APP_MOTION_SENSOR_UNAVAILABLE:
@@ -706,8 +707,9 @@ static void motion_reason_and_tap_setting_checks(void)
         clear_intents(); pointer(124, 448, true); pointer(124, 448, false);
         assert(action_count(APP_MOTION) == (cases[i].reason == APP_MOTION_READY ? 1U : 0U));
         assert(!s_state.motion_enabled);
-        clear_intents(); tap_control("Motion help");
-        assert(action_count(APP_MENU) == 1 && last_action(APP_MENU)->x == APP_OVERLAY_TARGET);
+        clear_intents(); tap_control("Recenter");
+        assert(action_count(APP_RECENTER) == (cases[i].reason == APP_MOTION_READY ? 1U : 0U));
+        assert(action_count(APP_MENU) == 0 && action_count(APP_CALIBRATE) == 0);
         assert(action_count(APP_TOUCH_MOVE) == 0 && action_count(APP_MOTION) == 0);
     }
     s_state = original; ui_fixture_native_networks(&s_state);
@@ -750,7 +752,7 @@ static void motion_reason_and_tap_setting_checks(void)
     lv_tick_inc(100); lv_timer_handler();
     assert(action_count(APP_TOUCH_MOVE) == 1 && action_count(APP_CLICK) == 0);
     s_state = original; render(); clear_intents();
-    puts("PASS: coordinator-derived Motion reasons and help routing, truthful tap preference/save state and no duplicate touchpad recognition");
+    puts("PASS: coordinator-derived Motion reasons and Recenter admission, truthful tap preference/save state and no duplicate touchpad recognition");
 }
 
 static void extension_checks(void)

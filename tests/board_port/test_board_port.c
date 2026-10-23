@@ -4,7 +4,9 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include "interaction.h"
 
 /* Exercise the actual adapter, including private sampler transitions, against
  * driver doubles. The doubles do not provide device qualification evidence. */
@@ -699,8 +701,8 @@ static void test_imu_real_units_and_nonblocking_cache(void)
     assert(hw.imu_stack == 4096 && hw.imu_priority == 6 && hw.task_creations == 3);
     board_imu_sample_t sample;
     assert(board_imu_read(&sample) == ESP_OK);
-    assert(sample.x_dps == -hw.gyro[1] && sample.y_dps == hw.gyro[0] && sample.z_dps == hw.gyro[2]);
-    assert(sample.x_g == -hw.accel[1] && sample.y_g == hw.accel[0] && sample.z_g == hw.accel[2]);
+    assert(sample.x_dps == hw.gyro[0] && sample.y_dps == hw.gyro[1] && sample.z_dps == hw.gyro[2]);
+    assert(sample.x_g == hw.accel[0] && sample.y_g == hw.accel[1] && sample.z_g == hw.accel[2]);
     assert(sample.timestamp_us < hw.time_us); /* Other board initialization does not retimestamp the cache. */
     const unsigned status_reads = hw.status_reads;
     const unsigned gyro_reads = hw.gyro_reads;
@@ -722,7 +724,7 @@ static void test_imu_display_frame_is_one_proper_rotation(void)
 {
     reset();
     assert(board_init(legacy_hold) == ESP_OK);
-    const float expected[3][3] = {{0, 1, 0}, {-1, 0, 0}, {0, 0, 1}};
+    const float expected[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
     float transformed[3][3];
     for (unsigned axis = 0; axis < 3; ++axis) {
         for (unsigned component = 0; component < 3; ++component) {
@@ -759,6 +761,113 @@ static void test_imu_display_frame_is_one_proper_rotation(void)
         unsigned b = (a + 1) % 3, c = (a + 2) % 3;
         float cross = transformed[0][b] * transformed[1][c] - transformed[0][c] * transformed[1][b];
         assert(cross == transformed[2][a]);
+    }
+}
+
+static void test_confirmed_upright_pose_uses_display_top_axis(void)
+{
+    reset();
+    memset(hw.gyro, 0, sizeof hw.gyro);
+    /* Confirmed text-upright, screen-facing hold on 2026-10-23: the old
+     * adapter reported X=-0.851..-0.816, Y=-0.032..0.023, Z=0.502..0.562 g.
+     * Undoing that known old (-nativeY,nativeX,nativeZ) transform gives this
+     * representative native boundary fixture. The hold was inclined, not an
+     * exact 90-degree pose. Its up component belongs to display Y, not X. */
+    hw.accel[0] = 0; hw.accel[1] = .84f; hw.accel[2] = .53f;
+    assert(board_init(legacy_hold) == ESP_OK);
+    board_imu_sample_t sample;
+    assert(board_imu_read(&sample) == ESP_OK);
+    assert(fabsf(sample.x_g) < .035f);
+    assert(sample.y_g > .80f && sample.y_g < .88f);
+    assert(sample.z_g > .49f && sample.z_g < .58f);
+    const float norm = sqrtf(sample.x_g * sample.x_g + sample.y_g * sample.y_g + sample.z_g * sample.z_g);
+    assert(fabsf(norm - 1) < .03f);
+}
+
+static input_delta_t board_motion_frame(interaction_t *model)
+{
+    hw.time_us += 10000;
+    assert(imu_update() == ESP_OK);
+    board_imu_sample_t sample;
+    assert(board_imu_read(&sample) == ESP_OK);
+    const interaction_imu_sample_t mapped = {.timestamp_us = sample.timestamp_us,
+        .gx_dps = sample.x_dps, .gy_dps = sample.y_dps, .gz_dps = sample.z_dps,
+        .ax_g = sample.x_g, .ay_g = sample.y_g, .az_g = sample.z_g};
+    return interaction_motion_sample(model, &mapped);
+}
+
+static void calibrated_board_grip(interaction_t *model, float tilt)
+{
+    reset();
+    memset(hw.gyro, 0, sizeof hw.gyro);
+    hw.accel[0] = 0; hw.accel[1] = sinf(tilt); hw.accel[2] = cosf(tilt);
+    assert(board_init(legacy_hold) == ESP_OK);
+    interaction_init(model);
+    input_state_t state;
+    input_init(&state);
+    input_set_connected(&state, true);
+    assert(input_set_mode(&state, INPUT_MOUSE));
+    assert(input_ack_release(&state, state.epoch));
+    interaction_sync(model, &state, true, hw.time_us / 1000U);
+    interaction_config_t config = model->config;
+    config.pointer_gain_x = 8; config.pointer_gain_y = 2; config.filter_seconds = 0;
+    assert(interaction_configure(model, &config));
+    for (unsigned i = 0; i < 64; ++i) {
+        const input_delta_t delta = board_motion_frame(model);
+        assert(delta.x == 0 && delta.y == 0);
+    }
+    assert(model->view.calibrated && model->gravity_ready);
+    float calibrated_bias[3];
+    memcpy(calibrated_bias, model->bias, sizeof calibrated_bias);
+    assert(interaction_set_motion(model, true));
+    assert(model->view.calibrated && model->view.motion_enabled && !model->gravity_ready);
+    const uint64_t enabled_us = s_imu_sample.timestamp_us;
+    /* Enabling intentionally reacquires the current physical reference. Feed
+     * new matching still frames through the real adapter, rather than setting
+     * reference flags or reusing the calibration result in the fixture. */
+    for (unsigned i = 0; i < 12; ++i) {
+        const bool had_reference = model->gravity_ready;
+        const input_delta_t delta = board_motion_frame(model);
+        assert(delta.x == 0 && delta.y == 0);
+        if (s_imu_sample.timestamp_us - enabled_us < 100000) assert(!model->gravity_ready);
+        if (!had_reference && model->gravity_ready)
+            assert(model->view.motion_block_reason == INTERACTION_MOTION_BLOCK_REFERENCE);
+    }
+    assert(model->gravity_ready && model->geometry_ready && model->view.motion_enabled);
+    assert(model->view.calibrated && !memcmp(calibrated_bias, model->bias, sizeof calibrated_bias));
+}
+
+static void test_board_to_model_flat_inclined_and_upright_axes(void)
+{
+    const float grips[] = {0, .5f * 3.14159265359f, atan2f(.84f, .53f)};
+    for (unsigned grip = 0; grip < sizeof(grips) / sizeof(grips[0]); ++grip) {
+        for (int direction = -1; direction <= 1; direction += 2) {
+            for (unsigned pitch = 0; pitch < 2; ++pitch) {
+                interaction_t model;
+                calibrated_board_grip(&model, grips[grip]);
+                const uint64_t first_us = s_imu_sample.timestamp_us;
+                const float rate = 31.25f * (float)direction;
+                int total_x = 0, total_y = 0;
+                for (unsigned i = 0; i < 100; ++i) {
+                    const float elapsed = (float)(hw.time_us + 10000 + hw.read_delay_us * 2 - first_us) / 1000000.0f;
+                    const float tilt = grips[grip] + (pitch ? rate * .017453292519943295f * elapsed : 0);
+                    hw.accel[0] = 0; hw.accel[1] = sinf(tilt); hw.accel[2] = cosf(tilt);
+                    /* Physical yaw is about world-up; pitch is about the
+                     * screen left-right axis. These are not Euler UI labels. */
+                    hw.gyro[0] = pitch ? rate : 0;
+                    hw.gyro[1] = pitch ? 0 : rate * sinf(tilt);
+                    hw.gyro[2] = pitch ? 0 : rate * cosf(tilt);
+                    const input_delta_t delta = board_motion_frame(&model);
+                    total_x += delta.x; total_y += delta.y;
+                    assert(model.gravity_ready && model.geometry_ready);
+                }
+                if (pitch) {
+                    assert(abs(total_x) <= 1 && total_y * direction >= 61 && total_y * direction <= 64);
+                } else {
+                    assert(abs(total_y) <= 1 && total_x * direction >= 249 && total_x * direction <= 252);
+                }
+            }
+        }
     }
 }
 
@@ -1670,6 +1779,8 @@ static void test_haptic_diagnostic_actual_receipts(void)
 
 int main(void)
 {
+    test_confirmed_upright_pose_uses_display_top_axis();
+    test_board_to_model_flat_inclined_and_upright_axes();
     test_display_observer_installs_before_adapter();
     test_haptic_diagnostic_actual_receipts();
     test_display_spi_diagnostic_is_observational();

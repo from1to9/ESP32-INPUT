@@ -3,8 +3,102 @@
 #include <math.h>
 #include <string.h>
 
-static void invalidate_reference(interaction_t *m);
+static void invalidate_reference(interaction_t *m, interaction_reference_reason_t reason);
 static void reset_calibration(interaction_t *m);
+static void recenter_reference(interaction_t *m, interaction_reference_reset_t reason);
+
+static interaction_reference_diagnostics_t *reference_diagnostics(interaction_t *m)
+{
+    interaction_reference_diagnostics_t *d = m->reference_diagnostics;
+    return d && d->owner == m ? d : NULL;
+}
+
+const interaction_reference_diagnostics_t *interaction_reference_diagnostics_get(const interaction_t *m)
+{
+    const interaction_reference_diagnostics_t *d = m->reference_diagnostics;
+    return d && d->owner == m ? d : NULL;
+}
+
+void interaction_reference_diagnostics_reset(interaction_t *m)
+{
+    interaction_reference_diagnostics_t *d = reference_diagnostics(m);
+    if (!d) return;
+    memset(d, 0, sizeof(*d));
+    d->owner = m;
+}
+
+void interaction_reference_diagnostics_bind(interaction_t *m, interaction_reference_diagnostics_t *storage)
+{
+    m->reference_diagnostics = storage;
+    if (storage) {
+        storage->owner = m;
+        interaction_reference_diagnostics_reset(m);
+    }
+}
+
+static void reference_count(uint32_t *count, bool *saturated)
+{
+    if (*count == UINT32_MAX) *saturated = true;
+    else ++*count;
+}
+
+static void __attribute__((noinline)) reference_begin(interaction_t *m, const interaction_imu_sample_t *sample)
+{
+    interaction_reference_diagnostics_t *d = reference_diagnostics(m);
+    if (!d) return;
+    interaction_reference_frame_t *f = &d->work;
+    memset(f, 0, sizeof(*f));
+    f->sample_known = sample != NULL;
+    if (sample) f->sample = *sample;
+    f->previous_known = d->previous_known && m->sample_seen && d->previous.timestamp_us == m->sample_us;
+    if (f->previous_known) f->previous = d->previous;
+    memcpy(f->bias, m->bias, sizeof f->bias);
+    memcpy(f->gravity_before, m->gravity, sizeof f->gravity_before);
+    memcpy(f->previous_accel, m->previous_accel, sizeof f->previous_accel);
+    f->gravity_ready = m->gravity_ready;
+    f->accel_seen = m->accel_seen;
+    f->trusted_us = m->gravity_trusted_us;
+    f->now_ms = m->now_ms;
+    f->context = (m->view.motion_enabled ? INTERACTION_REFERENCE_ENABLED : 0U) |
+        (m->output_ready ? INTERACTION_REFERENCE_OUTPUT_READY : 0U) |
+        (m->view.mode == INPUT_MOUSE ? INTERACTION_REFERENCE_MOUSE : 0U) |
+        (m->control.owner == m->motion_source ? INTERACTION_REFERENCE_OWNER : 0U) |
+        (m->control.locked ? INTERACTION_REFERENCE_LOCKED : 0U) |
+        (m->view.touch_active ? INTERACTION_REFERENCE_TOUCH : 0U) |
+        (m->touch.active ? INTERACTION_REFERENCE_GESTURE : 0U) |
+        (m->view.menu_open ? INTERACTION_REFERENCE_MENU : 0U) |
+        (m->view.haptic_active ? INTERACTION_REFERENCE_HAPTIC : 0U) |
+        (m->view.button_down ? INTERACTION_REFERENCE_BUTTON : 0U) |
+        (m->now_ms < m->freeze_until_ms ? INTERACTION_REFERENCE_FREEZE : 0U);
+    d->previous_known = sample != NULL;
+    if (sample) d->previous = *sample;
+}
+
+static void reference_checks(interaction_t *m, uint32_t known, uint32_t pass)
+{
+    interaction_reference_diagnostics_t *d = reference_diagnostics(m);
+    if (d) { d->work.checks_known |= known; d->work.checks_pass |= pass; }
+}
+
+static void __attribute__((noinline)) reference_rejected(interaction_t *m, bool haptic)
+{
+    interaction_reference_diagnostics_t *d = reference_diagnostics(m);
+    if (!d || !m->gravity_ready) return;
+    interaction_reference_episode_t *e = &d->episode;
+    if (!e->first_known) { e->first = d->work; e->first_known = true; }
+    reference_count(&e->rejected, &e->saturated);
+    const uint32_t failed = d->work.checks_known & ~d->work.checks_pass;
+    if (failed & INTERACTION_REFERENCE_NEAR_ONE) reference_count(&e->near_one, &e->saturated);
+    if (failed & INTERACTION_REFERENCE_GENTLE) reference_count(&e->gentle, &e->saturated);
+    if (failed & INTERACTION_REFERENCE_INNOVATION) reference_count(&e->innovation, &e->saturated);
+    if (haptic) reference_count(&e->haptic, &e->saturated);
+}
+
+static void reference_accepted(interaction_t *m)
+{
+    interaction_reference_diagnostics_t *d = reference_diagnostics(m);
+    if (d && d->episode.first_known) memset(&d->episode, 0, sizeof d->episode);
+}
 
 static const char *const letters[INTERACTION_GRID_CELLS] = {
     "ABCD", "EFGH", "IJKL", "MNOP", "QRST", "UVWX", "YZ01", "2345", "6789"
@@ -88,7 +182,8 @@ static bool observe_clock(interaction_t *m, uint64_t now_ms)
     m->clock_seen = true;
     m->now_ms = now_ms;
     if (!valid) {
-        invalidate_reference(m);
+        reference_begin(m, NULL);
+        invalidate_reference(m, INTERACTION_REFERENCE_CLOCK);
         reset_calibration(m);
         m->sample_seen = false;
         m->view.motion_enabled = false;
@@ -206,8 +301,19 @@ bool interaction_set_motion_owned(interaction_t *m, input_owner_t source, bool e
     if (enabled && (m->view.mode != INPUT_MOUSE || !m->output_ready ||
         m->control.owner != source || m->view.menu_open)) return false;
     m->motion_source = source;
+    const bool acquire = enabled && !m->view.motion_enabled;
     m->view.motion_enabled = enabled;
     reset_motion(m);
+    if (acquire) recenter_reference(m, INTERACTION_REFERENCE_RESET_ENABLE);
+    return true;
+}
+
+bool interaction_recenter_owned(interaction_t *m, input_owner_t source)
+{
+    if (!valid_source(source) || m->view.mode != INPUT_MOUSE || !m->view.motion_enabled ||
+        !m->view.calibrated || m->view.calibrating || !m->output_ready || m->control.locked ||
+        m->control.owner != source || m->motion_source != source || m->view.menu_open) return false;
+    recenter_reference(m, INTERACTION_REFERENCE_RESET_RECENTER);
     return true;
 }
 
@@ -712,7 +818,7 @@ static void propagate3(float v[3], const float gyro[3], float dt)
         v[i] = v[i] * c - cross[i] * s + axis[i] * projection * (1 - c);
 }
 
-static void invalidate_reference(interaction_t *m)
+static void clear_reference(interaction_t *m)
 {
     m->gravity_ready = false;
     m->gravity_predicted = false;
@@ -725,6 +831,27 @@ static void invalidate_reference(interaction_t *m)
     m->view.motion_block_reason = INTERACTION_MOTION_BLOCK_REFERENCE;
 }
 
+static void __attribute__((noinline)) invalidate_reference(interaction_t *m, interaction_reference_reason_t reason)
+{
+    interaction_reference_diagnostics_t *d = reference_diagnostics(m);
+    if (d && m->gravity_ready) {
+        reference_count(&d->losses[reason], &d->saturated);
+        const uint32_t active = INTERACTION_REFERENCE_ENABLED | INTERACTION_REFERENCE_OUTPUT_READY |
+            INTERACTION_REFERENCE_MOUSE | INTERACTION_REFERENCE_OWNER;
+        if (m->view.motion_enabled && (d->work.context & (active | INTERACTION_REFERENCE_LOCKED)) == active) {
+            reference_count(&d->active_losses, &d->saturated);
+            if (!d->first_active.known) {
+                d->first_active.reason = reason;
+                d->first_active.episode = d->episode;
+                d->first_active.terminal = d->work;
+                d->first_active.known = true;
+            }
+        }
+    }
+    reference_accepted(m);
+    clear_reference(m);
+}
+
 static void motion_status(interaction_t *m, interaction_motion_block_t reason, bool limited)
 {
     m->view.motion_status = (m->view.calibrated ? INTERACTION_MOTION_CALIBRATED : 0U) |
@@ -735,28 +862,50 @@ static void motion_status(interaction_t *m, interaction_motion_block_t reason, b
     m->view.motion_block_reason = reason;
 }
 
+static void __attribute__((noinline)) recenter_reference(interaction_t *m, interaction_reference_reset_t reason)
+{
+    interaction_reference_diagnostics_t *d = reference_diagnostics(m);
+    if (d) {
+        if (reason == INTERACTION_REFERENCE_RESET_ENABLE) reference_count(&d->enable_resets, &d->saturated);
+        else reference_count(&d->recenter_resets, &d->saturated);
+        d->last_reset = reason;
+        d->last_reset_ms = m->now_ms;
+    }
+    reference_accepted(m);
+    clear_reference(m);
+    reset_motion(m);
+    /* An intentional reset is waiting for real stable input, not a fault. */
+    motion_status(m, INTERACTION_MOTION_BLOCK_REFERENCE, false);
+}
+
 static bool update_reference(interaction_t *m, const interaction_imu_sample_t *sample,
                              const float gyro[3], float dt)
 {
     float accel[] = {sample->ax_g, sample->ay_g, sample->az_g};
     const float norm = sqrtf(dot3(accel, accel));
+    interaction_reference_diagnostics_t *d = reference_diagnostics(m);
+    if (d) { d->work.dt = dt; d->work.dt_known = true; d->work.norm = norm; d->work.norm_known = true; }
     if (m->view.haptic_active) {
+        reference_rejected(m, true);
         m->gravity_acquire_samples = 0;
         m->accel_seen = false;
         if (!m->gravity_ready) return false;
         if (sample->timestamp_us - m->gravity_trusted_us > 250000) {
-            invalidate_reference(m);
+            invalidate_reference(m, INTERACTION_REFERENCE_HAPTIC_AGE);
             return false;
         }
         propagate3(m->gravity, gyro, dt);
-        if (!normalize3(m->gravity)) { invalidate_reference(m); return false; }
+        if (!normalize3(m->gravity)) { invalidate_reference(m, INTERACTION_REFERENCE_HAPTIC_NORMALIZE); return false; }
         m->gravity_predicted = true;
         return true;
     }
     if (norm < .25f || norm > 2.5f) {
-        invalidate_reference(m);
+        reference_checks(m, INTERACTION_REFERENCE_SAFE_NORM, 0);
+        reference_rejected(m, false);
+        invalidate_reference(m, INTERACTION_REFERENCE_ACCEL_NORM);
         return false;
     }
+    reference_checks(m, INTERACTION_REFERENCE_SAFE_NORM, INTERACTION_REFERENCE_SAFE_NORM);
     float expected[] = {m->previous_accel[0], m->previous_accel[1], m->previous_accel[2]};
     propagate3(expected, gyro, dt);
     const float change[] = {accel[0] - expected[0], accel[1] - expected[1], accel[2] - expected[2]};
@@ -764,6 +913,8 @@ static bool update_reference(interaction_t *m, const interaction_imu_sample_t *s
     memcpy(m->previous_accel, accel, sizeof accel);
     m->accel_seen = true;
     const bool near_one_g = fabsf(norm - 1) <= .08f;
+    reference_checks(m, INTERACTION_REFERENCE_NEAR_ONE | INTERACTION_REFERENCE_GENTLE,
+        (near_one_g ? INTERACTION_REFERENCE_NEAR_ONE : 0U) | (gentle ? INTERACTION_REFERENCE_GENTLE : 0U));
     if (!m->gravity_ready) {
         const float deviation[] = {accel[0] - m->acquire_accel[0],
             accel[1] - m->acquire_accel[1], accel[2] - m->acquire_accel[2]};
@@ -785,22 +936,29 @@ static bool update_reference(interaction_t *m, const interaction_imu_sample_t *s
         m->gravity_predicted = false;
         m->gravity_trusted_us = sample->timestamp_us;
         m->geometry_ready = sqrtf(fmaxf(0, 1 - accel[0] * accel[0])) >= .35f;
+        reference_accepted(m);
         return true;
     }
     propagate3(m->gravity, gyro, dt);
-    if (!normalize3(m->gravity)) { invalidate_reference(m); return false; }
+    if (!normalize3(m->gravity)) { invalidate_reference(m, INTERACTION_REFERENCE_PREDICT_NORMALIZE); return false; }
     for (size_t i = 0; i < 3; ++i) accel[i] /= norm;
     /* Magnitude alone cannot identify lateral acceleration near one g. Check
      * its innovation against gyro prediction, and gyro-compensated jerk. */
     const bool trusted = near_one_g && gentle && dot3(accel, m->gravity) >= .939692621f;
+    if (near_one_g && gentle)
+        reference_checks(m, INTERACTION_REFERENCE_INNOVATION, trusted ? INTERACTION_REFERENCE_INNOVATION : 0U);
     if (trusted) {
         const float alpha = 1 - expf(-dt / .5f);
         for (size_t i = 0; i < 3; ++i) m->gravity[i] += alpha * (accel[i] - m->gravity[i]);
-        if (!normalize3(m->gravity)) { invalidate_reference(m); return false; }
+        if (!normalize3(m->gravity)) { invalidate_reference(m, INTERACTION_REFERENCE_CORRECT_NORMALIZE); return false; }
         m->gravity_trusted_us = sample->timestamp_us;
-    } else if (sample->timestamp_us - m->gravity_trusted_us > 250000) {
-        invalidate_reference(m);
-        return false;
+        reference_accepted(m);
+    } else {
+        reference_rejected(m, false);
+        if (sample->timestamp_us - m->gravity_trusted_us > 250000) {
+            invalidate_reference(m, INTERACTION_REFERENCE_TRUST_AGE);
+            return false;
+        }
     }
     m->gravity_predicted = !trusted;
     return true;
@@ -808,11 +966,12 @@ static bool update_reference(interaction_t *m, const interaction_imu_sample_t *s
 
 void interaction_calibrate(interaction_t *m)
 {
+    reference_begin(m, NULL);
     m->view.calibrating = true;
     m->view.calibrated = false;
     m->view.motion_enabled = false;
     m->sample_seen = false;
-    invalidate_reference(m);
+    invalidate_reference(m, INTERACTION_REFERENCE_CALIBRATE);
     m->view.motion_status &= ~(uint32_t)INTERACTION_MOTION_CALIBRATED;
     reset_calibration(m);
     reset_motion(m);
@@ -820,10 +979,11 @@ void interaction_calibrate(interaction_t *m)
 
 void interaction_calibration_cancel(interaction_t *m)
 {
+    reference_begin(m, NULL);
     m->view.calibrating = false; m->view.calibrated = false; m->view.motion_enabled = false;
     m->sample_seen = false;
     memset(m->bias, 0, sizeof m->bias);
-    reset_calibration(m); invalidate_reference(m); reset_motion(m);
+    reset_calibration(m); invalidate_reference(m, INTERACTION_REFERENCE_CANCEL); reset_motion(m);
     motion_status(m, INTERACTION_MOTION_BLOCK_CALIBRATION, false);
 }
 
@@ -938,8 +1098,9 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
                                               const interaction_imu_sample_t *s)
 {
     if (!valid_source(source)) return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
+    reference_begin(m, s);
     if (!s) {
-        invalidate_reference(m);
+        invalidate_reference(m, INTERACTION_REFERENCE_MISSING);
         m->sample_seen = false;
         reset_calibration(m);
         return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
@@ -947,7 +1108,7 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
     const float values[] = {s->gx_dps, s->gy_dps, s->gz_dps, s->ax_g, s->ay_g, s->az_g};
     for (size_t i = 0; i < 6; ++i) {
         if (!isfinite(values[i]) || fabsf(values[i]) >= (i < 3 ? 2000 : 16)) {
-            invalidate_reference(m);
+            invalidate_reference(m, INTERACTION_REFERENCE_INVALID_SAMPLE);
             reset_calibration(m);
             m->sample_seen = false;
             return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
@@ -958,7 +1119,7 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
     m->sample_seen = true;
     m->sample_us = s->timestamp_us;
     if (!first && (s->timestamp_us <= previous || s->timestamp_us - previous > 50000)) {
-        invalidate_reference(m);
+        invalidate_reference(m, INTERACTION_REFERENCE_SAMPLE_TIME);
         reset_calibration(m);
         m->sample_seen = false;
         return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
