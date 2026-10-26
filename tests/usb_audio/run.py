@@ -24,8 +24,16 @@ with tempfile.TemporaryDirectory(prefix="esp32-uac-test-") as directory:
         "-I", str(ROOT / "firmware/main"),
         str(SUITE / "test_usb_audio.c"), "-o", binary,
     ], check=True)
-    for case in range(17):
+    for case in range(18):
         subprocess.run([binary, str(case)], check=True)
+    restart_binary = str(Path(directory) / "test_capture_restart")
+    subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-g",
+        "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(SUITE / "stubs"),
+        "-I", str(ROOT / "tests/usb_hid/stubs"), "-isystem", str(ROOT / "firmware/managed_components/espressif__tinyusb/src"),
+        "-I", str(ROOT / "components/audio_engine/include"), "-I", str(ROOT / "firmware/main"),
+        str(SUITE / "test_capture_restart.c"), *[str(ROOT / "components/audio_engine" / source) for source in
+            ("audio_engine.c", "audio_media.c", "audio_recording.c")], "-o", restart_binary], check=True)
+    subprocess.run([restart_binary], check=True)
 subprocess.run([sys.executable, str(SUITE / "test_patch.py")], check=True)
 subprocess.run([sys.executable, str(SUITE / "test_config.py")], check=True)
 subprocess.run([sys.executable, str(SUITE / "run_pinned.py")], check=True)

@@ -83,8 +83,28 @@ empty transfers. The callback byte total equals actual completed bytes. The
 runner retains the prior class without the new observation hooks and with the
 old read-length assignment; it verifies that independently reviewed full source
 hash before reproducing both failures.
-All seven final real-driver cases pass; the three original-class defects and two
+All nine final real-driver cases pass; the three original-class defects and two
 isolated finite-tail failures remain expected, explicitly identified aborts.
+
+Capture sequence admission is scoped to the engine's immutable consumer
+generation. Within one prepared audio resource the engine assigns increasing
+consumer generations; each restarted Mic begins its own sequence space. A newer
+consumer retires queued/partial capture and waits for the worker's IN-only FIFO
+flush before retrying its first frame. Lower retired consumers remain stale even
+with a higher sequence. The worker rechecks consumer identity after each FIFO
+write so an interrupted old write cannot advance a replacement queue. Existing
+OUT/Speaker binding, queued input and partial playback remain intact. Packets
+already submitted to the controller/host cannot be recalled by a FIFO flush.
+
+An actual-engine/production-adapter regression runs two Mic stop/restart cycles
+while Speaker remains running, preserving the audio/link generation and Speaker
+consumer. The old adapter reproduces received960/delivered0/AE_STALE. Focused
+boundary checks cover duplicate frames, stale high-sequence retired frames and
+consumer replacement during a partial/in-flight write. Full/high-speed real
+class/FIFO cases clear a retired392-byte IN prefix, deliver exactly the new960
+PCM bytes and preserve96 bytes in the OUT FIFO plus96 partial playback bytes.
+Only the affected capture direction is flushed; no resource/session restart or
+sequence weakening is used to make the replacement pass.
 
 The two continuous duplex cases use the real generated class and 392-byte FIFO
 at full and high speed, ten-millisecond capture frames, one IN completion and

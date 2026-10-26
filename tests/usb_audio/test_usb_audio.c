@@ -5,7 +5,7 @@
 #include <string.h>
 #include "../../firmware/main/usb_audio.c"
 
-static unsigned lock_depth, allocations, releases, workers, clears;
+static unsigned lock_depth, allocations, releases, workers, clears, in_clears, out_clears;
 static bool fail_allocation, fail_worker;
 static uint64_t now_us = 1000;
 static uint8_t written_data[16384], input_data[16384], control_data[64];
@@ -47,13 +47,13 @@ void vTaskDelay(TickType_t timeout) { (void)timeout; abort(); } /* Never run an 
 bool tud_audio_n_clear_ep_in_ff(uint8_t function)
 {
     assert(!lock_depth && function == 0);
-    ++clears;
+    ++clears; ++in_clears;
     return true;
 }
 bool tud_audio_n_clear_ep_out_ff(uint8_t function)
 {
     assert(!lock_depth && function == 0);
-    ++clears;
+    ++clears; ++out_clears;
     input_bytes = input_offset = 0;
     return true;
 }
@@ -178,6 +178,36 @@ static void capture_batch_guards(void)
     assert(!memcmp(frame.data, written_data, written_bytes));
     assert(!s_status.prepared && s_status.cleanup_pending && s_status.error == ESP_OK);
     service(1); assert(!s_status.cleanup_pending && written_bytes == 628);
+}
+static void replace_capture_during_write(void)
+{
+    ae_frame_t replacement = make_frame(s_prepared_token, 1); replacement.consumer_generation = 19;
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &replacement) == AE_AGAIN);
+}
+static void capture_consumer_scope(void)
+{
+    ae_route_token_t token = start(AE_MICROPHONE | AE_SPEAKER);
+    ae_frame_t old = make_frame(token, 20);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &old) == AE_OK);
+    memset(input_data, 0x5a, 200); input_bytes = 200; service(1);
+    assert(s_memory->tx[s_tx_head].offset == 392 && s_input_bytes == 200);
+    unsigned before_in = in_clears, before_out = out_clears;
+    ae_frame_t next = make_frame(token, 1); next.consumer_generation = 18;
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_AGAIN && !s_tx_count);
+    old.sequence = UINT64_MAX; assert(capture(NULL, AE_ROUTE_USB_UAC, &old) == AE_STALE);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_AGAIN);
+    service(1); assert(in_clears == before_in + 1 && out_clears == before_out && s_input_bytes == 200 && s_consumer_generation == 17);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_OK);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_STALE);
+    next.sequence = 2; assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_OK);
+    uint64_t calls_before = s_status.capture_write_calls;
+    during_write = replace_capture_during_write; service(1);
+    assert(s_status.capture_write_calls == calls_before + 1 && !s_tx_count && s_input_bytes == 200);
+    next.sequence = UINT64_MAX; assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_STALE);
+    next.consumer_generation = 19; next.sequence = 1;
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_AGAIN); service(1);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_OK && s_input_bytes == 200 && s_consumer_generation == 17);
+    assert(in_clears == before_in + 2 && out_clears == before_out);
 }
 static void capture_invalid_batch_write(void)
 {
@@ -518,7 +548,7 @@ int main(int argc, char **argv)
         same_alternate_and_resume_require_fresh_preparation, endpoint_close_revokes_before_reopen,
         feedback_tracks_codec_consumption, dropped_frames_preserve_stream_offsets, playback_binding_barriers,
         other_profiles_keep_existing_admission, playback_content_observation,
-        capture_batch_guards, capture_invalid_batch_write};
+        capture_batch_guards, capture_invalid_batch_write, capture_consumer_scope};
     unsigned index = (unsigned)strtoul(argv[1], NULL, 10);
     assert(index < sizeof(cases) / sizeof(cases[0]));
     cases[index]();

@@ -1948,6 +1948,65 @@ disconnect remain visible. Representative light/dark waiting layouts were
 visually inspected and the pinned target build passed. This does not establish
 physical display acceptance for the new waiting presentation.
 
+### USB Mic restart failure during continuous Speaker playback: 2026-10-26
+
+The application-only deployment of `9199f64` independently verified image
+SHA-256 `4c4e3ddd1684eb0f6b36552bfccfe7e273ede1aaad5b0571e8eba4cfa85b4975`,
+preserving partition/NVS/PHY bytes without a full backup. The boot codec probe
+completed successfully with confirmed off. Before the host opened audio streams,
+both USB alternate settings were inactive and both roles correctly remained
+Waiting. This observation does not establish the later waiting-to-Ready display
+transition; the user did not separately confirm its visual stability.
+
+On macOS 27.0.1, the subsequent duplex test recorded nine distinct failed Mic
+restarts while Speaker kept the same audio resource active. Each received one
+960-byte frame, delivered zero bytes and ended with `AE_JOB_PARTIAL`,
+`AE_STOP_IO` and `AE_STALE`. The engine and codec retained zero error and the
+USB link identity remained stable. Three other Mic jobs and three Speaker jobs
+ended by requested stop. The user reported that Mic could not start, then
+recovered and worked again. Recovery does not erase the failed acceptance.
+
+The host received 3,795,968 frames including nonzero input, with zero callback
+errors and no retained PCM. These counters do not prove uninterrupted playback
+or physical sound. Both serial captures were incomplete: startup retained
+139.581 of 240 seconds with `capture_incomplete`, `esp_error` and
+`serial_io_error`; the duplex capture retained 81.005 of 240 seconds with
+`audio_job_failed`, `capture_incomplete` and `serial_io_error`. The startup ESP
+errors were the already-installed GPIO ISR service messages. Serial interruption
+causes remain unknown; this is not a smoke pass or a stability qualification.
+
+Source tracing identifies a sequence-ownership mismatch: each immutable Mic
+consumer starts its own frame sequence at one, while USB capture compared it
+against the previous consumer's sequence for the entire audio resource. A full
+resource restart clears that state, explaining the observed recovery. The
+follow-up repair must preserve rejection of old consumers and duplicate frames,
+and must not reset Speaker or weaken privacy and lifecycle checks. The user
+requested local validation and publication only for the repair; no follow-up
+device test is authorized at this stage.
+
+An actual-engine/production-USB host reproduction matches the device signature:
+the first Mic restart ends partial with 960 bytes received, zero delivered and
+`AE_STALE`, while Speaker stays running and the audio/link generations remain
+unchanged. This reproduces the defect without substituting a test-only engine
+sequence or resetting the shared resource.
+
+The USB adapter repair tracks capture consumer identity separately from its
+sequence. A newer consumer retires the old capture queue and waits for the
+worker's IN FIFO flush; older consumers and duplicate frames remain rejected.
+The OUT FIFO, partial Speaker data and playback binding are retained. Worker
+queue advancement also rechecks consumer identity after an in-flight write.
+No engine/API/UI behavior, buffer capacity or timeout was changed; the adapter
+adds two fixed 64-bit lifecycle fields.
+
+The repaired production engine/USB integration delivers data after two Mic
+restarts while Speaker stays running with unchanged audio/link identity. The
+focused USB suite also covers stale high-sequence frames, replacement during a
+partial/in-flight write and exact new-consumer bytes through the real pinned
+FIFO at full and high speed, while preserving partial Speaker input. Existing
+USB regressions and the pinned ESP32-S31 target build pass. These establish
+local regression and compilation evidence only. The repair has not been
+flashed or physically tested under the latest user instruction.
+
 ## Device evidence template
 
 ```text

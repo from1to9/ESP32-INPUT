@@ -46,6 +46,7 @@ static uint64_t s_flush_requested, s_flush_completed, s_stop_generation;
 static uint64_t s_rx_sequence, s_tx_sequence, s_sample_offset;
 static uint64_t s_input_started_us;
 static uint64_t s_consumer_generation, s_rx_flush_requested, s_rx_flush_completed;
+static uint64_t s_tx_consumer_generation, s_tx_flushed_consumer;
 static uint8_t s_roles;
 static unsigned s_tx_head, s_tx_count, s_rx_head, s_rx_count, s_input_bytes;
 static bool s_tx_seen;
@@ -108,6 +109,7 @@ static void request_flush_locked(void)
 {
     s_status.prepared = false;
     s_consumer_generation = 0;
+    s_tx_consumer_generation = s_tx_flushed_consumer = 0;
     s_tx_count = s_rx_count = s_input_bytes = 0;
     s_tx_head = s_rx_head = 0;
     s_tx_seen = false;
@@ -315,16 +317,29 @@ static ae_result_t capture(void *context, ae_route_t route, const ae_frame_t *fr
     else if (frame->audio_generation != s_status.audio_generation ||
              !same_token(&frame->route_token, &s_prepared_token) ||
              !same_token(&frame->route_token, &s_token) ||
-             (s_tx_seen && frame->sequence <= s_tx_sequence)) result = AE_STALE;
-    else if (s_tx_count == UAC_QUEUE_FRAMES) result = AE_AGAIN;
+             frame->consumer_generation < s_tx_consumer_generation) result = AE_STALE;
     else {
-        queued_frame_t *slot = &s_memory->tx[(s_tx_head + s_tx_count) % UAC_QUEUE_FRAMES];
-        slot->frame = *frame;
-        slot->offset = 0;
-        slot->admitted_us = (uint64_t)esp_timer_get_time();
-        ++s_tx_count;
-        s_tx_sequence = frame->sequence;
-        s_tx_seen = true;
+        /* The engine assigns increasing immutable consumer generations, each
+         * with its own sequence space. A replacement retires only capture;
+         * the running Speaker's OUT binding/FIFO must remain untouched. */
+        if (!s_tx_consumer_generation) {
+            s_tx_consumer_generation = s_tx_flushed_consumer = frame->consumer_generation;
+        } else if (frame->consumer_generation > s_tx_consumer_generation) {
+            s_tx_consumer_generation = frame->consumer_generation;
+            s_tx_count = s_tx_head = 0; s_tx_seen = false; s_tx_sequence = 0;
+        }
+        if (s_tx_consumer_generation != s_tx_flushed_consumer) result = AE_AGAIN;
+        else if (s_tx_seen && frame->sequence <= s_tx_sequence) result = AE_STALE;
+        else if (s_tx_count == UAC_QUEUE_FRAMES) result = AE_AGAIN;
+        else {
+            queued_frame_t *slot = &s_memory->tx[(s_tx_head + s_tx_count) % UAC_QUEUE_FRAMES];
+            slot->frame = *frame;
+            slot->offset = 0;
+            slot->admitted_us = (uint64_t)esp_timer_get_time();
+            ++s_tx_count;
+            s_tx_sequence = frame->sequence;
+            s_tx_seen = true;
+        }
     }
     if (result != AE_OK) count(&s_status.rejected_capture_frames);
     portEXIT_CRITICAL(&s_lock);
@@ -501,21 +516,30 @@ static void service_io(void)
     const bool need_flush = flush != s_flush_completed;
     const uint64_t rx_flush = s_rx_flush_requested;
     const bool need_rx_flush = rx_flush != s_rx_flush_completed;
+    const uint64_t tx_consumer = s_tx_consumer_generation;
+    const bool need_tx_flush = tx_consumer != s_tx_flushed_consumer;
     const bool ready = s_status.stack_ready;
     portEXIT_CRITICAL(&s_lock);
     if (!ready) return;
-    if (need_flush || need_rx_flush) {
-        if (need_flush) (void)tud_audio_clear_ep_in_ff();
-        (void)tud_audio_clear_ep_out_ff();
-        /* Admission remains closed until this worker acknowledges the flush.
-         * No producer can touch memory, so wipe PSRAM without masking IRQs. */
+    if (need_flush || need_rx_flush || need_tx_flush) {
+        if (need_flush || need_tx_flush) (void)tud_audio_clear_ep_in_ff();
+        if (need_flush || need_rx_flush) (void)tud_audio_clear_ep_out_ff();
+        /* Each affected direction stays closed until its flush is acknowledged.
+         * Wipe only that direction's PSRAM without masking IRQs. */
         if (need_flush) memset(s_memory, 0, sizeof(*s_memory));
         else {
-            memset(s_memory->rx, 0, sizeof(s_memory->rx));
-            memset(s_memory->input, 0, sizeof(s_memory->input));
+            if (need_rx_flush) {
+                memset(s_memory->rx, 0, sizeof(s_memory->rx));
+                memset(s_memory->input, 0, sizeof(s_memory->input));
+            }
+            if (need_tx_flush) {
+                memset(s_memory->tx, 0, sizeof(s_memory->tx));
+                memset(s_memory->output, 0, sizeof(s_memory->output));
+            }
         }
         portENTER_CRITICAL(&s_lock);
         if (rx_flush == s_rx_flush_requested) s_rx_flush_completed = rx_flush;
+        if (tx_consumer == s_tx_consumer_generation) s_tx_flushed_consumer = tx_consumer;
         if (flush == s_flush_requested) {
             s_flush_completed = flush;
             s_status.cleanup_pending = false;
@@ -532,7 +556,8 @@ static void service_io(void)
         const uint64_t output_now = (uint64_t)esp_timer_get_time();
         portENTER_CRITICAL(&s_lock);
         bool output = live_locked() && s_status.prepared && (s_roles & AE_MICROPHONE) &&
-            active_flush == s_flush_requested && s_tx_count;
+            active_flush == s_flush_requested && tx_consumer == s_tx_consumer_generation &&
+            tx_consumer == s_tx_flushed_consumer && s_tx_count;
         uint16_t output_bytes = 0;
         if (output) {
             queued_frame_t *slot = &s_memory->tx[s_tx_head];
@@ -554,7 +579,7 @@ static void service_io(void)
         uint16_t written = tud_audio_write(s_memory->output, output_bytes);
         portENTER_CRITICAL(&s_lock);
         add_count(&s_status.capture_write_bytes, written);
-        if (active_flush == s_flush_requested && s_tx_count) {
+        if (active_flush == s_flush_requested && tx_consumer == s_tx_consumer_generation && s_tx_count) {
             queued_frame_t *slot = &s_memory->tx[s_tx_head];
             if (written > output_bytes || (written & 1U)) {
                 s_status.error = ESP_FAIL;
@@ -568,7 +593,7 @@ static void service_io(void)
                 }
             }
         }
-        const bool current = active_flush == s_flush_requested;
+        const bool current = active_flush == s_flush_requested && tx_consumer == s_tx_consumer_generation;
         portEXIT_CRITICAL(&s_lock);
         if (!current || written < output_bytes) break;
     }

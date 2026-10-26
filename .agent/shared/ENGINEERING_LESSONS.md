@@ -687,3 +687,27 @@ permission, and real disconnect, faults and active controls immediately visible.
 Evidence: [codec budget regressions](../../tests/board_audio/README.md),
 [admission observer regressions](../../tests/audio_diagnostics/README.md) and
 [initialization investigation](../../docs/validation.md#bounded-codec-initialization-admission-2026-10-26).
+
+## 30. Scope frame sequences to their immutable consumer
+
+One audio resource can survive multiple Mic jobs while Speaker stays active.
+A replacement capture consumer starts its own sequence space; comparing its
+first frame with the previous consumer's last sequence falsely rejects valid
+data. A full resource restart can hide this defect by clearing the shared
+counter, so successful cold starts and later recovery are insufficient.
+
+Validate the complete resource/link identity before changing consumer state.
+Honor the producer's monotonic consumer generation, reject older consumers even
+when their frame sequence is larger, and retain duplicate rejection within a
+consumer. A new capture consumer needs a bounded input-only queue/FIFO barrier;
+do not flush Speaker or treat unfinished cleanup as completed admission. Keep
+replacement, partial writes, delayed callbacks and privacy invalidation in the
+same lifecycle model.
+
+Reproduce the stop/restart through the actual engine and transport adapter while
+the opposite role keeps the resource alive. Prove the old production path fails
+the same test, then check ordered new-consumer data and stale-frame rejection.
+Do not change the engine's legitimate sequence reset to satisfy the adapter.
+
+Evidence: [USB audio regressions](../../tests/usb_audio/README.md) and
+[Mic restart device failure](../../docs/validation.md#usb-mic-restart-failure-during-continuous-speaker-playback-2026-10-26).

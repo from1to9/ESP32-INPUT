@@ -80,7 +80,7 @@ for label, source in [("original", SRC / "class/audio/audio_device.c"), ("before
         subprocess.run(flags + objects + [linker, "-o", str(binary)], stdout=log, stderr=subprocess.STDOUT, check=True)
     cases = ("out", "capture_fs", "capture_hs") if label == "original" else ("single_fs", "single_hs")
     if label == "patched":
-        cases = ("out", "capture_fs", "capture_hs", "single_fs", "single_hs", "duplex_fs", "duplex_hs")
+        cases = ("out", "capture_fs", "capture_hs", "single_fs", "single_hs", "duplex_fs", "duplex_hs", "restart_fs", "restart_hs")
     for case in cases:
         run = subprocess.run([str(binary), case], capture_output=True, text=True, env=environment, timeout=20)
         (output / (label + "-" + case + ".log")).write_text(run.stdout + run.stderr)

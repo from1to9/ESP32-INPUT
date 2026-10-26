@@ -227,6 +227,33 @@ static uint8_t capture_byte(size_t offset)
     return (uint8_t)(offset % UAC_FRAME_BYTES + offset / UAC_FRAME_BYTES + 1U);
 }
 
+static void test_capture_consumer_restart(void)
+{
+    stack_driver_init(); ae_route_token_t token = start(AE_MICROPHONE | AE_SPEAKER);
+    ae_frame_t old = make_frame(token, 7), next = make_frame(token, 1);
+    next.consumer_generation = 18;
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &old) == AE_OK); service_io();
+    assert(tu_fifo_count(tud_audio_n_get_ep_in_ff(0)) == 392 && s_memory->tx[s_tx_head].offset == 392);
+    uint8_t packet[96]; memset(packet, 0xa5, sizeof(packet));
+    assert(stack_complete_out(packet, sizeof(packet))); service_io();
+    assert(s_input_bytes == 96); assert(stack_complete_out(packet, sizeof(packet)));
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_AGAIN && !s_tx_count);
+    old.sequence = UINT64_MAX; assert(capture(NULL, AE_ROUTE_USB_UAC, &old) == AE_STALE);
+    service_io();
+    assert(!tu_fifo_count(tud_audio_n_get_ep_in_ff(0)) && tud_audio_available() == 96 && s_input_bytes == 96 && s_consumer_generation == 17);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &next) == AE_OK); service_io();
+    assert(s_input_bytes == 192 && !s_status.dropped_playback_frames);
+    for (unsigned i = 0; i < s_input_bytes; ++i) assert(s_memory->input[i] == 0xa5);
+    uint8_t fifo[392]; assert(tu_fifo_peek_n(tud_audio_n_get_ep_in_ff(0), fifo, sizeof(fifo)) == sizeof(fifo));
+    assert(!memcmp(fifo, next.data, sizeof(fifo)));
+    for (unsigned i = 0; i < 20; ++i) { complete_in(); service_io(); now_us += 1000; }
+    assert(completed_bytes == next.bytes && !memcmp(completed_data, next.data, next.bytes));
+    assert(s_consumer_generation == 17 && s_input_bytes == 192 && !s_status.dropped_playback_frames);
+    assert(s_status.capture_write_bytes == 392 + next.bytes); /* Retired FIFO prefix was cleared, never padded/delivered. */
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &old) == AE_STALE);
+    puts("PASS: real IN FIFO replacement purges retired partial capture, rejects late high-sequence frames and preserves OUT FIFO/partial Speaker data");
+}
+
 static void test_duplex_capture_jitter(void)
 {
     stack_driver_init(); ae_route_token_t token = start(AE_MICROPHONE | AE_SPEAKER);
@@ -294,6 +321,9 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     if (!strcmp(argv[1], "out")) test_out();
+    else if (!strcmp(argv[1], "restart_fs") || !strcmp(argv[1], "restart_hs")) {
+        high_speed = !strcmp(argv[1], "restart_hs"); test_capture_consumer_restart();
+    }
     else if (!strcmp(argv[1], "duplex_fs") || !strcmp(argv[1], "duplex_hs")) {
         high_speed = !strcmp(argv[1], "duplex_hs"); test_duplex_capture_jitter();
     }
