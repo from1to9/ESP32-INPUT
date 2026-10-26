@@ -603,9 +603,9 @@ Exercise the actual manager and engine together with an asynchronous codec and
 continuous ingress; a synchronous engine-only codec hides this interleaving.
 Check ordered PCM content, bounded control completion and privacy interruption,
 not just successful enqueue or increasing byte counts. Queue acceptance is
-pending, not completion. Give successful notices a bounded page lifetime and
-propagate their removal to the coordinator's global status without erasing
-messages from another owner.
+pending, not completion. Use the product's failure-only notice policy: progress belongs in button/job
+state, and successful results remain silent. Propagate notice removal to the
+coordinator's global status without erasing messages from another owner.
 
 Evidence: [worker/engine regressions](../../tests/audio_engine/README.md),
 [control regressions](../../tests/media_controls/README.md), and

@@ -51,13 +51,14 @@ or automatically replay a rejected Start request. The settling interval is a
 named build-time policy; it does not delay transport invalidation or bypass
 consent, privacy, cleanup or resource checks.
 
-An accepted asynchronous command shows **Operation pending** until the audio
-owner reports its result. A successful completion notice expires after three
-seconds and clears when its mode or overlay changes; it must not reappear on
-another page. Clearing an audio notice must preserve a newer status owned by
-another subsystem. Errors remain available rather than expiring as successes.
-Live volume and microphone-gain changes must finish between PCM transfers
-without starving behind a continuous stream or silently restarting capture.
+Audio operations show progress through their existing button and job states.
+Accepted requests and successful completion do not produce a footer notice;
+only failures show a reason. Success must remain silent after page navigation,
+including a result received after leaving and returning. A new accepted request
+clears the previous audio notice without erasing a newer status owned by another
+subsystem. Errors remain available until superseded. Live volume and microphone
+gain changes must finish between PCM transfers without starving behind a
+continuous stream or silently restarting capture.
 
 ## Physical controls
 

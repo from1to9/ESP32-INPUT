@@ -23,16 +23,14 @@
 #define LIVE_SECONDS 3600U
 #define SPEECH_SECONDS 8U
 #define CURSOR_HISTORY 16U
-#define SUCCESS_MESSAGE_MS 3000U
 _Static_assert(APP_MEDIA_USB_START_SETTLE_MS > 0, "USB start settling must be positive");
 
 typedef struct {
     bool initialized, clock_known, clock_failed, runtime_known, store_known;
     bool list_requested, list_loaded, query_get, pending, prepare_review, confirmation_owned;
     bool capture_obligation;
-    bool message_success, message_clear_pending, pending_notice_current;
+    bool message_clear_pending;
     uint64_t capture_generation;
-    uint64_t message_since_ms;
     uint64_t now_ms, serial, pending_token, revision, store_revision, speech_revision;
     uint64_t old_audio_generation, old_audio_revision, old_speech_token;
     uint64_t consumed_speech_token;
@@ -115,19 +113,9 @@ static const char *result_text(ae_result_t result)
     default: return "Audio operation failed.";
     }
 }
-static void effect_result(app_media_controls_effect_t *effect, ae_result_t result)
-{
-    /* Queue acceptance is not the asynchronous operation's completion. */
-    if (result == AE_OK && controls.pending) result = AE_AGAIN;
-    controls.message_success = result == AE_OK;
-    controls.message_since_ms = controls.now_ms;
-    controls.message_clear_pending = false;
-    snprintf(controls.message, sizeof(controls.message), "%s", result_text(result));
-    if (effect) { effect->handled = true; snprintf(effect->message, sizeof(effect->message), "%s", controls.message); }
-}
 static void clear_message(void)
 {
-    controls.message[0] = '\0'; controls.message_success = false;
+    controls.message[0] = '\0';
     controls.message_clear_pending = true;
 }
 static void emit_message_clear(app_media_controls_effect_t *effect)
@@ -135,6 +123,16 @@ static void emit_message_clear(app_media_controls_effect_t *effect)
     if (controls.message_clear_pending && effect) {
         effect->handled = true; effect->message[0] = '\0'; controls.message_clear_pending = false;
     }
+}
+static void effect_result(app_media_controls_effect_t *effect, ae_result_t result)
+{
+    /* Buttons and job state show progress. Only failures need a notice. */
+    if (result == AE_OK || result == AE_AGAIN) {
+        clear_message(); emit_message_clear(effect); return;
+    }
+    controls.message_clear_pending = false;
+    snprintf(controls.message, sizeof(controls.message), "%s", result_text(result));
+    if (effect) { effect->handled = true; snprintf(effect->message, sizeof(effect->message), "%s", controls.message); }
 }
 static app_media_id_t ui_id(ae_id_t id)
 {
@@ -691,13 +689,6 @@ bool app_media_controls_init(void)
 void app_media_controls_context(const app_media_controls_context_t *context)
 {
     if (!context || !controls.initialized) return;
-    if (context->epoch != controls.context.epoch || context->mode != controls.context.mode ||
-        context->overlay != controls.context.overlay) {
-        if (controls.message_success) clear_message();
-        /* Returning to the origin must not revive a late success notice. The
-         * operation and any failure result still retain their normal owner. */
-        if (controls.pending) controls.pending_notice_current = false;
-    }
     if (controls.voice_link.active && (context->epoch != controls.voice_link.epoch || context->locked ||
         context->screen_off || context->mode != INPUT_AUDIO)) finish_voice_link(NULL, AE_PRIVACY);
     if (context->epoch != controls.context.epoch || context->locked || context->screen_off ||
@@ -719,7 +710,6 @@ static ae_result_t submit_runtime(app_media_local_request_t request)
     ae_result_t result = app_media_runtime_submit_local(&request);
     if (result == AE_OK) {
         controls.pending = true; controls.pending_token = request.token; controls.pending_action = request.action;
-        controls.pending_notice_current = true;
         increase(&controls.revision);
     }
     return result;
@@ -1056,8 +1046,6 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
         effect_result(effect, AE_TIME_UNKNOWN); return;
     }
     controls.clock_known = true; controls.now_ms = now_ms;
-    if (controls.message_success && now_ms - controls.message_since_ms >= SUCCESS_MESSAGE_MS)
-        clear_message();
     emit_message_clear(effect);
     memset(&poll_scratch, 0, sizeof(poll_scratch));
     app_media_snapshot_t *runtime = &poll_scratch.runtime;
@@ -1145,10 +1133,7 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
             controls.list_loaded = false; controls.view.recordings.known = false;
             snprintf(controls.view.recordings.reason, sizeof(controls.view.recordings.reason), "%s", result_text(result));
         }
-        increase(&controls.revision);
-        if (result == AE_OK && !controls.pending_notice_current) {
-            clear_message(); emit_message_clear(effect);
-        } else effect_result(effect, result);
+        increase(&controls.revision); effect_result(effect, result);
     }
     rebuild();
     if (controls.list_requested && controls.context.overlay == APP_OVERLAY_RECORDINGS && idle_controls()) {

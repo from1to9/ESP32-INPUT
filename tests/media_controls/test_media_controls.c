@@ -621,31 +621,27 @@ static void test_operation_message_lifecycle(void)
     setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC; poll_at(1010);
     app_intent_t volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 45;
     app_media_controls_effect_t effect = handle(volume);
-    assert(submissions == 1 && controls.pending && !strcmp(effect.message, "Operation pending."));
+    assert(submissions == 1 && controls.pending && effect.handled && !*effect.message);
     owner.busy = true; poll_at(5010);
-    assert(view.media.command_pending && !strcmp(view.media.reason, "Operation pending."));
+    assert(view.media.command_pending && !*view.media.reason);
     complete(AE_OK);
-    assert(!view.media.command_pending && !strcmp(view.media.reason, "Operation completed."));
-    uint64_t completed_at = controls.now_ms;
-    poll_at(completed_at + SUCCESS_MESSAGE_MS - 1U); assert(*view.media.reason);
-    app_media_controls_poll(completed_at + SUCCESS_MESSAGE_MS, &effect); app_media_controls_fill(&view);
-    assert(effect.handled && !*effect.message && !*view.media.reason);
+    assert(!view.media.command_pending && !*view.media.reason);
+    context.overlay = APP_OVERLAY_MEDIA_OPTIONS; poll_at(5020);
+    context.overlay = APP_OVERLAY_NONE; poll_at(5030); assert(!*view.media.reason);
 
-    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 46; handle(volume); complete(AE_OK);
-    context.overlay = APP_OVERLAY_MEDIA_OPTIONS; app_media_controls_context(&context);
-    app_media_controls_poll(controls.now_ms + 1, &effect); app_media_controls_fill(&view);
-    assert(effect.handled && !*effect.message && !*view.media.reason);
-    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 47; handle(volume); complete(AE_OK);
-    context.mode = INPUT_MOUSE; app_media_controls_context(&context);
-    app_media_controls_poll(controls.now_ms + 1, &effect); assert(effect.handled && !*effect.message);
-    context.mode = INPUT_AUDIO; app_media_controls_context(&context); poll_at(controls.now_ms + 1);
-    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 48; handle(volume); complete(AE_OK);
-    ++context.epoch; app_media_controls_context(&context);
-    app_media_controls_poll(controls.now_ms + 1, &effect); assert(effect.handled && !*effect.message);
-
-    poll_at(controls.now_ms + 1); volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 49;
-    handle(volume); complete(AE_IO_ERROR); poll_at(controls.now_ms + SUCCESS_MESSAGE_MS + 1U);
+    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 46;
+    handle(volume); complete(AE_IO_ERROR); poll_at(9030);
     assert(!strcmp(view.media.reason, result_text(AE_IO_ERROR)));
+    context.mode = INPUT_MOUSE; poll_at(9040);
+    assert(!strcmp(controls.message, result_text(AE_IO_ERROR)));
+    context.mode = INPUT_AUDIO; poll_at(9050);
+    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 47; effect = handle(volume);
+    assert(controls.pending && effect.handled && !*effect.message && !*controls.message);
+    complete(AE_OK); assert(!view.media.command_pending && !*view.media.reason);
+
+    effect_result(NULL, AE_IO_ERROR); effect_result(NULL, AE_OK);
+    app_media_controls_poll(9060, &effect);
+    assert(effect.handled && !*effect.message);
 }
 
 static void test_late_success_notice_scope(void)

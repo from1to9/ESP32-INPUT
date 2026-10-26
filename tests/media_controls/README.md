@@ -74,8 +74,8 @@ Every poll path exercised by the suite verifies scratch cleanup; a failed query
 cannot publish its temporary rows or automatically retry. Stack measurements
 are compiler evidence, not device high-water measurements.
 
-Operation-notice regressions distinguish accepted work from a taken result,
-expire success after three seconds, clear it on context changes, and suppress a
-late success after leaving and returning. They still consume the actual result,
-preserve the applied value, and retain errors. The production coordinator suite
-separately verifies that media-notice removal preserves another status owner.
+Operation-notice regressions keep acceptance and success silent while button/job
+state still reports progress. They consume late results after navigation,
+preserve applied values and errors, and clear old failure text when a new
+operation is accepted. The production coordinator suite separately verifies
+that media-notice removal preserves another status owner.

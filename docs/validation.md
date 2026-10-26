@@ -223,6 +223,37 @@ pending-I/O retirement. Internal heap start remained unchanged. Interrupt stack
 coverage and full release qualification remain unproven; these focused results
 do not imply that every repository suite was rerun.
 
+### Live-control device recovery and failure-only notices: 2026-10-26
+
+Source `6d549402e217ce17c85bc20e50352c8654a48d1b` was application-only
+flashed and verified. The 4,707,200-byte application SHA-256 is
+`e2f016e3c7c1b889e54a22ee76e37ca820a1e30ad21eab5ca188f60717b8c9bb`.
+Partitions and settings were preserved; no full backup was performed.
+
+The first 180-second capture passed its parser with 18 health observations.
+During playback, observed volume changed from 30 to 92, 47 and 91; a pending
+control observation was followed by completion without the previous timeout.
+The user confirmed audible playback and working controls, then reported grey,
+silent controls near the end of the bounded host stimulus. The first log
+contains a requested completed stop. A subsequent retained job reports owner
+loss/stale state after the host stimulus ended; the intervening transition was
+not captured, so the reported screen click is not established as its cause.
+
+A second host stimulus restored playback. The user confirmed that it continued
+without stopping. The later job delivered 12,622,080 bytes of mono 48 kHz PCM
+(131.48 seconds) with no observed job error or discarded frames while running;
+volume and requested stop/restart transitions were also observed. The second
+180-second capture retains the earlier partial owner-loss job and therefore
+still fails its overall audio-job gate. This record distinguishes that retained
+failure from the later running job rather than weakening the parser.
+
+The user confirmed successful notices disappeared after three seconds, then
+revised the interaction: success should be silent and only failure should
+notify. The follow-up source removes both success and pending footer notices;
+existing button/job states continue to show progress and errors remain visible.
+This notice-only follow-up needs its own deployment check. Bluetooth audio,
+long-duration endurance and complete release qualification remain pending.
+
 ### USB startup readiness interaction repair: 2026-10-26
 
 Local Audio start admission now requires the same valid USB stream identity,
