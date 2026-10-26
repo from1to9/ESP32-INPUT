@@ -1,5 +1,16 @@
 menu "Input device board resources"
 
+    config APP_LOCAL_SPEAKER_TEST
+        bool "One bounded local speaker tone before media startup"
+        default n
+        help
+            Diagnostic image only: boot once plays three seconds of local
+            1 kHz mono PCM through the actual board codec, without USB audio
+            input or microphone capture. A physical button/lock skips or
+            cancels the tone. The normal media owner starts only after the
+            test confirms codec shutdown. No settings are persisted and no
+            public remote audio-test API is enabled by this option.
+
     config APP_IMU_CAPTURE
         bool "Bounded raw IMU diagnostic capture"
         default n

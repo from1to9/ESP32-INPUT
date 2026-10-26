@@ -6,6 +6,10 @@
 #include "app_boot_ui.h"
 #include "app_media_runtime.h"
 #include "app_audio_diagnostics.h"
+#include "sdkconfig.h"
+#if defined(CONFIG_APP_LOCAL_SPEAKER_TEST) && CONFIG_APP_LOCAL_SPEAKER_TEST
+#include "app_local_speaker_test.h"
+#endif
 #include "app_media_controls.h"
 #include "app_connectivity_controls.h"
 #include "app_recording_store.h"
@@ -407,6 +411,9 @@ static app_local_edit_result_t submit_local_edit(const app_local_edit_request_t 
 
 static void physical_button(board_button_event_t event, uint64_t timestamp_us)
 {
+#if defined(CONFIG_APP_LOCAL_SPEAKER_TEST) && CONFIG_APP_LOCAL_SPEAKER_TEST
+    if (event == BOARD_BUTTON_DOWN) app_local_speaker_test_cancel();
+#endif
     portENTER_CRITICAL(&s_control_lock);
     s_physical_down = event == BOARD_BUTTON_DOWN;
     s_user_activity_ms = timestamp_us / 1000U;
@@ -512,6 +519,9 @@ static bool submit_contacts(const board_touch_snapshot_t *sample)
 
 static void physical_lock(void)
 {
+#if defined(CONFIG_APP_LOCAL_SPEAKER_TEST) && CONFIG_APP_LOCAL_SPEAKER_TEST
+    app_local_speaker_test_cancel();
+#endif
     /* Only the board callback can request unlock. Never expose this request
      * through touch or future network intents. Coalesced holds toggle once. */
     portENTER_CRITICAL(&s_control_lock);
@@ -2996,6 +3006,12 @@ void app_main(void)
         ESP_LOGW(TAG, "Wi-Fi unavailable: %s", esp_err_to_name(wifi_error));
     record_boot_memory("wifi");
     present_boot(APP_BOOT_UI_STARTING, "Preparing audio", "Microphone remains off");
+#if defined(CONFIG_APP_LOCAL_SPEAKER_TEST) && CONFIG_APP_LOCAL_SPEAKER_TEST
+    if (!app_local_speaker_test_run(s_engine.state.locked)) {
+        report_boot_fault("local speaker test shutdown unconfirmed", ESP_ERR_INVALID_STATE);
+        return;
+    }
+#endif
     app_recording_store_config_t recording_config = {.wall_time = recording_wall_time};
     ae_result_t recording_error = app_recording_store_init(&recording_config);
     if (recording_error != AE_OK)

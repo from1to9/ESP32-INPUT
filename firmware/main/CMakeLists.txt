@@ -14,6 +14,10 @@ idf_component_register(SRCS "main.c" "app_ui.c" "ble_hid.c" "board_mosaico.c" "u
                                 nvs_flash esp_tinyusb esp_timer mbedtls esp_wifi esp_netif
                                 esp_event esp_http_server esp_https_server esp_http_client app_update esp_app_format esp_driver_i2c esp_driver_spi esp_partition spi_flash)
 
+if(CONFIG_APP_LOCAL_SPEAKER_TEST)
+    target_sources(${COMPONENT_LIB} PRIVATE "app_local_speaker_test.c")
+endif()
+
 # Run on every build, including incremental builds after a commit or local edit.
 # The generator changes the header only when identity changes, so no-op builds
 # do not recompile main. The generated file is never committed to source.

@@ -113,6 +113,28 @@ do not qualify sound quality, duplex, Bluetooth audio or endurance. Health
 captures retain the existing GPIO errors and job-failure flags for host-owner
 loss; no complete health pass is claimed.
 
+A further attempt at the user's reported device volume of about 80 percent
+still produced no audible sound. It delivered 11,741,760 bytes to the codec
+interface (122.31 seconds equivalent); playback remained running and unmuted
+without a reported SDK error until the bounded host probe stopped. The actual
+volume register and nonzero sample content were not exposed in that image's
+logs. Low default volume is therefore insufficient to explain the result.
+The next discriminator is a finite device-generated tone through the current
+board codec adapter, bypassing USB payloads. If local sound works, compare
+nonzero playback data at USB ingress and I2S submission. Neither software
+counters nor GPIO command success prove electrical output.
+
+### Local speaker discriminator: 2026-10-26
+
+The default-off `APP_LOCAL_SPEAKER_TEST` diagnostic option supplies a finite
+1 kHz mono 48 kHz PCM16LE tone directly to the production board codec adapter
+before the normal media manager starts. It bypasses USB payloads and the media
+engine, opens no microphone and writes no user preferences. Physical button or
+lock input cancels the test. Normal startup can continue only after confirmed
+codec shutdown; software transfer counts do not establish audible output.
+This option does not implement or qualify the public `audio.test_tone` API.
+Device execution and audible playback remain pending for this test image.
+
 ### Combined source checkpoint: 2026-10-21
 
 | Check | Current evidence |
