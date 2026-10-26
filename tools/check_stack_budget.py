@@ -454,8 +454,7 @@ MEDIA_PROCESS = [("media_runtime", "worker"), ("media_runtime", "media_step"),
 MEDIA_START = MEDIA_PROCESS + [("media_runtime", "start_job")]
 MEDIA_SEND = [("media_runtime", "send_audio"), ("audio_manager", "app_audio_submit")]
 AUDIO_RUNTIME_PATHS = {
-    # This changed synchronous query is the only declared audio-manager worker
-    # path; it does not establish coverage of dispatch or the engine poll loop.
+    # These are focused declared paths, not complete manager/engine coverage.
     "audio_manager_playback_capacity": ("audio_manager", [("audio_manager", "worker"),
         ("audio_engine", "ae_playback_capacity"), ("audio_engine", "ae_job_active")]),
     "audio_worker_pcm_observe": ("media_control", [("media_runtime", "worker"),
@@ -468,6 +467,22 @@ AUDIO_RUNTIME_PATHS = {
     "audio_worker_route_ack_snapshot": ("media_control", MEDIA_PROCESS + [("audio_manager", "app_audio_snapshot")]),
     "audio_worker_identity_failure": ("media_control", MEDIA_PROCESS + [("media_runtime", "finish"), ("audio_helpers", "ae_secure_zero")]),
 }
+for _control in ("volume", "gain"):
+    AUDIO_RUNTIME_PATHS[f"audio_manager_live_{_control}"] = ("audio_manager", [
+        ("audio_manager", "worker"), ("audio_manager", "dispatch"),
+        ("audio_engine", f"ae_{_control}"), ("board_audio", _control),
+        ("board_audio", "exchange"), ("board_audio", "same_request"),
+        ("board_audio", "same_format")])
+for _name, _engine, _codec in (
+    ("capture", "capture_frame", "read_pcm"),
+    ("playback", "playback_frame", "write_pcm"),
+    ("unmute", "sync_roles", "mute"),
+):
+    AUDIO_RUNTIME_PATHS[f"audio_manager_control_retire_{_name}"] = ("audio_manager", [
+        ("audio_manager", "worker"), ("audio_engine", "ae_poll"),
+        ("audio_engine", _engine), ("board_audio", _codec),
+        ("board_audio", "exchange"), ("board_audio", "same_request"),
+        ("board_audio", "same_format")])
 for _helper in ("live_locked", "count", "add_count"):
     AUDIO_RUNTIME_PATHS[f"audio_worker_pcm_{_helper}"] = ("media_control", [
         ("media_runtime", "worker"), ("media_runtime", "media_step"),

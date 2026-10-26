@@ -5482,6 +5482,28 @@ static void physical_lock_stops_capture_but_release_only_does_not(void)
     assert(!test_media_environment.unlocked && test_media_environment.privacy_latched);
 }
 
+static void media_notice_clear_preserves_other_status_owners(void)
+{
+    setup(INPUT_AUDIO);
+    app_media_controls_effect_t notice = {.handled = true};
+    strcpy(notice.message, "Audio updated");
+    apply_media_effect(&notice);
+    assert(s_message == s_media_message && !strcmp(s_message, "Audio updated"));
+    app_media_controls_effect_t unchanged = {0};
+    apply_media_effect(&unchanged);
+    assert(!strcmp(s_message, "Audio updated"));
+    app_media_controls_effect_t clear = {.handled = true};
+    apply_media_effect(&clear);
+    assert(s_message == s_media_message && !*s_message);
+    apply_media_effect(&notice);
+    const char *other = "Wi-Fi connected";
+    s_message = other;
+    apply_media_effect(&clear);
+    assert(s_message == other && !strcmp(s_message, "Wi-Fi connected") && !*s_media_message);
+    apply_media_effect(&notice);
+    assert(s_message == s_media_message && !strcmp(s_message, "Audio updated"));
+}
+
 static void media_preview_confirmation_uses_normal_input_context(void)
 {
     setup(INPUT_KEYBOARD);
@@ -5915,6 +5937,7 @@ int main(int argc, char **argv)
     RUN(capture_keeps_display_awake_until_confirmed_off_without_activity);
     RUN(physical_lock_stops_capture_but_release_only_does_not);
     RUN(media_preview_confirmation_uses_normal_input_context);
+    RUN(media_notice_clear_preserves_other_status_owners);
     RUN(saturated_emergency_admission);
     RUN(stale_ui_epoch);
     RUN(touch_cannot_unlock);

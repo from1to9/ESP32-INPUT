@@ -27,6 +27,11 @@ access. Every synthetic file stays in the selected local evidence directory.
   snapshots remain unavailable; no poisoned stack view becomes known. A copied
   completion callback remains safe after owner teardown and task deletion,
   including replacement startup before and after task-handle publication.
+- `test_app_audio_controls.c`: actual worker with continuous USB PCM backlog
+  and writes completing in later worker iterations. Live volume/gain reserve
+  the next codec turn without losing frames; privacy stop cancels the reserved
+  command before submission. The deterministic clock bounds command progress
+  without changing the production worker's completion pump or timeout.
 - `test_app_recording_store.c`: actual firmware storage composition and real
   encrypted backend; explicit byte ownership, control-NVS custody, key/nonce
   atomicity, unknown commit handling and reboot. Only platform boundaries are

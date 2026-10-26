@@ -51,6 +51,14 @@ or automatically replay a rejected Start request. The settling interval is a
 named build-time policy; it does not delay transport invalidation or bypass
 consent, privacy, cleanup or resource checks.
 
+An accepted asynchronous command shows **Operation pending** until the audio
+owner reports its result. A successful completion notice expires after three
+seconds and clears when its mode or overlay changes; it must not reappear on
+another page. Clearing an audio notice must preserve a newer status owned by
+another subsystem. Errors remain available rather than expiring as successes.
+Live volume and microphone-gain changes must finish between PCM transfers
+without starving behind a continuous stream or silently restarting capture.
+
 ## Physical controls
 
 The official button factory currently exposes AI only. Its header also declares BOOT GPIO61, but runtime BOOT access is not a first-release dependency. POWER retains hardware power control.

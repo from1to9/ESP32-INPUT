@@ -703,10 +703,11 @@ static void refresh_media_context(void)
 static void apply_media_effect(const app_media_controls_effect_t *effect)
 {
     if (!effect || !effect->handled) return;
-    if (effect->message[0]) {
-        (void)snprintf(s_media_message, sizeof(s_media_message), "%s", effect->message);
-        s_message = s_media_message;
-    }
+    /* A handled empty message retires only the media-owned notice. Other
+     * subsystems may have replaced the global status in the meantime. */
+    bool owns_notice = s_message == s_media_message;
+    (void)snprintf(s_media_message, sizeof(s_media_message), "%s", effect->message);
+    if (effect->message[0] || owns_notice) s_message = s_media_message;
     if (effect->open_overlay) {
         s_confirmation = effect->confirmation;
         open_overlay(effect->overlay);

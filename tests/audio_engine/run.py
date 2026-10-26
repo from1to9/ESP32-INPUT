@@ -94,11 +94,14 @@ def main():
     app_command += [str(p) for p in engine_sources] + [str(ROOT / "tests/audio_engine/test_app_audio.c")]
     startup_command = [part for part in app_command if part != str(ROOT / "tests/audio_engine/test_app_audio.c")]
     startup_command += [str(ROOT / "tests/audio_engine/test_app_audio_startup.c")]
+    control_command = [part for part in app_command if part != str(ROOT / "tests/audio_engine/test_app_audio.c")]
+    control_command += [str(ROOT / "tests/audio_engine/test_app_audio_controls.c")]
     runtime_store_command = [part for part in store_command if part != str(ROOT / "tests/audio_engine/test_store.c")]
     runtime_store_command += ["-pthread", "-I", str(ROOT / "tests/audio_engine/stubs"), "-I", str(ROOT / "firmware/main"),
         str(ROOT / "tests/audio_engine/test_app_recording_store.c")]
     for name, build in [("engine", engine_command), ("store", store_command),
-                        ("recording-composition", composition_command), ("app", app_command), ("recording-runtime", runtime_store_command)]:
+                        ("recording-composition", composition_command), ("app", app_command),
+                        ("app-controls", control_command), ("recording-runtime", runtime_store_command)]:
         executable = output / ("test_" + name)
         with (output / (name + "-build.log")).open("w") as log:
             subprocess.run(build + ["-o", str(executable)], check=True, stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)
@@ -109,6 +112,15 @@ def main():
         if run.returncode:
             raise SystemExit(run.returncode)
         suites[name] = {"exit": run.returncode, "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
+        if name == "app-controls":
+            privacy = subprocess.run([str(executable), "privacy"], env=environment, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=ROOT, timeout=10)
+            (output / "app-controls-privacy.log").write_text(privacy.stdout)
+            print(privacy.stdout, end="")
+            if privacy.returncode:
+                raise SystemExit(privacy.returncode)
+            suites["app-controls-privacy"] = {"exit": privacy.returncode,
+                "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
     startup_binary = output / "test_app_startup"
     with (output / "startup-build.log").open("w") as log:
         subprocess.run(startup_command + ["-o", str(startup_binary)], check=True,

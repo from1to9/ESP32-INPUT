@@ -903,7 +903,15 @@ ae_result_t ae_poll(ae_engine_t *engine, uint64_t now_ms)
     }
     if (engine->view.quarantined) { ae_refresh_view(engine); return engine->view.error; }
     if (!ae_jobs_active(engine)) { ae_refresh_view(engine); return binding_cleanup; }
-    if (engine->control_pending) return AE_AGAIN;
+    if (engine->control_pending) {
+        /* Reserve the next mailbox turn for the accepted control, while
+         * retiring the exact request already in flight. Starting another PCM
+         * request here can starve controls under a continuous media backlog. */
+        if (engine->io_pending == AE_MICROPHONE) return capture_frame(engine, now_ms);
+        if (engine->io_pending == AE_SPEAKER) return playback_frame(engine, now_ms);
+        if (engine->unmute_pending) return sync_roles(engine, now_ms);
+        return AE_AGAIN;
+    }
     if (!engine->codec_running) return prepare_source(engine, now_ms);
     ae_result_t binding=ae_job_active(&engine->playback) ? playback_binding(engine,now_ms) : AE_OK;
     if (binding!=AE_OK) return binding;
@@ -1009,7 +1017,6 @@ ae_result_t ae_volume(ae_engine_t *engine, uint8_t percent, uint64_t now_ms)
     if (!engine || percent > 100) return AE_INVALID;
     if (!ae_clock(engine, now_ms)) return AE_TIME_UNKNOWN;
     if (engine->control_pending && (engine->control_pending != 1 || engine->control_value != percent)) return AE_BUSY;
-    if (engine->io_pending || engine->unmute_pending) return AE_AGAIN;
     if (!engine->codec_capabilities.available) {
         if (!engine->dependencies.codec.capabilities) return AE_UNAVAILABLE;
         ae_result_t available = engine->dependencies.codec.capabilities(engine->dependencies.codec.context, &engine->codec_capabilities);
@@ -1021,6 +1028,8 @@ ae_result_t ae_volume(ae_engine_t *engine, uint8_t percent, uint64_t now_ms)
     ae_result_t result = AE_OK;
     if (engine->codec_prepared) {
         if (!engine->dependencies.codec.volume) return AE_UNAVAILABLE;
+        engine->control_pending = 1; engine->control_value = percent;
+        if (engine->io_pending || engine->unmute_pending) return AE_AGAIN;
         result = engine->dependencies.codec.volume(engine->dependencies.codec.context, percent, engine->view.audio_generation);
         engine->control_pending = result == AE_AGAIN ? 1 : 0; engine->control_value = percent;
         now_ms = after_io(engine, now_ms);
@@ -1035,10 +1044,11 @@ ae_result_t ae_gain(ae_engine_t *engine, uint8_t db, uint64_t now_ms)
     if (!engine || db > 42 || db % 6) return AE_INVALID;
     if (!ae_clock(engine, now_ms)) return AE_TIME_UNKNOWN;
     if (engine->control_pending && (engine->control_pending != 2 || engine->control_value != db)) return AE_BUSY;
-    if (engine->io_pending || engine->unmute_pending) return AE_AGAIN;
     ae_result_t result = AE_OK;
     if (engine->codec_prepared) {
         if (!engine->dependencies.codec.gain) return AE_UNAVAILABLE;
+        engine->control_pending = 2; engine->control_value = db;
+        if (engine->io_pending || engine->unmute_pending) return AE_AGAIN;
         result = engine->dependencies.codec.gain(engine->dependencies.codec.context, db, engine->view.audio_generation);
         engine->control_pending = result == AE_AGAIN ? 2 : 0; engine->control_value = db;
         now_ms = after_io(engine, now_ms);

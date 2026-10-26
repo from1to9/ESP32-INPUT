@@ -588,3 +588,25 @@ prove why an earlier attempt was silent.
 Evidence: [PCM observer checks](../../tests/board_audio/README.md),
 [USB observer checks](../../tests/usb_audio/README.md), and
 [bounded playback evidence](../../docs/validation.md#audible-usb-playback-and-startup-control-churn-2026-10-26).
+
+## 27. Reserve control progress in a continuously busy audio mailbox
+
+An asynchronous PCM transfer can finish successfully on every iteration while
+a control request never gets a turn. In the production worker, retrying volume
+before the progress pump was insufficient: each pump retired the old write and
+queued the next one before the next control retry. The unchanged command
+deadline then stopped a healthy stream. Reserve the control turn, retire the
+exact pending I/O or unmute request, and defer new PCM until that control
+completes. Safety cancellation and generation checks still take precedence.
+
+Exercise the actual manager and engine together with an asynchronous codec and
+continuous ingress; a synchronous engine-only codec hides this interleaving.
+Check ordered PCM content, bounded control completion and privacy interruption,
+not just successful enqueue or increasing byte counts. Queue acceptance is
+pending, not completion. Give successful notices a bounded page lifetime and
+propagate their removal to the coordinator's global status without erasing
+messages from another owner.
+
+Evidence: [worker/engine regressions](../../tests/audio_engine/README.md),
+[control regressions](../../tests/media_controls/README.md), and
+[device failure record](../../docs/validation.md#remaining-live-control-timeout-after-usb-readiness-repair-2026-10-26).

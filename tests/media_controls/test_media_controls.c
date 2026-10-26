@@ -616,6 +616,59 @@ static void test_record_copy_failure(void)
     records_copy_result = AE_OK; controls.list_requested = true; poll_at(controls.now_ms + 10);
     complete(AE_OK); assert(view.media.recordings.known && view.media.recordings.row_count == 1 && controls.records[0].revision == 41);
 }
+static void test_operation_message_lifecycle(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC; poll_at(1010);
+    app_intent_t volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 45;
+    app_media_controls_effect_t effect = handle(volume);
+    assert(submissions == 1 && controls.pending && !strcmp(effect.message, "Operation pending."));
+    owner.busy = true; poll_at(5010);
+    assert(view.media.command_pending && !strcmp(view.media.reason, "Operation pending."));
+    complete(AE_OK);
+    assert(!view.media.command_pending && !strcmp(view.media.reason, "Operation completed."));
+    uint64_t completed_at = controls.now_ms;
+    poll_at(completed_at + SUCCESS_MESSAGE_MS - 1U); assert(*view.media.reason);
+    app_media_controls_poll(completed_at + SUCCESS_MESSAGE_MS, &effect); app_media_controls_fill(&view);
+    assert(effect.handled && !*effect.message && !*view.media.reason);
+
+    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 46; handle(volume); complete(AE_OK);
+    context.overlay = APP_OVERLAY_MEDIA_OPTIONS; app_media_controls_context(&context);
+    app_media_controls_poll(controls.now_ms + 1, &effect); app_media_controls_fill(&view);
+    assert(effect.handled && !*effect.message && !*view.media.reason);
+    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 47; handle(volume); complete(AE_OK);
+    context.mode = INPUT_MOUSE; app_media_controls_context(&context);
+    app_media_controls_poll(controls.now_ms + 1, &effect); assert(effect.handled && !*effect.message);
+    context.mode = INPUT_AUDIO; app_media_controls_context(&context); poll_at(controls.now_ms + 1);
+    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 48; handle(volume); complete(AE_OK);
+    ++context.epoch; app_media_controls_context(&context);
+    app_media_controls_poll(controls.now_ms + 1, &effect); assert(effect.handled && !*effect.message);
+
+    poll_at(controls.now_ms + 1); volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 49;
+    handle(volume); complete(AE_IO_ERROR); poll_at(controls.now_ms + SUCCESS_MESSAGE_MS + 1U);
+    assert(!strcmp(view.media.reason, result_text(AE_IO_ERROR)));
+}
+
+static void test_late_success_notice_scope(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC; poll_at(1010);
+    app_intent_t volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 45;
+    handle(volume); assert(controls.pending);
+    context.overlay = APP_OVERLAY_MEDIA_OPTIONS; poll_at(1020);
+    context.overlay = APP_OVERLAY_NONE; poll_at(1030);
+    owner.audio.volume_percent = 45; ++owner.audio.revision;
+    owner.request_token = submitted.token; owner.result = AE_OK; owner.result_ready = true;
+    app_media_controls_effect_t effect;
+    app_media_controls_poll(1040, &effect); app_media_controls_fill(&view);
+    assert(!owner.result_ready && !controls.pending && view.volume == 45);
+    assert(effect.handled && !*effect.message && !*view.media.reason);
+    poll_at(1050); assert(!*view.media.reason);
+
+    volume = intent(APP_MEDIA_SET_VOLUME); volume.media.value.level = 46; handle(volume);
+    ++context.epoch; context.mode = INPUT_MOUSE; poll_at(1060);
+    complete(AE_IO_ERROR);
+    assert(!controls.pending && !strcmp(view.media.reason, result_text(AE_IO_ERROR)));
+}
+
 static void test_usb_start_settling(void)
 {
     setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
@@ -694,8 +747,8 @@ static void test_usb_settle_stop_and_clock(void)
 }
 int main(int argc, char **argv)
 {
-    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock"};
-    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock};
+    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock", "operation_message_lifecycle", "late_success_notice_scope"};
+    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock, test_operation_message_lifecycle, test_late_success_notice_scope};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: media controls %s\n", names[i]); return 0; }

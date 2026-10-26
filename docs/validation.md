@@ -174,6 +174,55 @@ internal memory. Placement and tests are checked locally. Contiguous DMA
 recovery and behavior of that repaired diagnostic image remain untested on
 hardware. The normal restored image does not contain this optional module.
 
+### Remaining live-control timeout after USB readiness repair: 2026-10-26
+
+Source `bb3b075b0a52b441c1b1c9fed45c876f8826aaff` was application-only
+flashed and byte-verified. The 4,706,816-byte application SHA-256 is
+`772349ce1a70c07f955971576df94c16f8a5c0db1cadb6c3c9c6a74aa354cccd`;
+settings and partitions were preserved without a full backup.
+
+The user initially confirmed stable startup controls and audible stop/restart,
+then reported that both Mic and Speaker buttons became grey and unusable while
+audio continued. A persistent `Operation completed` message survived page
+navigation. The 180-second capture contained 18 health samples but failed the
+audio-job gate; this attempt is not a complete pass.
+
+The log observed media `busy=1` with active playback at 53.961, 54.821, 64.890
+and 74.921 seconds. At 83.979 seconds the owner became OFF, and the partial
+playback job reported `AE_STOP_IO` / `AE_PRIVACY`; cached board SDK errors were
+zero. Later manual starts produced sound, with explicit completed stops at
+102.476 and 108.740 seconds. The host stimulus ran for 150 seconds, separately
+from that earlier timeout. These observations distinguish the pending control
+failure from the planned end of the host test.
+
+A native fixture using the production manager and engine with an asynchronous
+codec reproduced the same failure under continuous PCM ingress: volume timed
+out after 30,001 simulated milliseconds while 30,030 writes delivered
+28,828,800 bytes, ending with the same partial-job stop/error pair. A control
+retry saw pending I/O before reserving its turn; the progress pump immediately
+queued another PCM request. Successful transfers therefore starved control
+completion. This deterministic source reproduction supports the device-log
+attribution; its timing is simulated, not measured device latency.
+
+The repair reserves the control turn, retires the exact pending I/O or unmute,
+and resumes PCM after the control completes. The same fixture completes volume
+and gain in three simulated milliseconds, with ordered PCM content and no
+overrun/discard. Safety-stop and privacy cancellation remain separate checks.
+Accepted commands display pending until their actual result arrives. Successful
+notices expire after three seconds and clear on navigation, including the
+coordinator's global status. The repaired image still needs physical live-volume,
+stop/restart and page-navigation validation. Bluetooth playback and microphone
+tests remain deferred until this USB round is complete, as requested.
+
+Focused sanitizer checks passed 13 engine/worker/startup variants, 32 media
+control cases and 163 production coordinator cases. The normal-profile
+coordinator harness now supplies its previously missing configuration header;
+this does not enable the optional startup tone. The pinned target build and
+482 declared task stack paths passed, including live control dispatch and
+pending-I/O retirement. Internal heap start remained unchanged. Interrupt stack
+coverage and full release qualification remain unproven; these focused results
+do not imply that every repository suite was rerun.
+
 ### USB startup readiness interaction repair: 2026-10-26
 
 Local Audio start admission now requires the same valid USB stream identity,

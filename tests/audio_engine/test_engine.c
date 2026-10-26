@@ -617,6 +617,25 @@ static void physical_mute_acknowledgement(void)
     puts("PASS: acknowledged per-role mute, asynchronous initial stop, cancelled unmute retirement, recognition-only revocation and stalled capture timeout");
 }
 
+static void controls_retire_pending_unmute(void)
+{
+    setup(); model.duplex = true;
+    ae_job_snapshot_t playback = start(AE_PLAYBACK_STREAM); step(6);
+    ae_frame_t frame = playback_frame(playback, 0);
+    assert(ae_submit_playback(engine, &frame, model.now) == AE_OK); step(2);
+    model.held_role = AE_MICROPHONE; model.pending_unmute = true; (void)start(AE_CAPTURE_LIVE); step(1);
+    assert(snapshot().microphone_mute_pending);
+    assert(ae_volume(engine, 81, model.now) == AE_INVALID);
+    assert(ae_volume(engine, 40, model.now) == AE_AGAIN);
+    assert(ae_gain(engine, 6, model.now) == AE_BUSY);
+    model.pending_unmute = false;
+    assert(ae_poll(engine, ++model.now) == AE_OK);
+    assert(ae_volume(engine, 40, model.now) == AE_OK && snapshot().volume_percent == 40);
+    step(2);
+    assert(model.mic && model.speaker && snapshot().capture_gate_open && snapshot().playback_gate_open);
+    puts("PASS: reserved volume retires an existing unmute, rejects invalid/conflicting controls and preserves both role gates");
+}
+
 static void duplex_and_storage_boundaries(void)
 {
     setup(); assert(ae_volume(engine, 40, model.now) == AE_OK && snapshot().volume_percent == 40);
@@ -668,7 +687,7 @@ static void duplex_and_storage_boundaries(void)
 
 int main(void)
 {
-    lifecycle(); callback_races(); safety_and_overflow(); playback_checks(); pending_capture_keeps_playback_progressing(); recording_checks(); background_checks(); duplex_and_storage_boundaries(); uncertain_reconciliation(); duplex_file_fragments(); physical_mute_acknowledgement(); transport_binding_lifecycle();
+    lifecycle(); callback_races(); safety_and_overflow(); playback_checks(); pending_capture_keeps_playback_progressing(); recording_checks(); background_checks(); duplex_and_storage_boundaries(); uncertain_reconciliation(); duplex_file_fragments(); physical_mute_acknowledgement(); controls_retire_pending_unmute(); transport_binding_lifecycle();
     printf("Resource bytes: engine=%zu (caller-provided external memory)\n", ae_engine_bytes());
     free(memory); return 0;
 }
