@@ -16,6 +16,49 @@ IMU samples but still failed the error-log and physical Motion gates.
 This checkpoint is not a qualified release. Reusable findings are indexed in
 the [engineering lessons](../.agent/shared/ENGINEERING_LESSONS.md).
 
+### USB transport deployment and capture startup investigation: 2026-10-26
+
+The separately authorized application-only deployment used clean source
+`f0ec1bfb582cb832df8b3f99e53b97e41ed1fd61`. Its 4,702,544-byte application
+SHA-256 is `e9f7b4a3d6ced8f04cfc362b39fb6e01cb5157b4d904117a94436d87d0d2b720`.
+Compilation and independent package review passed. Flash verification passed;
+the installed partition table, NVS and PHY data remained identical. No new full
+backup was taken, as requested. Runtime identity matched the delivered source.
+
+The user confirmed normal boot, touch and page switching. A 90-second startup
+capture observed connected/ready Bluetooth, LAN connectivity and advancing IMU
+samples. It remained failed because two duplicate GPIO ISR installation errors
+were logged; the same errors exist in the preceding image's startup evidence.
+There was no observed panic or reboot within this bounded capture. This does
+not qualify long-duration operation or Bluetooth host interoperability.
+
+USB audio controller mode was observed valid. Across two bounded output probes,
+OUT recorded 242,498 successful completions and 23,279,808 successful bytes,
+with no failed OUT completions. This is physical transport progress beyond the
+previous stalled two-packet observation. Acoustic success was not confirmed:
+the user still reported timeout/error. One playback job delivered 2,402,880
+bytes to the codec interface, then overflowed immediately after Mic admission.
+The next playback job delivered 5,685,120 bytes (59.22 seconds of mono 48 kHz
+16-bit PCM) without overflow, then ended on a USB stream/connection-generation
+change. Codec-write accounting is not proof of audible playback.
+
+A subsequent input-only host probe counted 4,183,040 client-format float frames,
+with no finite samples above its amplitude threshold and no callback errors. Two device Mic jobs started with the USB input stream
+selected, but the codec remained prepared without capture running; both reached
+the unchanged two-second startup deadline with no first frame and zero capture
+bytes. A missing host input consumer does not explain those attempts. The
+existing logs do not expose the display permission observation, so the exact
+pre-capture gate remains unproven. Raw logs and host/device details stay local.
+
+The follow-up source repair keeps an already active speaker progressing while
+a new Mic awaits its indicator, provided no codec command is pending. It also
+retains manager ingress frames while the engine ring is full. Native regressions
+first reproduced both failures, then checked ordered recovery, unchanged Mic
+permission/deadline checks and safety cancellation. Copied coordinator context
+diagnostics expose the next capture gate without rereading hardware or changing
+policy. These follow-up changes are not part of the deployed image above;
+their physical behavior remains unqualified until a separate verified update.
+
 ### Combined source checkpoint: 2026-10-21
 
 | Check | Current evidence |

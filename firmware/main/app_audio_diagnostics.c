@@ -38,6 +38,9 @@ typedef struct {
     uint64_t generation;
     bool quarantined, off_confirmed, capture_gate, playback_gate, indicator_required;
     bool microphone_mute_confirmed, speaker_mute_confirmed;
+    bool capture_context_known;
+    uint64_t capture_context_ms;
+    app_audio_capture_context_t capture_context;
     diagnostic_job_t jobs[DIAGNOSTIC_JOBS];
     sl_state_t speech_state;
     ae_result_t speech_result;
@@ -54,12 +57,23 @@ typedef struct {
     uint64_t last_check_ms, last_summary_ms;
     diagnostic_scratch_t scratch;
     diagnostic_observation_t current, previous;
+    bool capture_context_known;
+    uint64_t capture_context_ms;
+    app_audio_capture_context_t capture_context;
 } diagnostics_t;
 
 /* Coordinator-only, resident after PSRAM startup. Retained observations contain
  * public state/counters only; the full runtime copy is transient and wiped. */
 static AUDIO_DIAGNOSTICS_BSS diagnostics_t diagnostics;
 static const char *const TAG = "audio_diag";
+
+void app_audio_diagnostics_capture_context(uint64_t observed_ms,
+    const app_audio_capture_context_t *context)
+{
+    diagnostics.capture_context_known = context != NULL;
+    diagnostics.capture_context_ms = observed_ms;
+    diagnostics.capture_context = context ? *context : (app_audio_capture_context_t){0};
+}
 
 static void clear_scratch(void)
 {
@@ -79,6 +93,9 @@ static void observe(void)
     diagnostic_observation_t *out = &diagnostics.current;
     app_media_snapshot_t *media = &diagnostics.scratch.media;
     memset(out, 0, sizeof(*out));
+    out->capture_context_known = diagnostics.capture_context_known;
+    out->capture_context_ms = diagnostics.capture_context_ms;
+    out->capture_context = diagnostics.capture_context;
     out->snapshot_available = app_media_runtime_snapshot(media);
     out->initialized = out->snapshot_available && media->initialized;
     out->audio_known = out->initialized && media->audio_known;
@@ -123,6 +140,38 @@ static bool job_changed(const diagnostic_job_t *a, const diagnostic_job_t *b)
     return a->kind != b->kind || a->state != b->state || a->stop_reason != b->stop_reason || a->error != b->error ||
         a->first_frame_seen != b->first_frame_seen || a->cleanup_pending != b->cleanup_pending ||
         a->first_frame_ms != b->first_frame_ms || a->deadline_ms != b->deadline_ms;
+}
+static bool capture_context_changed(const diagnostic_observation_t *a, const diagnostic_observation_t *b)
+{
+    const app_audio_capture_context_t *x = &a->capture_context, *y = &b->capture_context;
+    return a->capture_context_known != b->capture_context_known ||
+        x->unlocked != y->unlocked || x->privacy_latched != y->privacy_latched ||
+        x->maintenance != y->maintenance || x->screen_visible != y->screen_visible ||
+        x->bound != y->bound || x->armed != y->armed || x->transfer_confirmed != y->transfer_confirmed ||
+        x->owner_alive != y->owner_alive || x->clock_valid != y->clock_valid || x->usable != y->usable ||
+        x->display_generation != y->display_generation || x->capture_generation != y->capture_generation ||
+        x->indicator_revision != y->indicator_revision || x->display_error != y->display_error;
+}
+static void log_capture_context(const diagnostic_observation_t *audio, uint64_t now_ms)
+{
+    if (!audio->capture_context_known) {
+        ESP_LOGI(TAG, "Audio diag capture context known=0");
+        return;
+    }
+    const app_audio_capture_context_t *c = &audio->capture_context;
+    bool age_known = now_ms >= audio->capture_context_ms;
+    ESP_LOGI(TAG, "Audio diag capture context known=1 age_known=%d age_ms=%" PRIu64
+        " audio_known=%d required=%d generation_known=%d audio_generation=%" PRIu64
+        " unlocked=%d privacy=%d maintenance=%d screen_visible=%d"
+        " bound=%d armed=%d transfer=%d owner_alive=%d clock_valid=%d usable=%d"
+        " display_generation=%" PRIu64 " capture_generation=%" PRIu64 " indicator_revision=%" PRIu64
+        " heartbeat_age_ms=%" PRIu64 " completion_age_ms=%" PRIu64 " display_error=%d",
+        age_known, age_known ? now_ms - audio->capture_context_ms : 0,
+        audio->audio_known, audio->audio_known ? audio->indicator_required : -1, audio->audio_known,
+        audio->generation, c->unlocked, c->privacy_latched, c->maintenance, c->screen_visible,
+        c->bound, c->armed, c->transfer_confirmed, c->owner_alive, c->clock_valid, c->usable,
+        c->display_generation, c->capture_generation, c->indicator_revision,
+        c->heartbeat_age_ms, c->completion_age_ms, c->display_error);
 }
 static bool usb_changed(const usb_audio_snapshot_t *a, const usb_audio_snapshot_t *b)
 {
@@ -275,6 +324,9 @@ void app_audio_diagnostics_poll(uint64_t now_ms)
     const diagnostic_observation_t *current = &diagnostics.current, *previous = &diagnostics.previous;
     bool summary = !diagnostics.observed || now_ms - diagnostics.last_summary_ms >= DIAGNOSTIC_SUMMARY_MS;
     if (summary || audio_changed(current, previous)) log_audio(current);
+    if ((current->indicator_required || previous->indicator_required) &&
+        (summary || audio_changed(current, previous) || capture_context_changed(current, previous)))
+        log_capture_context(current, now_ms);
     for (unsigned i = 0; i < DIAGNOSTIC_JOBS; ++i)
         if (current->audio_known && (summary || !previous->audio_known || job_changed(&current->jobs[i], &previous->jobs[i])))
             log_job(i, &current->jobs[i]);

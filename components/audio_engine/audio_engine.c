@@ -798,6 +798,13 @@ static ae_result_t deliver_capture(ae_engine_t *engine, ae_job_t *job, uint64_t 
     return result;
 }
 
+size_t ae_playback_capacity(const ae_engine_t *engine)
+{
+    if (!engine || !ae_job_active(&engine->playback) ||
+        engine->playback.request.kind != AE_PLAYBACK_STREAM) return 0;
+    return engine->playback.ring.capacity - engine->playback.ring.count;
+}
+
 ae_result_t ae_submit_playback(ae_engine_t *engine, const ae_frame_t *frame, uint64_t now_ms)
 {
     if (!engine || !frame) return AE_INVALID;
@@ -917,7 +924,13 @@ ae_result_t ae_poll(ae_engine_t *engine, uint64_t now_ms)
     if (engine->codec_stop_pending) return AE_AGAIN;
     if (engine->io_pending == AE_MICROPHONE) return capture_frame(engine, now_ms);
     if (engine->io_pending == AE_SPEAKER) return playback_frame(engine, now_ms);
-    ae_result_t r = sync_roles(engine, now_ms);
+    /* A new microphone waiting for a readable indicator owns no codec
+     * request. Keep an already active speaker progressing during that wait.
+     * Actual mute/unmute requests still retire through the shared mailbox. */
+    bool waiting_indicator = capture_count(engine) && !(engine->active_roles & AE_MICROPHONE) &&
+        (engine->active_roles & AE_SPEAKER) && !engine->closing_roles && !engine->unmute_pending &&
+        !ae_privacy_ready(engine, now_ms);
+    ae_result_t r = waiting_indicator ? AE_OK : sync_roles(engine, now_ms);
     if (r != AE_OK) return r;
     bool capture = capture_count(engine) && (engine->active_roles & AE_MICROPHONE);
     bool playback = ae_job_active(&engine->playback) && (engine->active_roles & AE_SPEAKER);

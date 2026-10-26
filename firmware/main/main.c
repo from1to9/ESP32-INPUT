@@ -670,6 +670,16 @@ static void refresh_media_context(void)
         .indicator_visible = visible && indicator.usable,
         .indicator_generation = indicator.capture_generation,
         .indicator_seen_ms = indicator.usable ? indicator.owner_heartbeat_ms : 0};
+    const app_audio_capture_context_t capture_context = {
+        .unlocked = environment.unlocked, .privacy_latched = environment.privacy_latched,
+        .maintenance = environment.maintenance, .screen_visible = environment.screen_visible,
+        .bound = indicator.bound, .armed = indicator.indicator_armed,
+        .transfer_confirmed = indicator.indicator_transfer_confirmed,
+        .owner_alive = indicator.owner_alive, .clock_valid = indicator.clock_valid, .usable = indicator.usable,
+        .display_generation = indicator.display_generation, .capture_generation = indicator.capture_generation,
+        .indicator_revision = indicator.indicator_revision, .heartbeat_age_ms = indicator.heartbeat_age_ms,
+        .completion_age_ms = indicator.completion_age_ms, .display_error = indicator.error};
+    app_audio_diagnostics_capture_context(s_now_ms, &capture_context);
     bool speech = s_engine.state.mode == INPUT_KEYBOARD &&
         s_keyboard_submode == APP_KEYBOARD_SPOKEN && s_overlay == APP_OVERLAY_NONE;
     app_media_runtime_environment(&environment, s_engine.state.epoch, s_ui_revision, speech);

@@ -2,7 +2,7 @@
 scope: repository-shared
 portability: cross-checkout
 status: active
-verified_at: 2026-10-23
+verified_at: 2026-10-26
 evidence_kind: reviewed-source-host-target-and-limited-device-evidence
 privacy_reviewed: true
 contains_local_runtime_facts: false
@@ -492,3 +492,30 @@ must not perform either action.
 
 Evidence: the pinned DWC2 source and
 [USB audio regression contract](../../tests/usb_audio/README.md).
+
+## 24. A pending role must not stall an independent active role
+
+A newly requested microphone can wait for display permission without owning a
+codec command. Returning before servicing an already active speaker during that
+wait stops playback consumption while transport ingress continues. Native
+regressions reproduced playback overflow on the seventeenth engine frame.
+Continue the existing role only when no real codec operation or safety closure
+is pending; do not bypass microphone permission or serialize unrelated waits.
+
+Backpressure must extend through every queue boundary. Checking manager ingress
+capacity does not establish space in the engine ring. Its serialized owner must
+check downstream credit before relinquishing the ingress frame. Preserve exact
+sequence, payload and cancellation ownership across a full backlog; do not
+enlarge queues, discard frames or weaken terminal overflow checks to hide a
+missing capacity boundary. Capacity is storage information, not authorization.
+
+Keep copied permission context separate from audio-owner availability. A known
+display observation must not turn a missing audio snapshot into an apparent
+capture-off result or generation zero. Diagnostics reuse the coordinator's
+existing observations and label missing data and unknown age explicitly.
+
+Evidence: [engine regressions](../../tests/audio_engine/README.md),
+[observer regressions](../../tests/audio_diagnostics/README.md) and the
+[bounded deployment investigation](../../docs/validation.md#usb-transport-deployment-and-capture-startup-investigation-2026-10-26).
+The native fixes do not establish the device's actual indicator failure cause
+or acoustic behavior.

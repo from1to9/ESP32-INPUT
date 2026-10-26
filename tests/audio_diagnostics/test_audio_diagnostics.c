@@ -221,12 +221,62 @@ static void test_clock_regression_is_observer_only(void)
     unsigned reads = media_reads; poll_at(UINT64_MAX - 1); assert(line_count == 19 && diagnostics.clock_failed);
     poll_at(UINT64_MAX); assert(line_count == 19 && media_reads == reads && contains_since(18, "observer_stopped=1"));
 }
+static void test_capture_context_is_copied_observation(void)
+{
+    setup(); owner.audio.capture_indicator_required = true;
+    poll_at(0);
+    assert(line_count == 10 && contains_since(0, "capture context known=0"));
+    app_audio_capture_context_t context = {.unlocked = true, .screen_visible = true,
+        .bound = true, .armed = true, .owner_alive = true, .clock_valid = true,
+        .capture_generation = 9, .display_generation = 3, .indicator_revision = 4};
+    app_audio_capture_context_t before = context;
+    unsigned reads = media_reads;
+    app_audio_diagnostics_capture_context(100, &context);
+    assert(!memcmp(&before, &context, sizeof(context)) && media_reads == reads && !mutations);
+    context.usable = true; /* The observer retained the prior copied value. */
+    size_t first = line_count; poll_at(100);
+    assert(contains_since(first, "capture context known=1 age_known=1 age_ms=0") &&
+        contains_since(first, "transfer=0 owner_alive=1 clock_valid=1 usable=0"));
+    first = line_count;
+    for (uint64_t now = 101; now < 200; ++now) {
+        context.heartbeat_age_ms = now;
+        app_audio_diagnostics_capture_context(now, &context); poll_at(now);
+    }
+    assert(line_count == first);
+    poll_at(200);
+    assert(contains_since(first, "usable=1") && contains_since(first, "age_ms=1"));
+    first = line_count; context.heartbeat_age_ms = 3; context.completion_age_ms = 9;
+    app_audio_diagnostics_capture_context(300, &context); poll_at(300);
+    assert(line_count == first); /* Admitted age-only observation stays quiet. */
+    context.transfer_confirmed = true;
+    app_audio_diagnostics_capture_context(500, &context); first = line_count; poll_at(400);
+    assert(contains_since(first, "age_known=0 age_ms=0"));
+    app_audio_diagnostics_capture_context(500, NULL); first = line_count; poll_at(500);
+    assert(contains_since(first, "capture context known=0"));
+    assert(!mutations);
+}
+static void test_capture_context_does_not_invent_owner_state(void)
+{
+    setup(); owner.audio.capture_indicator_required = true;
+    app_audio_capture_context_t context = {.unlocked = true, .screen_visible = true,
+        .bound = true, .armed = true, .owner_alive = true, .clock_valid = true,
+        .capture_generation = UINT64_MAX, .display_generation = UINT64_MAX, .indicator_revision = UINT64_MAX,
+        .heartbeat_age_ms = UINT64_MAX, .completion_age_ms = UINT64_MAX, .display_error = INT32_MIN};
+    app_audio_diagnostics_capture_context(0, &context); poll_at(UINT64_MAX - 100);
+    assert(line_count == 10 && contains_since(0, "age_ms=18446744073709551515") &&
+        contains_since(0, "display_error=-2147483648"));
+    size_t first = line_count; available = false; poll_at(UINT64_MAX);
+    assert(contains_since(first, "capture context known=1") &&
+        contains_since(first, "audio_known=0 required=-1 generation_known=0") &&
+        !contains_since(first, "required=0 audio_generation=0"));
+    assert(!mutations);
+}
 int main(int argc, char **argv)
 {
     const char *names[] = {"unknown_is_not_success", "idle_throttle_and_counter_summary", "failed_job_retained_and_replaced",
-        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "transport_mode_and_results", "private_metadata_wiped", "clock_regression_is_observer_only"};
+        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "transport_mode_and_results", "private_metadata_wiped", "clock_regression_is_observer_only", "capture_context_is_copied_observation", "capture_context_does_not_invent_owner_state"};
     void (*cases[])(void) = {test_unknown_is_not_success, test_idle_throttle_and_counter_summary, test_failed_job_retained_and_replaced,
-        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_transport_mode_and_results, test_private_metadata_wiped, test_clock_regression_is_observer_only};
+        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_transport_mode_and_results, test_private_metadata_wiped, test_clock_regression_is_observer_only, test_capture_context_is_copied_observation, test_capture_context_does_not_invent_owner_state};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)

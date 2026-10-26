@@ -383,12 +383,59 @@ static void playback_checks(void)
     for (unsigned i = 0; i < 20 && !model.writes; ++i) step(1);
     assert(snapshot().quarantined && snapshot().playback.state == AE_JOB_ERROR);
     setup(); job = start(AE_PLAYBACK_STREAM);
+    assert(ae_playback_capacity(engine) == AE_RING_FRAMES && ae_playback_capacity(NULL) == 0);
     for (unsigned i = 0; i <= AE_RING_FRAMES; ++i) {
         frame = playback_frame(job, i);
+        assert(ae_playback_capacity(engine) == AE_RING_FRAMES - i);
         assert(ae_submit_playback(engine, &frame, model.now) == (i < AE_RING_FRAMES ? AE_OK : AE_OVERFLOW));
     }
+    assert(ae_playback_capacity(engine) == 0);
     assert(model.writes == 0 && !snapshot().playback_gate_open);
     puts("PASS: exact playback sequence, explicit underrun timeout, partial-write fault and bounded ingress overflow");
+}
+
+static void pending_capture_keeps_playback_progressing(void)
+{
+    /* A missing, wrong-generation or expired presentation receipt must keep
+     * the new microphone closed without consuming the speaker's progress. */
+    for (unsigned condition = 0; condition < 4; ++condition) {
+        setup(); model.duplex = true;
+        ae_job_snapshot_t playback = start(AE_PLAYBACK_STREAM);
+        ae_frame_t frame = playback_frame(playback, 0);
+        assert(ae_submit_playback(engine, &frame, model.now) == AE_OK); step(8);
+        assert(model.speaker && model.writes == 1 && !model.mic);
+        ae_environment_t environment = {.unlocked = true, .screen_visible = true};
+        ae_environment(engine, &environment, model.now);
+        (void)start(AE_CAPTURE_LIVE);
+        unsigned frames = condition == 3 ? 51 : AE_RING_FRAMES + 2;
+        for (unsigned sequence = 1; sequence <= frames; ++sequence) {
+            frame = playback_frame(playback, sequence);
+            ae_result_t admitted = ae_submit_playback(engine, &frame, model.now);
+            if (admitted != AE_OK) fprintf(stderr,
+                "Pending capture condition=%u sequence=%u result=%d writes=%zu overruns=%llu\n",
+                condition, sequence, admitted, model.writes,
+                (unsigned long long)snapshot().overruns);
+            assert(admitted == AE_OK);
+            model.now += condition == 3 ? 40 : 20;
+            environment.indicator_visible = condition == 1 || condition == 2;
+            environment.indicator_generation = snapshot().audio_generation + (condition == 1 ? 1 : 0);
+            environment.indicator_seen_ms = model.now - (condition == 2 ? AE_INDICATOR_MAX_AGE_MS + 1 : 0);
+            ae_environment(engine, &environment, model.now);
+            (void)ae_poll(engine, model.now);
+            assert(!model.mic && !snapshot().capture_gate_open);
+        }
+        ae_snapshot_t view = snapshot();
+        assert(model.writes == frames + 1 && view.playback.state == AE_JOB_RUNNING && !view.overruns);
+        if (condition == 3) {
+            assert(view.capture[0].state == AE_JOB_ERROR && view.capture[0].error == AE_TIMEOUT &&
+                view.capture[0].stop_reason == AE_STOP_START_TIMEOUT && !view.capture[0].first_frame_seen);
+        } else {
+            assert(view.capture[0].state == AE_JOB_STARTING && !view.capture[0].first_frame_seen);
+            step(4);
+            assert(model.mic && snapshot().capture[0].first_frame_seen && snapshot().playback_gate_open);
+        }
+    }
+    puts("PASS: independent playback continues while microphone presentation is missing, stale or expired; capture keeps its startup deadline");
 }
 
 static void recording_checks(void)
@@ -621,7 +668,7 @@ static void duplex_and_storage_boundaries(void)
 
 int main(void)
 {
-    lifecycle(); callback_races(); safety_and_overflow(); playback_checks(); recording_checks(); background_checks(); duplex_and_storage_boundaries(); uncertain_reconciliation(); duplex_file_fragments(); physical_mute_acknowledgement(); transport_binding_lifecycle();
+    lifecycle(); callback_races(); safety_and_overflow(); playback_checks(); pending_capture_keeps_playback_progressing(); recording_checks(); background_checks(); duplex_and_storage_boundaries(); uncertain_reconciliation(); duplex_file_fragments(); physical_mute_acknowledgement(); transport_binding_lifecycle();
     printf("Resource bytes: engine=%zu (caller-provided external memory)\n", ae_engine_bytes());
     free(memory); return 0;
 }

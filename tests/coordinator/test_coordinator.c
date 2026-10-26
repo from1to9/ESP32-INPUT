@@ -105,6 +105,8 @@ static app_boot_ui_view_t test_boot_view;
 static app_media_snapshot_t test_media_snapshot;
 static app_presenter_indicator_status_t test_indicator;
 static ae_environment_t test_media_environment;
+static app_audio_capture_context_t test_capture_context;
+static uint64_t test_capture_context_ms;
 static app_media_controls_context_t test_media_context;
 static unsigned test_media_stops;
 static bool test_media_speech_context;
@@ -315,6 +317,8 @@ bool app_media_runtime_snapshot(app_media_snapshot_t *snapshot)
 /* The observer has a separate production-code suite; this boundary never
  * grants audio or input authority to coordinator tests. */
 void app_audio_diagnostics_poll(uint64_t now_ms) { (void)now_ms; }
+void app_audio_diagnostics_capture_context(uint64_t observed_ms, const app_audio_capture_context_t *context)
+{ assert(context); test_capture_context = *context; test_capture_context_ms = observed_ms; }
 void app_media_runtime_environment(const ae_environment_t *environment, uint64_t epoch,
     uint64_t revision, bool speech)
 { (void)epoch; (void)revision; test_media_environment = *environment; test_media_speech_context = speech; }
@@ -939,6 +943,7 @@ static void setup(input_mode_t mode)
     test_media_snapshot = (app_media_snapshot_t){0};
     test_indicator = (app_presenter_indicator_status_t){0};
     test_media_environment = (ae_environment_t){0};
+    test_capture_context = (app_audio_capture_context_t){0}; test_capture_context_ms = 0;
     test_media_context = (app_media_controls_context_t){0};
     test_media_stops = test_media_handles = 0;
     test_media_speech_context = test_media_handle = false;
@@ -5424,15 +5429,19 @@ static void capture_display_permission_requires_actual_receipt_and_brightness(vo
         .capture_generation = 9, .owner_heartbeat_ms = 1000};
     refresh_media_context();
     assert(test_media_environment.screen_visible && !test_media_environment.indicator_visible);
+    assert(test_capture_context.screen_visible && test_capture_context.armed && !test_capture_context.usable &&
+        test_capture_context.capture_generation == 9 && test_capture_context_ms == s_now_ms);
     assert(test_media_speech_context && test_media_context.preview_characters == 0);
     test_indicator.usable = true;
     test_indicator.completed_us = 100; /* Old transfer remains evidence only with fresh owner heartbeat. */
     refresh_media_context();
     assert(test_media_environment.indicator_visible && test_media_environment.indicator_generation == 9);
     assert(test_media_environment.indicator_seen_ms == 1000);
+    assert(test_capture_context.usable && test_capture_context.capture_generation == 9);
     test_brightness.applied_known = false;
     refresh_media_context();
     assert(!test_media_environment.screen_visible && !test_media_environment.indicator_visible);
+    assert(!test_capture_context.screen_visible && test_capture_context.usable); /* Independent observations stay distinct. */
     test_brightness.applied_known = true;
     s_idle.wake_capture = true;
     refresh_media_context();

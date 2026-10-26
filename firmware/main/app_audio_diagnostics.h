@@ -1,6 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
+
+/* Copied from the coordinator's existing permission observation. This record
+ * never grants capture permission or reads the display a second time. */
+typedef struct {
+    bool unlocked, privacy_latched, maintenance, screen_visible;
+    bool bound, armed, transfer_confirmed, owner_alive, clock_valid, usable;
+    uint64_t display_generation, capture_generation, indicator_revision;
+    uint64_t heartbeat_age_ms, completion_age_ms;
+    int display_error;
+} app_audio_capture_context_t;
+void app_audio_diagnostics_capture_context(uint64_t observed_ms,
+    const app_audio_capture_context_t *context);
 
 /* Serialized coordinator observer, after PSRAM initialization. Reads cached
  * owner snapshots at most every 100 ms; never services a producer or changes

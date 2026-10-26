@@ -70,6 +70,7 @@ class StackBudgets(unittest.TestCase):
         self.assertEqual({key: value["budget_bytes"] for key, value in budgets.items()}, {
             "main": 8192, "esp_timer": 3584, "sensor": 4096, "power": 3072,
             "control_runtime": 12288, "media_control": 6144, "board_audio": 6144,
+            "audio_manager": 8192,
             "ble_control": 6144, "btc": 3072, "usb_audio": 3072, "tinyusb": 4096, "https": 12288, "lvgl": 8192})
         self.assertEqual(budgets["main"]["allocated_bytes"], 8704)
         self.assertEqual(budgets["esp_timer"]["allocated_bytes"], 4096)
@@ -236,6 +237,110 @@ class StackBudgets(unittest.TestCase):
         del frames["audio_helpers"]["ae_format_equal"]
         errors = stack.evaluate_paths(frames, stack.task_budgets(CONFIG), {label: steps}, {label: "main"})[1]
         self.assertTrue(any("audio_helpers:ae_format_equal" in error for error in errors))
+
+    def test_capture_context_copy_accounts_for_service_and_intent_callers(self):
+        budgets = stack.task_budgets(CONFIG)
+        for caller, prefix in {
+            "service": stack.CORE + [("main", "service_media")],
+            "intent": stack.CORE + [("main", "consume_coordinator_event"), ("main", "handle_intent")],
+        }.items():
+            with self.subTest(caller=caller):
+                label = f"audio_capture_context_{caller}"
+                steps = stack.AUDIO_DIAGNOSTIC_PATHS[label]
+                self.assertEqual(steps[:-2], prefix)
+                self.assertEqual(steps[-2:], [("main", "refresh_media_context"),
+                    ("audio_diagnostics", "app_audio_diagnostics_capture_context")])
+                frames = {}
+                for module, name in steps:
+                    frames.setdefault(module, {})[name] = self.frame(32)
+                # A private refresh helper may be inlined into either caller.
+                del frames["main"]["refresh_media_context"]
+                owners = {label: stack.PATH_OWNERS[label]}
+                chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, owners)
+                self.assertFalse(errors)
+                self.assertEqual(chains[label]["task_owner"], "main")
+                self.assertEqual(chains[label]["known_bytes"], 32 * (len(steps) - 1))
+                frames["main"]["refresh_media_context.part.0"] = self.frame(6144)
+                chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, owners)
+                self.assertTrue(any("2048 reserve > 8192" in error for error in errors))
+                self.assertEqual(chains[label]["known_bytes"], 32 * (len(steps) - 1) + 6144)
+                del frames["audio_diagnostics"]["app_audio_diagnostics_capture_context"]
+                errors = stack.evaluate_paths(frames, budgets, {label: steps}, owners)[1]
+                self.assertTrue(any("Required emitted frame missing: audio_diagnostics:app_audio_diagnostics_capture_context"
+                    in error for error in errors))
+
+    def test_capture_context_logger_and_comparison_count_optional_clones_separately(self):
+        budgets = stack.task_budgets(CONFIG)
+        for helper in ("log_capture_context", "capture_context_changed"):
+            with self.subTest(helper=helper):
+                label = f"audio_diagnostics_{helper}"
+                steps = stack.AUDIO_DIAGNOSTIC_PATHS[label]
+                self.assertEqual(steps, stack.AUDIO_OBSERVER + [("audio_diagnostics", helper)])
+                self.assertNotIn(("main", "refresh_media_context"), steps)
+                self.assertNotIn(("audio_diagnostics", "observe"), steps)
+                frames = {}
+                for module, name in steps[:-1]:
+                    frames.setdefault(module, {})[name] = self.frame(32)
+                owners = {label: stack.PATH_OWNERS[label]}
+                chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, owners)
+                self.assertFalse(errors)
+                known = chains[label]["known_bytes"]
+                frames["audio_diagnostics"][helper] = self.frame(32)
+                frames["audio_diagnostics"][helper + ".constprop.0"] = self.frame(6144)
+                chains, errors = stack.evaluate_paths(frames, budgets, {label: steps}, owners)
+                self.assertEqual(chains[label]["known_bytes"], known + 32 + 6144)
+                self.assertTrue(any("2048 reserve > 8192" in error for error in errors))
+
+    def test_audio_manager_capacity_uses_own_worker_budget_and_required_engine_frames(self):
+        label = "audio_manager_playback_capacity"
+        owner, steps = stack.AUDIO_RUNTIME_PATHS[label]
+        self.assertEqual(owner, "audio_manager")
+        self.assertEqual(stack.PATH_OWNERS[label], owner)
+        self.assertEqual(steps, [("audio_manager", "worker"),
+            ("audio_engine", "ae_playback_capacity"), ("audio_engine", "ae_job_active")])
+        self.assertEqual(stack.UNITS["audio_engine"], "components/audio_engine/audio_engine.c")
+        frames = {}
+        for module, name in steps:
+            frames.setdefault(module, {})[name] = self.frame(32)
+        frames["audio_manager"]["worker"] = self.frame(3000)
+        frames["audio_engine"]["ae_playback_capacity.part.0"] = self.frame(64)
+        owners = {label: owner}
+        before = stack.task_budgets(CONFIG)
+        chains, errors = stack.evaluate_paths(frames, before, {label: steps}, owners)
+        self.assertFalse(errors)
+        self.assertEqual(chains[label]["known_bytes"], 3128)
+        self.assertEqual(chains[label]["reserve_bytes"], 2048)
+        root = self.fixture()
+        path = root / stack.BUDGET_FILES[owner]
+        source = path.read_text()
+        self.assertIn("#define WORKER_STACK_BYTES 8192U", source)
+        path.write_text(source.replace("#define WORKER_STACK_BYTES 8192U", "#define WORKER_STACK_BYTES 4096U"))
+        after = stack.task_budgets(CONFIG, root)
+        self.assertEqual(after[owner]["budget_bytes"], 4096)
+        self.assertEqual(after[owner]["allocated_bytes"], 4096)
+        self.assertNotEqual(before[owner]["evidence"][0]["sha256"], after[owner]["evidence"][0]["sha256"])
+        self.assertTrue(stack.evaluate_paths(frames, after, {label: steps}, owners)[1])
+        self.assertFalse(stack.evaluate_paths(frames, after, {label: steps}, {label: "main"})[1])
+        for module, name in steps:
+            with self.subTest(required_entry=name):
+                missing = {key: dict(value) for key, value in frames.items()}
+                missing[module] = {key: value for key, value in missing[module].items()
+                    if key != name and not key.startswith(name + ".")}
+                errors = stack.evaluate_paths(missing, before, {label: steps}, owners)[1]
+                self.assertTrue(any(f"Required emitted frame missing: {module}:{name}" in error for error in errors))
+
+    def test_audio_manager_ambiguous_or_unresolved_allocation_fails_closed(self):
+        for mutation in (
+            lambda source: source.replace('worker, "audio_manager", WORKER_STACK_BYTES',
+                'worker, "audio_manager", unknown_stack'),
+            lambda source: source + '\nvoid extra(void) { xTaskCreate(worker, "audio_manager", 4096, state, 4, NULL); }\n',
+            lambda source: source.replace("#define WORKER_STACK_BYTES 8192U", "#define WORKER_STACK_BYTES unknown_stack"),
+        ):
+            root = self.fixture()
+            path = root / stack.BUDGET_FILES["audio_manager"]
+            path.write_text(mutation(path.read_text()))
+            with self.assertRaises(RuntimeError):
+                stack.task_budgets(CONFIG, root)
 
     def test_worker_allocation_branches_must_agree(self):
         for key, task in (("media_runtime", "media_control"), ("board_audio", "board_audio")):

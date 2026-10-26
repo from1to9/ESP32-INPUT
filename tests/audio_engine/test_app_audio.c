@@ -17,6 +17,7 @@ struct test_task { pthread_t thread; pthread_mutex_t lock; pthread_cond_t change
 static struct test_task task;
 static atomic_uint allocations, writes, receipts;
 static atomic_bool hold_worker, worker_held;
+static atomic_bool hold_write, write_held, verify_payload;
 static atomic_bool hold_task_handle, task_handle_held;
 static size_t allocated_bytes;
 static unsigned allocation_attempt, fail_allocation;
@@ -123,6 +124,7 @@ static ae_result_t write_codec(void *c, uint64_t generation, const void *data, s
 {
     (void)c; assert(speaker && generation == codec_generation && bytes == 960); *actual = 0;
     if (!pending) memcpy(submitted, data, bytes); else assert(!memcmp(data, submitted, bytes));
+    if (pending && atomic_load(&hold_write)) { atomic_store(&write_held, true); return AE_AGAIN; }
     ae_result_t r = exchange(5); if (r == AE_OK) { *actual = bytes; atomic_fetch_add(&writes, 1); } return r;
 }
 static ae_result_t route_caps(void *c, ae_route_t route, ae_route_capabilities_t *out)
@@ -135,7 +137,12 @@ static ae_result_t route_prepare(void *c, ae_route_t route, const ae_format_t *f
 static ae_result_t route_stop(void *c, ae_route_t route, uint64_t generation, const ae_route_token_t *token)
 { (void)c; (void)route; (void)generation; (void)token; return AE_OK; }
 static void consumed(void *c, ae_route_t route, const ae_frame_t *frame)
-{ (void)c; assert(route == AE_ROUTE_USB_UAC && frame->sequence == atomic_load(&receipts) + 1); atomic_fetch_add(&receipts, 1); }
+{
+    (void)c; assert(route == AE_ROUTE_USB_UAC && frame->sequence == atomic_load(&receipts) + 1);
+    if (atomic_load(&verify_payload))
+        for (size_t i = 0; i < frame->bytes; ++i) assert(frame->data[i] == (uint8_t)frame->sequence);
+    atomic_fetch_add(&receipts, 1);
+}
 static ae_result_t authority(void *c, ae_authority_operation_t op, const ae_start_request_t *request, uint64_t now, ae_authority_t *out)
 { (void)c; (void)op; (void)request; *out = (ae_authority_t){.allowed = true, .owner_session_alive = true, .source_valid_until_ms = now + 3600000}; return AE_OK; }
 static ae_result_t wall(void *c, uint64_t *seconds) { (void)c; *seconds = 100000; return AE_OK; }
@@ -150,6 +157,40 @@ static app_audio_result_t command(app_audio_command_t *request)
     app_audio_result_t result;
     for (unsigned i = 0; i < 2000; ++i) { if (app_audio_take_result(&result)) { assert(result.request_token == token); return result; } pause_ms(1); }
     assert(!"async command timed out"); return (app_audio_result_t){0};
+}
+static void hold_full_playback(ae_frame_t *frame)
+{
+    /* Hold an actual asynchronous codec request, then fill the engine and
+     * ingress independently. Full engine storage must leave ingress owned. */
+    uint64_t delivered_frames = frame->sequence;
+    atomic_store(&hold_write, true); atomic_store(&write_held, false); atomic_store(&verify_payload, true);
+    for (unsigned i = 0; i < AE_RING_FRAMES; ++i) {
+        frame->sequence++; frame->sample_offset += 480; memset(frame->data, (int)frame->sequence, frame->bytes);
+        assert(app_audio_submit_transport_playback(AE_ROUTE_USB_UAC, frame) == AE_OK);
+        for (unsigned wait = 0; wait < 500 && snapshot().playback.received_bytes < frame->sequence * frame->bytes; ++wait) pause_ms(1);
+        assert(snapshot().playback.received_bytes == frame->sequence * frame->bytes);
+    }
+    assert(atomic_load(&write_held));
+    atomic_store(&hold_worker, true);
+    for (unsigned i = 0; i < 500 && !atomic_load(&worker_held); ++i) pause_ms(1);
+    assert(atomic_load(&worker_held));
+    for (unsigned i = 0; i < 4; ++i) {
+        frame->sequence++; frame->sample_offset += 480; memset(frame->data, (int)frame->sequence, frame->bytes);
+        assert(app_audio_submit_transport_playback(AE_ROUTE_USB_UAC, frame) == AE_OK);
+    }
+    atomic_store(&write_held, false); atomic_store(&hold_worker, false);
+    for (unsigned i = 0; i < 500 && !atomic_load(&write_held) && !snapshot().overruns; ++i) pause_ms(1);
+    ae_snapshot_t view = snapshot();
+    if (view.overruns) fprintf(stderr, "Full engine consumed ingress: received=%llu delivered=%llu discarded=%llu overruns=%llu\n",
+        (unsigned long long)view.playback.received_bytes, (unsigned long long)view.playback.delivered_bytes,
+        (unsigned long long)view.playback.discarded_frames, (unsigned long long)view.overruns);
+    assert(atomic_load(&write_held) && view.playback.state == AE_JOB_RUNNING && !view.overruns);
+    assert(view.playback.received_bytes == (delivered_frames + AE_RING_FRAMES) * frame->bytes &&
+        view.playback.delivered_bytes == delivered_frames * frame->bytes);
+    assert(app_audio_transport_playback_capacity(AE_ROUTE_USB_UAC, view.audio_generation) == 0);
+    ae_frame_t retry = *frame; retry.sequence++; retry.sample_offset += 480;
+    retry.consumer_generation = view.playback.consumer_generation;
+    assert(app_audio_try_submit_playback(&retry) == AE_AGAIN && !snapshot().overruns);
 }
 int main(void)
 {
@@ -198,15 +239,21 @@ int main(void)
     atomic_store(&hold_worker, false);
     for (unsigned i = 0; i < 500 && atomic_load(&receipts) < 84; ++i) pause_ms(1);
     assert(atomic_load(&receipts) == 84 && !snapshot().overruns);
-    frame.sequence++; frame.sample_offset += 480; frame.route_token.link_generation++;
-    assert(app_audio_submit_transport_playback(AE_ROUTE_USB_UAC, &frame) == AE_STALE);
+    hold_full_playback(&frame);
+    atomic_store(&hold_write, false); completed();
+    for (unsigned i = 0; i < 500 && atomic_load(&receipts) < 104; ++i) pause_ms(1);
+    assert(atomic_load(&receipts) == 104 && atomic_load(&writes) == 104 && !snapshot().overruns);
+    ae_frame_t stale = frame; stale.sequence++; stale.sample_offset += 480; stale.route_token.link_generation++;
+    assert(app_audio_submit_transport_playback(AE_ROUTE_USB_UAC, &stale) == AE_STALE);
+    hold_full_playback(&frame);
     app_audio_request_safety_stop(AE_STOP_PRIVACY);
     assert(app_audio_transport_playback_capacity(AE_ROUTE_USB_UAC, view.audio_generation) == 0);
     assert(app_audio_submit_transport_playback(AE_ROUTE_USB_UAC, &frame) != AE_OK);
     assert(app_audio_shutdown() == AE_AGAIN); assert(!pthread_join(task.thread, NULL));
+    assert(atomic_load(&receipts) == 104 && atomic_load(&writes) == 104);
     assert(app_audio_shutdown() == AE_OK && atomic_load(&allocations) == 0);
     pthread_cond_destroy(&task.changed); pthread_mutex_destroy(&task.lock);
     printf("Resource bytes: app audio allocations=%zu (including engine, excluding worker stack/SDK drivers)\n", allocated_bytes);
-    puts("PASS: actual audio worker, async codec completion notifications at 100 Hz tick, 80 real-rate frames plus four-frame credit catchup, exact consumer binding, consumption receipts and safety shutdown");
+    puts("PASS: actual audio worker, async codec completion notifications at 100 Hz tick, sustained PCM, full engine retains four-frame ingress until exact payload/sequence drain, safety shutdown discards retained work without delivery");
     return 0;
 }

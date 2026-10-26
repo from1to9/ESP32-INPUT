@@ -158,6 +158,10 @@ void ae_safety_stop(ae_engine_t *, ae_stop_reason_t, uint64_t now_ms);
 /* Poll performs bounded work; no callback waits beyond the 20 ms port budget.
  * The owner calls it at least every 10 ms while jobs/cleanup are pending. */
 ae_result_t ae_poll(ae_engine_t *, uint64_t now_ms);
+/* Serialized owner only: available stream ring slots, zero without an active
+ * stream. This is storage capacity, not authorization; submission revalidates
+ * the frame and current job. No engine mutation may intervene before submit. */
+size_t ae_playback_capacity(const ae_engine_t *);
 ae_result_t ae_submit_playback(ae_engine_t *, const ae_frame_t *, uint64_t now_ms);
 ae_result_t ae_recover(ae_engine_t *, uint64_t now_ms);
 void ae_snapshot(const ae_engine_t *, ae_snapshot_t *);

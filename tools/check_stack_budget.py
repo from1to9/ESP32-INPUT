@@ -32,6 +32,7 @@ UNITS = {
     "bluetooth_management": "firmware/main/app_bluetooth_management.c",
     "media_runtime": "firmware/main/app_media_runtime.c",
     "audio_manager": "firmware/main/app_audio.c",
+    "audio_engine": "components/audio_engine/audio_engine.c",
     "audio_diagnostics": "firmware/main/app_audio_diagnostics.c",
     "usb_audio": "firmware/main/usb_audio.c",
     "board_audio": "firmware/main/board_audio_mosaico.c",
@@ -392,9 +393,15 @@ AUDIO_DIAGNOSTIC_PATHS = {
     "audio_diagnostics_job_copy": AUDIO_OBSERVER + [("audio_diagnostics", "observe"), ("audio_diagnostics", "observe_job")],
     "audio_diagnostics_scratch_wipe": AUDIO_OBSERVER + [("audio_diagnostics", "observe"), ("audio_diagnostics", "clear_scratch")],
 }
-for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec", "log_transport"):
+for _caller, _prefix in {
+    "service": CORE + [("main", "service_media")],
+    "intent": LOCAL_INTENT,
+}.items():
+    AUDIO_DIAGNOSTIC_PATHS[f"audio_capture_context_{_caller}"] = _prefix + [
+        ("main", "refresh_media_context"), ("audio_diagnostics", "app_audio_diagnostics_capture_context")]
+for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec", "log_transport", "log_capture_context"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_logger}"] = AUDIO_OBSERVER + [("audio_diagnostics", _logger)]
-for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed", "transport_changed"):
+for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed", "transport_changed", "capture_context_changed"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_comparison}"] = AUDIO_OBSERVER + [("audio_diagnostics", _comparison)]
 AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_format"] = AUDIO_OBSERVER + [
     ("audio_diagnostics", "codec_changed"), ("audio_helpers", "ae_format_equal")]
@@ -433,6 +440,10 @@ MEDIA_PROCESS = [("media_runtime", "worker"), ("media_runtime", "media_step"),
 MEDIA_START = MEDIA_PROCESS + [("media_runtime", "start_job")]
 MEDIA_SEND = [("media_runtime", "send_audio"), ("audio_manager", "app_audio_submit")]
 AUDIO_RUNTIME_PATHS = {
+    # This changed synchronous query is the only declared audio-manager worker
+    # path; it does not establish coverage of dispatch or the engine poll loop.
+    "audio_manager_playback_capacity": ("audio_manager", [("audio_manager", "worker"),
+        ("audio_engine", "ae_playback_capacity"), ("audio_engine", "ae_job_active")]),
     "audio_worker_route_submit": ("media_control", MEDIA_PROCESS + MEDIA_SEND + [("audio_helpers", "ae_secure_zero")]),
     "audio_worker_start_submit": ("media_control", MEDIA_START + MEDIA_SEND + [("audio_helpers", "ae_secure_zero")]),
     "audio_worker_start_wake": ("media_control", MEDIA_START + MEDIA_SEND + [("audio_manager", "wake")]),
@@ -886,6 +897,8 @@ REQUIRED.update(step for path in TOUCH_PATHS.values() for step in path
 REQUIRED.update({("main", "send_report"), ("main", "remote_changed"), ("main", "remote_observe"),
     ("usb_hid", "usb_hid_send_generation"), ("usb_hid", "usb_hid_snapshot")})
 REQUIRED.add(("board_audio", "worker"))
+REQUIRED.update({("audio_manager", "worker"), ("audio_engine", "ae_playback_capacity"),
+    ("audio_engine", "ae_job_active")})
 REQUIRED.update({("ble", "control_worker"), ("ble", "gap_callback"), ("ble", "gatts_callback"),
     ("main", "report_bluetooth_advertising_diagnostics"), ("osi_thread", "osi_thread_run"),
     ("btc_thread", "btc_thread_handler"), ("btc_gap", "btc_gap_ble_cb_handler"), ("btc_gatts", "btc_gatts_cb_handler")})
@@ -918,6 +931,7 @@ BUDGET_FILES = {
     "main": "firmware/main/main.c",
     "runtime": "firmware/main/app_control_runtime.c",
     "media_runtime": "firmware/main/app_media_runtime.c",
+    "audio_manager": UNITS["audio_manager"],
     "board_audio": UNITS["board_audio"],
     "ble": UNITS["ble"],
     "bt_common": ".tools/esp-idf/components/bt/common/include/bt_common.h",
@@ -1040,6 +1054,10 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
 
     media_stack = conditional_worker_stack("media_runtime", "media_control")
     audio_stack = conditional_worker_stack("board_audio", "board_audio")
+    manager_stack = integer_expression(single("audio_manager", r"^#define WORKER_STACK_BYTES\s+([^\n]+)")[1])
+    manager_allocation = single("audio_manager", r"xTaskCreate\s*\(\s*worker\s*,\s*\"audio_manager\"\s*,\s*([^,]+),")[1]
+    if manager_allocation.strip() != "WORKER_STACK_BYTES":
+        raise RuntimeError("Cannot verify the audio_manager worker stack allocation")
     ble_stack = integer_expression(single("ble", r"^#define CONTROL_TASK_STACK\s+([^\n]+)")[1])
     match("ble", r"xTaskCreate\s*\(\s*control_worker\s*,\s*\"ble_hid_control\"\s*,\s*CONTROL_TASK_STACK\s*,")
     btc_stack = configured("CONFIG_BT_BTC_TASK_STACK_SIZE")
@@ -1100,6 +1118,8 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
             ["xTaskCreate[WithCaps](worker, media_control)"]),
         "board_audio": budget("board_audio", audio_stack, ["board_audio"],
             ["xTaskCreate[WithCaps](worker, board_audio)"]),
+        "audio_manager": budget("audio_manager", manager_stack, ["audio_manager"],
+            ["WORKER_STACK_BYTES", "xTaskCreate(worker, audio_manager, WORKER_STACK_BYTES)"]),
         "ble_control": budget("ble_hid_control", ble_stack, ["ble"], ["CONTROL_TASK_STACK"]),
         "btc": budget("BTC_TASK", btc_stack, ["sdk_tasks", "bt_user_config", "bt_common", "btc_thread", "osi_thread"],
             ["CONFIG_BT_BTC_TASK_STACK_SIZE", "BTC_TASK_STACK_SIZE", "osi_thread_create", "xTaskCreatePinnedToCore"], extra),
@@ -1420,6 +1440,7 @@ def main():
                              "Other SDK/vendor dependencies are not covered by this drift check.",
               "paths": chains, "all_frames": frames, "errors": errors,
               "limits": "Task PASS covers declared task paths only. Interrupt inventory remains explicitly unqualified. "
+                        "Audio-manager worker coverage is limited to the playback-capacity query, excluding dispatch and engine polling. "
                         "Declared task/callback paths include named measured vendor wrappers. "
                         "Main/timer SDK libc stack supplements are reported but excluded from the checked "
                         "application budget. Clone sums are conservative; no "

@@ -259,8 +259,12 @@ static void worker(void *context)
             /* Make the authorized binding visible before route.prepare can start a
              * transport producer. No pre-start media queue is opened by a driver. */
             publish(state);
+            /* Only this worker mutates the engine. Retain ingress ownership
+             * while its downstream ring is full; polling may free a slot. */
+            size_t engine_capacity = ae_playback_capacity(state->engine);
             portENTER_CRITICAL(&app.lock);
-            ae_result_t frame_result = state->ingress_open ? ae_ring_pop(&state->ingress, &state->frame) : AE_AGAIN;
+            ae_result_t frame_result = state->ingress_open && engine_capacity ?
+                ae_ring_pop(&state->ingress, &state->frame) : AE_AGAIN;
             portEXIT_CRITICAL(&app.lock);
             if (frame_result == AE_OK) {
                 (void)ae_submit_playback(state->engine, &state->frame, now_ms());

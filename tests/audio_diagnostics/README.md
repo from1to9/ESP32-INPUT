@@ -1,6 +1,6 @@
 # Cached audio diagnostics observer
 
-Run `python3 tests/audio_diagnostics/run.py` from the repository root. Nine
+Run `python3 tests/audio_diagnostics/run.py` from the repository root. Eleven
 isolated cases compile the actual `app_audio_diagnostics.c` observer and format
 comparison code with strict C11 warnings, AddressSanitizer and fail-fast UBSan.
 Only the cached media/USB/codec getters and logger are substituted. Exact
@@ -12,7 +12,7 @@ The observer copies cached snapshots at most once per 100 ms, logs semantic
 state/error changes and emits counter summaries once per ten seconds. No
 producer service, audio mutation, HID action, storage or allocation occurs.
 It can miss transitions shorter than its sampling interval. Logging has a
-cost; physical scheduling/timing effects remain unqualified. At most nine
+cost; physical scheduling/timing effects remain unqualified. At most ten
 lines are emitted per admitted observation, including during error flapping.
 A monotonic clock regression reports the observer failure once and disables
 further observation without changing the audio owner or its policy.
@@ -52,7 +52,7 @@ USB host compatibility or the reported physical two-second startup cause.
 
 
 A separate cached USB transport copy-out snapshot adds one bounded diagnostic
-line (nine maximum lines per admitted observation). The existing line's 768-byte
+line (ten maximum lines per admitted observation with capture context). The existing line's 768-byte
 format bound remains; the added transport line is checked below 1,024 bytes even
 with maximum-width counters/registers. Sampling and ten-second summary cadence
 are unchanged. This increases logging cost; target scheduling effects remain
@@ -75,3 +75,12 @@ prove a coherent instant, and the observer never reads peripheral registers.
 Mode required/known/valid and reject bits distinguish unavailable evidence from
 rejected hardware prerequisites. Copying or logging observations never performs
 the explicit audio mode/reset lifecycle transition.
+
+While capture is required, the observer also logs the coordinator's copied
+permission context: display binding, armed marker, completed transfer, owner
+heartbeat, generation and visibility. The coordinator passes the observations
+it already used; diagnostics do not call the display getter or read hardware.
+Missing context stays unknown. Observation age and clock validity are separate
+from the copied permission result. Context is sampled at the existing 100 ms
+cadence; heartbeat-age changes alone do not produce extra logs. This evidence
+can locate a blocked startup gate but does not itself authorize capture.
