@@ -9,6 +9,9 @@ A fifteenth checks playback-only sample counts and peaks, signed extrema, known
 silence, expired frames, saturating counts, stale generations and read-only
 snapshot calls. Observations measure complete frames returned to the manager;
 they neither retain PCM nor establish physical receipt or acoustic output.
+Two further cases bound capture admission to four 98-byte writes per worker
+pass, preserve a zero/short write's suffix, stop a batch on a link change during
+its second write, and retain fail-closed handling of an odd-byte FIFO result.
 
 Thirteen isolated cases cover exact mono PCM16 frames, short writes, queue
 saturation, expired samples, monotonic sequence rejection, disconnect during
@@ -65,7 +68,7 @@ the oldest unread PCM and retain the partial frame and bounded application queue
 Actual IN completions exercise the initial empty transfer and 94/96/98-byte
 flow-control packets with bounded worker jitter. At every step, accepted bytes
 equal completed bytes plus the pending DCD packet plus FIFO contents, all checked
-against varied source PCM. The run completes 3,836 of 3,840 accepted bytes; four
+against varied source PCM. The run completes 3,748 of 3,840 accepted bytes; 92
 bytes remain in the real FIFO awaiting more samples. No tail is padded or counted
 as completed. Rejected admission can retry the same sequence, and unchanged age
 expiry, stop flush and reset/reinitialization policy are covered.
@@ -80,8 +83,26 @@ empty transfers. The callback byte total equals actual completed bytes. The
 runner retains the prior class without the new observation hooks and with the
 old read-length assignment; it verifies that independently reviewed full source
 hash before reproducing both failures.
-All five final real-driver cases pass; the three original-class defects and two
+All seven final real-driver cases pass; the three original-class defects and two
 isolated finite-tail failures remain expected, explicitly identified aborts.
+
+The two continuous duplex cases use the real generated class and 392-byte FIFO
+at full and high speed, ten-millisecond capture frames, one IN completion and
+one 96-byte OUT packet per millisecond, and one missed worker wake every four
+milliseconds. The prior adapter fills its four-frame queue and rejects capture
+at 130 ms. Bounded batch admission sustains ten seconds without capture rejection
+or playback drops. Every completed, pending and FIFO byte is checked in order,
+and accepted bytes equal completions plus the pending packet plus FIFO contents;
+the application queue accounts for the remaining produced bytes. No PCM tail is
+padded or counted as completed. This is host simulation evidence for throughput,
+not a physical explanation or qualification of crackling or a reported freeze.
+
+The stalled-host comparison still performs exactly twenty FIFO write attempts,
+preserving the original 1,920-byte overwrite failure and 392-byte retained FIFO.
+Its resume schedule includes a four-millisecond wake gap at the real class's
+flow-control blackout boundary, retaining explicit 94/96/98-byte coverage with
+the faster FIFO refill. That finite case completes 3,748 of 3,840 accepted bytes;
+92 remain in the real FIFO. The single-frame cases still complete exactly 960.
 
 The generated class preserves upstream licensing and uses the exact reviewed
 preimage, patch and postimage hashes in

@@ -610,3 +610,23 @@ coordinator's global status without erasing messages from another owner.
 Evidence: [worker/engine regressions](../../tests/audio_engine/README.md),
 [control regressions](../../tests/media_controls/README.md), and
 [device failure record](../../docs/validation.md#remaining-live-control-timeout-after-usb-readiness-repair-2026-10-26).
+
+## 28. Separate FIFO admission from USB packet cadence
+
+One packet-sized write followed by a nominal one-millisecond task delay does
+not sustain one packet per millisecond after scheduler and processing overhead.
+A continuous capture stream can fill its fixed application queue even while
+USB completion counters keep advancing. Let each worker pass admit a bounded
+batch to the finite FIFO, stopping on short/zero writes and rechecking lifecycle
+identity between chunks. Keep packet limits, suffix ownership, queue capacity,
+age rejection and privacy invalidation unchanged.
+
+Use the real pinned class/FIFO with a continuous producer, bus consumption and
+missed worker wakes. Compare every byte in completed packets, in-flight packets,
+the FIFO and the application queue; successful enqueue counts alone are not
+conservation. Preserve low-fill and finite-tail oracles when improved batching
+changes which scheduling gaps reach those branches. Such tests establish a
+throughput defect and repair, not the cause of audible crackle or a UI freeze.
+
+Evidence: [USB audio regressions](../../tests/usb_audio/README.md) and
+[duplex failure evidence](../../docs/validation.md#failure-only-notice-deployment-and-usb-duplex-failure-2026-10-26).

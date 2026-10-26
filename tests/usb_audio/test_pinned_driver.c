@@ -139,7 +139,11 @@ static void test_capture(void)
         memcpy(expected + (i - 1) * UAC_FRAME_BYTES, frame.data, UAC_FRAME_BYTES);
         assert(capture(NULL, AE_ROUTE_USB_UAC, &frame) == AE_OK);
     }
-    for (unsigned i = 0; i < 20; ++i) { service_io(); now_us += 1000; }
+    /* Keep the original comparison at exactly twenty FIFO write attempts,
+     * independently of how many bounded attempts the worker makes per wake. */
+    for (unsigned i = 0; i < 20 && usb_audio_snapshot().capture_write_calls < 20; ++i) {
+        service_io(); now_us += 1000;
+    }
     usb_audio_snapshot_t snapshot = usb_audio_snapshot();
     uint16_t queued = tu_fifo_count(tud_audio_n_get_ep_in_ff(0));
     if (snapshot.capture_write_bytes != sizeof(pending))
@@ -158,7 +162,12 @@ static void test_capture(void)
      * then the actual class consumes its FIFO and arms the following packet. */
     for (unsigned i = 0; i < 60; ++i) {
         complete_in();
-        if (i % 4 != 3) service_io(); /* Bounded worker jitter exercises low-fill flow control. */
+        /* Include a four-millisecond wake gap at the real class's blackout
+         * boundary. Batch admission otherwise keeps the FIFO above its
+         * low-fill threshold, leaving the 94-byte branch unexercised. */
+        bool wake = i % 4 != 3 || i == 7;
+        if (i >= 8 && i <= 10) wake = false;
+        if (wake) service_io();
         now_us += 1000;
         snapshot = usb_audio_snapshot(); queued = tu_fifo_count(tud_audio_n_get_ep_in_ff(0));
         assert(snapshot.capture_write_bytes == completed_bytes + in_bytes + queued);
@@ -213,10 +222,81 @@ static void test_single_capture(void)
     puts("PASS: finite single-frame IN sends exact960 PCM bytes, including short94 tail, then empty packets only");
 }
 
+static uint8_t capture_byte(size_t offset)
+{
+    return (uint8_t)(offset % UAC_FRAME_BYTES + offset / UAC_FRAME_BYTES + 1U);
+}
+
+static void test_duplex_capture_jitter(void)
+{
+    stack_driver_init(); ae_route_token_t token = start(AE_MICROPHONE | AE_SPEAKER);
+    size_t produced = 0, completed = 0, playback_bytes = 0;
+    unsigned peak_queued = 0;
+    uint8_t packet[96], fifo[392];
+    for (unsigned ms = 0; ms < 10000; ++ms) {
+        if (ms % 10U == 0) {
+            ae_frame_t frame = make_frame(token, produced / UAC_FRAME_BYTES + 1U);
+            ae_result_t result = capture(NULL, AE_ROUTE_USB_UAC, &frame);
+            if (result != AE_OK) {
+                usb_audio_snapshot_t state = usb_audio_snapshot();
+                fprintf(stderr, "FAIL: continuous capture rejected at ms=%u result=%d produced=%zu accepted=%llu completed=%zu queued=%u\n",
+                    ms, result, produced, (unsigned long long)state.capture_write_bytes, completed, state.queued_capture_frames);
+            }
+            assert(result == AE_OK); produced += frame.bytes;
+        }
+        /* One real IN completion and one 96-byte OUT packet per millisecond.
+         * Varied PCM is checked in place; the test retains no stream history. */
+        assert(stack_in_armed);
+        for (uint16_t i = 0; i < in_bytes; ++i) assert(in_data[i] == capture_byte(completed + i));
+        completed += in_bytes;
+        uint16_t bytes = in_bytes; stack_in_armed = false;
+        assert(audiod_xfer_isr(0, 0x84, XFER_RESULT_SUCCESS, bytes));
+        for (unsigned i = 0; i < sizeof(packet); ++i) packet[i] = (uint8_t)((size_t)ms * sizeof(packet) + i);
+        assert(stack_complete_out(packet, sizeof(packet)));
+        /* Bounded scheduling jitter: three wakes, then one missed wake. */
+        if (ms % 4U != 3U) {
+            usb_audio_snapshot_t before = usb_audio_snapshot();
+            service_io(); service_feedback();
+            usb_audio_snapshot_t after = usb_audio_snapshot();
+            assert(after.capture_write_calls - before.capture_write_calls <= 4);
+            assert(after.capture_write_bytes - before.capture_write_bytes <= 392);
+        }
+        ae_frame_t playback;
+        while (usb_audio_receive(&playback) == AE_OK) {
+            assert(playback.sample_offset * 2U == playback_bytes);
+            for (unsigned i = 0; i < playback.bytes; ++i) assert(playback.data[i] == (uint8_t)(playback_bytes + i));
+            playback_bytes += playback.bytes;
+            playback_consumed(NULL, AE_ROUTE_USB_UAC, &playback);
+        }
+        usb_audio_snapshot_t state = usb_audio_snapshot();
+        uint16_t queued = tu_fifo_count(tud_audio_n_get_ep_in_ff(0));
+        assert(state.capture_write_bytes == completed + in_bytes + queued);
+        assert(tu_fifo_peek_n(tud_audio_n_get_ep_in_ff(0), fifo, queued) == queued);
+        for (uint16_t i = 0; i < in_bytes; ++i) assert(in_data[i] == capture_byte(completed + i));
+        for (uint16_t i = 0; i < queued; ++i) assert(fifo[i] == capture_byte(completed + in_bytes + i));
+        size_t application_bytes = 0;
+        for (unsigned i = 0; i < s_tx_count; ++i)
+            application_bytes += UAC_FRAME_BYTES - s_memory->tx[(s_tx_head + i) % UAC_QUEUE_FRAMES].offset;
+        assert(produced == state.capture_write_bytes + application_bytes);
+        assert(!state.rejected_capture_frames && !state.dropped_playback_frames && state.prepared);
+        if (s_tx_count > peak_queued) peak_queued = s_tx_count;
+        now_us += 1000;
+    }
+    usb_audio_snapshot_t state = usb_audio_snapshot();
+    assert(produced == 960000 && state.capture_write_bytes == produced && completed >= produced - UAC_FRAME_BYTES);
+    assert(playback_bytes >= produced - UAC_FRAME_BYTES && peak_queued < UAC_QUEUE_FRAMES);
+    printf("PASS: 10s real-class %s duplex with one missed wake per4ms: produced=%zu accepted=%llu completed=%zu pending=%u fifo=%u peak_queue=%u playback=%zu; exact PCM and finite-FIFO conservation\n",
+        high_speed ? "HS" : "FS", produced, (unsigned long long)state.capture_write_bytes,
+        completed, in_bytes, tu_fifo_count(tud_audio_n_get_ep_in_ff(0)), peak_queued, playback_bytes);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     if (!strcmp(argv[1], "out")) test_out();
+    else if (!strcmp(argv[1], "duplex_fs") || !strcmp(argv[1], "duplex_hs")) {
+        high_speed = !strcmp(argv[1], "duplex_hs"); test_duplex_capture_jitter();
+    }
     else {
         bool single = !strcmp(argv[1], "single_fs") || !strcmp(argv[1], "single_hs");
         assert(single || !strcmp(argv[1], "capture_fs") || !strcmp(argv[1], "capture_hs"));

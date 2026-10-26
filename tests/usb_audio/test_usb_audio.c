@@ -160,6 +160,35 @@ static void disconnect_during_fifo_write(void)
     usb_audio_stack_event(false, false);
     usb_audio_stack_event(true, false);
 }
+static void disconnect_on_next_write(void) { during_write = disconnect_during_fifo_write; }
+static void capture_batch_guards(void)
+{
+    ae_route_token_t token = start(AE_MICROPHONE);
+    ae_frame_t frame = make_frame(token, 1);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &frame) == AE_OK);
+    service(1);
+    assert(s_status.capture_write_calls == 4 && written_bytes == 392 && s_memory->tx[s_tx_head].offset == 392);
+    maximum_write = 0; service(1);
+    assert(s_status.capture_write_calls == 5 && written_bytes == 392 && s_memory->tx[s_tx_head].offset == 392);
+    maximum_write = 40; service(1);
+    assert(s_status.capture_write_calls == 6 && written_bytes == 432 && s_memory->tx[s_tx_head].offset == 432);
+    assert(!memcmp(frame.data, written_data, written_bytes));
+    maximum_write = UINT16_MAX; during_write = disconnect_on_next_write; service(1);
+    assert(s_status.capture_write_calls == 8 && written_bytes == 628 && !s_tx_count);
+    assert(!memcmp(frame.data, written_data, written_bytes));
+    assert(!s_status.prepared && s_status.cleanup_pending && s_status.error == ESP_OK);
+    service(1); assert(!s_status.cleanup_pending && written_bytes == 628);
+}
+static void capture_invalid_batch_write(void)
+{
+    ae_route_token_t token = start(AE_MICROPHONE);
+    ae_frame_t frame = make_frame(token, 1);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &frame) == AE_OK);
+    maximum_write = 1; service(1);
+    assert(s_status.capture_write_calls == 1 && s_status.capture_write_bytes == 1);
+    assert(s_status.error == ESP_FAIL && !s_status.prepared && s_status.cleanup_pending && !s_tx_count);
+    service(1); assert(!s_status.cleanup_pending && s_status.capture_write_calls == 1);
+}
 static void generations_and_stop(void)
 {
     ae_route_token_t token = start(AE_MICROPHONE);
@@ -488,7 +517,8 @@ int main(int argc, char **argv)
         worker_failure_releases_memory, saturation_and_time_failure, many_reconnections,
         same_alternate_and_resume_require_fresh_preparation, endpoint_close_revokes_before_reopen,
         feedback_tracks_codec_consumption, dropped_frames_preserve_stream_offsets, playback_binding_barriers,
-        other_profiles_keep_existing_admission, playback_content_observation};
+        other_profiles_keep_existing_admission, playback_content_observation,
+        capture_batch_guards, capture_invalid_batch_write};
     unsigned index = (unsigned)strtoul(argv[1], NULL, 10);
     assert(index < sizeof(cases) / sizeof(cases[0]));
     cases[index]();

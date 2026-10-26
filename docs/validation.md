@@ -254,6 +254,56 @@ existing button/job states continue to show progress and errors remain visible.
 This notice-only follow-up needs its own deployment check. Bluetooth audio,
 long-duration endurance and complete release qualification remain pending.
 
+### Failure-only notice deployment and USB duplex failure: 2026-10-26
+
+The notice-only image `c7b0f96eea185ccd245460b68c31d894d4107d9e` was
+application-only flashed and verified, preserving settings and partitions with
+no full backup. Its 4,706,944-byte application SHA-256 is
+`bd33ee977b8206d517efbd635eec7b5e03a24b751c87ec734dde9345ae38cc72`.
+The source passed 32 media-control sanitizer cases, the pinned build and the
+same 482 declared task paths. Physical notice acceptance was interrupted by a
+new simultaneous-audio report and remains distinct from those source results.
+
+During the output-only host stimulus, both codec capture and playback were
+observed running. Mic delivered 404,160 bytes, then ended partial with
+`AE_STOP_OVERFLOW` / `AE_OVERFLOW`; the speaker remained active. USB IN reported
+404,120 bytes, and the capture-admission rejection counter reached 5,463. The
+user reported Mic exiting and crackling playback. The 90-second capture has
+nine health observations and fails the audio-job gate. This is not evidence of
+stable duplex operation or proof that a host input consumer would remove the
+failure.
+
+A subsequent host probe enabled simultaneous input/output without retaining
+PCM. It received frames but no nonzero input samples; no fresh device audio
+activation appeared during that window, only the earlier retained failures.
+That attempt is unexercised and cannot qualify or disprove a repair. The
+packet-sized TX write per worker wake was subsequently reproduced as a native
+throughput defect; crackling playback still requires physical confirmation.
+
+The actual pinned class/FIFO test supplies one capture frame every 10 ms,
+completes IN and OUT every millisecond, and skips one worker wake in four. The
+old adapter rejects capture at 130 ms with its four-frame queue full. The repair
+admits at most four existing 98-byte chunks per pass, stops on short/zero writes
+and rechecks flush, readiness and age between chunks. Scratch allocation, queue
+capacity, descriptors and deadlines are unchanged.
+
+Both full-speed and high-speed native scenarios pass ten simulated seconds:
+960,000 produced bytes equal admitted bytes, with 959,806 completed bytes plus
+96 in flight and 98 in the finite FIFO. Per-byte order, application/FIFO
+conservation and zero admission rejection or playback drop are checked. Seven
+candidate class/FIFO scenarios pass, and five historical negative oracles remain
+failing as intended. Existing low-fill and finite-tail assertions are preserved;
+the resumed-capture stimulus now includes a four-millisecond worker gap to keep
+exercising the 94/96/98-byte branches after batching improves FIFO occupancy.
+This is source/host evidence, not a device duplex pass.
+
+The user then reported a frozen interface and manually entered BOOT. The last
+90-second observation still contained advancing health records, no logged
+panic/watchdog/allocation failure, and a largest DMA block of 8,192 bytes. That
+capture does not identify the freeze's onset or cause. The ROM download
+interface observed afterward reflects the confirmed manual BOOT action, not
+proof of an automatic firmware crash.
+
 ### USB startup readiness interaction repair: 2026-10-26
 
 Local Audio start admission now requires the same valid USB stream identity,

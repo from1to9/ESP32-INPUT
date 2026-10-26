@@ -21,7 +21,7 @@
 #error "The composite stack must enable exactly one UAC2 function"
 #endif
 
-enum { UAC_FRAME_BYTES = 960, UAC_QUEUE_FRAMES = 4, UAC_FRAME_AGE_US = 100000 };
+enum { UAC_FRAME_BYTES = 960, UAC_QUEUE_FRAMES = 4, UAC_FRAME_AGE_US = 100000, UAC_TX_WRITES_PER_PASS = 4 };
 typedef struct {
     ae_frame_t frame;
     uint64_t admitted_us;
@@ -523,44 +523,57 @@ static void service_io(void)
         portEXIT_CRITICAL(&s_lock);
         return;
     }
-    const uint64_t now = (uint64_t)esp_timer_get_time();
-    portENTER_CRITICAL(&s_lock);
-    bool output = live_locked() && s_status.prepared && (s_roles & AE_MICROPHONE) && s_tx_count;
-    uint16_t output_bytes = 0;
-    if (output) {
-        queued_frame_t *slot = &s_memory->tx[s_tx_head];
-        if (now < slot->admitted_us || now - slot->admitted_us >= UAC_FRAME_AGE_US) {
-            memset(slot, 0, sizeof(*slot));
-            s_tx_head = (s_tx_head + 1) % UAC_QUEUE_FRAMES;
-            --s_tx_count;
-            count(&s_status.rejected_capture_frames);
-            output = false;
-        } else {
-            output_bytes = (uint16_t)(UAC_FRAME_BYTES - slot->offset);
-            if (output_bytes > sizeof(s_memory->output)) output_bytes = sizeof(s_memory->output);
-            memcpy(s_memory->output, slot->frame.data + slot->offset, output_bytes);
-        }
-    }
-    const uint64_t active_flush = s_flush_requested;
-    if (output) count(&s_status.capture_write_calls);
-    portEXIT_CRITICAL(&s_lock);
-    uint16_t written = output ? tud_audio_write(s_memory->output, output_bytes) : 0;
-    portENTER_CRITICAL(&s_lock);
-    add_count(&s_status.capture_write_bytes, written);
-    if (active_flush == s_flush_requested && output && s_tx_count) {
-        queued_frame_t *slot = &s_memory->tx[s_tx_head];
-        if (written > output_bytes || (written & 1U)) {
-            s_status.error = ESP_FAIL;
-            request_flush_locked();
-        } else {
-            slot->offset = (uint16_t)(slot->offset + written);
-            if (slot->offset == UAC_FRAME_BYTES) {
+    const uint64_t active_flush = flush;
+    /* FIFO admission is independent of USB packet timing. Fill up to four
+     * packet-sized chunks per wake so scheduling jitter does not cap capture
+     * below its PCM rate. Keep the original scratch and short lock scopes;
+     * a short/zero write retains its suffix until a later worker pass. */
+    for (unsigned pass = 0; pass < UAC_TX_WRITES_PER_PASS; ++pass) {
+        const uint64_t output_now = (uint64_t)esp_timer_get_time();
+        portENTER_CRITICAL(&s_lock);
+        bool output = live_locked() && s_status.prepared && (s_roles & AE_MICROPHONE) &&
+            active_flush == s_flush_requested && s_tx_count;
+        uint16_t output_bytes = 0;
+        if (output) {
+            queued_frame_t *slot = &s_memory->tx[s_tx_head];
+            if (output_now < slot->admitted_us || output_now - slot->admitted_us >= UAC_FRAME_AGE_US) {
                 memset(slot, 0, sizeof(*slot));
                 s_tx_head = (s_tx_head + 1) % UAC_QUEUE_FRAMES;
                 --s_tx_count;
+                count(&s_status.rejected_capture_frames);
+                output = false;
+            } else {
+                output_bytes = (uint16_t)(UAC_FRAME_BYTES - slot->offset);
+                if (output_bytes > sizeof(s_memory->output)) output_bytes = sizeof(s_memory->output);
+                memcpy(s_memory->output, slot->frame.data + slot->offset, output_bytes);
             }
         }
+        if (output) count(&s_status.capture_write_calls);
+        portEXIT_CRITICAL(&s_lock);
+        if (!output) break;
+        uint16_t written = tud_audio_write(s_memory->output, output_bytes);
+        portENTER_CRITICAL(&s_lock);
+        add_count(&s_status.capture_write_bytes, written);
+        if (active_flush == s_flush_requested && s_tx_count) {
+            queued_frame_t *slot = &s_memory->tx[s_tx_head];
+            if (written > output_bytes || (written & 1U)) {
+                s_status.error = ESP_FAIL;
+                request_flush_locked();
+            } else {
+                slot->offset = (uint16_t)(slot->offset + written);
+                if (slot->offset == UAC_FRAME_BYTES) {
+                    memset(slot, 0, sizeof(*slot));
+                    s_tx_head = (s_tx_head + 1) % UAC_QUEUE_FRAMES;
+                    --s_tx_count;
+                }
+            }
+        }
+        const bool current = active_flush == s_flush_requested;
+        portEXIT_CRITICAL(&s_lock);
+        if (!current || written < output_bytes) break;
     }
+    const uint64_t now = (uint64_t)esp_timer_get_time();
+    portENTER_CRITICAL(&s_lock);
     bool input = live_locked() && s_status.prepared && (s_roles & AE_SPEAKER) &&
         active_flush == s_flush_requested && s_consumer_generation &&
         s_rx_flush_requested == s_rx_flush_completed;
