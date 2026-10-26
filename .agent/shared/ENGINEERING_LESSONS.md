@@ -569,3 +569,22 @@ defect, not the schedule that caused a particular physical timeout.
 
 Evidence: [presenter checks](../../tests/presenter/README.md) and
 [device observation](../../docs/validation.md#capture-indicator-confirmation-failure-2026-10-26).
+
+## 26. Separate audio content from transfer counts and requested gain
+
+A sustained PCM byte rate can carry silence. To localize a silent-output report,
+observe nonzero counts and absolute peaks at separate owning boundaries, then
+compare generation-tagged observations. Count only the valid prefix reported
+by a synchronous write; a successful report is not DMA consumption or analog
+output. Preserve unknown observations and failed/invalid-prefix totals.
+
+Reuse existing gain and mute read acknowledgements. A requested slider value
+or a transient local-test gain does not establish the normal engine's actual
+setting. Use bounded metadata in external memory and scan only task-owned
+copies outside interrupt locks; do not retain recordings or add getter I/O.
+A later audible test without matching earlier measurements cannot retrospectively
+prove why an earlier attempt was silent.
+
+Evidence: [PCM observer checks](../../tests/board_audio/README.md),
+[USB observer checks](../../tests/usb_audio/README.md), and
+[bounded playback evidence](../../docs/validation.md#audible-usb-playback-and-startup-control-churn-2026-10-26).

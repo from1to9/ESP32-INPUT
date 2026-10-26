@@ -174,6 +174,67 @@ internal memory. Placement and tests are checked locally. Contiguous DMA
 recovery and behavior of that repaired diagnostic image remain untested on
 hardware. The normal restored image does not contain this optional module.
 
+### USB startup readiness interaction repair: 2026-10-26
+
+Local Audio start admission now requires the same valid USB stream identity,
+format and requested role to remain observed for the named 1,000 ms settling
+interval. Loss, replacement, unknown runtime or invalid timing revokes that
+readiness immediately. Timer maturity does not advance the control revision
+and cannot invalidate an unrelated held Stop/Mute or replay a prior Start.
+USB selection remains possible without a host stream. The current preparing
+hint takes priority over retained command text; current faults and historical
+job results remain intact.
+
+Thirty control-layer sanitizer cases passed, including churn, exact threshold,
+fresh explicit consent, per-role readiness, disconnect/replacement, missing
+runtime, clock overflow/regression and independent Stop/Mute. The focused
+native Audio UI suite passed 118 renders across both themes and pointer tests
+that reject a press begun while Start was disabled. New preparing and retained
+error scenes were visually checked for alignment and clipping. This was the
+Audio subset, not a rerun of every UI suite. The pinned target build and expanded
+task stack paths passed; physical startup/recovery verification remains pending.
+
+### Audible USB playback and startup control churn: 2026-10-26
+
+Published source `acac8e6df130793db3041c20e27639ff251a1f8f` was built
+with the optional boot tone disabled. The 4,706,400-byte application has SHA-256
+`57f995e733b9a3479072fd2ade73d883ae11727527422ef3a08c72cf08fd791e`.
+Application-only write and independent flash comparison passed; the partition
+table, NVS and PHY bytes were unchanged. No full backup was performed.
+
+The user heard the host's alternating one-second 1 kHz USB tone after starting
+Speaker with Mic off and settling the volume near 80 percent. The three-minute
+capture contained 18 complete health observations and no parser failure codes.
+The running job was observed across 167.669 seconds. At the final paired
+summary, USB delivered 8,052,480 samples and the board reported 8,050,080 samples;
+both had 3,861,539 nonzero samples and peak 4,096. These cumulative snapshots
+are sequential, not atomic. All 16,771 recorded board writes had valid reported
+prefixes and SDK success. Cached DAC volume and mute reads matched their
+requests; settled volume was observed at 79 and later 77 percent. The host
+rendered 8,656,896 frames with zero callback errors or incoming silence flags.
+No raw PCM was saved.
+
+This establishes audible output for this bounded USB playback attempt. It does
+not prove the cause of earlier silence, uninterrupted sample timing, other
+hosts, duplex operation or endurance. Earlier captures lack equivalent sample
+content and actual-volume evidence.
+
+Startup remains defective: the user reported buttons rapidly alternating
+between usable and grey, with early attempts ineffective, then stable controls
+and playback after several seconds. During that interval the device remained
+USB-mounted while host alternate-interface selection repeatedly closed and
+reopened streams; observed link generation advanced from 7 to 79. This
+correlates the symptom with host stream negotiation and motivates an explicit
+local readiness-settling state, without retaining or replaying Start consent.
+
+A separate 90-second post-playback capture retained eight health observations
+but failed the audio-job gate: host stream closure left a partial playback job
+with `AE_STALE` / `AE_STOP_OWNER_LOST` and five discarded frames. Hardware
+returned OFF with mute confirmed and cleanup complete. This is retained
+terminal evidence, not an unreported successful stop or a passing recovery
+qualification. A new-start recovery and the control interaction repair remain
+pending.
+
 ### USB playback content observation candidate: 2026-10-26
 
 Following renewed device-test authorization, the candidate adds task-only

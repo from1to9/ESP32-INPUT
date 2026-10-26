@@ -8,6 +8,11 @@
  * borrowed pointers. Owners supply observed values and action admission. */
 #define APP_MEDIA_ROWS 4U
 #define APP_MEDIA_PROFILES 8U
+/* Build-time local-start policy; host negotiation must keep one stream/role
+ * identity continuously valid for this positive interval before new consent. */
+#ifndef APP_MEDIA_USB_START_SETTLE_MS
+#define APP_MEDIA_USB_START_SETTLE_MS 1000U
+#endif
 typedef struct { uint8_t bytes[16]; } app_media_id_t;
 typedef enum { APP_MEDIA_ROUTE_OFF, APP_MEDIA_ROUTE_LOCAL, APP_MEDIA_ROUTE_HFP,
     APP_MEDIA_ROUTE_A2DP, APP_MEDIA_ROUTE_UAC, APP_MEDIA_ROUTE_COUNT } app_media_route_t;
@@ -24,7 +29,7 @@ typedef enum {
     APP_MEDIA_START_IDENTITY_UNAVAILABLE, APP_MEDIA_START_PEER_MISMATCH,
     APP_MEDIA_START_CLEANUP, APP_MEDIA_START_OCCUPIED,
     APP_MEDIA_START_STOP_REQUIRED, APP_MEDIA_START_CODEC_UNAVAILABLE,
-    APP_MEDIA_START_FORMAT_UNSUPPORTED
+    APP_MEDIA_START_FORMAT_UNSUPPORTED, APP_MEDIA_START_HOST_PREPARING
 } app_media_start_block_t;
 typedef enum { APP_MEDIA_UNKNOWN, APP_MEDIA_OFF, APP_MEDIA_PREPARING,
     APP_MEDIA_READY_MUTED, APP_MEDIA_RUNNING, APP_MEDIA_STOPPING, APP_MEDIA_FAULT } app_media_state_t;

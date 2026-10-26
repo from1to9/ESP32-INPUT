@@ -39,6 +39,47 @@ static void audio_start_block_checks(void)
     assert(!has_visible_label(lv_screen_active(), "Off / Ready"));
 }
 
+static void audio_host_settling_checks(void)
+{
+    ui_fixture_media(&s_state);
+    s_state.media.microphone.can_start = s_state.media.speaker.can_start = false;
+    s_state.media.microphone.start_block = s_state.media.speaker.start_block = APP_MEDIA_START_HOST_PREPARING;
+    screenshot("audio-core-host-preparing");
+    audio_assert_text_fits("Off / Preparing\nHost is preparing audio");
+    audio_assert_text_fits("Mic: Host is preparing audio\nSpeaker: Host is preparing audio");
+    clear_intents(); tap_control("Start mic"); tap_control("Start speaker");
+    assert(action_count(APP_MEDIA_CONTROL) == 0);
+    clear_intents(); pointer(380, 284, true);
+    s_state.media.speaker.can_start = true; s_state.media.speaker.start_block = APP_MEDIA_START_ALLOWED;
+    render(); pointer(380, 284, false);
+    assert(action_count(APP_MEDIA_CONTROL) == 0); /* Disabled press cannot become deferred consent. */
+    tap_control("Start speaker"); assert(action_count(APP_MEDIA_CONTROL) == 1);
+    s_state.media.speaker.can_start = false; s_state.media.speaker.start_block = APP_MEDIA_START_HOST_PREPARING;
+    s_state.media.playback = (app_media_job_view_t){.known = true, .state = APP_MEDIA_JOB_ERROR};
+    strcpy(s_state.media.playback.reason, "State changed. Review the current controls.");
+    screenshot("audio-core-host-preparing-previous-error");
+    audio_assert_text_fits("Error\nState changed. Review the current controls.");
+    audio_assert_text_fits("Mic: Host is preparing audio\nSpeaker: Host is preparing audio");
+    s_state.media.playback = (app_media_job_view_t){.known = true, .id = {{83}}, .consumer_generation = 93,
+        .state = APP_MEDIA_JOB_RUNNING, .can_stop = true};
+    s_state.media.speaker.start_block = APP_MEDIA_START_OCCUPIED;
+    s_state.media.speaker.muted = false;
+    screenshot("audio-core-host-preparing-active-speaker");
+    clear_intents(); pointer(380, 284, true);
+    s_state.media.microphone.can_start = true; s_state.media.microphone.start_block = APP_MEDIA_START_ALLOWED;
+    render(); pointer(380, 284, false);
+    assert(action_count(APP_MEDIA_CONTROL) == 1 && last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_LIVE_STOP);
+    ui_fixture_media(&s_state);
+    s_state.media.live_capture = (app_media_job_view_t){.known = true, .id = {{81}}, .consumer_generation = 91,
+        .state = APP_MEDIA_JOB_RUNNING, .can_stop = true};
+    s_state.media.microphone.can_start = false; s_state.media.microphone.muted = false; s_state.media.microphone.can_mute = true;
+    s_state.media.speaker.can_start = false; s_state.media.speaker.start_block = APP_MEDIA_START_HOST_PREPARING;
+    screenshot("audio-core-host-preparing-active-mic");
+    clear_intents(); tap_control("Mute mic");
+    assert(action_count(APP_MEDIA_CONTROL) == 1 && last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_SET_MUTED &&
+        last_action(APP_MEDIA_CONTROL)->media.value.role.value);
+}
+
 static void audio_core_checks(void)
 {
     app_view_t original = s_state;
@@ -57,6 +98,7 @@ static void audio_core_checks(void)
     clear_intents(); tap_control("Start mic"); tap_control("Start speaker"); tap_control("Mute mic");
     assert(action_count(APP_MEDIA_CONTROL) == 0);
     audio_start_block_checks();
+    audio_host_settling_checks();
     ui_fixture_media(&s_state); screenshot("audio-core-usb-ready");
     assert(has_visible_label(lv_screen_active(), "Off / Ready"));
     assert(!has_visible_label(lv_screen_active(), "On")); /* Enabled hardware alone is not a running job. */

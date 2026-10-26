@@ -436,8 +436,18 @@ for _name, _prefix in {
         "any_jobs": [("media_controls", "live_start_block"), ("media_controls", "any_jobs"), ("media_controls", "job_active")],
         "capture_jobs": [("media_controls", "live_start_block"), ("media_controls", "capture_jobs"), ("media_controls", "job_active")],
         "live_job": [("media_controls", "live_start_block"), ("media_controls", "job_active")],
+        "usb_settled": [("media_controls", "live_start_block"), ("media_controls", "usb_start_settled")],
     }.items():
         AUDIO_ADAPTER_PATHS[f"audio_connection_{_name}_{_leaf}"] = _prefix + _tail
+USB_START_OBSERVER = CORE + [("main", "service_media"), ("media_controls", "app_media_controls_poll"),
+    ("media_controls", "observe_usb_start_readiness")]
+for _name, _tail in {
+    "identity": [("audio_helpers", "ae_route_token_equal"), ("audio_helpers", "ae_id_equal")],
+    "validity": [("audio_helpers", "ae_route_token_valid"), ("audio_helpers", "ae_id_empty")],
+    "format_equal": [("audio_helpers", "ae_format_equal")],
+    "format_size": [("audio_helpers", "ae_format_size")],
+}.items():
+    AUDIO_ADAPTER_PATHS[f"audio_usb_start_observe_{_name}"] = USB_START_OBSERVER + _tail
 PATHS.update(AUDIO_ADAPTER_PATHS)
 MEDIA_PROCESS = [("media_runtime", "worker"), ("media_runtime", "media_step"),
     ("media_runtime", "process_command")]

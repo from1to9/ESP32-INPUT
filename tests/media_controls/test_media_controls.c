@@ -89,7 +89,9 @@ static void setup(void)
         .token = {.peer_id = {{1}}, .stream_id = {{2}}, .link_generation = 3}};
     context = (app_media_controls_context_t){.epoch = 11, .ui_revision = 13, .mode = INPUT_AUDIO,
         .overlay = APP_OVERLAY_RECORDING_START};
-    assert(app_media_controls_init()); assert(!app_media_controls_init()); poll_at(1000);
+    assert(app_media_controls_init()); assert(!app_media_controls_init());
+    /* Timing-independent cases begin with an explicitly observed stable host. */
+    poll_at(0); poll_at(1000);
 }
 static app_intent_t intent(app_media_operation_t operation)
 {
@@ -426,11 +428,15 @@ static void test_live_start_independent_host_roles(void)
     assert(view.media.speaker.can_start && view.media.speaker.start_block == APP_MEDIA_START_ALLOWED &&
         !view.media.speaker.enabled && !view.media.speaker.mute_confirmed);
     route.capture = true; route.playback = false; poll_at(1020);
-    assert(view.media.microphone.can_start && view.media.speaker.start_block == APP_MEDIA_START_HOST_STREAM_REQUIRED);
-    route.playback = true; hardware.formats[0].roles = AE_SPEAKER; poll_at(1030);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_HOST_PREPARING &&
+        view.media.speaker.start_block == APP_MEDIA_START_HOST_STREAM_REQUIRED);
+    poll_at(2020); assert(view.media.microphone.can_start);
+    route.playback = true; hardware.formats[0].roles = AE_SPEAKER; poll_at(2030);
+    assert(view.media.speaker.start_block == APP_MEDIA_START_HOST_PREPARING);
+    poll_at(3030);
     assert(view.media.microphone.start_block == APP_MEDIA_START_FORMAT_UNSUPPORTED && view.media.speaker.can_start);
     hardware.formats[0].roles = AE_MICROPHONE | AE_SPEAKER;
-    route.token.link_generation = 0; poll_at(1040);
+    route.token.link_generation = 0; poll_at(3040);
     assert(view.media.microphone.start_block == APP_MEDIA_START_IDENTITY_UNAVAILABLE &&
         view.media.speaker.start_block == APP_MEDIA_START_IDENTITY_UNAVAILABLE);
 }
@@ -610,10 +616,86 @@ static void test_record_copy_failure(void)
     records_copy_result = AE_OK; controls.list_requested = true; poll_at(controls.now_ms + 10);
     complete(AE_OK); assert(view.media.recordings.known && view.media.recordings.row_count == 1 && controls.records[0].revision == 41);
 }
+static void test_usb_start_settling(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
+    ++route.token.link_generation; poll_at(1010);
+    app_intent_t stale = intent(APP_MEDIA_LIVE_START); stale.media.value.role.role = APP_MEDIA_SPEAKER;
+    for (unsigned i = 0; i < 6; ++i) {
+        route.capture = route.playback = (i & 1U) == 0; ++route.token.link_generation;
+        poll_at(1020 + i * 100U);
+        assert(!view.media.microphone.can_start && !view.media.speaker.can_start);
+        app_intent_t start = intent(APP_MEDIA_LIVE_START);
+        start.media.value.role.role = (i & 1U) ? APP_MEDIA_MICROPHONE : APP_MEDIA_SPEAKER;
+        handle(start); assert(!submissions);
+    }
+    route.capture = route.playback = true; ++route.token.link_generation; poll_at(2000);
+    assert(view.media.speaker.start_block == APP_MEDIA_START_HOST_PREPARING);
+    uint64_t revision = view.media.resource_revision;
+    poll_at(2000 + APP_MEDIA_USB_START_SETTLE_MS - 1U); assert(!view.media.speaker.can_start && !submissions);
+    poll_at(2000 + APP_MEDIA_USB_START_SETTLE_MS);
+    assert(view.media.speaker.can_start && view.media.microphone.can_start && !submissions && view.media.resource_revision == revision);
+    handle(stale); assert(!submissions); /* A replacement never retargets the old press. */
+    app_intent_t fresh = intent(APP_MEDIA_LIVE_START); fresh.media.value.role.role = APP_MEDIA_SPEAKER;
+    handle(fresh); assert(submissions == 1 && submitted.kind == AE_PLAYBACK_STREAM && submitted.action == APP_MEDIA_START);
+}
+static void test_usb_settle_revoke_and_hint(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
+    route.capture = false; poll_at(1010); assert(view.media.speaker.can_start);
+    route.capture = true; poll_at(1020);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_HOST_PREPARING && view.media.speaker.can_start);
+    uint64_t now = 1020 + APP_MEDIA_USB_START_SETTLE_MS; poll_at(now); assert(view.media.microphone.can_start);
+    ++now; route.available = false; poll_at(now); assert(!view.media.speaker.can_start && !controls.usb_role_observed[1]);
+    ++now; route.available = true; poll_at(now); assert(view.media.speaker.start_block == APP_MEDIA_START_HOST_PREPARING);
+    effect_result(NULL, AE_STALE);
+    owner.audio.playback = (ae_job_snapshot_t){.job_id={{42}}, .consumer_generation=9, .kind=AE_PLAYBACK_STREAM,
+        .state=AE_JOB_PARTIAL, .stop_reason=AE_STOP_OWNER_LOST, .error=AE_STALE};
+    poll_at(++now);
+    assert(view.media.playback.known && *view.media.playback.reason && !*view.media.reason && *controls.message);
+    owner.audio.error = AE_IO_ERROR; poll_at(++now);
+    assert(!strcmp(view.media.reason, result_text(AE_IO_ERROR)) && *controls.message);
+    owner.audio.error = AE_OK;
+    now += APP_MEDIA_USB_START_SETTLE_MS; poll_at(now); assert(view.media.speaker.can_start);
+    route.token.stream_id.bytes[0]++; poll_at(++now); assert(view.media.speaker.start_block == APP_MEDIA_START_HOST_PREPARING);
+    route.token.stream_id = (ae_id_t){0}; poll_at(++now); assert(view.media.speaker.start_block == APP_MEDIA_START_IDENTITY_UNAVAILABLE);
+    route.token.stream_id = (ae_id_t){{7}}; poll_at(++now);
+    snapshot_available = false; poll_at(++now); assert(!controls.usb_role_observed[0] && !controls.usb_role_observed[1]);
+    snapshot_available = true; poll_at(++now); assert(view.media.speaker.start_block == APP_MEDIA_START_HOST_PREPARING);
+    now += APP_MEDIA_USB_START_SETTLE_MS; poll_at(now); assert(view.media.speaker.can_start && !submissions);
+    owner.audio.route = AE_ROUTE_LOCAL; route.capture = route.playback = route.connected = false; poll_at(++now);
+    assert(view.media.can_select_connection[APP_MEDIA_CONNECTION_USB]);
+}
+static void test_usb_settle_stop_and_clock(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
+    route.full_duplex = hardware.full_duplex = true;
+    owner.audio.hardware_off_confirmed = false;
+    owner.audio.microphone_enabled = owner.audio.speaker_enabled = true;
+    owner.audio.microphone_muted = owner.audio.speaker_muted = false;
+    owner.audio.microphone_mute_confirmed = owner.audio.speaker_mute_confirmed = true;
+    owner.audio.playback = (ae_job_snapshot_t){.job_id={{51}}, .consumer_generation=61, .kind=AE_PLAYBACK_STREAM, .state=AE_JOB_RUNNING};
+    owner.audio.capture[0] = (ae_job_snapshot_t){.job_id={{52}}, .consumer_generation=62, .kind=AE_CAPTURE_LIVE, .state=AE_JOB_RUNNING};
+    ++route.token.link_generation; poll_at(1010);
+    assert(view.media.playback.can_stop && view.media.microphone.can_mute);
+    app_intent_t stop = intent(APP_MEDIA_LIVE_STOP); stop.media.value.role.role = APP_MEDIA_SPEAKER;
+    stop.media.job_id=view.media.playback.id; stop.media.consumer_generation=view.media.playback.consumer_generation;
+    uint64_t revision=view.media.resource_revision;poll_at(1010 + APP_MEDIA_USB_START_SETTLE_MS);
+    assert(view.media.resource_revision==revision && view.media.playback.can_stop && view.media.microphone.can_mute);
+    handle(stop); assert(submissions==1 && submitted.action==APP_MEDIA_STOP_JOB && submitted.job_id.bytes[0]==51);
+    complete(AE_OK);
+    app_intent_t mute=intent(APP_MEDIA_SET_MUTED);mute.media.value.role.role=APP_MEDIA_MICROPHONE;mute.media.value.role.value=true;
+    handle(mute);assert(submissions==2 && submitted.action==APP_MEDIA_MUTE_ROLE && submitted.value);
+    complete(AE_OK);owner.audio.playback=(ae_job_snapshot_t){0};owner.audio.capture[0]=(ae_job_snapshot_t){0};
+    owner.audio.hardware_off_confirmed=true;poll_at(UINT64_MAX-500U);
+    ++route.token.link_generation;poll_at(UINT64_MAX-499U);poll_at(UINT64_MAX);
+    assert(view.media.speaker.start_block==APP_MEDIA_START_HOST_PREPARING);
+    poll_at(0);assert(view.media.speaker.start_block==APP_MEDIA_START_CLOCK_UNAVAILABLE && !view.media.speaker.can_start);
+}
 int main(int argc, char **argv)
 {
-    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure"};
-    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure};
+    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock"};
+    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: media controls %s\n", names[i]); return 0; }

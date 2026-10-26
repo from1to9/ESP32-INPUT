@@ -1,10 +1,20 @@
 # Native media product controls
 
-Run `python3 tests/media_controls/run.py`. Twenty-seven isolated cases compile the real
+Run `python3 tests/media_controls/run.py`. Thirty isolated cases compile the real
 `app_media_controls.c` and audio format arithmetic with strict warnings,
 AddressSanitizer and UndefinedBehaviorSanitizer. Cached codec, store, runtime and
 Bluetooth interfaces are substituted at their public boundaries; no production
 policy branch is replaced.
+
+USB local starts require an unchanged valid stream token/format and selected
+role for `APP_MEDIA_USB_START_SETTLE_MS` (default 1000 ms, positive build-time
+override). Loss, replacement, invalid identity or unavailable runtime resets
+observation immediately. Clock regression remains fail-closed. The policy
+does not delay Stop/Mute, gate connection selection, or remember a Start.
+Timer maturity does not change resource identity or invalidate a held Stop.
+Old command messages and terminal jobs remain retained; during host preparation
+the primary Audio footer shows current readiness, while the card retains the
+previous job error and current audio faults keep priority.
 
 Coverage includes immutable recording review and actual chunk-overhead quota
 arithmetic, stale revision rejection, uncertain outcomes without retry, exact

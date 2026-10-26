@@ -40,6 +40,17 @@ Independent audio mode produces no motion or character output. Background audio
 becomes available in mouse/keyboard mode only after its concurrency capability is
 qualified. This primary-workspace revision was explicitly requested on 2026-10-23.
 
+USB connection selection does not require an open host audio stream. Local Mic
+or Speaker start becomes actionable only after the corresponding valid USB
+stream identity, format and role readiness remain stable for 1,000 ms. During
+negotiation, use **Host is preparing audio** in the existing card/footer; do not
+flash an actionable Start button between transient stream openings. Loss or
+replacement revokes readiness immediately. Keep Stop and Mute available under
+their existing owner rules, retain terminal-job evidence, and never remember
+or automatically replay a rejected Start request. The settling interval is a
+named build-time policy; it does not delay transport invalidation or bypass
+consent, privacy, cleanup or resource checks.
+
 ## Physical controls
 
 The official button factory currently exposes AI only. Its header also declares BOOT GPIO61, but runtime BOOT access is not a first-release dependency. POWER retains hardware power control.

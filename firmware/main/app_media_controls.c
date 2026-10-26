@@ -23,6 +23,7 @@
 #define LIVE_SECONDS 3600U
 #define SPEECH_SECONDS 8U
 #define CURSOR_HISTORY 16U
+_Static_assert(APP_MEDIA_USB_START_SETTLE_MS > 0, "USB start settling must be positive");
 
 typedef struct {
     bool initialized, clock_known, clock_failed, runtime_known, store_known;
@@ -51,6 +52,8 @@ typedef struct {
         uint8_t peer[6];
     } voice_link;
     ae_route_capabilities_t routes[AE_ROUTE_COUNT];
+    bool usb_role_observed[2];
+    uint64_t usb_role_since_ms[2];
     app_media_view_t view;
     app_media_review_t review;
     app_recording_storage_view_t storage_view;
@@ -269,6 +272,33 @@ static bool route_ready(ae_route_t route, ae_role_t role)
     return caps->implemented && caps->available && caps->connected &&
         (role == AE_MICROPHONE ? caps->capture : caps->playback);
 }
+static void observe_usb_start_readiness(const ae_route_capabilities_t *next)
+{
+    const ae_route_capabilities_t *old = &controls.routes[AE_ROUTE_USB_UAC];
+    bool same = ae_route_token_equal(&old->token, &next->token) && ae_format_equal(&old->format, &next->format);
+    size_t bytes; uint32_t samples;
+    bool valid = controls.clock_known && !controls.clock_failed && controls.runtime_known &&
+        controls.runtime.initialized && controls.runtime.audio_known && next->implemented && next->available &&
+        next->connected && ae_route_token_valid(&next->token, false) &&
+        ae_format_size(&next->format, &bytes, &samples) == AE_OK;
+    for (unsigned i = 0; i < 2; ++i) {
+        bool role_valid = valid && (i == 0 ? next->capture : next->playback);
+        if (!role_valid) {
+            controls.usb_role_observed[i] = false;
+            controls.usb_role_since_ms[i] = 0;
+        } else if (!same || !controls.usb_role_observed[i]) {
+            controls.usb_role_observed[i] = true;
+            controls.usb_role_since_ms[i] = controls.now_ms;
+        }
+    }
+}
+static bool usb_start_settled(ae_role_t role)
+{
+    unsigned i = role == AE_MICROPHONE ? 0U : 1U;
+    return controls.usb_role_observed[i] && controls.clock_known && !controls.clock_failed &&
+        controls.now_ms >= controls.usb_role_since_ms[i] &&
+        controls.now_ms - controls.usb_role_since_ms[i] >= APP_MEDIA_USB_START_SETTLE_MS;
+}
 static ae_route_t connection_route(app_media_connection_t connection)
 {
     if (connection == APP_MEDIA_CONNECTION_USB) return AE_ROUTE_USB_UAC;
@@ -332,7 +362,9 @@ static app_media_start_block_t live_start_block(ae_role_t role)
     bool duplex = controls.routes[selected].full_duplex && controls.codec.full_duplex;
     bool admitted = role == AE_MICROPHONE ? !capture_jobs() && (!job_active(&controls.runtime.audio.playback) || duplex) :
         !job_active(&controls.runtime.audio.playback) && (!capture_jobs() || duplex);
-    return admitted ? APP_MEDIA_START_ALLOWED : APP_MEDIA_START_OCCUPIED;
+    if (!admitted) return APP_MEDIA_START_OCCUPIED;
+    if (selected == AE_ROUTE_USB_UAC && !usb_start_settled(role)) return APP_MEDIA_START_HOST_PREPARING;
+    return APP_MEDIA_START_ALLOWED;
 }
 static bool speech_context(void)
 {
@@ -620,7 +652,14 @@ static void rebuild(void)
     spoken->can_confirm = spoken->can_reject && controls.context.preview_characters < APP_UI_DRAFT_CAPACITY &&
         speech->epoch == controls.context.epoch && speech->ui_revision == controls.context.ui_revision;
     if (speech->result != AE_OK) snprintf(spoken->reason, sizeof(spoken->reason), "%s", result_text(speech->result));
-    if (*controls.message) snprintf(view->reason, sizeof(view->reason), "%s", controls.message);
+    bool host_preparing = view->microphone.start_block == APP_MEDIA_START_HOST_PREPARING ||
+        view->speaker.start_block == APP_MEDIA_START_HOST_PREPARING;
+    bool primary_audio = controls.context.mode == INPUT_AUDIO &&
+        (controls.context.overlay == APP_OVERLAY_NONE || controls.context.overlay == APP_OVERLAY_AUDIO);
+    /* Keep old command outcomes and terminal jobs, but do not let a retained
+     * command message mask current host preparation. Current faults win. */
+    if (*controls.message && !(primary_audio && host_preparing))
+        snprintf(view->reason, sizeof(view->reason), "%s", controls.message);
 }
 
 bool app_media_controls_init(void)
@@ -1038,6 +1077,7 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
         ae_route_capabilities_t route = {0};
         ae_result_t result = app_media_runtime_route((ae_route_t)i, &route);
         if (result != AE_OK) route = (ae_route_capabilities_t){.reason = result};
+        if (i == AE_ROUTE_USB_UAC) observe_usb_start_readiness(&route);
         if (!same_route(&route, &controls.routes[i])) increase(&controls.revision);
         controls.routes[i] = route;
     }
