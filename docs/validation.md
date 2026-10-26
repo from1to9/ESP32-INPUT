@@ -1876,6 +1876,38 @@ not a display acknowledgement. Meter-only changes do not generate these logs.
 The exact cause of the reported actionable/disabled alternation remains a
 physical gate; no cosmetic smoothing or UI-overhead attribution is claimed.
 
+The subsequent application-only deployment of `f4c20a7` independently verified
+image SHA-256 `20ad932bd263bc4b3eff2e3ebd5adf48bc520e6e70c7bad4333c3bfa299d0567`
+and preserved partition/NVS/PHY data without a full backup. This attempt failed
+before any user audio job: the boot probe reported `AE_UNCERTAIN`, cleanup was
+uncertain and the engine entered quarantine. Both retained SDK errors were
+zero; no register transfer failure was observed. The first retained serial
+line was after this startup failure, so the exact preceding schedule was not
+captured. New admission observations consistently blocked both Start controls
+for quarantine while the host negotiated USB streams. This does not qualify
+the previous flicker report or microphone meter; startup cancellation ordering
+requires repair before another physical audio test.
+The completed 240.005-second capture retained 24 health samples and the
+`runtime_media_fault` failure code. All 47 sampled admission records blocked
+both Start controls for quarantine; no user audio job was attempted.
+
+The follow-up native reproduction injects the real engine's initial stop
+inside the real ES8311 enable callback. It reproduces the retained probe
+uncertainty, zero SDK error, stranded enable reference and subsequent stop
+timeout. Sequential probe-first/stop-first tests had missed this interleaving.
+The repair preserves the mandatory muted boot probe through queued safety
+requests and acknowledges them only after actual teardown. The probe keeps
+its original 5 ms budget from its first control call; the 100 ms allowance
+applies only to an explicit user-job prepare. Ordinary prepare cancellation,
+real SDK failures and the engine's 100 ms stop deadline remain unchanged.
+No PCM, PA enable, automatic probe retry or private reference repair is added.
+Nine added real-engine/codec cases cover those interleavings, a blocked SDK
+call, queued mute and a genuine transfer failure. Healthy cases confirm off
+within the unchanged deadline in the advancing-clock fixture; the genuine
+failure remains quarantined. The relevant board suite, pinned target build
+and 504 declared task stack paths pass. These are source/native/target checks;
+the follow-up image still requires physical boot and audio acceptance.
+
 ## Device evidence template
 
 ```text

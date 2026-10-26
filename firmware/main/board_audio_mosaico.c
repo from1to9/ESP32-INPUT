@@ -27,8 +27,8 @@
 
 #define CONTROL_TIMEOUT_MS 5
 /* Match the pinned codec control default and the shared BSP touch transaction
- * budget while preparing muted hardware. Runtime/safety IO keeps its 5 ms
- * bound. A failed/cancelled initialization admits no further control waits. */
+ * budget for an explicit prepare. The mandatory boot probe and runtime/safety
+ * IO retain 5 ms. Failed/cancelled ordinary prepares admit no further waits. */
 #define INITIALIZATION_CONTROL_TIMEOUT_MS 100
 #define DMA_DESCRIPTORS 6U
 #define DMA_FRAMES 240U
@@ -186,9 +186,13 @@ static esp_err_t control_admission(control_t *control)
     if (control->first_error != ESP_OK) return control->first_error;
     portENTER_CRITICAL(&s.lock);
     bool cancelled = s.stop_pending || s.mute_pending;
+    bool probing = s.probe_running;
     portEXIT_CRITICAL(&s.lock);
     if (cancelled) control->initialization_cancelled = true;
-    return control->initialization_cancelled ? ESP_ERR_INVALID_STATE : ESP_OK;
+    /* The muted one-time probe owns no PCM gate. Finish its real teardown
+     * before acknowledging queued safety work; aborting a vendor enable
+     * halfway can strand its opaque reference without an SDK failure. */
+    return control->initialization_cancelled && !probing ? ESP_ERR_INVALID_STATE : ESP_OK;
 }
 
 static int ctrl_read(const audio_codec_ctrl_if_t *base, int reg, int reg_len,
@@ -203,7 +207,7 @@ static int ctrl_read(const audio_codec_ctrl_if_t *base, int reg, int reg_len,
     if (admitted != ESP_OK) return admitted;
     uint8_t address = (uint8_t)reg;
     esp_err_t error = i2c_master_transmit_receive(c->device, &address, 1,
-        data, (size_t)data_len, c->initializing ? INITIALIZATION_CONTROL_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
+        data, (size_t)data_len, c->initializing && !s.probe_running ? INITIALIZATION_CONTROL_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
     remember(error, BOARD_AUDIO_SDK_I2C_READ);
     return error;
 }
@@ -220,7 +224,7 @@ static int ctrl_write(const audio_codec_ctrl_if_t *base, int reg, int reg_len,
     if (admitted != ESP_OK) return admitted;
     uint8_t bytes[2] = {(uint8_t)reg, *(uint8_t *)data};
     esp_err_t error = i2c_master_transmit(c->device, bytes, sizeof(bytes),
-        c->initializing ? INITIALIZATION_CONTROL_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
+        c->initializing && !s.probe_running ? INITIALIZATION_CONTROL_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
     remember(error, BOARD_AUDIO_SDK_I2C_WRITE);
     if (error == ESP_OK && reg == 0x32) { c->volume_written = bytes[1]; c->volume_write_observed = true; }
     return error;
@@ -406,6 +410,7 @@ static ae_result_t hardware_stop(void)
 static ae_result_t hardware_prepare(const request_t *request)
 {
     if (s.tx || s.rx || s.codec || s.control.device || s.power_owned) return AE_BUSY;
+    const bool probing = request->operation == OP_PROBE;
     ae_result_t prepare_result = AE_OK;
     s.control.initializing = s.control.initialization_cancelled = false;
     portENTER_CRITICAL(&s.lock);
@@ -475,8 +480,8 @@ static ae_result_t hardware_prepare(const request_t *request)
         .hw_gain = { .pa_voltage = 5.0f, .codec_dac_voltage = 3.3f } };
     s.control.initializing = true;
     s.codec = es8311_codec_new(&codec);
-    if (!s.codec || s.control.first_error != ESP_OK || s.control.initialization_cancelled) {
-        prepare_result = s.control.initialization_cancelled ? AE_STALE :
+    if (!s.codec || s.control.first_error != ESP_OK || (s.control.initialization_cancelled && !probing)) {
+        prepare_result = s.control.initialization_cancelled && !probing ? AE_STALE :
             s.control.first_error != ESP_OK ? sdk_result(s.control.first_error) : AE_IO_ERROR;
         goto fail;
     }
@@ -498,7 +503,7 @@ static ae_result_t hardware_prepare(const request_t *request)
     s.hardware_observed = true;
     return AE_OK;
 fail: {
-    ae_result_t failure = s.control.initialization_cancelled ? AE_STALE :
+    ae_result_t failure = s.control.initialization_cancelled && !probing ? AE_STALE :
         prepare_result != AE_OK ? prepare_result : sdk_result(error);
     s.control.initializing = false;
     if (hardware_stop() != AE_OK) return AE_UNCERTAIN;

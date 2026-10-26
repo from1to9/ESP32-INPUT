@@ -70,6 +70,11 @@ with tempfile.TemporaryDirectory(prefix="esp32-board-audio-") as temp:
     engine_binary = str(Path(temp) / "board_engine")
     subprocess.run(common + engine_objects + objects[1:] + ["-lm", "-o", engine_binary], check=True)
     subprocess.run([engine_binary], check=True)
+    probe_binary = str(Path(temp) / "probe_interleaving")
+    subprocess.run(common + ["-pedantic", str(suite / "test_probe_interleaving.c")] + engine_objects[1:] + objects[1:] + ["-lm", "-o", probe_binary], check=True)
+    for scenario in ("constructor", "configure", "enable", "initial_mute", "enable_blocked", "enable_failure",
+                     "mute_constructor", "mute_configure", "mute_enable"):
+        subprocess.run([probe_binary, scenario], check=True)
     startup_object = str(Path(temp) / "startup.o")
     subprocess.run(common + ["-pedantic", "-c", str(suite / "test_audio_startup.c"), "-o", startup_object], check=True)
     startup_binary = str(Path(temp) / "audio_startup")

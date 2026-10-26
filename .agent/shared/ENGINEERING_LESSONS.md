@@ -663,6 +663,15 @@ uncertain teardown. Test the old and repaired production sources with the same
 finite-contention fixture, plus exhaustion, transfer errors and cancellation.
 An SDK timeout argument is not necessarily a whole-operation latency bound.
 
+Keep the one-time muted boot obligation distinct from a cancellable user-job
+prepare. A synthetic cancellation inside a vendor enable operation can leave
+an acquired reference without the matching enabled state, despite zero SDK
+errors. Exercise initial engine stop during the real constructor, configuration,
+enable and mute callbacks, with time advancing while the call is pending.
+Retain the probe's original short budget and acknowledge queued safety work
+only after real teardown. Do not erase a genuine transfer failure, guess the
+vendor's private references or widen the safety deadline to hide the race.
+
 For a reported control flicker, observe the existing presenter's permission and
 blocker transitions alongside transport identity. Do not add a second readiness
 read or claim a copied candidate was displayed. Distinguish initial negotiation

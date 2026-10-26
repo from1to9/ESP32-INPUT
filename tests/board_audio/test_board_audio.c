@@ -40,6 +40,7 @@ static bool peer_on_write;
 static esp_err_t control_transfer_error;
 static void (*control_hook)(void);
 static unsigned control_hook_at;
+static int control_timeout_argument;
 static int references[CODEC_REF_STAGE_NUM];
 static uint8_t registers[256];
 static uint8_t emitted[WIRE_BYTES_MAX];
@@ -111,8 +112,9 @@ esp_err_t i2c_master_bus_rm_device(i2c_master_dev_handle_t device)
 static esp_err_t control_boundary(int timeout, bool writing)
 {
     assert(timeout == 5 || timeout == 100);
+    control_timeout_argument = timeout;
     if (timeout == 100) ++initialization_calls; else ++runtime_control_calls;
-    if (control_hook && initialization_calls == control_hook_at) {
+    if (control_hook && (control_hook_at == UINT32_MAX || initialization_calls == control_hook_at)) {
         void (*hook)(void) = control_hook; control_hook = NULL; hook();
     }
     if (peer_busy_ms && (!peer_on_write || writing)) {
