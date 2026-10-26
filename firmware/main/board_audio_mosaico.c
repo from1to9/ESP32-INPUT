@@ -107,6 +107,10 @@ static EXT_RAM_BSS_ATTR struct {
     uint8_t wire[WIRE_BYTES_MAX];
 } buffers;
 
+/* Worker/task-only observations; keep payload and aggregates out of internal
+ * BSS. Scanning is outside the owner lock; only small updates/copies lock. */
+static EXT_RAM_BSS_ATTR board_audio_pcm_snapshot_t pcm_observation;
+
 static bool same_format(const ae_format_t *a, const ae_format_t *b)
 {
     return a->sample_rate_hz == b->sample_rate_hz && a->channels == b->channels &&
@@ -202,10 +206,21 @@ static ae_result_t codec_result(int result)
 static ae_result_t dac_mute(bool muted)
 {
     if (!s.codec) return AE_OK;
+    portENTER_CRITICAL(&s.lock);
+    pcm_observation.mute_requested = muted;
+    pcm_observation.mute_read_known = pcm_observation.mute_matches = false;
+    portEXIT_CRITICAL(&s.lock);
     s.control.first_error = ESP_OK;
     int result = s.codec->mute(s.codec, muted);
     uint8_t value = 0;
     int read_result = ctrl_read(&s.control.base, 0x31, 1, &value, 1);
+    if (read_result == ESP_OK) {
+        portENTER_CRITICAL(&s.lock);
+        pcm_observation.mute_read_known = true;
+        pcm_observation.mute_register = value;
+        pcm_observation.mute_matches = (value & 0x60U) == (muted ? 0x60U : 0U);
+        portEXIT_CRITICAL(&s.lock);
+    }
     ae_result_t checked = codec_result(result);
     if (checked != AE_OK) return checked;
     if (read_result != ESP_OK || (value & 0x60U) != (muted ? 0x60U : 0U)) return AE_INTEGRITY;
@@ -353,6 +368,10 @@ static ae_result_t hardware_stop(void)
 static ae_result_t hardware_prepare(const request_t *request)
 {
     if (s.tx || s.rx || s.codec || s.control.device || s.power_owned) return AE_BUSY;
+    portENTER_CRITICAL(&s.lock);
+    pcm_observation = (board_audio_pcm_snapshot_t){.generation = request->generation,
+        .generation_known = request->generation != 0};
+    portEXIT_CRITICAL(&s.lock);
     s.control.first_error = ESP_OK;
     i2s_chan_config_t channels = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     channels.dma_desc_num = DMA_DESCRIPTORS;
@@ -498,6 +517,44 @@ static void sample_put(uint8_t *data, int16_t value)
     data[1] = (uint8_t)(bits >> 8);
 }
 
+static void pcm_count(uint64_t *value, uint64_t amount)
+{
+    if (amount > UINT64_MAX - *value) {
+        *value = UINT64_MAX; pcm_observation.saturated = true;
+    } else *value += amount;
+}
+static void observe_pcm_write(esp_err_t sdk_result_, size_t requested, size_t reported)
+{
+    const bool valid = reported <= requested && reported % 4U == 0;
+    uint16_t peak = 0;
+    uint64_t samples = 0, nonzero = 0;
+    if (valid) {
+        samples = reported / 4U;
+        /* SDK has returned; this worker still owns the wire scratch. Never
+         * scan capture data or an unreported/requested-only suffix. */
+        for (size_t i = 0; i < samples; ++i) {
+            int32_t sample = sample_get(buffers.wire + i * 4U);
+            uint16_t magnitude = (uint16_t)(sample < 0 ? -sample : sample);
+            if (magnitude) ++nonzero;
+            if (magnitude > peak) peak = magnitude;
+        }
+    }
+    portENTER_CRITICAL(&s.lock);
+    pcm_observation.write_result_known = true;
+    pcm_observation.last_write_sdk_result = sdk_result_;
+    pcm_observation.last_prefix_valid = valid;
+    pcm_count(&pcm_observation.write_calls, 1);
+    if (sdk_result_ != ESP_OK) pcm_count(&pcm_observation.failed_writes, 1);
+    if (!valid) pcm_count(&pcm_observation.invalid_prefix_writes, 1);
+    if (samples) {
+        pcm_observation.pcm_known = true;
+        pcm_count(&pcm_observation.reported_samples, samples);
+        pcm_count(&pcm_observation.reported_nonzero_samples, nonzero);
+        if (peak > pcm_observation.reported_peak_abs) pcm_observation.reported_peak_abs = peak;
+    }
+    portEXIT_CRITICAL(&s.lock);
+}
+
 static ae_result_t hardware_pcm(const request_t *request, size_t *actual)
 {
     bool reading = request->operation == OP_READ;
@@ -519,6 +576,7 @@ static ae_result_t hardware_pcm(const request_t *request, size_t *actual)
     if (!reading) s.tx_dirty = true;
     esp_err_t error = reading ? i2s_channel_read(s.rx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS) :
         i2s_channel_write(s.tx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS);
+    if (!reading) observe_pcm_write(error, wire_bytes, transferred);
     remember(error, reading ? BOARD_AUDIO_SDK_I2S_READ : BOARD_AUDIO_SDK_I2S_WRITE);
     if (transferred > wire_bytes || transferred % 4U) return AE_INTEGRITY;
     frames = transferred / 4U;
@@ -546,6 +604,11 @@ static ae_result_t execute(const request_t *request, size_t *actual)
     switch (request->operation) {
     case OP_UNMUTE: return hardware_unmute((ae_role_t)request->roles);
     case OP_VOLUME: {
+        portENTER_CRITICAL(&s.lock);
+        pcm_observation.volume_requested_known = true;
+        pcm_observation.volume_requested = request->value;
+        pcm_observation.volume_read_known = pcm_observation.volume_matches = false;
+        portEXIT_CRITICAL(&s.lock);
         s.control.first_error = ESP_OK;
         s.control.volume_write_observed = false;
         ae_result_t result = codec_result(s.codec->set_vol(s.codec,
@@ -553,6 +616,11 @@ static ae_result_t execute(const request_t *request, size_t *actual)
         uint8_t volume = 0;
         if (result != AE_OK) return result;
         if (ctrl_read(&s.control.base, 0x32, 1, &volume, 1) != ESP_OK) return AE_IO_ERROR;
+        portENTER_CRITICAL(&s.lock);
+        pcm_observation.volume_read_known = true;
+        pcm_observation.volume_register = volume;
+        pcm_observation.volume_matches = s.control.volume_write_observed && volume == s.control.volume_written;
+        portEXIT_CRITICAL(&s.lock);
         return s.control.volume_write_observed && volume == s.control.volume_written ? AE_OK : AE_INTEGRITY;
     }
     case OP_GAIN: {
@@ -923,4 +991,12 @@ board_audio_status_t board_audio_mosaico_status(void)
     board_audio_status_t status = s.status;
     portEXIT_CRITICAL(&s.lock);
     return status;
+}
+
+void board_audio_pcm_snapshot(board_audio_pcm_snapshot_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&s.lock);
+    *out = pcm_observation;
+    portEXIT_CRITICAL(&s.lock);
 }

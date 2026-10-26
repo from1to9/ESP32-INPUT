@@ -144,3 +144,24 @@ All evidence here is host-tested/source-reviewed. Target object compilation
 does not establish acoustic output, microphone data/slot placement, simultaneous
 IO, timing, safe loudness, resource margin, optical indicator visibility or
 recording endurance. Device access is intentionally deferred by the user.
+## Playback PCM observation
+
+Run `python3 tests/board_audio/run_pcm.py --output-dir <new-local-directory>`
+for the focused snapshot suite and the existing board/codec regressions.
+It uses the real board adapter and pinned ES8311 with SDK boundary models.
+
+`board_audio_pcm_snapshot()` copies a separate task-only external-BSS snapshot;
+it does not grow the internal mailbox/status or perform I/O. Content counts
+cover one normalized mono sample per stereo I2S time slot, after downmix, and
+only the aligned, in-bounds prefix reported by `i2s_channel_write()`. Failed
+SDK calls still contribute their valid reported prefix; `failed_writes`
+counts nonzero SDK returns, not successful job delivery. Capture and preload
+buffers do not contribute. Zero/invalid reported lengths cannot establish
+known PCM content. Peak magnitude includes 32768 for `INT16_MIN`.
+
+An owning prepare attempt resets scope; stop retains the final generation.
+Separate flags distinguish scope, observed SDK result, observed samples,
+requested volume and actual cached register reads. Volume/mute match flags
+compare existing register reads with the request; they are historical values,
+not a live hardware getter. Native tests do not qualify DMA/cache, target
+placement, acoustic output or speaker stability.

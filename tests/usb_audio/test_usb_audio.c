@@ -432,6 +432,54 @@ static void other_profiles_keep_existing_admission(void)
         prepare(NULL, AE_ROUTE_USB_UAC, &s_format, AE_SPEAKER, 11, &token) == AE_OK);
 }
 
+static void playback_content_observation(void)
+{
+    usb_audio_pcm_snapshot_t observed;
+    usb_audio_pcm_snapshot(&observed);
+    assert(!observed.known && !observed.current);
+    ae_route_token_t token = start(AE_MICROPHONE | AE_SPEAKER);
+    ae_frame_t frame = make_frame(token, 1);
+    assert(capture(NULL, AE_ROUTE_USB_UAC, &frame) == AE_OK);
+    service(10); usb_audio_pcm_snapshot(&observed);
+    assert(!observed.known); /* Microphone samples never enter this observation. */
+    input_bytes = UAC_FRAME_BYTES; service(1);
+    assert(usb_audio_receive(&frame) == AE_OK);
+    usb_audio_pcm_snapshot(&observed);
+    assert(observed.known && observed.current && observed.frames == 1 && observed.samples == 480 &&
+        observed.nonzero_samples == 0 && observed.peak_abs == 0 && observed.last_sequence == 1);
+    const uint8_t edges[] = {0, 0, 0, 0x80, 0xff, 0x7f, 0xff, 0xff, 1, 0, 0, 0x10};
+    for (unsigned i = 0; i < UAC_FRAME_BYTES; ++i) input_data[i] = edges[i % sizeof(edges)];
+    input_offset = 0; service(1);
+    assert(usb_audio_receive(&frame) == AE_OK && !memcmp(frame.data, input_data, UAC_FRAME_BYTES));
+    usb_audio_pcm_snapshot(&observed);
+    assert(observed.frames == 2 && observed.samples == 960 && observed.nonzero_samples == 400 &&
+        observed.peak_abs == 32768 && observed.last_sequence == 2 && observed.audio_generation == 11 &&
+        observed.consumer_generation == 17 && observed.link_generation == token.link_generation);
+    usb_audio_snapshot_t before = usb_audio_snapshot();
+    usb_audio_pcm_snapshot_t copy = observed;
+    for (unsigned i = 0; i < 10; ++i) usb_audio_pcm_snapshot(&observed);
+    usb_audio_snapshot_t after = usb_audio_snapshot();
+    assert(!memcmp(&copy, &observed, sizeof(copy)) && !memcmp(&before, &after, sizeof(before)));
+    input_offset = 0; service(1); now_us += UAC_FRAME_AGE_US;
+    assert(usb_audio_receive(&frame) == AE_AGAIN);
+    usb_audio_pcm_snapshot(&observed); assert(observed.frames == 2);
+    s_pcm.frames = s_pcm.samples = s_pcm.nonzero_samples = UINT64_MAX - 1;
+    input_offset = 0; service(1); assert(usb_audio_receive(&frame) == AE_OK);
+    usb_audio_pcm_snapshot(&observed);
+    assert(observed.frames == UINT64_MAX && observed.samples == UINT64_MAX && observed.nonzero_samples == UINT64_MAX);
+    assert(bind_playback(NULL, AE_ROUTE_USB_UAC, 11, &token, 18, true) == AE_AGAIN);
+    observe_playback_pcm(&frame); /* Completion from the replaced consumer. */
+    usb_audio_pcm_snapshot(&observed); assert(observed.known && !observed.current && observed.consumer_generation == 17);
+    service(1); assert(bind_playback(NULL, AE_ROUTE_USB_UAC, 11, &token, 18, true) == AE_OK);
+    memset(input_data, 0, UAC_FRAME_BYTES); input_bytes = UAC_FRAME_BYTES; input_offset = 0; service(1);
+    assert(usb_audio_receive(&frame) == AE_OK); usb_audio_pcm_snapshot(&observed);
+    assert(observed.current && observed.consumer_generation == 18 && observed.frames == 1 && observed.samples == 480 &&
+        observed.nonzero_samples == 0 && observed.peak_abs == 0 && observed.last_sequence == 1);
+    usb_audio_stack_event(false, false); usb_audio_pcm_snapshot(&observed);
+    assert(observed.known && !observed.current && observed.frames == 1);
+    usb_audio_pcm_snapshot(NULL);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -440,7 +488,7 @@ int main(int argc, char **argv)
         worker_failure_releases_memory, saturation_and_time_failure, many_reconnections,
         same_alternate_and_resume_require_fresh_preparation, endpoint_close_revokes_before_reopen,
         feedback_tracks_codec_consumption, dropped_frames_preserve_stream_offsets, playback_binding_barriers,
-        other_profiles_keep_existing_admission};
+        other_profiles_keep_existing_admission, playback_content_observation};
     unsigned index = (unsigned)strtoul(argv[1], NULL, 10);
     assert(index < sizeof(cases) / sizeof(cases[0]));
     cases[index]();

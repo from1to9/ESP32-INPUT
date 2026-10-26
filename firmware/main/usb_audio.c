@@ -10,6 +10,12 @@
 #include "tusb.h"
 #include <limits.h>
 #include <string.h>
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define USB_AUDIO_OBSERVATION_BSS EXT_RAM_BSS_ATTR
+#else
+#define USB_AUDIO_OBSERVATION_BSS
+#endif
 
 #if CFG_TUD_AUDIO != 1
 #error "The composite stack must enable exactly one UAC2 function"
@@ -45,6 +51,9 @@ static unsigned s_tx_head, s_tx_count, s_rx_head, s_rx_count, s_input_bytes;
 static bool s_tx_seen;
 static uint64_t s_played_samples;
 static int64_t s_feedback_level_q16;
+/* Task-only metadata; lifecycle/ISR state remains in the existing internal
+ * storage. Neither observation nor copying reserves internal DMA payloads. */
+static USB_AUDIO_OBSERVATION_BSS usb_audio_pcm_snapshot_t s_pcm;
 
 static const ae_format_t s_format = {
     .sample_rate_hz = INPUT_USB_AUDIO_RATE, .channels = 1,
@@ -405,6 +414,46 @@ ae_route_port_t usb_audio_route_port(void)
         .bind_playback = bind_playback};
 }
 
+static void observe_playback_pcm(const ae_frame_t *frame)
+{
+    uint16_t nonzero = 0, peak = 0;
+    /* The caller owns this complete copy. Keep the scan outside the IRQ lock. */
+    for (unsigned i = 0; i < frame->bytes; i += 2) {
+        uint16_t bits = (uint16_t)frame->data[i] | (uint16_t)((uint16_t)frame->data[i + 1] << 8);
+        int32_t value = bits < 0x8000U ? bits : (int32_t)bits - 65536;
+        uint16_t magnitude = (uint16_t)(value < 0 ? -value : value);
+        if (magnitude) ++nonzero;
+        if (magnitude > peak) peak = magnitude;
+    }
+    portENTER_CRITICAL(&s_lock);
+    /* Lifecycle can revoke a frame while it is being measured. Observation
+     * must not publish that old frame as evidence for a replacement stream. */
+    if (live_locked() && s_status.prepared && frame->audio_generation == s_status.audio_generation &&
+        frame->consumer_generation == s_consumer_generation && same_token(&frame->route_token, &s_token)) {
+        if (!s_pcm.known || s_pcm.link_generation != frame->route_token.link_generation ||
+            s_pcm.audio_generation != frame->audio_generation || s_pcm.consumer_generation != frame->consumer_generation)
+            s_pcm = (usb_audio_pcm_snapshot_t){.known = true, .link_generation = frame->route_token.link_generation,
+                .audio_generation = frame->audio_generation, .consumer_generation = frame->consumer_generation};
+        count(&s_pcm.frames);
+        add_count(&s_pcm.samples, (uint16_t)(frame->bytes / 2U));
+        add_count(&s_pcm.nonzero_samples, nonzero);
+        s_pcm.last_sequence = frame->sequence;
+        if (peak > s_pcm.peak_abs) s_pcm.peak_abs = peak;
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void usb_audio_pcm_snapshot(usb_audio_pcm_snapshot_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&s_lock);
+    *out = s_pcm;
+    out->current = out->known && live_locked() && s_status.prepared &&
+        out->link_generation == s_status.link_generation && out->audio_generation == s_status.audio_generation &&
+        out->consumer_generation == s_consumer_generation && s_rx_flush_requested == s_rx_flush_completed;
+    portEXIT_CRITICAL(&s_lock);
+}
+
 ae_result_t usb_audio_receive(ae_frame_t *frame)
 {
     if (!frame) return AE_INVALID;
@@ -425,6 +474,7 @@ ae_result_t usb_audio_receive(ae_frame_t *frame)
         count(&s_status.dropped_playback_frames);
     }
     portEXIT_CRITICAL(&s_lock);
+    if (result == AE_OK) observe_playback_pcm(frame);
     return result;
 }
 

@@ -390,6 +390,10 @@ AUDIO_DIAGNOSTIC_PATHS = {
         ("usb_audio", "usb_audio_transport_snapshot")],
     "audio_diagnostics_codec_snapshot": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
         ("board_audio", "board_audio_mosaico_status")],
+    "audio_diagnostics_usb_pcm": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
+        ("usb_audio", "usb_audio_pcm_snapshot"), ("usb_audio", "live_locked")],
+    "audio_diagnostics_board_pcm": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
+        ("board_audio", "board_audio_pcm_snapshot")],
     "audio_diagnostics_job_copy": AUDIO_OBSERVER + [("audio_diagnostics", "observe"), ("audio_diagnostics", "observe_job")],
     "audio_diagnostics_scratch_wipe": AUDIO_OBSERVER + [("audio_diagnostics", "observe"), ("audio_diagnostics", "clear_scratch")],
 }
@@ -399,7 +403,7 @@ for _caller, _prefix in {
 }.items():
     AUDIO_DIAGNOSTIC_PATHS[f"audio_capture_context_{_caller}"] = _prefix + [
         ("main", "refresh_media_context"), ("audio_diagnostics", "app_audio_diagnostics_capture_context")]
-for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec", "log_transport", "log_capture_context"):
+for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec", "log_transport", "log_capture_context", "log_usb_pcm", "log_codec_pcm"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_logger}"] = AUDIO_OBSERVER + [("audio_diagnostics", _logger)]
 for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed", "transport_changed", "capture_context_changed"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_comparison}"] = AUDIO_OBSERVER + [("audio_diagnostics", _comparison)]
@@ -444,6 +448,9 @@ AUDIO_RUNTIME_PATHS = {
     # path; it does not establish coverage of dispatch or the engine poll loop.
     "audio_manager_playback_capacity": ("audio_manager", [("audio_manager", "worker"),
         ("audio_engine", "ae_playback_capacity"), ("audio_engine", "ae_job_active")]),
+    "audio_worker_pcm_observe": ("media_control", [("media_runtime", "worker"),
+        ("media_runtime", "media_step"), ("usb_audio", "usb_audio_receive"),
+        ("usb_audio", "observe_playback_pcm"), ("usb_audio", "same_token")]),
     "audio_worker_route_submit": ("media_control", MEDIA_PROCESS + MEDIA_SEND + [("audio_helpers", "ae_secure_zero")]),
     "audio_worker_start_submit": ("media_control", MEDIA_START + MEDIA_SEND + [("audio_helpers", "ae_secure_zero")]),
     "audio_worker_start_wake": ("media_control", MEDIA_START + MEDIA_SEND + [("audio_manager", "wake")]),
@@ -451,6 +458,10 @@ AUDIO_RUNTIME_PATHS = {
     "audio_worker_route_ack_snapshot": ("media_control", MEDIA_PROCESS + [("audio_manager", "app_audio_snapshot")]),
     "audio_worker_identity_failure": ("media_control", MEDIA_PROCESS + [("media_runtime", "finish"), ("audio_helpers", "ae_secure_zero")]),
 }
+for _helper in ("live_locked", "count", "add_count"):
+    AUDIO_RUNTIME_PATHS[f"audio_worker_pcm_{_helper}"] = ("media_control", [
+        ("media_runtime", "worker"), ("media_runtime", "media_step"),
+        ("usb_audio", "usb_audio_receive"), ("usb_audio", "observe_playback_pcm"), ("usb_audio", _helper)])
 for _name, (_owner, _prefix) in {
     "live_admission": ("main", LOCAL_INTENT + [("media_controls", "app_media_controls_handle"),
         ("media_controls", "submit_start"), ("media_controls", "submit_runtime"),
@@ -557,6 +568,10 @@ PATHS.update(TOUCH_PATHS)
 BOARD_AUDIO_SERVICE = [("board_audio", "worker"), ("board_audio", "service")]
 BOARD_AUDIO_EXECUTE = BOARD_AUDIO_SERVICE + [("board_audio", "execute")]
 BOARD_AUDIO_PATHS = {
+    "board_audio_pcm_sample": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_pcm"),
+        ("board_audio", "observe_pcm_write"), ("board_audio", "sample_get")],
+    "board_audio_pcm_observe": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_pcm"),
+        ("board_audio", "observe_pcm_write"), ("board_audio", "pcm_count")],
     "board_audio_pcm_error": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_pcm"), ("board_audio", "remember")],
     "board_audio_prepare_error": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_prepare"), ("board_audio", "remember")],
     "board_audio_unmute_error": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_unmute"), ("board_audio", "remember")],

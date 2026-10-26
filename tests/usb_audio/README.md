@@ -5,6 +5,10 @@ dependencies. The suite compiles production `usb_audio.c` against the actual
 TinyUSB audio headers with strict diagnostics and address/undefined sanitizers.
 The original thirteen cases replace RTOS, heap, time and stack FIFO boundaries.
 A fourteenth case preserves existing admission on profiles that do not require PTI.
+A fifteenth checks playback-only sample counts and peaks, signed extrema, known
+silence, expired frames, saturating counts, stale generations and read-only
+snapshot calls. Observations measure complete frames returned to the manager;
+they neither retain PCM nor establish physical receipt or acoustic output.
 
 Thirteen isolated cases cover exact mono PCM16 frames, short writes, queue
 saturation, expired samples, monotonic sequence rejection, disconnect during

@@ -38,6 +38,7 @@ typedef struct {
     uint64_t generation;
     bool quarantined, off_confirmed, capture_gate, playback_gate, indicator_required;
     bool microphone_mute_confirmed, speaker_mute_confirmed;
+    uint8_t volume_percent;
     bool capture_context_known;
     uint64_t capture_context_ms;
     app_audio_capture_context_t capture_context;
@@ -48,6 +49,8 @@ typedef struct {
     usb_audio_snapshot_t usb;
     usb_audio_transport_snapshot_t transport;
     board_audio_status_t codec;
+    usb_audio_pcm_snapshot_t usb_pcm;
+    board_audio_pcm_snapshot_t codec_pcm;
 } diagnostic_observation_t;
 typedef struct {
     app_media_snapshot_t media;
@@ -113,6 +116,7 @@ static void observe(void)
         out->indicator_required = audio->capture_indicator_required;
         out->microphone_mute_confirmed = audio->microphone_mute_confirmed;
         out->speaker_mute_confirmed = audio->speaker_mute_confirmed;
+        out->volume_percent = audio->volume_percent;
         for (unsigned i = 0; i < AE_CONSUMERS_MAX; ++i) observe_job(&out->jobs[i], &audio->capture[i]);
         observe_job(&out->jobs[AE_CONSUMERS_MAX], &audio->playback);
     }
@@ -123,6 +127,8 @@ static void observe(void)
     out->usb = usb_audio_snapshot();
     usb_audio_transport_snapshot(&out->transport);
     out->codec = board_audio_mosaico_status();
+    usb_audio_pcm_snapshot(&out->usb_pcm);
+    board_audio_pcm_snapshot(&out->codec_pcm);
     clear_scratch();
 }
 static bool audio_changed(const diagnostic_observation_t *a, const diagnostic_observation_t *b)
@@ -133,7 +139,7 @@ static bool audio_changed(const diagnostic_observation_t *a, const diagnostic_ob
         a->generation != b->generation || a->quarantined != b->quarantined || a->off_confirmed != b->off_confirmed ||
         a->capture_gate != b->capture_gate || a->playback_gate != b->playback_gate ||
         a->indicator_required != b->indicator_required || a->microphone_mute_confirmed != b->microphone_mute_confirmed ||
-        a->speaker_mute_confirmed != b->speaker_mute_confirmed;
+        a->speaker_mute_confirmed != b->speaker_mute_confirmed || a->volume_percent != b->volume_percent;
 }
 static bool job_changed(const diagnostic_job_t *a, const diagnostic_job_t *b)
 {
@@ -247,10 +253,36 @@ static void log_audio(const diagnostic_observation_t *audio)
     }
     ESP_LOGI(TAG, "Audio diag audio known=1 state=%u route=%u error=%d generation=%" PRIu64
         " quarantine=%d off_confirmed=%d capture_gate=%d playback_gate=%d indicator_required=%d"
-        " microphone_mute_confirmed=%d speaker_mute_confirmed=%d busy=%d result_known=%d result=%d",
+        " microphone_mute_confirmed=%d speaker_mute_confirmed=%d busy=%d result_known=%d result=%d volume_percent=%u",
         (unsigned)audio->state, (unsigned)audio->route, (int)audio->error, audio->generation, audio->quarantined, audio->off_confirmed,
         audio->capture_gate, audio->playback_gate, audio->indicator_required, audio->microphone_mute_confirmed,
-        audio->speaker_mute_confirmed, audio->busy, audio->result_known, audio->result_known ? (int)audio->result : -1);
+        audio->speaker_mute_confirmed, audio->busy, audio->result_known, audio->result_known ? (int)audio->result : -1,
+        audio->volume_percent);
+}
+
+static void log_usb_pcm(const usb_audio_pcm_snapshot_t *pcm)
+{
+    ESP_LOGI(TAG, "Audio diag USB PCM known=%d current=%d link_generation=%" PRIu64
+        " audio_generation=%" PRIu64 " consumer_generation=%" PRIu64
+        " frames=%" PRIu64 " samples=%" PRIu64 " nonzero=%" PRIu64 " peak=%u sequence=%" PRIu64,
+        pcm->known, pcm->current, pcm->link_generation, pcm->audio_generation, pcm->consumer_generation,
+        pcm->frames, pcm->samples, pcm->nonzero_samples, pcm->peak_abs, pcm->last_sequence);
+}
+
+static void log_codec_pcm(const board_audio_pcm_snapshot_t *pcm)
+{
+    ESP_LOGI(TAG, "Audio diag codec PCM generation_known=%d generation=%" PRIu64
+        " pcm_known=%d samples=%" PRIu64 " nonzero=%" PRIu64 " peak=%u saturated=%d"
+        " calls=%" PRIu64 " failed=%" PRIu64 " invalid=%" PRIu64
+        " result_known=%d sdk_result=%d prefix_valid=%d"
+        " volume_requested_known=%d volume_requested=%u volume_read_known=%d volume_register=%u volume_matches=%d"
+        " mute_read_known=%d mute_requested=%d mute_register=%u mute_matches=%d",
+        pcm->generation_known, pcm->generation, pcm->pcm_known, pcm->reported_samples,
+        pcm->reported_nonzero_samples, pcm->reported_peak_abs, pcm->saturated,
+        pcm->write_calls, pcm->failed_writes, pcm->invalid_prefix_writes,
+        pcm->write_result_known, pcm->last_write_sdk_result, pcm->last_prefix_valid,
+        pcm->volume_requested_known, pcm->volume_requested, pcm->volume_read_known, pcm->volume_register, pcm->volume_matches,
+        pcm->mute_read_known, pcm->mute_requested, pcm->mute_register, pcm->mute_matches);
 }
 static void log_job(unsigned slot, const diagnostic_job_t *job)
 {
@@ -335,6 +367,20 @@ void app_audio_diagnostics_poll(uint64_t now_ms)
     if (summary || usb_changed(&current->usb, &previous->usb)) log_usb(&current->usb);
     if (summary || transport_changed(&current->transport, &previous->transport)) log_transport(&current->transport);
     if (summary || codec_changed(&current->codec, &previous->codec)) log_codec(&current->codec);
+    /* No per-frame logging. Unknown observations do not invent a zero signal;
+     * the first measured frame and stream replacement remain distinguishable. */
+    if ((current->usb_pcm.known || previous->usb_pcm.known) &&
+        (summary || current->usb_pcm.known != previous->usb_pcm.known ||
+         current->usb_pcm.current != previous->usb_pcm.current ||
+         current->usb_pcm.audio_generation != previous->usb_pcm.audio_generation ||
+         current->usb_pcm.consumer_generation != previous->usb_pcm.consumer_generation ||
+         current->usb_pcm.link_generation != previous->usb_pcm.link_generation)) log_usb_pcm(&current->usb_pcm);
+    if ((current->codec_pcm.generation_known || previous->codec_pcm.generation_known) &&
+        (summary || current->codec_pcm.generation != previous->codec_pcm.generation ||
+         current->codec_pcm.generation_known != previous->codec_pcm.generation_known ||
+         current->codec_pcm.pcm_known != previous->codec_pcm.pcm_known ||
+         codec_changed(&current->codec, &previous->codec) || current->volume_percent != previous->volume_percent))
+        log_codec_pcm(&current->codec_pcm);
     diagnostics.previous = diagnostics.current;
     diagnostics.observed = true;
     if (summary) diagnostics.last_summary_ms = now_ms;

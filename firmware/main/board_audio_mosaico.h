@@ -84,3 +84,28 @@ typedef struct {
 ae_result_t board_audio_mosaico_init(void);
 ae_codec_port_t board_audio_mosaico_port(void);
 board_audio_status_t board_audio_mosaico_status(void);
+
+/* Task-only cached observation, separate from the internal control mailbox.
+ * Scope resets on an owning prepare attempt, retains through stop. Samples
+ * are post-downmix mono time samples (one of the duplicated PCM16 I2S slots).
+ * Only the valid reported write prefix contributes, including SDK errors;
+ * this is not DMA consumption, job delivery, analog output or audibility. */
+typedef struct {
+    uint64_t generation;
+    uint64_t write_calls, failed_writes, invalid_prefix_writes;
+    uint64_t reported_samples, reported_nonzero_samples;
+    int last_write_sdk_result;
+    uint16_t reported_peak_abs; /* 0..32768; INT16_MIN has magnitude 32768. */
+    bool generation_known, write_result_known, last_prefix_valid, pcm_known, saturated;
+    /* Requests and actual existing register reads have distinct validity.
+     * Matches compares that read with the requested mute/volume write. These
+     * historical acknowledgements never cause an extra I2C transaction. */
+    bool volume_requested_known, volume_read_known, volume_matches;
+    uint8_t volume_requested, volume_register;
+    bool mute_read_known, mute_requested, mute_matches;
+    uint8_t mute_register;
+} board_audio_pcm_snapshot_t;
+
+/* Task context only. Copies under the existing owner lock; no IO or mutation.
+ * Before any write/read the corresponding known flag is false, not silence. */
+void board_audio_pcm_snapshot(board_audio_pcm_snapshot_t *out);

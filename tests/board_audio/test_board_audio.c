@@ -30,6 +30,7 @@ static bool fail_init, fail_remove, readback_corrupt, inject_stop, inject_mute;
 static bool fail_start, corrupt_volume;
 static esp_err_t transfer_error;
 static size_t transfer_limit = SIZE_MAX;
+static size_t write_overreport;
 static int references[CODEC_REF_STAGE_NUM];
 static uint8_t registers[256];
 static uint8_t emitted[WIRE_BYTES_MAX];
@@ -206,6 +207,7 @@ esp_err_t i2s_channel_write(i2s_chan_handle_t channel, const void *data, size_t 
     *actual = bytes < transfer_limit ? bytes : transfer_limit;
     assert(*actual <= sizeof(emitted)); memcpy(emitted, data, *actual); emitted_bytes = *actual;
     memcpy(dma_storage, data, *actual);
+    *actual += write_overreport; /* Explicit SDK boundary fault; never a buffer read. */
     return transfer_error;
 }
 

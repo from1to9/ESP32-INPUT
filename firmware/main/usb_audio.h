@@ -21,6 +21,17 @@ typedef struct {
     esp_err_t error;
 } usb_audio_snapshot_t;
 
+/* Task-only playback observations. Unknown is different from a silent frame.
+ * Counts cover complete frames returned to the manager, not physical USB or
+ * speaker completion. Retained generations are marked non-current after stop. */
+typedef struct {
+    bool known, current;
+    uint64_t link_generation, audio_generation, consumer_generation;
+    uint64_t frames, samples, nonzero_samples, last_sequence;
+    uint16_t peak_abs; /* 0..32768 for signed PCM16, including INT16_MIN. */
+} usb_audio_pcm_snapshot_t;
+void usb_audio_pcm_snapshot(usb_audio_pcm_snapshot_t *out);
+
 /* One UAC2 function in the existing CDC/HID TinyUSB stack. Initialization
  * allocates bounded PSRAM queues and one worker; it never opens the codec.
  * USB alternate-interface selection only reports a host request. An explicit

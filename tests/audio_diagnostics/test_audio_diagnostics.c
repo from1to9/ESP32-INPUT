@@ -9,6 +9,8 @@
 static app_media_snapshot_t owner;
 static usb_audio_snapshot_t usb;
 static board_audio_status_t codec;
+static usb_audio_pcm_snapshot_t usb_pcm;
+static board_audio_pcm_snapshot_t codec_pcm;
 static usb_audio_transport_snapshot_t transport;
 static bool available = true;
 static unsigned media_reads, usb_reads, codec_reads, mutations;
@@ -20,6 +22,8 @@ bool app_media_runtime_snapshot(app_media_snapshot_t *out)
 usb_audio_snapshot_t usb_audio_snapshot(void) { ++usb_reads; return usb; }
 void usb_audio_transport_snapshot(usb_audio_transport_snapshot_t *out) { *out = transport; }
 board_audio_status_t board_audio_mosaico_status(void) { ++codec_reads; return codec; }
+void usb_audio_pcm_snapshot(usb_audio_pcm_snapshot_t *out) { *out = usb_pcm; }
+void board_audio_pcm_snapshot(board_audio_pcm_snapshot_t *out) { *out = codec_pcm; }
 /* Forbidden mutations are linked and counted independently of the observer. */
 ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *request)
 { (void)request; ++mutations; return AE_INVALID; }
@@ -47,7 +51,11 @@ static void poll_at(uint64_t now)
     usb_audio_snapshot_t usb_before = usb;
     board_audio_status_t codec_before = codec;
     usb_audio_transport_snapshot_t transport_before = transport;
+    usb_audio_pcm_snapshot_t usb_pcm_before = usb_pcm;
+    board_audio_pcm_snapshot_t codec_pcm_before = codec_pcm;
     app_audio_diagnostics_poll(now);
+    assert(!memcmp(&usb_pcm_before, &usb_pcm, sizeof(usb_pcm)) &&
+        !memcmp(&codec_pcm_before, &codec_pcm, sizeof(codec_pcm)));
     assert(!memcmp(&before, &owner, sizeof(owner)) && !memcmp(&usb_before, &usb, sizeof(usb)) &&
         !memcmp(&codec_before, &codec, sizeof(codec)) && !memcmp(&transport_before, &transport, sizeof(transport)) && !mutations);
     const unsigned char *bytes = (const unsigned char *)&diagnostics.scratch;
@@ -271,12 +279,51 @@ static void test_capture_context_does_not_invent_owner_state(void)
         !contains_since(first, "required=0 audio_generation=0"));
     assert(!mutations);
 }
+static void test_pcm_observation_and_volume(void)
+{
+    setup(); poll_at(0);
+    assert(!contains_since(0, "USB PCM") && !contains_since(0, "codec PCM"));
+    usb_pcm = (usb_audio_pcm_snapshot_t){.known = true, .current = true,
+        .link_generation = 8, .audio_generation = 9, .consumer_generation = 10,
+        .frames = 1, .samples = 480};
+    codec_pcm = (board_audio_pcm_snapshot_t){.generation_known = true, .generation = 9,
+        .pcm_known = true, .reported_samples = 480, .write_calls = 1,
+        .write_result_known = true, .last_prefix_valid = true};
+    size_t first = line_count; poll_at(100);
+    assert(line_count == first + 2 && contains_since(first, "USB PCM known=1 current=1") &&
+        contains_since(first, "samples=480 nonzero=0 peak=0"));
+    ++usb_pcm.frames; usb_pcm.samples += 480; usb_pcm.nonzero_samples = 400; usb_pcm.peak_abs = 32768;
+    codec_pcm.reported_samples += 480; codec_pcm.reported_nonzero_samples = 400; codec_pcm.reported_peak_abs = 32768;
+    first = line_count; poll_at(200); assert(line_count == first);
+    owner.audio.volume_percent = 80;
+    codec_pcm.volume_requested_known = codec_pcm.volume_read_known = codec_pcm.volume_matches = true;
+    codec_pcm.volume_requested = 80; codec_pcm.volume_register = 204;
+    codec_pcm.mute_read_known = codec_pcm.mute_matches = true;
+    poll_at(300);
+    assert(contains_since(first, "volume_percent=80") &&
+        contains_since(first, "volume_requested=80 volume_read_known=1 volume_register=204 volume_matches=1"));
+    first = line_count; usb_pcm.current = false; poll_at(400);
+    assert(contains_since(first, "USB PCM known=1 current=0") && contains_since(first, "nonzero=400 peak=32768"));
+    first = line_count; usb_pcm.consumer_generation++; usb_pcm.current = true;
+    usb_pcm.nonzero_samples = usb_pcm.peak_abs = 0; poll_at(500);
+    assert(contains_since(first, "consumer_generation=11") && contains_since(first, "nonzero=0 peak=0"));
+    usb_pcm.link_generation = usb_pcm.audio_generation = usb_pcm.consumer_generation = UINT64_MAX;
+    usb_pcm.frames = usb_pcm.samples = usb_pcm.nonzero_samples = usb_pcm.last_sequence = UINT64_MAX;
+    codec_pcm.generation = codec_pcm.write_calls = codec_pcm.failed_writes = codec_pcm.invalid_prefix_writes = UINT64_MAX;
+    codec_pcm.reported_samples = codec_pcm.reported_nonzero_samples = UINT64_MAX;
+    codec_pcm.last_write_sdk_result = INT32_MIN; codec_pcm.saturated = true;
+    first = line_count; poll_at(10000);
+    assert(line_count <= first + 12 && contains_since(first, "sdk_result=-2147483648") &&
+        contains_since(first, "samples=18446744073709551615"));
+    available = false; first = line_count; poll_at(10100);
+    assert(contains_since(first, "audio known=0") && !contains_since(first, "volume_percent=0"));
+}
 int main(int argc, char **argv)
 {
     const char *names[] = {"unknown_is_not_success", "idle_throttle_and_counter_summary", "failed_job_retained_and_replaced",
-        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "transport_mode_and_results", "private_metadata_wiped", "clock_regression_is_observer_only", "capture_context_is_copied_observation", "capture_context_does_not_invent_owner_state"};
+        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "transport_mode_and_results", "private_metadata_wiped", "clock_regression_is_observer_only", "capture_context_is_copied_observation", "capture_context_does_not_invent_owner_state", "pcm_observation_and_volume"};
     void (*cases[])(void) = {test_unknown_is_not_success, test_idle_throttle_and_counter_summary, test_failed_job_retained_and_replaced,
-        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_transport_mode_and_results, test_private_metadata_wiped, test_clock_regression_is_observer_only, test_capture_context_is_copied_observation, test_capture_context_does_not_invent_owner_state};
+        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_transport_mode_and_results, test_private_metadata_wiped, test_clock_regression_is_observer_only, test_capture_context_is_copied_observation, test_capture_context_does_not_invent_owner_state, test_pcm_observation_and_volume};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)

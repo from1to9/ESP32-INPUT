@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix="esp32-uac-test-") as directory:
         "-I", str(ROOT / "firmware/main"),
         str(SUITE / "test_usb_audio.c"), "-o", binary,
     ], check=True)
-    for case in range(14):
+    for case in range(15):
         subprocess.run([binary, str(case)], check=True)
 subprocess.run([sys.executable, str(SUITE / "test_patch.py")], check=True)
 subprocess.run([sys.executable, str(SUITE / "test_config.py")], check=True)

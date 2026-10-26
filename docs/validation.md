@@ -174,6 +174,32 @@ internal memory. Placement and tests are checked locally. Contiguous DMA
 recovery and behavior of that repaired diagnostic image remain untested on
 hardware. The normal restored image does not contain this optional module.
 
+### USB playback content observation candidate: 2026-10-26
+
+Following renewed device-test authorization, the candidate adds task-only
+nonzero-sample counts and absolute peaks at complete USB frame delivery and
+the board's post-conversion, SDK-reported I2S write prefix. It retains no raw
+audio. Cached existing DAC volume/mute reads and engine volume are logged;
+no extra bus transactions or control-policy changes are introduced. Stream
+and consumer generations distinguish retained USB observations from current
+ones. Board observations remain historical acknowledgements, not DMA or
+acoustic completion.
+
+Fifteen USB application cases, twelve observer sanitizer cases and ten board
+adapter/ES8311 sanitizer cases passed. The pinned USB class/FIFO and DWC2
+comparison checks also passed with their expected baseline failures retained.
+The pinned ESP32-S31 target build and declared task stack budget passed;
+interrupt safety remains unqualified. Both new aggregates and the enlarged
+observer are in external BSS; the internal heap boundary remains identical to
+the previously restored normal image. The optional boot speaker test stays off.
+
+The broader portable check stopped at the coordinator harness because it
+cannot find `sdkconfig.h`, included by unchanged `main.c`. Neither the harness
+nor that include changed in this candidate; the broader gate is not claimed
+as passing. Focused checks above cover the changed behavior. Physical USB
+sample content, actual volume, audibility and stability remain pending the
+new deployment; these source checks alone do not resolve the silence defect.
+
 ### USB silence offline follow-up: 2026-10-26
 
 This investigation used clean source
