@@ -645,3 +645,30 @@ throughput defect and repair, not the cause of audible crackle or a UI freeze.
 
 Evidence: [USB audio regressions](../../tests/usb_audio/README.md) and
 [duplex failure evidence](../../docs/validation.md#failure-only-notice-deployment-and-usb-duplex-failure-2026-10-26).
+
+## 29. Separate shared-bus admission from peripheral transfer failure
+
+Preserve the original SDK error before translating it into a public result.
+Trace that error through the exact pinned driver and active configuration:
+a synchronous transaction can time out acquiring a shared bus before sending
+any register bytes. The error alone does not identify the competing peer or
+prove an electrical failure. Tick conversion must also be verified rather than
+assuming that a short millisecond budget becomes zero.
+
+Give muted initialization a finite budget consistent with shared-bus peers,
+without extending runtime or safety operations. Vendor initialization may keep
+calling control callbacks after a failure; latch failure/cancellation before
+admitting another wait, restore the short budget before cleanup and retain
+uncertain teardown. Test the old and repaired production sources with the same
+finite-contention fixture, plus exhaustion, transfer errors and cancellation.
+An SDK timeout argument is not necessarily a whole-operation latency bound.
+
+For a reported control flicker, observe the existing presenter's permission and
+blocker transitions alongside transport identity. Do not add a second readiness
+read or claim a copied candidate was displayed. Distinguish initial negotiation
+from a later persistent fault; changing labels or hiding disabled states does
+not repair either cause.
+
+Evidence: [codec budget regressions](../../tests/board_audio/README.md),
+[admission observer regressions](../../tests/audio_diagnostics/README.md) and
+[initialization investigation](../../docs/validation.md#bounded-codec-initialization-admission-2026-10-26).

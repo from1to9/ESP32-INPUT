@@ -26,6 +26,10 @@
 #endif
 
 #define CONTROL_TIMEOUT_MS 5
+/* Match the pinned codec control default and the shared BSP touch transaction
+ * budget while preparing muted hardware. Runtime/safety IO keeps its 5 ms
+ * bound. A failed/cancelled initialization admits no further control waits. */
+#define INITIALIZATION_CONTROL_TIMEOUT_MS 100
 #define DMA_DESCRIPTORS 6U
 #define DMA_FRAMES 240U
 #define WIRE_BYTES_MAX (960U * 4U)
@@ -49,6 +53,7 @@ typedef struct {
     esp_err_t first_error;
     uint8_t volume_written;
     bool volume_write_observed;
+    bool initializing, initialization_cancelled;
 } control_t;
 
 /* Mailbox/status are protected by lock. All SDK handles and wire bytes belong
@@ -175,6 +180,17 @@ static bool ctrl_open(const audio_codec_ctrl_if_t *base)
     return ((const control_t *)base)->device != NULL;
 }
 
+static esp_err_t control_admission(control_t *control)
+{
+    if (!control->initializing) return ESP_OK;
+    if (control->first_error != ESP_OK) return control->first_error;
+    portENTER_CRITICAL(&s.lock);
+    bool cancelled = s.stop_pending || s.mute_pending;
+    portEXIT_CRITICAL(&s.lock);
+    if (cancelled) control->initialization_cancelled = true;
+    return control->initialization_cancelled ? ESP_ERR_INVALID_STATE : ESP_OK;
+}
+
 static int ctrl_read(const audio_codec_ctrl_if_t *base, int reg, int reg_len,
                      void *data, int data_len)
 {
@@ -183,9 +199,11 @@ static int ctrl_read(const audio_codec_ctrl_if_t *base, int reg, int reg_len,
         remember(ESP_ERR_INVALID_ARG, BOARD_AUDIO_SDK_I2C_READ);
         return ESP_ERR_INVALID_ARG;
     }
+    esp_err_t admitted = control_admission(c);
+    if (admitted != ESP_OK) return admitted;
     uint8_t address = (uint8_t)reg;
     esp_err_t error = i2c_master_transmit_receive(c->device, &address, 1,
-        data, (size_t)data_len, CONTROL_TIMEOUT_MS);
+        data, (size_t)data_len, c->initializing ? INITIALIZATION_CONTROL_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
     remember(error, BOARD_AUDIO_SDK_I2C_READ);
     return error;
 }
@@ -198,8 +216,11 @@ static int ctrl_write(const audio_codec_ctrl_if_t *base, int reg, int reg_len,
         remember(ESP_ERR_INVALID_ARG, BOARD_AUDIO_SDK_I2C_WRITE);
         return ESP_ERR_INVALID_ARG;
     }
+    esp_err_t admitted = control_admission(c);
+    if (admitted != ESP_OK) return admitted;
     uint8_t bytes[2] = {(uint8_t)reg, *(uint8_t *)data};
-    esp_err_t error = i2c_master_transmit(c->device, bytes, sizeof(bytes), CONTROL_TIMEOUT_MS);
+    esp_err_t error = i2c_master_transmit(c->device, bytes, sizeof(bytes),
+        c->initializing ? INITIALIZATION_CONTROL_TIMEOUT_MS : CONTROL_TIMEOUT_MS);
     remember(error, BOARD_AUDIO_SDK_I2C_WRITE);
     if (error == ESP_OK && reg == 0x32) { c->volume_written = bytes[1]; c->volume_write_observed = true; }
     return error;
@@ -385,6 +406,8 @@ static ae_result_t hardware_stop(void)
 static ae_result_t hardware_prepare(const request_t *request)
 {
     if (s.tx || s.rx || s.codec || s.control.device || s.power_owned) return AE_BUSY;
+    ae_result_t prepare_result = AE_OK;
+    s.control.initializing = s.control.initialization_cancelled = false;
     portENTER_CRITICAL(&s.lock);
     pcm_observation = (board_audio_pcm_snapshot_t){.generation = request->generation,
         .generation_known = request->generation != 0};
@@ -450,13 +473,22 @@ static ae_result_t hardware_prepare(const request_t *request)
         .codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH, .pa_pin = -1,
         .use_mclk = true, .no_dac_ref = true, .mclk_div = 256,
         .hw_gain = { .pa_voltage = 5.0f, .codec_dac_voltage = 3.3f } };
+    s.control.initializing = true;
     s.codec = es8311_codec_new(&codec);
-    if (!s.codec || s.control.first_error != ESP_OK) { error = ESP_FAIL; goto fail; }
+    if (!s.codec || s.control.first_error != ESP_OK || s.control.initialization_cancelled) {
+        prepare_result = s.control.initialization_cancelled ? AE_STALE :
+            s.control.first_error != ESP_OK ? sdk_result(s.control.first_error) : AE_IO_ERROR;
+        goto fail;
+    }
     esp_codec_dev_sample_info_t sample = { .sample_rate = request->format.sample_rate_hz,
         .bits_per_sample = 16, .channel = 2, .mclk_multiple = 256 };
-    if (codec_result(s.codec->set_fs(s.codec, &sample)) != AE_OK ||
-        codec_enable(true) != AE_OK || dac_mute(true) != AE_OK ||
-        flush_tx() != AE_OK) { error = ESP_FAIL; goto fail; }
+    prepare_result = codec_result(s.codec->set_fs(s.codec, &sample));
+    if (prepare_result == AE_OK) prepare_result = codec_enable(true);
+    if (prepare_result == AE_OK) prepare_result = dac_mute(true);
+    if (prepare_result == AE_OK) prepare_result = flush_tx();
+    if (prepare_result != AE_OK) goto fail;
+    if (control_admission(&s.control) != ESP_OK) { prepare_result = AE_STALE; goto fail; }
+    s.control.initializing = false;
     s.format = request->format;
     s.roles = request->roles;
     s.generation = request->generation;
@@ -466,7 +498,9 @@ static ae_result_t hardware_prepare(const request_t *request)
     s.hardware_observed = true;
     return AE_OK;
 fail: {
-    ae_result_t failure = sdk_result(error);
+    ae_result_t failure = s.control.initialization_cancelled ? AE_STALE :
+        prepare_result != AE_OK ? prepare_result : sdk_result(error);
+    s.control.initializing = false;
     if (hardware_stop() != AE_OK) return AE_UNCERTAIN;
     return failure;
 }

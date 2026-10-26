@@ -2,6 +2,11 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "app_media_ui.h"
+
+/* Copy only public admission fields from the coordinator's existing presenter
+ * candidate. This is not a display acknowledgement or another readiness read. */
+void app_audio_diagnostics_media_view(uint64_t observed_ms, const app_media_view_t *view);
 
 /* Copied from the coordinator's existing permission observation. This record
  * never grants capture permission or reads the display a second time. */

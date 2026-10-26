@@ -21,6 +21,12 @@
 #define DIAGNOSTIC_JOBS (AE_CONSUMERS_MAX + 1U)
 
 typedef struct {
+    bool observed, known, pending, microphone_start, speaker_start, volume_enabled;
+    app_media_state_t state;
+    app_media_start_block_t microphone_block, speaker_block;
+    uint64_t observed_ms, generation, revision;
+} diagnostic_admission_t;
+typedef struct {
     ae_job_kind_t kind;
     ae_job_state_t state;
     ae_stop_reason_t stop_reason;
@@ -51,6 +57,7 @@ typedef struct {
     board_audio_status_t codec;
     usb_audio_pcm_snapshot_t usb_pcm;
     board_audio_pcm_snapshot_t codec_pcm;
+    diagnostic_admission_t admission;
 } diagnostic_observation_t;
 typedef struct {
     app_media_snapshot_t media;
@@ -63,12 +70,29 @@ typedef struct {
     bool capture_context_known;
     uint64_t capture_context_ms;
     app_audio_capture_context_t capture_context;
+    diagnostic_admission_t admission;
 } diagnostics_t;
 
 /* Coordinator-only, resident after PSRAM startup. Retained observations contain
  * public state/counters only; the full runtime copy is transient and wiped. */
 static AUDIO_DIAGNOSTICS_BSS diagnostics_t diagnostics;
 static const char *const TAG = "audio_diag";
+
+void app_audio_diagnostics_media_view(uint64_t observed_ms, const app_media_view_t *view)
+{
+    diagnostics.admission = (diagnostic_admission_t){.observed = true,
+        .known = view && view->known, .observed_ms = observed_ms};
+    if (!view || !view->known) return;
+    diagnostics.admission.pending = view->command_pending;
+    diagnostics.admission.state = view->state;
+    diagnostics.admission.microphone_start = view->microphone.can_start;
+    diagnostics.admission.speaker_start = view->speaker.can_start;
+    diagnostics.admission.microphone_block = view->microphone.start_block;
+    diagnostics.admission.speaker_block = view->speaker.start_block;
+    diagnostics.admission.volume_enabled = view->can_set_volume;
+    diagnostics.admission.generation = view->audio_generation;
+    diagnostics.admission.revision = view->resource_revision;
+}
 
 void app_audio_diagnostics_capture_context(uint64_t observed_ms,
     const app_audio_capture_context_t *context)
@@ -96,6 +120,7 @@ static void observe(void)
     diagnostic_observation_t *out = &diagnostics.current;
     app_media_snapshot_t *media = &diagnostics.scratch.media;
     memset(out, 0, sizeof(*out));
+    out->admission = diagnostics.admission;
     out->capture_context_known = diagnostics.capture_context_known;
     out->capture_context_ms = diagnostics.capture_context_ms;
     out->capture_context = diagnostics.capture_context;
@@ -322,6 +347,29 @@ static void log_usb(const usb_audio_snapshot_t *usb)
         usb->playback_bound, usb->playback_flush_pending, usb->queued_playback_frames, usb->partial_playback_bytes,
         usb->capture_write_calls, usb->capture_write_bytes, usb->queued_capture_frames);
 }
+static bool admission_changed(const diagnostic_admission_t *a, const diagnostic_admission_t *b)
+{
+    return a->observed != b->observed || a->known != b->known || a->pending != b->pending ||
+        a->state != b->state || a->microphone_start != b->microphone_start ||
+        a->speaker_start != b->speaker_start || a->microphone_block != b->microphone_block ||
+        a->speaker_block != b->speaker_block || a->volume_enabled != b->volume_enabled ||
+        a->generation != b->generation || a->revision != b->revision;
+}
+static void log_admission(const diagnostic_admission_t *a, uint64_t now_ms)
+{
+    bool age_known = now_ms >= a->observed_ms;
+    if (!a->known) {
+        ESP_LOGI(TAG, "Audio diag admission known=0 source=presenter_candidate age_known=%d age_ms=%" PRIu64,
+            age_known, age_known ? now_ms - a->observed_ms : 0);
+        return;
+    }
+    ESP_LOGI(TAG, "Audio diag admission known=1 source=presenter_candidate age_known=%d age_ms=%" PRIu64
+        " state=%u pending=%d generation=%" PRIu64 " revision=%" PRIu64
+        " mic_start=%d mic_block=%u speaker_start=%d speaker_block=%u volume_enabled=%d",
+        age_known, age_known ? now_ms - a->observed_ms : 0, (unsigned)a->state, a->pending,
+        a->generation, a->revision, a->microphone_start, (unsigned)a->microphone_block,
+        a->speaker_start, (unsigned)a->speaker_block, a->volume_enabled);
+}
 static void log_codec(const board_audio_status_t *codec)
 {
     if (!codec->worker_started) {
@@ -355,6 +403,8 @@ void app_audio_diagnostics_poll(uint64_t now_ms)
     observe();
     const diagnostic_observation_t *current = &diagnostics.current, *previous = &diagnostics.previous;
     bool summary = !diagnostics.observed || now_ms - diagnostics.last_summary_ms >= DIAGNOSTIC_SUMMARY_MS;
+    if (current->admission.observed && (summary || admission_changed(&current->admission, &previous->admission)))
+        log_admission(&current->admission, now_ms);
     if (summary || audio_changed(current, previous)) log_audio(current);
     if ((current->indicator_required || previous->indicator_required) &&
         (summary || audio_changed(current, previous) || capture_context_changed(current, previous)))

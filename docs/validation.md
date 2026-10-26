@@ -1821,7 +1821,60 @@ probes remain local. Existing zero-idle gates were not weakened.
 Representative final light/dark active, waiting, quiet, clipping and long-copy
 renders were visually inspected. These checks establish source/native layout
 and state behavior, not physical microphone sensitivity, host recording or a
-device stability pass for this new meter image. Physical acceptance is pending.
+device stability pass for this new meter image.
+
+The subsequent application-only deployment of
+`829ca37bf879f09417740f04c98b8312baaf72f1` verified the 4,709,360-byte image
+with SHA-256 `24cfd0f11d5a86ab3cc023986ea88562ab197b8ddef11aa464152bfeedec2edf`.
+Partition table, NVS and PHY bytes were preserved without a full backup.
+Its 180.005-second capture had 18 health samples and failed with
+`audio_job_failed` and `runtime_media_fault`. The first Mic start failed before
+any PCM frame; the codec retained `ESP_ERR_TIMEOUT` from `i2c_master_transmit`,
+and the engine entered quarantine with `AE_IO_ERROR`. USB input/output remained
+selected and transport counters advanced; the host received no nonzero input.
+The user reported disabled Mic/Speaker/volume controls and alternating Start/
+waiting states after choosing USB. No successful meter acceptance is claimed.
+
+The log contains no allocation, display-refresh, panic or reboot failure.
+Tracing the retained timeout through the exact pinned synchronous I2C driver
+and build configuration identifies failure to acquire the shared bus lock,
+before submitting the register payload. The register, competing peer and any
+indirect scheduling contribution were not recorded. The level computation had
+not received a PCM frame. UI resource cost alone is therefore not an evidenced
+explanation for this attempt. Raw failure and post-failure captures remain
+local; physical recovery is pending.
+
+### Bounded codec initialization admission: 2026-10-26
+
+The codec's five-millisecond bus admission wait could expire while another
+shared-bus owner was legitimately active. The pinned BSP touch peer and codec
+control default use 100 ms. Initialization now uses that finite argument while
+muted; runtime, mute and teardown retain 5 ms. The first failed or cancelled
+initialization rejects later vendor callbacks before another SDK wait. The
+original timeout result is retained, and cleanup failure remains uncertain.
+There is no automatic retry, fabricated readiness or change to job deadlines.
+The SDK separately applies its argument to admission and transfer; this does
+not bound an entire initialization to 100 ms.
+
+An identical native fixture with the real codec and a six-millisecond shared
+peer hold reproduces the old image's retained SDK timeout and generic engine
+I/O failure, while the repaired source prepares successfully. Six new cases
+cover read/write contention, exhausted wait, transfer failure and stop/mute
+cancellation; existing board regressions also pass. Thirteen observer cases
+and 163 coordinator cases pass. Physical recovery still requires a new image.
+The pinned target build and 504 declared task stack paths pass; interrupt
+safety remains unqualified. The existing meter layout and control binding
+code are unchanged by this repair.
+
+The failed image also recorded repeated USB stream generations during initial
+host setup, followed by stable selected input/output. This is separate from the
+later codec failure. Existing one-second settling and quarantine rules remain
+unchanged. A bounded transition record now copies Mic/Speaker Start permissions,
+blockers, pending state and volume availability from the coordinator's existing
+presenter candidate. It adds no hardware reads or readiness decisions and is
+not a display acknowledgement. Meter-only changes do not generate these logs.
+The exact cause of the reported actionable/disabled alternation remains a
+physical gate; no cosmetic smoothing or UI-overhead attribution is claimed.
 
 ## Device evidence template
 

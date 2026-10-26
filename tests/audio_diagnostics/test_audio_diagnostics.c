@@ -318,12 +318,49 @@ static void test_pcm_observation_and_volume(void)
     available = false; first = line_count; poll_at(10100);
     assert(contains_since(first, "audio known=0") && !contains_since(first, "volume_percent=0"));
 }
+static void test_presenter_admission_is_observation(void)
+{
+    setup();
+    app_media_view_t view = {.known = true, .state = APP_MEDIA_OFF,
+        .audio_generation = 4, .resource_revision = 7, .can_set_volume = true};
+    view.microphone.can_start = view.speaker.can_start = true;
+    view.microphone.start_block = view.speaker.start_block = APP_MEDIA_START_ALLOWED;
+    unsigned reads = media_reads + usb_reads + codec_reads;
+    app_audio_diagnostics_media_view(100, &view);
+    assert(media_reads + usb_reads + codec_reads == reads && !mutations);
+    view.microphone.can_start = false; /* The observer owns a copy, not this pointer. */
+    poll_at(100);
+    assert(contains_since(0, "source=presenter_candidate age_known=1 age_ms=0"));
+    assert(contains_since(0, "generation=4 revision=7 mic_start=1 mic_block=1 speaker_start=1"));
+    view.microphone.can_start = true;
+    size_t first = line_count;
+    for (unsigned i = 1; i <= 20; ++i) {
+        view.microphone_level = (app_media_mic_level_t){.state = APP_MEDIA_LEVEL_LIVE,
+            .dbfs = -(int16_t)i, .percent = (uint8_t)i};
+        app_audio_diagnostics_media_view(100 + i * 100U, &view); poll_at(100 + i * 100U);
+    }
+    assert(line_count == first); /* Meter data/time alone never floods admission logs. */
+    view.state = APP_MEDIA_FAULT;
+    view.microphone.can_start = view.speaker.can_start = view.can_set_volume = false;
+    view.microphone.start_block = view.speaker.start_block = APP_MEDIA_START_QUARANTINED;
+    app_audio_diagnostics_media_view(2200, &view); poll_at(2200);
+    assert(contains_since(first, "mic_start=0 mic_block=6 speaker_start=0 speaker_block=6 volume_enabled=0"));
+    first = line_count; view.known = false;
+    app_audio_diagnostics_media_view(2300, &view); poll_at(2300);
+    assert(contains_since(first, "admission known=0") && !contains_since(first, "mic_start="));
+    first = line_count; view.known = true; view.command_pending = true;
+    app_audio_diagnostics_media_view(2500, &view); poll_at(2400);
+    assert(contains_since(first, "age_known=0 age_ms=0") && !mutations);
+    first = line_count; app_audio_diagnostics_media_view(2500, NULL); poll_at(2500);
+    assert(contains_since(first, "admission known=0") && !contains_since(first, "mic_start="));
+}
+
 int main(int argc, char **argv)
 {
     const char *names[] = {"unknown_is_not_success", "idle_throttle_and_counter_summary", "failed_job_retained_and_replaced",
-        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "transport_mode_and_results", "private_metadata_wiped", "clock_regression_is_observer_only", "capture_context_is_copied_observation", "capture_context_does_not_invent_owner_state", "pcm_observation_and_volume"};
+        "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "transport_mode_and_results", "private_metadata_wiped", "clock_regression_is_observer_only", "capture_context_is_copied_observation", "capture_context_does_not_invent_owner_state", "pcm_observation_and_volume", "presenter_admission_is_observation"};
     void (*cases[])(void) = {test_unknown_is_not_success, test_idle_throttle_and_counter_summary, test_failed_job_retained_and_replaced,
-        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_transport_mode_and_results, test_private_metadata_wiped, test_clock_regression_is_observer_only, test_capture_context_is_copied_observation, test_capture_context_does_not_invent_owner_state, test_pcm_observation_and_volume};
+        test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_transport_mode_and_results, test_private_metadata_wiped, test_clock_regression_is_observer_only, test_capture_context_is_copied_observation, test_capture_context_does_not_invent_owner_state, test_pcm_observation_and_volume, test_presenter_admission_is_observation};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)

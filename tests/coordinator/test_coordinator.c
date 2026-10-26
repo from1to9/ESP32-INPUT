@@ -319,6 +319,8 @@ bool app_media_runtime_snapshot(app_media_snapshot_t *snapshot)
 /* The observer has a separate production-code suite; this boundary never
  * grants audio or input authority to coordinator tests. */
 void app_audio_diagnostics_poll(uint64_t now_ms) { (void)now_ms; }
+void app_audio_diagnostics_media_view(uint64_t observed_ms, const app_media_view_t *view)
+{ (void)observed_ms; (void)view; }
 void app_audio_diagnostics_capture_context(uint64_t observed_ms, const app_audio_capture_context_t *context)
 { assert(context); test_capture_context = *context; test_capture_context_ms = observed_ms; }
 void app_media_runtime_environment(const ae_environment_t *environment, uint64_t epoch,

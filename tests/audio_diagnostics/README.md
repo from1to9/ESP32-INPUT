@@ -1,6 +1,6 @@
 # Cached audio diagnostics observer
 
-Run `python3 tests/audio_diagnostics/run.py` from the repository root. Twelve
+Run `python3 tests/audio_diagnostics/run.py` from the repository root. Thirteen
 isolated cases compile the actual `app_audio_diagnostics.c` observer and format
 comparison code with strict C11 warnings, AddressSanitizer and fail-fast UBSan.
 Only the cached media/USB/codec getters and logger are substituted. Exact
@@ -95,3 +95,13 @@ Existing volume/mute read acknowledgements and engine volume are reported
 without new I2C transactions. Metadata uses external BSS and task-only access.
 The additional case checks zero/nonzero distinction, stale observations,
 volume visibility, full-width formatting and read-only throttling.
+
+The coordinator also copies public Mic/Speaker admission fields from its
+presenter candidate: known state, pending operation, generation/revision,
+Start permission/blocker and volume availability. These transition records
+do not acknowledge screen delivery, sample hardware or infer readiness.
+Timestamp changes and continuous level updates alone produce no admission log;
+the existing 100 ms sampling and ten-second summaries remain in force. Missing
+views stay unknown, and their fields are not reused as false zero values.
+Tests exercise copied ownership, ready/fault transitions, unknown/future-dated
+views, unchanged-level throttling and the absence of producer mutations.

@@ -403,9 +403,11 @@ for _caller, _prefix in {
 }.items():
     AUDIO_DIAGNOSTIC_PATHS[f"audio_capture_context_{_caller}"] = _prefix + [
         ("main", "refresh_media_context"), ("audio_diagnostics", "app_audio_diagnostics_capture_context")]
-for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec", "log_transport", "log_capture_context", "log_usb_pcm", "log_codec_pcm"):
+AUDIO_DIAGNOSTIC_PATHS["audio_presenter_admission_copy"] = CORE + [("main", "render_view"),
+    ("audio_diagnostics", "app_audio_diagnostics_media_view")]
+for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec", "log_transport", "log_capture_context", "log_usb_pcm", "log_codec_pcm", "log_admission"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_logger}"] = AUDIO_OBSERVER + [("audio_diagnostics", _logger)]
-for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed", "transport_changed", "capture_context_changed"):
+for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed", "transport_changed", "capture_context_changed", "admission_changed"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_comparison}"] = AUDIO_OBSERVER + [("audio_diagnostics", _comparison)]
 AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_format"] = AUDIO_OBSERVER + [
     ("audio_diagnostics", "codec_changed"), ("audio_helpers", "ae_format_equal")]
@@ -628,6 +630,18 @@ BOARD_AUDIO_PATHS = {
     "board_audio_capture_status_failure": BOARD_AUDIO_SERVICE + [("board_audio", "publish"),
         ("board_audio", "invalidate_capture_level")],
 }
+# First-party callback frames around opaque codec calls; SDK internals remain
+# covered only by the declared reserve, not a measured callback stack bound.
+for _name, _tail in {
+    "direct": [], "enable": [("board_audio", "codec_enable")],
+    "mute": [("board_audio", "dac_mute")],
+}.items():
+    for _control in ("ctrl_read", "ctrl_write"):
+        BOARD_AUDIO_PATHS[f"board_audio_prepare_{_name}_{_control}_admission"] = (
+            BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_prepare")] + _tail +
+            [("board_audio", _control), ("board_audio", "control_admission")])
+BOARD_AUDIO_PATHS["board_audio_prepare_commit_admission"] = BOARD_AUDIO_EXECUTE + [
+    ("board_audio", "hardware_prepare"), ("board_audio", "control_admission")]
 # Codec SDK calls stay on the existing board worker. Clock enable/disable and
 # offline DMA purge are sibling calls; they never run on the submitting task.
 for _name, (_prefix, _can_start) in {

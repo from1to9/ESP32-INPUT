@@ -45,6 +45,23 @@ configurations check the exact creation API, capacity, no-fallback failure and
 explicit retry, alongside DMA placement and both-channel cleanup. These tasks
 have no deletion lifecycle; any future deletion must use the matching SDK API.
 
+Muted codec initialization uses a 100 ms I2C timeout argument, matching the
+pinned codec-control default and the BSP touch peer on the shared bus. Runtime,
+mute and cleanup calls retain their 5 ms argument. A first failed initialization
+callback latches its exact error; later vendor callbacks cannot start another
+SDK wait. Stop/mute cancellation is checked before each admitted initialization
+control and before prepare commits, with cleanup using the original short
+budget. No register operation, job or preparation is automatically retried.
+The SDK applies its argument to bus admission and transfer waits separately;
+this is not a claim that an entire initialization finishes within 100 ms.
+
+Six real-codec budget cases cover finite six-millisecond shared-peer occupation
+on read/write admission, admission still blocked after 100 ms, a real transfer
+error, and stop/mute cancellation during preparation. They verify that later
+vendor callbacks start no more waits after failure/cancellation, retain the
+original SDK error, leave capture/playback gates closed, release only confirmed
+ownership, and restore 5 ms runtime/mute/teardown behavior on every exit.
+
 The physical ES8311 is a singleton in BOTH mode, with shared I2S0, MCLK 256,
 stereo 16-bit wire slots, six DMA descriptors of 240 sample frames per direction
 and a 20 ms maximum read/write wait. Codec I2C uses the BSP bus and 0x19 address,

@@ -34,6 +34,12 @@ static size_t write_overreport;
 static size_t read_overreport;
 static bool custom_capture;
 static int16_t capture_samples[2];
+static unsigned peer_busy_ms, initialization_calls, runtime_control_calls, control_payloads;
+static unsigned control_waited_ms;
+static bool peer_on_write;
+static esp_err_t control_transfer_error;
+static void (*control_hook)(void);
+static unsigned control_hook_at;
 static int references[CODEC_REF_STAGE_NUM];
 static uint8_t registers[256];
 static uint8_t emitted[WIRE_BYTES_MAX];
@@ -102,10 +108,28 @@ esp_err_t i2c_master_bus_rm_device(i2c_master_dev_handle_t device)
 {
     sdk(); assert(device == (void *)&registers); return fail_remove ? ESP_FAIL : ESP_OK;
 }
+static esp_err_t control_boundary(int timeout, bool writing)
+{
+    assert(timeout == 5 || timeout == 100);
+    if (timeout == 100) ++initialization_calls; else ++runtime_control_calls;
+    if (control_hook && initialization_calls == control_hook_at) {
+        void (*hook)(void) = control_hook; control_hook = NULL; hook();
+    }
+    if (peer_busy_ms && (!peer_on_write || writing)) {
+        unsigned waited = peer_busy_ms < (unsigned)timeout ? peer_busy_ms : (unsigned)timeout;
+        peer_busy_ms -= waited; control_waited_ms += waited;
+        if (peer_busy_ms) return ESP_ERR_TIMEOUT; /* Bus admission precedes payload. */
+    }
+    ++control_payloads;
+    return control_transfer_error;
+}
+
 esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t device, const uint8_t *address,
     size_t address_bytes, uint8_t *data, size_t bytes, int timeout)
 {
-    sdk(); assert(device && address_bytes == 1 && bytes == 1 && timeout == 5);
+    sdk(); assert(device && address_bytes == 1 && bytes == 1);
+    esp_err_t admitted = control_boundary(timeout, false);
+    if (admitted != ESP_OK) return admitted;
     if ((int)*address == fail_register && fail_read) return ESP_ERR_TIMEOUT;
     *data = registers[*address];
     if (readback_corrupt && *address == 0x31) *data ^= 0x60;
@@ -114,7 +138,9 @@ esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t device, const uint
 }
 esp_err_t i2c_master_transmit(i2c_master_dev_handle_t device, const uint8_t *data, size_t bytes, int timeout)
 {
-    sdk(); assert(device && bytes == 2 && timeout == 5);
+    sdk(); assert(device && bytes == 2);
+    esp_err_t admitted = control_boundary(timeout, true);
+    if (admitted != ESP_OK) return admitted;
     if ((int)data[0] == fail_register && fail_write) return ESP_ERR_TIMEOUT;
     if (fail_start && references[CODEC_REF_STAGE_ENABLE] == 1 && data[0] == 0 && data[1] == 0x80)
         return ESP_ERR_TIMEOUT;

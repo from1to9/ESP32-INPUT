@@ -2767,6 +2767,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
     }
     fill_local_management_view(&view, &wifi, link);
     app_media_controls_fill(&view);
+    app_audio_diagnostics_media_view(s_now_ms, &view.media);
     app_connectivity_controls_fill(&view);
     view.api.remote_input_allowed = s_remote_allowed;
     view.api.remote_input_generation = s_remote_input && s_command_bridge &&
