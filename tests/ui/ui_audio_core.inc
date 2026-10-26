@@ -16,8 +16,7 @@ static void audio_start_block_checks(void)
     s_state.media.microphone.can_start = s_state.media.speaker.can_start = false;
     s_state.media.microphone.start_block = s_state.media.speaker.start_block = APP_MEDIA_START_HOST_STREAM_REQUIRED;
     screenshot("audio-core-host-stream-required");
-    audio_assert_text_fits("Off / Unavailable\nOpen Mic on host");
-    audio_assert_text_fits("Off / Unavailable\nPlay audio to this device on host");
+    audio_assert_text_fits("Off / Waiting\nWaiting for host audio");
     audio_assert_text_fits("Mic: Open Mic on host\nSpeaker: Play audio to this device on host");
     clear_intents(); tap_control("Start mic"); tap_control("Start speaker");
     assert(action_count(APP_MEDIA_CONTROL) == 0 && !s_state.media.live_capture.known && !s_state.media.playback.known);
@@ -45,21 +44,73 @@ static void audio_host_settling_checks(void)
     s_state.media.microphone.can_start = s_state.media.speaker.can_start = false;
     s_state.media.microphone.start_block = s_state.media.speaker.start_block = APP_MEDIA_START_HOST_PREPARING;
     screenshot("audio-core-host-preparing");
-    audio_assert_text_fits("Off / Preparing\nHost is preparing audio");
-    audio_assert_text_fits("Mic: Host is preparing audio\nSpeaker: Host is preparing audio");
+    audio_assert_text_fits("Off / Waiting\nWaiting for host audio");
+    audio_assert_text_fits("Mic: Open Mic on host\nSpeaker: Play audio to this device on host");
+    for (unsigned history = 0; history < 2; ++history) {
+        if (history) {
+            s_state.media.live_capture = s_state.media.playback = (app_media_job_view_t){.known = true, .state = APP_MEDIA_JOB_COMPLETED};
+            strcpy(s_state.media.live_capture.reason, "Previous Mic session ended.");
+            strcpy(s_state.media.playback.reason, "Previous Speaker session ended.");
+            screenshot("audio-core-host-waiting-retained-completion");
+        }
+        lv_tick_inc(1000); lv_timer_handler(); render();
+        ui_memory_stats_t before = ui_memory_stats();
+        uint64_t flushes = s_flush_count;
+        for (unsigned i = 0; i < 100; ++i) {
+            /* Independent role openings and stream replacements change owner
+             * identity without making either idle role actionable. */
+            s_state.media.microphone.start_block = i % 2 ? APP_MEDIA_START_HOST_STREAM_REQUIRED : APP_MEDIA_START_HOST_PREPARING;
+            s_state.media.speaker.start_block = i % 3 ? APP_MEDIA_START_HOST_PREPARING : APP_MEDIA_START_HOST_STREAM_REQUIRED;
+            ++s_state.media.resource_revision;
+            render(); lv_tick_inc(100); lv_timer_handler();
+            audio_assert_text_fits("Off / Waiting\nWaiting for host audio");
+            audio_assert_text_fits("Mic: Open Mic on host\nSpeaker: Play audio to this device on host");
+            assert(!has_visible_label(lv_screen_active(), "Off / Ready"));
+            assert(!has_visible_label(lv_screen_active(), "Previous Mic session ended."));
+            assert(!has_visible_label(lv_screen_active(), "Previous Speaker session ended."));
+            assert(lv_obj_has_state(control("Start mic"), LV_STATE_DISABLED));
+            assert(lv_obj_has_state(control("Start speaker"), LV_STATE_DISABLED));
+        }
+        ui_memory_stats_t after = ui_memory_stats();
+        assert(after.allocations == before.allocations && after.reallocations == before.reallocations && after.frees == before.frees);
+        assert(after.live_bytes == before.live_bytes && after.live_blocks == before.live_blocks);
+        assert(s_flush_count == flushes && lv_anim_count_running() == 0);
+    }
+    s_state.media.live_capture = s_state.media.playback = (app_media_job_view_t){0};
     clear_intents(); tap_control("Start mic"); tap_control("Start speaker");
     assert(action_count(APP_MEDIA_CONTROL) == 0);
+    s_state.media.microphone.start_block = s_state.media.speaker.start_block = APP_MEDIA_START_HOST_UNAVAILABLE;
+    screenshot("audio-core-host-disconnected");
+    audio_assert_text_fits("Off / Unavailable\nHost audio is not connected");
+    assert(!has_visible_label(lv_screen_active(), "Waiting for host audio"));
+    clear_intents(); tap_control("Start mic"); tap_control("Start speaker");
+    assert(action_count(APP_MEDIA_CONTROL) == 0);
+    s_state.media.microphone.start_block = s_state.media.speaker.start_block = APP_MEDIA_START_HOST_PREPARING;
+    render();
     clear_intents(); pointer(380, 284, true);
     s_state.media.speaker.can_start = true; s_state.media.speaker.start_block = APP_MEDIA_START_ALLOWED;
     render(); pointer(380, 284, false);
     assert(action_count(APP_MEDIA_CONTROL) == 0); /* Disabled press cannot become deferred consent. */
+    pointer(380, 284, true);
+    s_state.media.speaker.can_start = false; s_state.media.speaker.start_block = APP_MEDIA_START_HOST_STREAM_REQUIRED;
+    ++s_state.media.resource_revision;
+    render(); pointer(380, 284, false);
+    assert(action_count(APP_MEDIA_CONTROL) == 0); /* A ready press cannot retain stale admission. */
+    assert(!has_visible_label(lv_screen_active(), "Off / Ready"));
+    s_state.media.speaker.can_start = true; s_state.media.speaker.start_block = APP_MEDIA_START_ALLOWED;
+    render(); audio_assert_text_fits("Off / Ready");
     tap_control("Start speaker"); assert(action_count(APP_MEDIA_CONTROL) == 1);
     s_state.media.speaker.can_start = false; s_state.media.speaker.start_block = APP_MEDIA_START_HOST_PREPARING;
     s_state.media.playback = (app_media_job_view_t){.known = true, .state = APP_MEDIA_JOB_ERROR};
     strcpy(s_state.media.playback.reason, "State changed. Review the current controls.");
     screenshot("audio-core-host-preparing-previous-error");
     audio_assert_text_fits("Error\nState changed. Review the current controls.");
-    audio_assert_text_fits("Mic: Host is preparing audio\nSpeaker: Host is preparing audio");
+    audio_assert_text_fits("Speaker: State changed. Review the current controls.");
+    s_state.media.microphone.start_block = s_state.media.speaker.start_block = APP_MEDIA_START_HOST_STREAM_REQUIRED;
+    render();
+    audio_assert_text_fits("Error\nState changed. Review the current controls.");
+    audio_assert_text_fits("Speaker: State changed. Review the current controls.");
+    s_state.media.microphone.start_block = s_state.media.speaker.start_block = APP_MEDIA_START_HOST_PREPARING;
     s_state.media.playback = (app_media_job_view_t){.known = true, .id = {{83}}, .consumer_generation = 93,
         .state = APP_MEDIA_JOB_RUNNING, .can_stop = true};
     s_state.media.speaker.start_block = APP_MEDIA_START_OCCUPIED;
@@ -78,6 +129,7 @@ static void audio_host_settling_checks(void)
     clear_intents(); tap_control("Mute mic");
     assert(action_count(APP_MEDIA_CONTROL) == 1 && last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_SET_MUTED &&
         last_action(APP_MEDIA_CONTROL)->media.value.role.value);
+    puts("PASS: host waiting with/without completed jobs stays stable; 200 snapshots, zero flushes/allocations, readiness/disconnect/errors remain authoritative");
 }
 
 static void audio_core_checks(void)

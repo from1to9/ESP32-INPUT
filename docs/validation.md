@@ -1908,6 +1908,46 @@ failure remains quarantined. The relevant board suite, pinned target build
 and 504 declared task stack paths pass. These are source/native/target checks;
 the follow-up image still requires physical boot and audio acceptance.
 
+### Boot recovery and USB waiting presentation: 2026-10-26
+
+The application-only deployment of `3a17212` independently verified image
+SHA-256 `0320648d6ff5723234a59778a63433f390051d9d6201f3a11920a21d10ee52be`,
+preserving partition/NVS/PHY bytes without a full backup. The boot probe
+completed with observed hardware, no codec error, no uncertain cleanup and
+confirmed off. The user confirmed a changing microphone level, normal USB
+duplex sound and usable controls. Three Mic jobs and three Speaker jobs ended
+by requested stop with zero reported job errors. The longest delivered 79.67
+and 35.35 seconds equivalent of mono 48 kHz PCM16, respectively. Host input
+contained nonzero samples, with zero host callback errors; no PCM was retained.
+
+This is not a complete smoke pass: serial capture stopped after 189.85 of the
+requested 240 seconds, retaining 18 health samples and `capture_incomplete`,
+`esp_error` and `serial_io_error`. The two ESP errors were the already-installed
+GPIO ISR service messages at startup; the serial interruption cause is unknown.
+The last retained audio state was off with no engine error. The capture retains
+USB admission rejections and explicit-stop discarded frames; it is not a
+zero-drop or long-term stability claim.
+
+The remaining user report is rapid Unavailable/Preparing/possibly Ready text
+after choosing USB. Initial presenter samples alternate blockers for no host
+stream and an unsettled stream, with both Start permissions false. Permission
+then becomes true after the existing settling interval. The 100 ms observer is
+not per-frame display proof, so it does not disprove faster reported changes.
+Source-matched rendering explains the observed Unavailable/Preparing alternation.
+The presentation repair maps both idle waiting conditions to the same visible
+waiting state and stable host instructions; actual Ready permission, disconnect,
+fault and active-job behavior remain distinct. No delay, transport readiness
+decision or command policy is changed. Per the user's subsequent instruction,
+this follow-up is validated locally and published without another device test.
+The focused production LVGL Audio run passes 142 renders and interaction
+checks in both themes. Two 100-update alternation sequences per theme, including
+retained completed-job notices, produce no extra flushes, allocations or live
+memory growth. Held Start loses permission immediately when applied state
+revokes it; blocked presses cannot become deferred consent. Real errors and
+disconnect remain visible. Representative light/dark waiting layouts were
+visually inspected and the pinned target build passed. This does not establish
+physical display acceptance for the new waiting presentation.
+
 ## Device evidence template
 
 ```text

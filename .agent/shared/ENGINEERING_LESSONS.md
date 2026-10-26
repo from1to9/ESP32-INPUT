@@ -678,6 +678,12 @@ read or claim a copied candidate was displayed. Distinguish initial negotiation
 from a later persistent fault; changing labels or hiding disabled states does
 not repair either cause.
 
+When no-host-stream and unsettled-host-stream observations both deny Start,
+present them as one truthful waiting category with stable host instructions.
+Calling one transient phase unavailable creates visible flicker without adding
+useful guidance. Keep the diagnostic reasons distinct, Ready tied to actual
+permission, and real disconnect, faults and active controls immediately visible.
+
 Evidence: [codec budget regressions](../../tests/board_audio/README.md),
 [admission observer regressions](../../tests/audio_diagnostics/README.md) and
 [initialization investigation](../../docs/validation.md#bounded-codec-initialization-admission-2026-10-26).

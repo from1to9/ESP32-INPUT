@@ -145,6 +145,11 @@ static bool media_mic_in_use(void)
         s_view.media.speech.state == APP_SPEECH_STOPPING;
 }
 
+static bool media_waiting_for_host(app_media_start_block_t block)
+{
+    return block == APP_MEDIA_START_HOST_STREAM_REQUIRED || block == APP_MEDIA_START_HOST_PREPARING;
+}
+
 static const char *media_start_reason(bool speaker, const app_media_role_view_t *role,
     const app_media_job_view_t *job)
 {
@@ -163,8 +168,8 @@ static const char *media_start_reason(bool speaker, const app_media_role_view_t 
     case APP_MEDIA_START_UNSUPPORTED: return speaker ? "Speaker unsupported on this connection" : "Mic unsupported on this connection";
     case APP_MEDIA_START_ROUTE_UNAVAILABLE: return "Audio connection unavailable";
     case APP_MEDIA_START_HOST_UNAVAILABLE: return "Host audio is not connected";
-    case APP_MEDIA_START_HOST_STREAM_REQUIRED: return speaker ? "Play audio to this device on host" : "Open Mic on host";
-    case APP_MEDIA_START_HOST_PREPARING: return "Host is preparing audio";
+    case APP_MEDIA_START_HOST_STREAM_REQUIRED:
+    case APP_MEDIA_START_HOST_PREPARING: return "Waiting for host audio";
     case APP_MEDIA_START_IDENTITY_UNAVAILABLE: return "Audio session unavailable";
     case APP_MEDIA_START_PEER_MISMATCH: return "Audio devices do not match";
     case APP_MEDIA_START_CLEANUP: return "Finishing previous audio";
@@ -193,7 +198,7 @@ static const char *media_core_state(bool speaker, const app_media_role_view_t *r
     if (s_view.media.state == APP_MEDIA_FAULT) return "Audio error";
     if (s_view.media.command_pending) return "Updating";
     if (role->can_start) return "Off / Ready";
-    if (role->start_block == APP_MEDIA_START_HOST_PREPARING) return "Off / Preparing";
+    if (media_waiting_for_host(role->start_block)) return "Off / Waiting";
     return "Off / Unavailable";
 }
 
@@ -248,9 +253,15 @@ static void render_media_core(void)
         text(s_audio_power[i], i ? (active ? "Stop speaker" : "Start speaker") : (active ? "Stop mic" : "Start mic"));
         selected(s_audio_power[i], active);
         start_reason[i] = media_start_reason(i != 0, role, job);
-        const char *reason = job->known && *job->reason ? job->reason : start_reason[i];
+        bool waiting = start_reason[i] && media_waiting_for_host(role->start_block);
+        const char *reason = job->known && *job->reason && !(waiting && job->state == APP_MEDIA_JOB_COMPLETED) ?
+            job->reason : start_reason[i];
         if (reason) label_format(s_audio_state[i], "%s\n%s", media_core_state(i != 0, role, job), reason);
         else label_text(s_audio_state[i], media_core_state(i != 0, role, job));
+        /* Both host-waiting phases share stable setup guidance. The owner
+         * retains the distinct blockers and remains the only start gate. */
+        if (waiting)
+            start_reason[i] = i ? "Play audio to this device on host" : "Open Mic on host";
     }
     const app_media_role_view_t *mic = &media->microphone;
     bool mute = !mic->mute_confirmed || !mic->muted;
@@ -265,12 +276,14 @@ static void render_media_core(void)
     media_bind(s_volume, media_request(APP_MEDIA_SET_VOLUME), volume && media->can_set_volume && !media->command_pending);
     if (volume) { slider_value(s_volume, media->volume_percent); label_format(s_volume_text, "%u%%", media->volume_percent); }
     else label_text(s_volume_text, "--");
-    bool settling_hint = (start_reason[0] && media->microphone.start_block == APP_MEDIA_START_HOST_PREPARING) ||
-        (start_reason[1] && media->speaker.start_block == APP_MEDIA_START_HOST_PREPARING);
+    bool waiting_hint = (start_reason[0] && media_waiting_for_host(media->microphone.start_block)) ||
+        (start_reason[1] && media_waiting_for_host(media->speaker.start_block));
     if (!media->known) label_text(s_audio_note, "Audio status unavailable.");
     else if (*media->reason) label_text(s_audio_note, media->reason);
-    else if (!settling_hint && media->live_capture.known && *media->live_capture.reason) label_format(s_audio_note, "Mic: %s", media->live_capture.reason);
-    else if (!settling_hint && media->playback.known && *media->playback.reason) label_format(s_audio_note, "Speaker: %s", media->playback.reason);
+    else if (media->live_capture.known && *media->live_capture.reason &&
+        !(waiting_hint && media->live_capture.state == APP_MEDIA_JOB_COMPLETED)) label_format(s_audio_note, "Mic: %s", media->live_capture.reason);
+    else if (media->playback.known && *media->playback.reason &&
+        !(waiting_hint && media->playback.state == APP_MEDIA_JOB_COMPLETED)) label_format(s_audio_note, "Speaker: %s", media->playback.reason);
     else if (start_reason[0] && start_reason[1]) label_format(s_audio_note, "Mic: %s\nSpeaker: %s", start_reason[0], start_reason[1]);
     else if (start_reason[0]) label_format(s_audio_note, "Mic: %s", start_reason[0]);
     else if (start_reason[1]) label_format(s_audio_note, "Speaker: %s", start_reason[1]);

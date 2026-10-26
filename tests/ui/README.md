@@ -60,6 +60,13 @@ unopened USB host stream from unavailable hardware or link, and keeps active
 jobs and errors authoritative. Longest reason labels and their two-role footer
 are checked against actual font/layout bounds in both themes; unknown reason
 codes stay unavailable and disabled hits cannot emit a start.
+Unopened and settling USB host streams share the same waiting text and stable
+role-specific setup guidance. Alternating those owner blockers for 100 snapshots
+with and without retained completed-job notices per theme must produce zero
+flushes, allocations, reallocations or frees, with unchanged live memory. Actual
+errors retain their card/footer priority. Readiness enables Start only when the
+owner permits it; disconnect remains distinct and a held Start cannot retain
+revoked admission.
 Both cards stay visible regardless of the legacy audio-kind setting. Recording
 and spoken-letter checks remain separate from primary Audio navigation. Storage
 tests assert that its entry is absent from primary Audio, then exercise the

@@ -42,8 +42,11 @@ qualified. This primary-workspace revision was explicitly requested on 2026-10-2
 
 USB connection selection does not require an open host audio stream. Local Mic
 or Speaker start becomes actionable only after the corresponding valid USB
-stream identity, format and role readiness remain stable for 1,000 ms. During
-negotiation, use **Host is preparing audio** in the existing card/footer; do not
+stream identity, format and role readiness remain stable for 1,000 ms. An idle
+role awaiting a host stream or stable negotiation shows **Off / Waiting** and
+**Waiting for host audio** in the existing card. Use stable, role-specific host
+instructions in the footer instead of alternating Unavailable/Preparing labels.
+**Ready** and actionable Start require the owner's actual permission. Do not
 flash an actionable Start button between transient stream openings. Loss or
 replacement revokes readiness immediately. Keep Stop and Mute available under
 their existing owner rules, retain terminal-job evidence, and never remember
