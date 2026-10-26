@@ -29,6 +29,7 @@ static app_presenter_status_t s_status = {.init_error = ESP_ERR_INVALID_STATE};
 static uint64_t s_publish_ms, s_apply_ms, s_pending_since_ms;
 static lv_display_t *s_display;
 static uint64_t s_display_generation, s_refresh_sequence, s_owner_heartbeat_ms;
+static uint64_t s_observed_invalidation_revision;
 static bool s_have_heartbeat, s_refresh_active, s_have_transfer, s_geometry_fault;
 static app_ui_capture_indicator_t s_indicator;
 static board_display_token_t s_refresh_token;
@@ -71,6 +72,38 @@ static bool valid_indicator(const app_ui_capture_indicator_t *indicator)
         indicator->x2 >= indicator->x1 && indicator->y2 >= indicator->y1;
 }
 
+/* Caller holds s_lock; the receipt was copied outside it. Owner observation
+ * must retain a complete receipt before the next refresh replaces Board's
+ * records, even when no status caller ran between those refreshes. */
+static bool observe_transfer_locked(const board_display_receipt_t *observed)
+{
+    /* A status caller can copy before owner progress, then acquire this lock
+     * afterwards. It must not restore an invalidated epoch or older proof. */
+    if (observed->invalidation_revision < s_observed_invalidation_revision) return false;
+    s_observed_invalidation_revision = observed->invalidation_revision;
+    bool observer_current = observed->installed && observed->callback_attached &&
+        !observed->association_lost && observed->error == ESP_OK &&
+        observed->display_generation == s_display_generation;
+    if (!s_display || !observer_current || s_geometry_fault || s_display_error != ESP_OK ||
+        (s_have_transfer && observed->invalidation_revision != s_confirmed_transfer.invalidation_revision))
+        s_have_transfer = false;
+    bool token_matches = observed->token.display_generation == s_display_generation &&
+        observed->token.capture_generation == s_indicator.capture_generation &&
+        observed->token.indicator_revision == s_indicator.indicator_revision &&
+        observed->token.refresh_sequence && observed->token.refresh_sequence <= s_refresh_sequence;
+    bool area_matches = observed->required.x0 == s_indicator.x1 && observed->required.y0 == s_indicator.y1 &&
+        observed->required.x1 == s_indicator.x2 + 1 && observed->required.y1 == s_indicator.y2 + 1;
+    if (s_display && s_indicator.armed && observer_current && !s_geometry_fault &&
+        s_display_error == ESP_OK && token_matches && area_matches && observed->refresh_sealed &&
+        observed->coverage_complete && observed->indicator_transfer_confirmed &&
+        observed->transfers && observed->transfers == observed->completed_transfers &&
+        (!s_have_transfer || observed->token.refresh_sequence >= s_confirmed_transfer.token.refresh_sequence)) {
+        s_confirmed_transfer = *observed;
+        s_have_transfer = true;
+    }
+    return observer_current;
+}
+
 static void observe_owner(void)
 {
     /* Only called by the actual LVGL owner, never by publish/status polling. */
@@ -96,6 +129,9 @@ static void observe_owner(void)
         s_have_transfer = false;
         s_refresh_active = false;
     }
+    /* A changed identity is invalidated below and needs its own new transfer.
+     * Otherwise preserve the already-read proof before begin clears records. */
+    if (!changed && !generation_changed) (void)observe_transfer_locked(&receipt);
     portEXIT_CRITICAL(&s_lock);
     if ((changed || generation_changed) && bound) board_display_transfer_invalidate();
     /* Callback replacement invalidates the old hardware generation. Repaint
@@ -356,25 +392,7 @@ app_presenter_indicator_status_t app_presenter_indicator_status(void)
         .indicator_revision = s_indicator.indicator_revision, .owner_heartbeat_ms = s_owner_heartbeat_ms,
         .error = s_display_error
     };
-    bool observer_current = observed.installed && observed.callback_attached &&
-        !observed.association_lost && observed.error == ESP_OK &&
-        observed.display_generation == s_display_generation;
-    if (!status.bound || !observer_current || s_geometry_fault || s_display_error != ESP_OK ||
-        (s_have_transfer && observed.invalidation_revision != s_confirmed_transfer.invalidation_revision))
-        s_have_transfer = false;
-    bool token_matches = observed.token.display_generation == s_display_generation &&
-        observed.token.capture_generation == s_indicator.capture_generation &&
-        observed.token.indicator_revision == s_indicator.indicator_revision &&
-        observed.token.refresh_sequence && observed.token.refresh_sequence <= s_refresh_sequence;
-    bool area_matches = observed.required.x0 == s_indicator.x1 && observed.required.y0 == s_indicator.y1 &&
-        observed.required.x1 == s_indicator.x2 + 1 && observed.required.y1 == s_indicator.y2 + 1;
-    if (status.bound && s_indicator.armed && observer_current && !s_geometry_fault &&
-        s_display_error == ESP_OK && token_matches && area_matches && observed.refresh_sealed &&
-        observed.coverage_complete && observed.indicator_transfer_confirmed &&
-        observed.transfers && observed.transfers == observed.completed_transfers) {
-        s_confirmed_transfer = observed;
-        s_have_transfer = true;
-    }
+    bool observer_current = observe_transfer_locked(&observed);
     status.clock_valid = raw_us >= 0 && s_have_heartbeat && current_ms >= s_owner_heartbeat_ms &&
         (!s_have_transfer || current_us >= s_confirmed_transfer.completed_us);
     status.heartbeat_age_ms = status.clock_valid ? current_ms - s_owner_heartbeat_ms : 0;

@@ -58,8 +58,16 @@ int main(void)
     app_view_t view = {.epoch = 1, .ui_revision = 1, .dark_theme = true,
         .capture_indicator_required = true, .capture_indicator_generation = 17, .capture_state = APP_CAPTURE_ACTIVE};
     assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); advance(200);
+    board_display_receipt_t first_transfer = board_display_transfer_receipt();
+    assert(first_transfer.indicator_transfer_confirmed && first_transfer.completed_us);
+    /* The first status read may follow another refresh with no pixels to send. */
+    unsigned completed_draws = draws;
+    lv_refr_now(display);
+    assert(draws == completed_draws && !board_display_transfer_receipt().transfers);
     app_presenter_indicator_status_t proof = app_presenter_indicator_status();
     assert(proof.usable && proof.capture_generation == 17 && proof.completed_us);
+    assert(proof.completed_us == first_transfer.completed_us &&
+        proof.refresh_sequence == first_transfer.token.refresh_sequence);
     unsigned before = draws; advance(1000);
     assert(draws == before && app_presenter_indicator_status().usable);
     assert(app_presenter_indicator_status().completed_us == proof.completed_us);

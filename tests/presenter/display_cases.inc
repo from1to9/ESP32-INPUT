@@ -36,14 +36,150 @@ static void observed_complete(void)
     s_board.completed_us = (uint64_t)atomic_load(&s_clock_us);
 }
 
-static void complete_refresh(void)
+static void complete_refresh_without_poll(void)
 {
     display_signal(LV_EVENT_REFR_START);
     assert(s_board.required.x0 == 280 && s_board.required.y0 == 8 &&
         s_board.required.x1 == 396 && s_board.required.y1 == 56);
     observed_complete();
     display_signal(LV_EVENT_REFR_READY);
+}
+
+static void complete_refresh(void)
+{
+    complete_refresh_without_poll();
     assert(app_presenter_indicator_status().usable);
+}
+
+static void display_first_proof_survives_unpolled_refresh(void)
+{
+    app_view_t view = setup_display_indicator();
+    assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); tick();
+    complete_refresh_without_poll();
+    atomic_store(&s_clock_us, 120000);
+    display_signal(LV_EVENT_REFR_START); display_signal(LV_EVENT_REFR_READY);
+    assert(!s_board.transfers && !s_board.indicator_transfer_confirmed);
+    atomic_store(&s_clock_us, 130000);
+    display_signal(LV_EVENT_REFR_START); display_signal(LV_EVENT_REFR_READY);
+    atomic_store(&s_clock_us, 140000);
+    display_signal(LV_EVENT_REFR_START);
+    /* One completed draw outside the marker cannot create a new proof. */
+    s_board.transfers = s_board.completed_transfers = 1;
+    s_board.completed_us = 140000;
+    display_signal(LV_EVENT_REFR_READY);
+    app_presenter_indicator_status_t status = app_presenter_indicator_status();
+    assert(status.usable && status.indicator_transfer_confirmed && status.owner_alive);
+    assert(status.refresh_sequence == 1 && status.completed_us == 100000);
+    assert(s_begins == 4 && s_ends == 4);
+}
+
+static void newer_proof_before_status_lock(void)
+{
+    atomic_store(&s_clock_us, 110000);
+    complete_refresh_without_poll(); tick();
+}
+
+static void revoke_before_status_lock(void)
+{
+    ++s_board.invalidation_revision; s_board.indicator_transfer_confirmed = false;
+    tick();
+}
+
+static void revoke_and_reprove_before_status_lock(void)
+{
+    revoke_before_status_lock();
+    newer_proof_before_status_lock();
+}
+
+static void display_copied_receipt_cannot_replace_newer_observation(void)
+{
+    app_view_t view = setup_display_indicator();
+    assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); tick();
+    complete_refresh_without_poll();
+    s_receipt_hook = newer_proof_before_status_lock;
+    app_presenter_indicator_status_t status = app_presenter_indicator_status();
+    assert(status.usable && status.refresh_sequence == 2 && status.completed_us == 110000);
+    s_receipt_hook = revoke_and_reprove_before_status_lock;
+    status = app_presenter_indicator_status();
+    assert(!status.usable || status.refresh_sequence == 3);
+    status = app_presenter_indicator_status();
+    assert(status.usable && status.refresh_sequence == 3);
+    s_receipt_hook = revoke_before_status_lock;
+    assert(!app_presenter_indicator_status().usable);
+    assert(!app_presenter_indicator_status().usable);
+}
+
+static void display_unpolled_invalid_receipts_never_become_proof(void)
+{
+    app_view_t view = setup_display_indicator();
+    assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); tick();
+    for (unsigned defect = 0; defect < 8; ++defect) {
+        display_signal(LV_EVENT_REFR_START); observed_complete();
+        if (defect == 0) s_board.completed_transfers = 1;
+        if (defect == 1) s_board.coverage_complete = false;
+        if (defect == 2) s_board.indicator_transfer_confirmed = false;
+        if (defect == 3) --s_board.required.x1;
+        if (defect == 4) ++s_board.token.capture_generation;
+        if (defect == 5) s_board.callback_attached = false;
+        if (defect == 6) s_board.association_lost = true;
+        if (defect == 7) s_end_error = ESP_FAIL;
+        display_signal(LV_EVENT_REFR_READY);
+        tick(); /* Owner gets the sealed bad receipt before a fresh begin. */
+        s_end_error = ESP_OK;
+        display_signal(LV_EVENT_REFR_START);
+        /* Restore the seam only after begin has cleared the rejected record. */
+        s_board.callback_attached = true; s_board.association_lost = false;
+        display_signal(LV_EVENT_REFR_READY);
+        assert(!app_presenter_indicator_status().usable);
+    }
+}
+
+static void display_first_late_proof_survives_unpolled_refresh(void)
+{
+    app_view_t view = setup_display_indicator();
+    assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); tick();
+    display_signal(LV_EVENT_REFR_START); display_signal(LV_EVENT_REFR_READY);
+    atomic_store(&s_clock_us, 110000);
+    observed_complete();
+    atomic_store(&s_clock_us, 120000);
+    display_signal(LV_EVENT_REFR_START); display_signal(LV_EVENT_REFR_READY);
+    app_presenter_indicator_status_t status = app_presenter_indicator_status();
+    assert(status.usable && status.refresh_sequence == 1 && status.completed_us == 110000);
+    assert(s_begins == 2 && s_ends == 2);
+}
+
+static void display_unpolled_first_proof_revocations(void)
+{
+    app_view_t view = setup_display_indicator();
+    assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); tick();
+    complete_refresh_without_poll();
+    ++s_board.invalidation_revision; s_board.indicator_transfer_confirmed = false;
+    display_signal(LV_EVENT_REFR_START); display_signal(LV_EVENT_REFR_READY);
+    assert(!app_presenter_indicator_status().usable);
+
+    complete_refresh_without_poll();
+    view.screen_off = true; ++view.ui_revision;
+    assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); tick();
+    display_signal(LV_EVENT_REFR_START); display_signal(LV_EVENT_REFR_READY);
+    assert(!app_presenter_indicator_status().indicator_armed && !app_presenter_indicator_status().usable);
+
+    view.screen_off = false; ++view.ui_revision;
+    assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); tick();
+    complete_refresh_without_poll();
+    ++view.capture_indicator_generation; ++view.ui_revision;
+    assert(app_presenter_publish(&view) == APP_PRESENTER_ACCEPTED); tick();
+    display_signal(LV_EVENT_REFR_START); display_signal(LV_EVENT_REFR_READY);
+    app_presenter_indicator_status_t status = app_presenter_indicator_status();
+    assert(status.capture_generation == view.capture_indicator_generation && !status.usable);
+
+    complete_refresh_without_poll();
+    ++s_board.display_generation; ++s_board.invalidation_revision;
+    s_board.indicator_transfer_confirmed = false;
+    unsigned repaints = s_repaints; tick();
+    assert(s_repaints == repaints + 1);
+    display_signal(LV_EVENT_REFR_START); display_signal(LV_EVENT_REFR_READY);
+    status = app_presenter_indicator_status();
+    assert(status.display_generation == s_board.display_generation && !status.usable);
 }
 
 static void display_binding_failures(void)

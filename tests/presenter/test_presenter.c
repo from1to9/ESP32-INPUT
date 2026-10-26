@@ -31,6 +31,7 @@ static board_display_receipt_t s_board;
 static esp_err_t s_begin_error, s_end_error;
 static unsigned s_begins, s_ends, s_invalidates;
 static unsigned s_repaints;
+static void (*s_receipt_hook)(void);
 struct lv_obj_t { unsigned unused; };
 static lv_obj_t s_test_screen;
 lv_obj_t *lv_display_get_screen_active(lv_display_t *display)
@@ -86,7 +87,13 @@ void board_display_transfer_invalidate(void)
 board_display_receipt_t board_display_transfer_receipt(void)
 {
     assert(s_lock_depth == 0);
-    return s_board;
+    board_display_receipt_t receipt = s_board;
+    if (s_receipt_hook) {
+        void (*hook)(void) = s_receipt_hook;
+        s_receipt_hook = NULL;
+        hook(); /* Owner progress after this copy, before the status lock. */
+    }
+    return receipt;
 }
 
 void presenter_test_enter(portMUX_TYPE *lock)
@@ -439,6 +446,11 @@ static const test_case_t s_cases[] = {
     {"caller_progress_while_renderer_delayed", caller_progress_while_renderer_delayed},
     {"display_binding_failures", display_binding_failures},
     {"display_requires_real_complete_receipt", display_requires_real_complete_receipt},
+    {"display_first_proof_survives_unpolled_refresh", display_first_proof_survives_unpolled_refresh},
+    {"display_first_late_proof_survives_unpolled_refresh", display_first_late_proof_survives_unpolled_refresh},
+    {"display_unpolled_first_proof_revocations", display_unpolled_first_proof_revocations},
+    {"display_copied_receipt_cannot_replace_newer_observation", display_copied_receipt_cannot_replace_newer_observation},
+    {"display_unpolled_invalid_receipts_never_become_proof", display_unpolled_invalid_receipts_never_become_proof},
     {"display_late_completion_and_failure", display_late_completion_and_failure},
     {"display_idle_proof_and_owner_liveness", display_idle_proof_and_owner_liveness},
     {"display_superseded_hidden_and_recreated", display_superseded_hidden_and_recreated},

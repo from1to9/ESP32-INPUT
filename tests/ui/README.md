@@ -103,7 +103,8 @@ with live Mic/Speaker readiness.
 `ui_presenter_integration` composes production UI, presenter and display observer
 with actual LVGL FULL rendering. Only physical panel/IO, clock and task/ISR locks
 are seams. It verifies idle heartbeat without redraw, exact transfer receipts,
-overwrite revocation with and without an intervening status poll, empty refresh,
+overwrite revocation with and without an intervening status poll, first complete
+proof retained across a forced empty refresh before the first status read,
 callback generation replacement and hidden-screen revocation. This is software
 composition evidence, not panel scanout or optical readability proof.
 

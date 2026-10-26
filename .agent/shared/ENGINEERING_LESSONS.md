@@ -519,3 +519,22 @@ Evidence: [engine regressions](../../tests/audio_engine/README.md),
 [bounded deployment investigation](../../docs/validation.md#usb-transport-deployment-and-capture-startup-investigation-2026-10-26).
 The native fixes do not establish the device's actual indicator failure cause
 or acoustic behavior.
+
+## 25. Preserve completion evidence before its producer replaces it
+
+A status query must not be the only opportunity to retain a completed display
+transfer. The LVGL owner already reads the Board receipt before starting the
+next refresh. If it ignores that proof and the next begin clears the records,
+an empty refresh can erase the first confirmation before a slower observer
+reads it. Tests that always query status immediately after completion conceal
+this ordering.
+
+Exercise complete transfer, delayed observation and intervening empty refresh
+as one sequence. Preserve the original completion time and refresh identity;
+empty work is not new evidence. Shared owner/status validation must retain all
+coverage, token, area, error and revocation checks, and stale copied observations
+must not replace newer proof. Software reproduction establishes this retention
+defect, not the schedule that caused a particular physical timeout.
+
+Evidence: [presenter checks](../../tests/presenter/README.md) and
+[device observation](../../docs/validation.md#capture-indicator-confirmation-failure-2026-10-26).

@@ -59,6 +59,29 @@ diagnostics expose the next capture gate without rereading hardware or changing
 policy. These follow-up changes are not part of the deployed image above;
 their physical behavior remains unqualified until a separate verified update.
 
+### Capture indicator confirmation failure: 2026-10-26
+
+The follow-up application from clean source
+`31fe54ada3cdc58ab965df41671419b62ff53db6` was independently reviewed and
+deployed. Its 4,703,760-byte application SHA-256 is
+`5ede5644cda1d641a1d385da774ee1263b994486753c37d91124986793260d6e`.
+Application verification and unchanged partition-table/NVS/PHY checks passed;
+no full backup was taken. Runtime identity matched. The 90-second startup
+capture again failed on the two existing duplicate GPIO ISR installation
+errors, without an observed panic or reboot. This is not a passing health gate.
+
+An isolated USB Mic request still timed out. Its capture generation matched an
+armed recording indicator; the screen was visible, the display owner was alive,
+the clock was valid, and neither lock nor maintenance denied capture. However,
+display transfer confirmation and indicator usability remained false until the
+unchanged two-second deadline. The codec was prepared but capture never ran or
+read a first frame. The input-only host probe counted 4,204,544 client-format
+float frames, no finite samples above amplitude 0.00001, and no callback errors.
+This narrows the observed block to indicator transfer confirmation; it does not
+prove why that confirmation was absent or establish usable microphone audio.
+Raw captures remain local. A software receipt-retention regression and its
+repair must be distinguished from physical causal confirmation on a later image.
+
 ### Combined source checkpoint: 2026-10-21
 
 | Check | Current evidence |

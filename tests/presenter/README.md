@@ -7,7 +7,7 @@ The lock boundary uses a real host mutex; a second thread can hold rendering
 open while the publishing caller continues. Strict compiler diagnostics and
 address/undefined-behavior sanitizers remain enabled.
 
-Fourteen cases cover initialization failure and explicit retry, first zero-valued
+Nineteen cases cover initialization failure and explicit retry, first zero-valued
 identity, 10,000 latest-value publications, idle ticks without replay, temporary
 pointer lifetime, bounded text copies and NULL semantics, independently stale
 epochs/revisions, equal-identity telemetry, and identity wrap rejection. Cleanup
@@ -44,6 +44,18 @@ including late completion, exact token/region/count conditions, failed begin/end
 owner heartbeat versus actual transfer time, hidden/superseded markers and
 display replacement. LVGL refresh completion alone is never transfer proof.
 Board observer coverage tests and actual target integration remain independent.
+
+The first complete receipt must survive empty and unrelated refreshes before
+the first status poll, including a completion that arrives after refresh sealing.
+The LVGL owner and status caller share the same bounded receipt validation; owner
+observation retains the original completion timestamp before the next begin
+replaces Board records. A new identity, hidden marker, invalidation or replaced
+display still requires fresh exact proof. No extra transfer, wait or status poll
+is introduced to make these cases pass.
+The copied-receipt seam also runs owner progress between a status snapshot and
+its lock acquisition. Older epochs cannot resurrect revoked proof, and older
+refreshes cannot replace a newer confirmed sequence. Bad count, coverage, token,
+region, callback, association and error observations remain insufficient.
 
 
 The revocation cases require the Board's monotonic invalidation revision. An
