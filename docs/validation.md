@@ -82,6 +82,37 @@ prove why that confirmation was absent or establish usable microphone audio.
 Raw captures remain local. A software receipt-retention regression and its
 repair must be distinguished from physical causal confirmation on a later image.
 
+The receipt-retention repair was subsequently deployed from clean source
+`8d04401ebb5a5d6302d821b24e17b375783e8aaa`. Its 4,704,016-byte application
+SHA-256 is `d641557a20101beb474eebddf6d41923255db52523c13669768b58edb3c1271e`.
+Application verification passed with partition table, NVS and PHY preserved,
+and runtime identity matched. Nineteen focused presenter regressions, native
+LVGL/UI/presenter/Board composition, target compilation and one independent
+source review passed before deployment.
+
+On this image, both initial USB Mic start and restart after the host consumer
+closed obtained a confirmed display transfer and entered capture. The user
+confirmed that Mic could enable in both attempts. The device delivered
+2,664,960 and 1,766,400 bytes of mono 48 kHz 16-bit PCM respectively, equivalent
+to 27.76 and 18.4 seconds. Both input-only host probes observed finite samples
+above amplitude 0.00001 and zero callback errors; no PCM was retained. The
+bounded probes ran for 60 and 90 seconds, but those durations include time
+before the user started Mic and must not be reported as active-capture duration.
+Each job ended when the host consumer closed, USB selection cleared and the
+connection generation advanced, with `AE_STOP_OWNER_LOST` / `AE_STALE` rather
+than the previous startup timeout. The user then saw unavailable controls.
+The generic `Unavailable` / `State changed` wording does not explain host demand.
+
+A separate output-only attempt delivered 10,673,280 bytes to the codec interface
+(111.18 seconds equivalent), with playback running, speaker unmuted and no
+reported SDK error. The user could start Speaker but heard no sound. Acoustic
+playback therefore remains unqualified. The test used sparse, low-amplitude
+tones; the default 30-percent device level maps to -35 dB, which makes stimulus
+level a candidate explanation, not an established cause. These observations
+do not qualify sound quality, duplex, Bluetooth audio or endurance. Health
+captures retain the existing GPIO errors and job-failure flags for host-owner
+loss; no complete health pass is claimed.
+
 ### Combined source checkpoint: 2026-10-21
 
 | Check | Current evidence |
