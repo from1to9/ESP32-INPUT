@@ -324,6 +324,20 @@ then correlate them with bounded cached transport/codec observations. Observatio
 must not start a stream, change its deadline, grant microphone access or expose
 PCM, transcripts or peer identity. See the [audio investigation](../../docs/validation.md#bluetooth-discovery-and-usb-audio-investigation-2026-10-23).
 
+Silent PCM can progress at the exact nominal byte rate. Use signed, varied
+sample values and an explicit all-zero control when testing the handoff; include
+caller-buffer erasure and asynchronous result retirement. An I2S copy completing
+before the engine consumes its result is not a missing frame. Preserve both
+observations in a test instead of stopping at the first completion.
+
+An audible local tone narrows the hardware investigation but bypasses the USB
+payload and application engine. Compare its transient gain with the normal
+engine's acknowledged gain before drawing conclusions. Offline format conversion
+and exact host-model payload checks do not establish live host output or device
+sample content. Keep missing payload/level evidence explicit rather than making
+speculative transport, gain or cache changes. See the
+[offline follow-up](../../docs/validation.md#usb-silence-offline-follow-up-2026-10-26).
+
 ## 15. Relative input must survive ordinary transport backpressure
 
 An in-flight USB report or pending BLE confirmation is temporary backpressure,

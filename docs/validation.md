@@ -174,6 +174,62 @@ internal memory. Placement and tests are checked locally. Contiguous DMA
 recovery and behavior of that repaired diagnostic image remain untested on
 hardware. The normal restored image does not contain this optional module.
 
+### USB silence offline follow-up: 2026-10-26
+
+This investigation used clean source
+`8662b22120f78507be0689f328ae9f7bc36d15ba` and retained logs. It did not
+flash firmware, open a device, start host audio or collect new device logs.
+No deterministic firmware cause of the reported USB silence was reproduced.
+
+The original host renderer and the later comparison renderer were called
+offline with varying callback lengths, then passed through the host's actual
+float-to-signed-PCM16 converter. Each produced 96,000 samples. The original
+440 Hz stimulus contained 4,792 nonzero samples with peak 1,311; the comparison
+1 kHz stimulus contained 46,000 nonzero samples with peak 4,096. Conversion
+error stayed below half a PCM16 unit and the intended silent tails remained
+zero. This rejects an unconditional zero-output or float/PCM conversion defect
+in those isolated paths. It does not observe the live host mixer, output
+callback flags, USB wire or device input.
+
+Six isolated sanitizer cases composed the production USB application adapter,
+audio engine, board adapter and pinned ES8311 driver. Cases covered levels
+80/30/0, Mic stop before Speaker start, local playback stop before USB playback,
+and an all-zero input control. Each passed six 480-sample frames through the
+actual application queues and asynchronous board mailbox. Varied signed samples,
+including both signed 16-bit extrema, reached both I2S slots byte-for-byte even
+after the submitting buffer was erased. DAC volume/mute registers and PA state
+matched the modeled requests. These cases substitute FIFO, SDK and authority
+boundaries and do not run the application audio worker, TinyUSB controller,
+physical DMA/cache or analog output. All 41 recorded inputs stayed unchanged.
+
+The shared board path uses the same format, pins and I2S copy operation for
+local and USB playback. USB preparation also sets ADC gain; source and the
+composition cases show no additional DAC mute or USB-only PCM scaling in that
+step. The normal engine starts at 30 percent and does not inherit the boot
+diagnostic's transient 80 percent. A settled UI value reflects the engine's
+acknowledged setting; a slider position during a drag does not prove that
+setting was applied in an earlier device attempt.
+
+Reanalysis of the previous volume-80 attempt found twelve intervals of at least
+five seconds with codec-interface accounting between 95,914 and 96,133 bytes
+per second, close to the nominal 96,000. Pending received-minus-delivered bytes
+were 2,880 to 3,840 at those observations. This argues against a sustained
+application submission stall during that attempt, but silence can have exactly
+the same byte rate. It is not a DMA completion or electrical-output measurement.
+
+The next missing discriminator is sample content on the device: compare bounded
+nonzero-sample counts and absolute peaks at complete USB frame admission and at
+the board's converted/reported-written samples, tied to the same stream and
+consumer generation. Also retain the engine volume and the already performed
+DAC volume/mute readbacks. These observations are not implemented or collected
+by this documentation update. They must not retain raw PCM, add bus reads in
+getters, scan payloads in an ISR, or consume unbudgeted internal DMA memory.
+Zero USB input would direct investigation toward host/USB ingress; nonzero
+input lost before board submission would implicate the software handoff;
+nonzero board submission with confirmed gain would leave runtime DMA/clock,
+power and analog output to distinguish. Existing evidence cannot select among
+those branches, so USB playback remains unqualified.
+
 ### Combined source checkpoint: 2026-10-21
 
 | Check | Current evidence |
