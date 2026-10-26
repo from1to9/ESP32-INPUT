@@ -18,7 +18,10 @@ The final log distinguishes bytes generated, bytes submitted once per logical
 frame, and validated bytes reported by board write callbacks, including a
 partial/error report. Retries increase `write_calls`, not `submitted_bytes`.
 These counters do not establish DMA consumption, analog output or audibility.
-PCM scratch is static and erased after shutdown. The diagnostic callback is
+Task-only PCM scratch and result state use `EXT_RAM_BSS_ATTR`; the callback
+lock, waiter and atomic cancellation latch remain internal. Target map evidence
+must verify placement; host tests do not establish internal heap recovery.
+PCM scratch is erased after shutdown. The diagnostic callback is
 detached before handover; normal initialization reuses the existing board
 worker. Diagnostic generation 1 precedes normal engine route generation 2.
 

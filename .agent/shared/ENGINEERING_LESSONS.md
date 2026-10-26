@@ -56,6 +56,15 @@ memory that was never allocated. A stopped or failed worker also cannot stand
 in for a healthy concurrent workload. Charge its live resources conservatively
 without claiming the old task's storage reclamation was measured.
 
+A default-off diagnostic can still break the enabled image's resource budget.
+Its static buffers remain resident after playback ends or their bytes are wiped.
+Keep task-only diagnostic payloads in supported external BSS; keep callback
+locks, task handles and cancellation state in suitable internal storage. Compare
+linked object placement and boot-entry heap boundaries, then measure the largest
+DMA block. Relocating payload bytes does not prove equal contiguous recovery.
+The [local speaker tests](../../tests/local_speaker/README.md) distinguish these
+placement claims from native behavior checks and physical sound.
+
 Evidence: [display tests](../../tests/display_resources/README.md),
 [board display policy](../../firmware/main/board_display_resources.c) and
 [memory plan](../../design/runtime-memory.md).
@@ -140,6 +149,14 @@ configuration, dependency pins and linked placement. Native tests can have empty
 placement attributes, so they cannot prove where target storage resides. Do not
 lower scan admission thresholds to disguise insufficient memory. Successful
 radio initialization, LAN join and connected scanning are separate observations.
+
+Restoring a local configuration with its old timestamp can leave generated
+headers and linked objects on the previous profile even when the source config
+text has changed. Force configuration regeneration after such a restore, then
+verify the generated macro, compile-unit inventory and linked entrypoints.
+A build identity hash of the config file alone does not prove compiled option
+selection. Reject inconsistent packages before device writes and retain the
+failed artifact as evidence.
 
 Evidence: [tracked defaults](../../firmware/sdkconfig.defaults),
 [pinned toolchain](../../toolchain.lock.json) and

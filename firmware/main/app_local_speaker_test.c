@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_local_speaker_test.h"
 #include "board_audio_mosaico.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -18,8 +19,8 @@ typedef struct {
     uint32_t produced_bytes, submitted_bytes, accepted_bytes, write_calls;
     ae_result_t result, mute_result, stop_result;
 } test_result_t;
-static test_result_t result;
-static uint8_t frame[FRAME_BYTES];
+static EXT_RAM_BSS_ATTR test_result_t result;
+static EXT_RAM_BSS_ATTR uint8_t frame[FRAME_BYTES];
 static atomic_bool cancelled;
 static portMUX_TYPE wake_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t waiter;

@@ -119,9 +119,8 @@ interface (122.31 seconds equivalent); playback remained running and unmuted
 without a reported SDK error until the bounded host probe stopped. The actual
 volume register and nonzero sample content were not exposed in that image's
 logs. Low default volume is therefore insufficient to explain the result.
-The next discriminator is a finite device-generated tone through the current
-board codec adapter, bypassing USB payloads. If local sound works, compare
-nonzero playback data at USB ingress and I2S submission. Neither software
+The subsequent local-tone discriminator is recorded below. Nonzero playback
+data at USB ingress and I2S submission remains unobserved. Neither software
 counters nor GPIO command success prove electrical output.
 
 ### Local speaker discriminator: 2026-10-26
@@ -133,7 +132,47 @@ engine, opens no microphone and writes no user preferences. Physical button or
 lock input cancels the test. Normal startup can continue only after confirmed
 codec shutdown; software transfer counts do not establish audible output.
 This option does not implement or qualify the public `audio.test_tone` API.
-Device execution and audible playback remain pending for this test image.
+The enabled image from clean source `4e837cdbf8443b94d5cf322afa7cfc4e3327d27e`
+was written and verified without a full backup; the partition table, NVS and PHY
+data were preserved. Its 4,706,288-byte application SHA-256 is
+`1e962225e20bd865b0b32d5a9396cbadfdaa31392932456c9feb616f0f777e5f`.
+The user heard the local tone. The fixed three-second output deadline returned
+`AE_TIMEOUT` after 283,200 driver-reported bytes, with 284,160 bytes produced
+and submitted. Mute and stop returned `AE_OK`, shutdown was confirmed and the
+normal media owner took over. Audible local output is established for this
+profile; complete 300-frame delivery and USB sound are not established.
+
+The diagnostic module caused a separate internal-memory regression. Exact
+linked objects added 1,021 bytes of internal static payload and moved the heap
+start by 1,040 bytes. Boot entry measurements corroborate that loss before
+codec prepare/teardown. The diagnostic image later had 12,167 free DMA bytes,
+but its largest DMA block was only 7,680 bytes; display transfers needed an
+8,190-byte allocation. Display `ESP_ERR_NO_MEM` appeared during initial startup
+and recurred during the USB comparison. More total free memory did not imply
+sufficient contiguous space. A prepare/teardown leak is not established.
+
+The USB comparison ended after 15.45 seconds with a serial IO error and no
+admitted Speaker job. The user reported a frozen display and then manually
+restarted/reconnected the device; this is not evidence of an autonomous crash.
+A read-only host query observed mono 48 kHz signed 16-bit physical output and
+mono 48 kHz float client format. No host hardware volume/mute property was
+exposed, consistent with the descriptor's absence of a Feature Unit. These
+facts do not reveal whether accepted USB playback frames contain nonzero PCM.
+
+The same clean source was subsequently rebuilt with the test option disabled.
+The generated configuration, compile database and linked symbols all confirm
+that the diagnostic module is absent. Its 4,704,016-byte application SHA-256 is
+`63e69644576b5173701ad07395dad6637eff5e6f7c5e2caf5e277536fe5b1931`.
+That normal image was restored and verified, preserving settings and the
+partition table. The runtime USB interface reappeared. At the user's request,
+no functional device test or new log capture followed restoration; subsequent
+changes are restricted to local analysis, validation and Git publication.
+
+The source repair moves only the diagnostic frame and result storage to
+supported external BSS; callback synchronization and cancellation remain in
+internal memory. Placement and tests are checked locally. Contiguous DMA
+recovery and behavior of that repaired diagnostic image remain untested on
+hardware. The normal restored image does not contain this optional module.
 
 ### Combined source checkpoint: 2026-10-21
 
