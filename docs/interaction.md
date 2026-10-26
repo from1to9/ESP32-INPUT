@@ -60,6 +60,20 @@ subsystem. Errors remain available until superseded. Live volume and microphone
 gain changes must finish between PCM transfers without starving behind a
 continuous stream or silently restarting capture.
 
+Keep the real-time Mic level inside the existing card, beside Mute, without
+moving Start/Stop or shortening the two-line state explanation. Show RMS dBFS
+and a logarithmic bar (-60 to 0 dBFS maps to 0 to 100 percent); a valid all-zero
+sample window shows **Quiet**, while a full-scale peak shows **Too loud**.
+Freshness is bounded to 300 ms and observation publication to 10 Hz. Show
+**Waiting for signal** for an active capture with no fresh valid window,
+**Level unavailable** for unknown/invalid/error observations, and **Mic off**
+when capture is confirmed off or muted. Those states clear the bar and ignore
+any retained value. Actual digital silence is distinct from missing evidence.
+No raw audio is retained and this display does not certify host recording.
+Meter changes must not alter control revisions, reject an already held control
+or animate synthetic activity. Reuse persistent label/bar objects, update only
+changed visible values without animation, and do no meter work on hidden pages.
+
 ## Physical controls
 
 The official button factory currently exposes AI only. Its header also declares BOOT GPIO61, but runtime BOOT access is not a first-release dependency. POWER retains hardware power control.

@@ -26,6 +26,14 @@ static ae_result_t records_copy_result = AE_OK;
 static ae_record_metadata_t listed[APP_MEDIA_ROWS];
 static app_media_controls_context_t context;
 static app_view_t view;
+static board_audio_capture_snapshot_t capture_level;
+static bool capture_clock_override;
+static int64_t capture_clock_us;
+int64_t esp_timer_get_time(void)
+{
+    if (capture_clock_override) return capture_clock_us;
+    return controls.now_ms <= INT64_MAX / 1000U ? (int64_t)(controls.now_ms * 1000U) : INT64_MAX;
+}
 
 bool app_media_runtime_snapshot(app_media_snapshot_t *out) { if (snapshot_available) *out = owner; return snapshot_available; }
 bool app_recording_store_snapshot(app_recording_store_snapshot_t *out)
@@ -47,6 +55,7 @@ esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t revision, bt_audi
 }
 static ae_result_t codec_caps(void *unused, ae_codec_capabilities_t *out) { (void)unused; *out = hardware; return AE_OK; }
 ae_codec_port_t board_audio_mosaico_port(void) { return (ae_codec_port_t){.capabilities = codec_caps}; }
+void board_audio_capture_snapshot(board_audio_capture_snapshot_t *out) { *out = capture_level; }
 ae_result_t app_media_runtime_route(ae_route_t selected, ae_route_capabilities_t *out)
 { assert((unsigned)selected < AE_ROUTE_COUNT); *out = distinct_routes ? routes_by_id[selected] : route; return AE_OK; }
 ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *request)
@@ -665,6 +674,91 @@ static void test_late_success_notice_scope(void)
     assert(!controls.pending && !strcmp(view.media.reason, result_text(AE_IO_ERROR)));
 }
 
+static void setup_microphone_level(void)
+{
+    setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
+    owner.audio.hardware_off_confirmed = false; owner.audio.microphone_enabled = true;
+    owner.audio.microphone_muted = false; owner.audio.microphone_mute_applied = false;
+    owner.audio.microphone_mute_confirmed = true; owner.audio.capture_gate_open = true;
+    owner.audio.capture_indicator_required = true;
+    owner.audio.capture[0] = (ae_job_snapshot_t){.kind = AE_CAPTURE_LIVE, .state = AE_JOB_RUNNING,
+        .job_id = {{51}}, .consumer_generation = 61};
+    capture_level = (board_audio_capture_snapshot_t){.known = true, .current = true, .generation = 3,
+        .observed_ms = 1020, .samples = 8, .sum_squares = UINT64_C(8) * 268435456U, .peak_abs = 16384};
+    ++owner.audio.revision; poll_at(1020);
+}
+static void test_microphone_level_values(void)
+{
+    setup_microphone_level(); app_media_mic_level_t level = view.media.microphone_level;
+    assert(level.state == APP_MEDIA_LEVEL_LIVE && level.dbfs == -6 && level.percent == 90 && !level.silent && !level.clipping);
+    capture_level.observed_ms += 100; capture_level.sum_squares = UINT64_C(8) * 67108864U; capture_level.peak_abs = 8192;
+    poll_at(1120); level = view.media.microphone_level;
+    assert(level.state == APP_MEDIA_LEVEL_LIVE && level.dbfs == -12 && level.percent == 80);
+    capture_level.observed_ms += 100; capture_level.sum_squares = 0; capture_level.peak_abs = 0;
+    poll_at(1220); level = view.media.microphone_level;
+    assert(level.state == APP_MEDIA_LEVEL_LIVE && level.silent && !level.percent && !level.clipping);
+    capture_level.observed_ms += 100; capture_level.sum_squares = UINT64_C(8) * 1073741824U; capture_level.peak_abs = 32768;
+    poll_at(1320); level = view.media.microphone_level;
+    assert(level.state == APP_MEDIA_LEVEL_LIVE && level.dbfs == 0 && level.percent == 100 && level.clipping);
+    capture_level.observed_ms += 100; capture_level.sum_squares = 1; capture_level.peak_abs = 1; capture_level.samples = 100000;
+    poll_at(1420); level = view.media.microphone_level;
+    assert(level.state == APP_MEDIA_LEVEL_LIVE && level.dbfs == -96 && !level.silent && !level.percent);
+}
+static void test_microphone_level_validity(void)
+{
+    setup_microphone_level(); poll_at(1320); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_LIVE);
+    poll_at(1321); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_WAITING && !view.media.microphone_level.percent);
+    capture_level.observed_ms = 1400; poll_at(1330); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+    capture_level.observed_ms = 1330; ++capture_level.generation; poll_at(1340);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+    capture_level.generation = 3; capture_level.current = false; poll_at(1350);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+    capture_level.current = true; capture_level.known = false; poll_at(1360);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_WAITING);
+    capture_level.result = AE_TIMEOUT; poll_at(1370); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+    capture_level.result = AE_OK; capture_level.known = true; capture_level.samples = 0; poll_at(1380);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+    owner.audio.capture_gate_open = false; owner.audio.microphone_muted = true;
+    owner.audio.microphone_mute_applied = true; poll_at(1390);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_OFF && !view.media.microphone_level.percent);
+    owner.audio.microphone_mute_confirmed = false; poll_at(1400);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+    owner.audio.microphone_muted = false; poll_at(1410); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_WAITING);
+    owner.audio.hardware_off_confirmed = true; poll_at(1420); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_OFF);
+    owner.audio.error = AE_IO_ERROR; poll_at(1430); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+    owner.audio.error = AE_OK; owner.audio.capture_gate_open = true; owner.audio.hardware_off_confirmed = false;
+    capture_level.samples = 8; capture_level.observed_ms = 1440; poll_at(1440);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_LIVE);
+    snapshot_available = false; poll_at(1450); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+    snapshot_available = true; poll_at(1460); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_LIVE);
+    poll_at(1459); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN);
+}
+static void test_microphone_level_preserves_controls(void)
+{
+    setup_microphone_level(); uint64_t revision = view.media.resource_revision;
+    app_intent_t held = intent(APP_MEDIA_SET_VOLUME); held.media.value.level = 45;
+    for (unsigned i = 1; i <= 10; ++i) {
+        capture_level.observed_ms = 1020 + i * 100U;
+        capture_level.sum_squares = UINT64_C(8) * i * i; capture_level.peak_abs = (uint16_t)i;
+        ++owner.audio.capture[0].sample_frames; poll_at(capture_level.observed_ms);
+        assert(view.media.resource_revision == revision && view.media.microphone_level.state == APP_MEDIA_LEVEL_LIVE);
+    }
+    handle(held); assert(submissions == 1 && controls.pending && submitted.action == APP_MEDIA_VOLUME);
+}
+static void test_microphone_level_clock_order(void)
+{
+    setup_microphone_level(); uint64_t revision = view.media.resource_revision;
+    capture_clock_override = true; capture_clock_us = 1121000; capture_level.observed_ms = 1121;
+    poll_at(1120); assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_LIVE);
+    assert(view.media.resource_revision == revision && controls.now_ms == 1120);
+    capture_level.observed_ms = 1122; poll_at(1121);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN); /* Future even after the copy. */
+    capture_level.observed_ms = 1121; capture_clock_us = 1120500; poll_at(1121);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN); /* Clock itself went backward. */
+    capture_clock_us = 1221000; capture_level.observed_ms = 1221; poll_at(1221);
+    assert(view.media.microphone_level.state == APP_MEDIA_LEVEL_UNKNOWN); /* Clock failure stays explicit. */
+}
+
 static void test_usb_start_settling(void)
 {
     setup(); context.overlay = APP_OVERLAY_NONE; owner.audio.route = AE_ROUTE_USB_UAC;
@@ -743,8 +837,8 @@ static void test_usb_settle_stop_and_clock(void)
 }
 int main(int argc, char **argv)
 {
-    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock", "operation_message_lifecycle", "late_success_notice_scope"};
-    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock, test_operation_message_lifecycle, test_late_success_notice_scope};
+    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock", "operation_message_lifecycle", "late_success_notice_scope", "microphone_level_values", "microphone_level_validity", "microphone_level_preserves_controls", "microphone_level_clock_order"};
+    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock, test_operation_message_lifecycle, test_late_success_notice_scope, test_microphone_level_values, test_microphone_level_validity, test_microphone_level_preserves_controls, test_microphone_level_clock_order};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: media controls %s\n", names[i]); return 0; }

@@ -1330,6 +1330,7 @@ static void setup_cache_lifetime_checks(void)
 #include "ui_touch_context.inc"
 #include "ui_recording_storage.inc"
 #include "ui_audio_core.inc"
+#include "ui_audio_level.inc"
 #include "ui_media.inc"
 #include "ui_connections.inc"
 #include "ui_bluetooth_management.inc"

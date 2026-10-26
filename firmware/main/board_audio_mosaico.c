@@ -10,6 +10,7 @@
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
 #include "esp_attr.h"
+#include "esp_timer.h"
 #include "es8311_codec.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -110,6 +111,22 @@ static EXT_RAM_BSS_ATTR struct {
 /* Worker/task-only observations; keep payload and aggregates out of internal
  * BSS. Scanning is outside the owner lock; only small updates/copies lock. */
 static EXT_RAM_BSS_ATTR board_audio_pcm_snapshot_t pcm_observation;
+static EXT_RAM_BSS_ATTR struct {
+    board_audio_capture_snapshot_t view;
+    uint64_t energy, last_seen_ms, published_ms;
+    uint32_t samples;
+    uint16_t peak;
+    bool clock_known, published, clock_failed;
+} capture_observation;
+
+/* Caller holds the owner lock. Invalidation never changes audio behavior. */
+static void invalidate_capture_level(ae_result_t result, bool reset)
+{
+    if (reset) memset(&capture_observation, 0, sizeof(capture_observation));
+    capture_observation.view.known = capture_observation.view.current = false;
+    capture_observation.view.result = result;
+    capture_observation.energy = capture_observation.samples = capture_observation.peak = 0;
+}
 
 static bool same_format(const ae_format_t *a, const ae_format_t *b)
 {
@@ -523,6 +540,53 @@ static void pcm_count(uint64_t *value, uint64_t amount)
         *value = UINT64_MAX; pcm_observation.saturated = true;
     } else *value += amount;
 }
+typedef struct {
+    uint64_t energy;
+    int64_t now_ms;
+    uint32_t samples;
+    uint16_t peak;
+} capture_measurement_t;
+
+static capture_measurement_t measure_capture(size_t bytes)
+{
+    capture_measurement_t measurement = {.samples = (uint32_t)(bytes / 2U)};
+    int64_t now_us = esp_timer_get_time();
+    measurement.now_ms = now_us < 0 ? -1 : now_us / 1000;
+    /* The worker exclusively owns this successful read's mono PCM scratch. */
+    for (size_t i = 0; i < bytes; i += 2U) {
+        int32_t sample = sample_get(buffers.pcm + i);
+        uint16_t magnitude = (uint16_t)(sample < 0 ? -sample : sample);
+        measurement.energy += (uint64_t)((int64_t)sample * sample);
+        if (magnitude > measurement.peak) measurement.peak = magnitude;
+    }
+    return measurement;
+}
+
+static void publish_capture_level(const request_t *request, const capture_measurement_t *measurement)
+{
+    /* Called under lock only after the normal completion/permission checks. */
+    if (measurement->now_ms < 0 || capture_observation.clock_failed ||
+        (capture_observation.clock_known && (uint64_t)measurement->now_ms < capture_observation.last_seen_ms)) {
+        capture_observation.clock_failed = true;
+        invalidate_capture_level(AE_TIME_UNKNOWN, false); return;
+    }
+    uint64_t now = (uint64_t)measurement->now_ms;
+    capture_observation.last_seen_ms = now; capture_observation.clock_known = true;
+    if (measurement->energy > UINT64_MAX - capture_observation.energy ||
+        measurement->samples > UINT32_MAX - capture_observation.samples) {
+        invalidate_capture_level(AE_EXHAUSTED, false); return;
+    }
+    capture_observation.energy += measurement->energy; capture_observation.samples += measurement->samples;
+    if (measurement->peak > capture_observation.peak) capture_observation.peak = measurement->peak;
+    capture_observation.view.result = AE_OK;
+    if (!capture_observation.published || now - capture_observation.published_ms >= BOARD_AUDIO_CAPTURE_LEVEL_INTERVAL_MS) {
+        capture_observation.view = (board_audio_capture_snapshot_t){.known = true,
+            .generation = request->generation, .observed_ms = now, .sum_squares = capture_observation.energy,
+            .samples = capture_observation.samples, .peak_abs = capture_observation.peak, .result = AE_OK};
+        capture_observation.published = true; capture_observation.published_ms = now;
+        capture_observation.energy = capture_observation.samples = capture_observation.peak = 0;
+    }
+}
 static void observe_pcm_write(esp_err_t sdk_result_, size_t requested, size_t reported)
 {
     const bool valid = reported <= requested && reported % 4U == 0;
@@ -653,6 +717,7 @@ static void publish(ae_result_t result)
     s.status.roles = s.roles;
     s.status.cleanup_uncertain = s.quarantined;
     if (s.quarantined) s.capture_gate = s.playback_gate = false;
+    if (result != AE_OK && result != AE_AGAIN) invalidate_capture_level(result, false);
     s.status.last_result = result;
     portEXIT_CRITICAL(&s.lock);
 }
@@ -724,6 +789,9 @@ static bool service(void)
     portEXIT_CRITICAL(&s.lock);
     size_t actual = 0;
     ae_result_t result = gated ? AE_STALE : execute(&request, &actual);
+    capture_measurement_t measurement = {0};
+    if (request.operation == OP_READ && result == AE_OK && actual == request.bytes)
+        measurement = measure_capture(actual);
     portENTER_CRITICAL(&s.lock);
     if (s.stop_pending || (request.operation == OP_UNMUTE && request.safety_epoch != s.safety_epoch) ||
         (request.operation == OP_READ && !s.capture_gate) ||
@@ -735,6 +803,11 @@ static bool service(void)
     if (request.operation == OP_UNMUTE && result == AE_OK) {
         if (request.roles == AE_MICROPHONE && !(s.mute_pending & AE_MICROPHONE)) s.capture_gate = true;
         if (request.roles == AE_SPEAKER && !(s.mute_pending & AE_SPEAKER)) s.playback_gate = true;
+    }
+    if (request.operation == OP_READ) {
+        if (result == AE_OK && actual == request.bytes && measurement.samples && request.generation == s.generation)
+            publish_capture_level(&request, &measurement);
+        else invalidate_capture_level(result == AE_OK ? AE_INTEGRITY : result, false);
     }
     s.result = result;
     s.actual = actual;
@@ -792,6 +865,7 @@ static ae_result_t exchange(const request_t *request, void *data, size_t *actual
         if (request->generation <= s.last_generation) { portEXIT_CRITICAL(&s.lock); return AE_STALE; }
         if (s.status.prepared || s.status.cleanup_uncertain) { portEXIT_CRITICAL(&s.lock); return AE_BUSY; }
         s.last_generation = request->generation;
+        invalidate_capture_level(AE_AGAIN, true);
     } else {
         if (s.status.cleanup_uncertain) { portEXIT_CRITICAL(&s.lock); return AE_UNCERTAIN; }
         if (!s.status.prepared || request->generation != s.status.generation) {
@@ -866,7 +940,7 @@ static ae_result_t mute(void *context, ae_role_t role, bool muted, uint64_t gene
     }
     portENTER_CRITICAL(&s.lock);
     if (!s.status.worker_started) { portEXIT_CRITICAL(&s.lock); return AE_UNAVAILABLE; }
-    if (role == AE_MICROPHONE) s.capture_gate = false;
+    if (role == AE_MICROPHONE) { s.capture_gate = false; invalidate_capture_level(AE_AGAIN, true); }
     else s.playback_gate = false;
     if (s.mute_done & role) {
         s.mute_done &= (uint8_t)~role;
@@ -928,6 +1002,7 @@ static ae_result_t stop(void *context, uint64_t generation)
     portENTER_CRITICAL(&s.lock);
     if (!s.status.worker_started) { portEXIT_CRITICAL(&s.lock); return AE_UNAVAILABLE; }
     s.capture_gate = s.playback_gate = false;
+    invalidate_capture_level(AE_AGAIN, true);
     if (s.stop_done && generation == s.stop_generation) {
         ae_result_t result = s.stop_result;
         s.stop_done = false;
@@ -998,5 +1073,16 @@ void board_audio_pcm_snapshot(board_audio_pcm_snapshot_t *out)
     if (!out) return;
     portENTER_CRITICAL(&s.lock);
     *out = pcm_observation;
+    portEXIT_CRITICAL(&s.lock);
+}
+
+void board_audio_capture_snapshot(board_audio_capture_snapshot_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&s.lock);
+    *out = capture_observation.view;
+    out->current = out->known && s.capture_gate && !s.stop_pending && !(s.mute_pending & AE_MICROPHONE) &&
+        s.status.prepared && s.status.capture_running && !s.status.cleanup_uncertain &&
+        (s.status.roles & AE_MICROPHONE) && out->generation == s.status.generation;
     portEXIT_CRITICAL(&s.lock);
 }

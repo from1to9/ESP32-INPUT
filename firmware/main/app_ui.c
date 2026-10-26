@@ -69,6 +69,8 @@ static lv_obj_t *s_voice_page, *s_voice_candidate, *s_voice_hint, *s_voice_confi
 static lv_obj_t *s_shortcut_page, *s_shortcuts[6], *s_delete, *s_space, *s_send;
 static lv_obj_t *s_audio_power[2], *s_audio_state[2];
 static lv_obj_t *s_audio_mute, *s_volume, *s_volume_text, *s_audio_note;
+static lv_obj_t *s_mic_level, *s_mic_level_label;
+static char s_mic_level_text[32];
 static lv_obj_t *s_overlay, *s_overlay_target, *s_overlay_critical;
 static lv_obj_t *s_telemetry, *s_overlay_state;
 static lv_obj_t *s_settings_title, *s_settings_back, *s_save_status;
@@ -1164,9 +1166,29 @@ static void create_audio(lv_obj_t *panel)
         lv_obj_set_style_border_width(s_audio_power[i], 1, 0);
         border(s_audio_power[i], LINE, 0);
         if (!i) {
-            s_audio_mute = button(surface, "Mute mic", 16, 104, 424, 48, APP_MEDIA_CONTROL, 0);
+            s_audio_mute = button(surface, "Mute mic", 16, 104, 224, 48, APP_MEDIA_CONTROL, 0);
             lv_obj_set_style_border_width(s_audio_mute, 1, 0);
             border(s_audio_mute, LINE, 0);
+            s_mic_level_label = lv_label_create(surface);
+            lv_obj_set_pos(s_mic_level_label, 256, 106);
+            lv_obj_set_size(s_mic_level_label, 184, 20);
+            lv_label_set_long_mode(s_mic_level_label, LV_LABEL_LONG_CLIP);
+            lv_obj_remove_flag(s_mic_level_label, LV_OBJ_FLAG_CLICKABLE);
+            s_mic_level_text[0] = '\0';
+            lv_label_set_text_static(s_mic_level_label, s_mic_level_text);
+            foreground(s_mic_level_label, MUTED, 0);
+            s_mic_level = lv_bar_create(surface);
+            lv_obj_remove_style_all(s_mic_level);
+            lv_obj_set_pos(s_mic_level, 256, 136);
+            lv_obj_set_size(s_mic_level, 184, 12);
+            lv_obj_remove_flag(s_mic_level, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            lv_bar_set_range(s_mic_level, 0, 100);
+            lv_obj_set_style_bg_opa(s_mic_level, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_opa(s_mic_level, LV_OPA_COVER, LV_PART_INDICATOR);
+            lv_obj_set_style_radius(s_mic_level, 6, 0);
+            lv_obj_set_style_radius(s_mic_level, 6, LV_PART_INDICATOR);
+            background(s_mic_level, LINE, 0);
+            background(s_mic_level, ACCENT, LV_PART_INDICATOR);
         }
         else {
             label(surface, "Volume", 16, 94, 268, INK);

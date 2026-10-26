@@ -275,6 +275,8 @@ ae_store_port_t app_recording_store_port(void) { return (ae_store_port_t){0}; }
 bool app_recording_store_snapshot(app_recording_store_snapshot_t *out)
 { memset(out, 0, sizeof(*out)); return false; }
 ae_codec_port_t board_audio_mosaico_port(void) { return (ae_codec_port_t){0}; }
+void board_audio_capture_snapshot(board_audio_capture_snapshot_t *out)
+{ *out = (board_audio_capture_snapshot_t){0}; }
 cp_error_t app_control_runtime_capture_authority(const cp_capture_authority_request_t *request,
     cp_capture_authority_t *out)
 { (void)request; memset(out, 0, sizeof(*out)); return CP_FORBIDDEN; }

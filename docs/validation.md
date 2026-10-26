@@ -1766,6 +1766,63 @@ interoperability remain device gates for this candidate.
 
 The test plan requires 24 hours of powered operation followed by 72 hours after failure cases pass. Cover host sleep/reconnect storms, no USB reader, queue pressure, motor cancellation, storage wear, power interruptions, watchdog recovery and comparable memory checkpoints. Record temperature and power conditions. A short smoke run and 100,000 simulated host cycles are useful evidence but do not satisfy this gate; periodic reboot is not an acceptable substitute for fixing resource growth.
 
+### Bounded USB duplex recovery: 2026-10-26
+
+Clean source `84bd53f817c8d8236f363e86892a9cb8f13d133e` was deployed as an
+application-only update and independently verified. The 4,707,072-byte image
+SHA-256 is `812bb8875290a418432bd6bbbc86c51fe7eaa539d953df4978c417672d4830f0`.
+Partition table, NVS and PHY data were preserved; no full backup was taken and
+the optional startup-tone module remained disabled.
+
+A 180.004-second runtime capture contained 18 health samples and no smoke-gate
+failure codes. Two Mic jobs delivered 66.93 and 16.62 seconds equivalent of
+mono 48 kHz PCM16; two Speaker jobs delivered 74.19 and 17.39 seconds equivalent.
+All four jobs completed by requested stop with zero terminal errors. Capture
+discarded no frames; playback discarded four queued frames at explicit stops.
+The USB capture-admission rejection counter ended at one, playback drops at
+zero and USB error at zero. This is not a zero-rejection device claim.
+
+The user confirmed simultaneous Mic/Speaker operation, normal touch/navigation,
+and successful restart of both controls. No crackle was reported in this repeat.
+The host probe received input callbacks without callback errors and retained
+no PCM. Its nonzero-sample count did not separately account for host silence
+flags, so it does not establish meaningful recorded duration or speech quality.
+The bounded run supports this USB duplex recovery, not endurance, Bluetooth
+audio, echo cancellation or a general explanation of the earlier reported
+freeze. Runtime logs and host-specific details remain local.
+
+### Real-time microphone level candidate: 2026-10-26
+
+The Mic card now exposes a read-only RMS dBFS level from validated mono PCM
+already acquired by the board worker. Publication is bounded to 100 ms and
+freshness to 300 ms. Missing, expired, muted, failed and all-zero observations
+remain distinct. Permission/generation checks prevent a late read from restoring
+a stopped meter. The post-copy freshness clock avoids misclassifying a concurrent
+publication as a future-dated sample; command timing and revisions are unchanged.
+
+The complete board suite, including six new energy/lifetime/clock scenarios,
+passed with sanitizers. All 36 media-control cases and 163 coordinator cases
+passed. The optional local-tone suite also passed all 13 cases after the timer
+dependency change; that module remains disabled in the normal firmware.
+The pinned target build and 494 declared task stack paths passed with no source
+drift; interrupt safety remains unqualified.
+
+The focused production LVGL Audio suite passed 138 renders and touch checks
+in light/dark themes. The meter adds two persistent objects (114 core objects)
+and preserves held Start/Stop/Mute/Menu/volume controls. Nine unchanged/hidden/
+inactive cases per theme, each with 100 snapshots, had zero allocation or flush
+activity. One hundred changed live values per theme retained stable live bytes
+after layout and no animations. The public LVGL label setter temporarily used
+56 bytes for layout bookkeeping per update; it was released after layout.
+Assertions that assumed this public API allocated nothing during a visible text
+change were corrected after tracing the library behavior; the original failed
+probes remain local. Existing zero-idle gates were not weakened.
+
+Representative final light/dark active, waiting, quiet, clipping and long-copy
+renders were visually inspected. These checks establish source/native layout
+and state behavior, not physical microphone sensitivity, host recording or a
+device stability pass for this new meter image. Physical acceptance is pending.
+
 ## Device evidence template
 
 ```text

@@ -45,6 +45,10 @@ with tempfile.TemporaryDirectory(prefix="esp32-board-audio-") as temp:
     if args.clock_only:
         raise SystemExit(0)
     subprocess.run([binary], check=True)
+    level_binary = str(Path(temp) / "capture_level")
+    subprocess.run(common + ["-pedantic", str(suite / "test_capture_level.c")] + objects[1:] + ["-lm", "-o", level_binary], check=True)
+    for scenario in ("amplitude", "silence", "extrema", "failure", "safety", "clock"):
+        subprocess.run([level_binary, scenario], check=True)
     nand_binary = str(Path(temp) / "nand_probe")
     subprocess.run(common + ["-pedantic", str(suite / "test_nand_probe.c"), "-o", nand_binary], check=True)
     subprocess.run([nand_binary], check=True)

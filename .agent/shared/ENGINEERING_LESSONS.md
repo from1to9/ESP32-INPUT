@@ -585,6 +585,21 @@ copies outside interrupt locks; do not retain recordings or add getter I/O.
 A later audible test without matching earlier measurements cannot retrospectively
 prove why an earlier attempt was silent.
 
+A live microphone meter needs both capture permission and a fresh, matching
+generation. Zero PCM is measured silence; no samples, failed/partial reads and
+expired windows are different states. Invalidate retained levels on mute, stop
+and replacement, and recheck ownership before publishing a completed read.
+Keep meter observations out of action revisions so continuous telemetry cannot
+invalidate an already held Stop or Mute. A worker can publish after the main
+loop sampled its time; compare freshness against a monotonic read taken after
+copying the observation, rather than inventing a future-time tolerance.
+
+Reusing a static LVGL label avoids text-buffer churn but does not imply zero
+allocation during visible text changes: the pinned public label setter queues
+a short-lived layout event. Bound that transient work and require stable live
+allocations after layout; unchanged and hidden snapshots must still do no work.
+This does not qualify target memory headroom or microphone sensitivity.
+
 Evidence: [PCM observer checks](../../tests/board_audio/README.md),
 [USB observer checks](../../tests/usb_audio/README.md), and
 [bounded playback evidence](../../docs/validation.md#audible-usb-playback-and-startup-control-churn-2026-10-26).

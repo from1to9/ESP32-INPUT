@@ -109,3 +109,21 @@ typedef struct {
 /* Task context only. Copies under the existing owner lock; no IO or mutation.
  * Before any write/read the corresponding known flag is false, not silence. */
 void board_audio_pcm_snapshot(board_audio_pcm_snapshot_t *out);
+
+#define BOARD_AUDIO_CAPTURE_LEVEL_INTERVAL_MS 100U
+/* Cached digital microphone observation, not an acoustic calibration. Only
+ * complete successful mono reads contribute. Windows publish at most 10 Hz;
+ * sum_squares/samples describe RMS energy, peak_abs includes INT16_MIN=32768.
+ * known distinguishes measured silence from no valid samples. current also
+ * requires the same prepared generation and open physical capture gate.
+ * The consumer must check its own permission and timestamp freshness. */
+typedef struct {
+    uint64_t generation, observed_ms, sum_squares;
+    uint32_t samples;
+    uint16_t peak_abs;
+    ae_result_t result;
+    bool known, current;
+} board_audio_capture_snapshot_t;
+
+/* Task-only copy under the owner lock; no IO, clock read or state mutation. */
+void board_audio_capture_snapshot(board_audio_capture_snapshot_t *out);

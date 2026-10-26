@@ -94,7 +94,7 @@ static void audio_core_checks(void)
     assert(!find_control(lv_screen_active(), "Record") && !find_control(lv_screen_active(), "Recordings"));
     assert_rect(control("Start mic"), 316, 80, 136, 48);
     assert_rect(control("Start speaker"), 316, 260, 136, 48);
-    assert_rect(control("Mute mic"), 28, 168, 424, 48);
+    assert_rect(control("Mute mic"), 28, 168, 224, 48);
     clear_intents(); tap_control("Start mic"); tap_control("Start speaker"); tap_control("Mute mic");
     assert(action_count(APP_MEDIA_CONTROL) == 0);
     audio_start_block_checks();

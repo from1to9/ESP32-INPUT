@@ -2,6 +2,7 @@
 static void media_checks(void)
 {
     audio_core_checks();
+    audio_level_checks();
     app_view_t original = s_state;
     const app_media_request_t *request;
     s_state.mode = INPUT_AUDIO;

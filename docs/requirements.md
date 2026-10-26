@@ -149,6 +149,15 @@ missing host audio, unsupported microphone capability or an operation still
 stopping. Derive the explanation from the same decision that disables the
 control; a generic Off label or a previously successful command is insufficient.
 
+The Mic card includes a live digital input level, derived from real local PCM
+already acquired with capture permission. Show a compact RMS dBFS value and a
+logarithmic bar, with separate off, waiting, unavailable, quiet and clipping
+states. Missing or stale samples must never look like silence or retain an old
+live value. This is local microphone activity, not proof that a host has saved
+or received a recording. Do not add hardware reads or retain audio for the meter;
+bound observation updates to 10 Hz and keep them independent of command
+revisions, audio scheduling and existing Start, Stop, Mute and volume controls.
+
 ## P2: concurrency and remote extensions
 
 - Qualify same-host HID + HFP first and HID + A2DP separately. Enable background audio in mouse/keyboard mode only after qualification.

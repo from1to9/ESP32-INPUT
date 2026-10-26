@@ -10,6 +10,17 @@ comparison remains a visible warning in vendor compilation only.
 
 ## Audio boundary
 
+Six microphone-level cases exercise the real adapter/codec with controlled SDK
+PCM: integer RMS energy and peak, true silence, signed extrema, cadence,
+short/failed/invalid transfers, mute/stop during IO, generation replacement and
+backward/negative clock rejection. Only complete successful mono reads enter
+the external-memory energy window. The cached snapshot getter performs no IO
+or clock reads; capture revocation invalidates it before late IO can publish.
+Numeric snapshots publish at most every 100 ms after the first valid read.
+These digital measurements do not establish acoustic calibration or device UI
+acceptance. The normal board suite runs these cases with its existing clock,
+privacy, startup, real-engine and SDK capability regressions.
+
 `board_audio_mosaico_init` creates one private worker and queues a muted boot
 probe/teardown. Capabilities remain unavailable until that probe succeeds.
 Readiness is a separate one-time obligation, outside the request mailbox. The

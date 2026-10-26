@@ -1,6 +1,6 @@
 # Native media product controls
 
-Run `python3 tests/media_controls/run.py`. Thirty isolated cases compile the real
+Run `python3 tests/media_controls/run.py`. Thirty-six isolated cases compile the real
 `app_media_controls.c` and audio format arithmetic with strict warnings,
 AddressSanitizer and UndefinedBehaviorSanitizer. Cached codec, store, runtime and
 Bluetooth interfaces are substituted at their public boundaries; no production
@@ -79,3 +79,11 @@ state still reports progress. They consume late results after navigation,
 preserve applied values and errors, and clear old failure text when a new
 operation is accepted. The production coordinator suite separately verifies
 that media-notice removal preserves another status owner.
+
+Four microphone-meter cases cover PCM16 RMS scaling, clipping, measured silence,
+300 ms freshness, missing/error/generation/permission states and retained button
+identity across ten level updates. Freshness samples the monotonic clock after
+the cached board snapshot copy, so a worker publish during coordinator polling
+does not become a false future sample. True future/negative/backward clocks
+remain unavailable. A level-only update never changes resource revisions or
+rejects a held control; no meter path creates microphone authority or reads IO.

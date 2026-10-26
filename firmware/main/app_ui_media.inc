@@ -197,6 +197,41 @@ static const char *media_core_state(bool speaker, const app_media_role_view_t *r
     return "Off / Unavailable";
 }
 
+static void render_mic_level(void)
+{
+    const app_media_mic_level_t *level = &s_view.media.microphone_level;
+    app_media_level_state_t state = s_view.media.known ? level->state : APP_MEDIA_LEVEL_UNKNOWN;
+    if (state == APP_MEDIA_LEVEL_LIVE && (level->percent > 100 ||
+        (!level->silent && (level->dbfs < -96 || level->dbfs > 0)) ||
+        (level->silent && level->clipping))) state = APP_MEDIA_LEVEL_UNKNOWN;
+    char value[sizeof(s_mic_level_text)];
+    unsigned percent = 0;
+    uint32_t color = MUTED;
+    switch (state) {
+    case APP_MEDIA_LEVEL_OFF: snprintf(value, sizeof(value), "Mic off"); break;
+    case APP_MEDIA_LEVEL_WAITING: snprintf(value, sizeof(value), "Waiting for signal"); break;
+    case APP_MEDIA_LEVEL_LIVE:
+        if (level->silent) snprintf(value, sizeof(value), "Input: Quiet");
+        else {
+            snprintf(value, sizeof(value), level->clipping ? "Too loud / %d dBFS" : "Input %d dBFS", level->dbfs);
+            percent = level->percent;
+            color = level->clipping ? ERROR : ACCENT;
+        }
+        break;
+    default: snprintf(value, sizeof(value), "Level unavailable"); break;
+    }
+    /* This read-only meter never participates in action bindings. Its fixed
+     * text buffer avoids allocator traffic as live values change length. */
+    if (strcmp(value, s_mic_level_text)) {
+        memcpy(s_mic_level_text, value, strlen(value) + 1);
+        lv_label_set_text_static(s_mic_level_label, s_mic_level_text);
+    }
+    if (lv_bar_get_value(s_mic_level) != (int)percent)
+        lv_bar_set_value(s_mic_level, (int)percent, LV_ANIM_OFF);
+    foreground(s_mic_level_label, color, 0);
+    background(s_mic_level, color, LV_PART_INDICATOR);
+}
+
 static void render_media_core(void)
 {
     const app_media_view_t *media = &s_view.media;
@@ -225,6 +260,7 @@ static void render_media_core(void)
     media_bind(s_audio_mute, request, mic->known && (mute ? mic->can_mute : mic->can_unmute));
     text(s_audio_mute, mic->known && !mic->mute_confirmed ? "Mute mic / unconfirmed" : mute ? "Mute mic" : "Unmute mic");
     selected(s_audio_mute, mic->known && mic->mute_confirmed && mic->muted);
+    render_mic_level();
     bool volume = media->volume_known && media->volume_percent <= 100 && media->safe_volume_max <= 100;
     media_bind(s_volume, media_request(APP_MEDIA_SET_VOLUME), volume && media->can_set_volume && !media->command_pending);
     if (volume) { slider_value(s_volume, media->volume_percent); label_format(s_volume_text, "%u%%", media->volume_percent); }

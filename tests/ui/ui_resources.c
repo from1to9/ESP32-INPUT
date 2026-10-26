@@ -12,7 +12,7 @@
 #define IDLE_MS 10000
 #define FRAME_BYTES (WIDTH * HEIGHT * 2U)
 /* design/ui-plan.md: fixed input pages preserve gestures; one panel is dynamic. */
-#define CORE_OBJECT_LIMIT 112 /* Two independent Audio cards add six objects to the approved 106-object core. */
+#define CORE_OBJECT_LIMIT 114 /* Two Mic level objects extend the approved 112-object Audio core. */
 #define PANEL_OBJECT_LIMIT 160
 
 typedef struct {

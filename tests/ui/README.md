@@ -35,7 +35,7 @@ Private editor cases enter all 95 printable ASCII characters through actual two-
 
 Both fixtures use FULL rendering, RGB565, a 480 x 480 draw buffer, a 15 ms refresh period and 60 DPI, matching the relevant pinned firmware settings. The resource fixture advances the normal LVGL timer path for 100 snapshots over 10 simulated seconds after settling; it does not force a redraw to manufacture either activity or a pass. It counts actual flush callbacks/bytes, objects, timers, allocator calls, live blocks, requested live bytes and peak requested bytes. Visible-change and allocator positive controls ensure the observers work. It requires zero new flushes, allocations, reallocations and frees for settled identical state, hidden About/bond changes, screen-off updates and target changes behind Settings Home. All panels and Settings categories also receive identical-state checks in both themes.
 
-The documented ceilings are 112 objects for the fixed core (the independent Mic/Speaker cards add six to the prior 106-object core) and 160 with one dynamic panel. The resource fixture warms bounded label capacities, then performs 1,000 panel open/close cycles per theme across the registered variants on the same UI instance, including native list/detail, both private editor purposes, Common keys and remote review. Each close must return to the same core objects, timers, live blocks and requested bytes with cleared private drafts; teardown must release every tracked block. Hidden Wi-Fi labels, Bluetooth-name metadata and audio connection/volume metadata join the existing hidden-only checks. Rendering and deferred-touch lifecycle checks remain separate so a safe final allocation total cannot hide a stale action.
+The documented ceilings are 114 objects for the fixed core (the Mic level label and bar add two to the prior 112-object core) and 160 with one dynamic panel. The resource fixture warms bounded label capacities, then performs 1,000 panel open/close cycles per theme across the registered variants on the same UI instance, including native list/detail, both private editor purposes, Common keys and remote review. Each close must return to the same core objects, timers, live blocks and requested bytes with cleared private drafts; teardown must release every tracked block. Hidden Wi-Fi labels, Bluetooth-name metadata and audio connection/volume metadata join the existing hidden-only checks. Rendering and deferred-touch lifecycle checks remain separate so a safe final allocation total cannot hide a stale action.
 
 `ui_memory.c` observes the CLIB allocator boundary and delegates allocation/reallocation/free to the unchanged managed LVGL backend. CMake renames only that backend's three entry points so the observer can interpose; production `app_ui.c` and LVGL decisions are unchanged. The observer uses bounded static bookkeeping and fails on overflow or unknown pointers. Counts include LVGL drawing work, exclude test output/framebuffers and allocator overhead, and do not measure target internal/DMA memory or PSRAM. No source-only product branches, replay corrections or success-returning device doubles are used.
 
@@ -65,7 +65,20 @@ and spoken-letter checks remain separate from primary Audio navigation. Storage
 tests assert that its entry is absent from primary Audio, then exercise the
 retained owner-supplied panel and every existing preparation/privacy assertion.
 
-`ui_media.inc` covers both themes and all retained media panels. The fixed core has 112
+`ui_audio_level.inc` covers the read-only Mic input meter within the existing
+card. Its label and bar distinguish unavailable, off, waiting, live RMS dBFS,
+real silence and clipping; invalid live values fail closed. Actual held
+Start/Stop/Mute/Menu and volume gestures survive telemetry-only snapshots.
+Nine cases per theme prove identical, hidden and inactive updates produce no
+allocation or display flushes. One hundred changing live snapshots per theme
+bound the pinned LVGL transient text-layout callback to 64 bytes per update,
+with no text-buffer reallocation, stable objects/live bytes after layout, and no
+animation. Normal draw-task allocation during changed-frame rendering is separate.
+The focused run writes `audio-level-resources.json` for each theme and asserts
+zero live allocations at teardown. These synthetic PCM levels prove UI behavior,
+not microphone sensitivity or host recording success.
+
+`ui_media.inc` covers both themes and all retained media panels. The fixed core has 114
 objects; one dynamic panel remains bounded by 160. Identical owner snapshots
 must have zero idle allocation and flushes. This requirement also covers expired
 confirmations, so rendering an invalid review cannot oscillate label contents.

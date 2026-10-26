@@ -17,6 +17,16 @@ typedef struct { uint8_t bytes[16]; } app_media_id_t;
 typedef enum { APP_MEDIA_ROUTE_OFF, APP_MEDIA_ROUTE_LOCAL, APP_MEDIA_ROUTE_HFP,
     APP_MEDIA_ROUTE_A2DP, APP_MEDIA_ROUTE_UAC, APP_MEDIA_ROUTE_COUNT } app_media_route_t;
 typedef enum { APP_MEDIA_MICROPHONE, APP_MEDIA_SPEAKER } app_media_role_t;
+typedef enum {
+    APP_MEDIA_LEVEL_UNKNOWN, APP_MEDIA_LEVEL_OFF,
+    APP_MEDIA_LEVEL_WAITING, APP_MEDIA_LEVEL_LIVE
+} app_media_level_state_t;
+typedef struct {
+    app_media_level_state_t state;
+    int16_t dbfs; /* RMS dBFS, -96..0 when LIVE and not silent. */
+    uint8_t percent; /* Bounded visual scale: -60..0 dBFS maps to 0..100. */
+    bool silent, clipping;
+} app_media_mic_level_t;
 typedef enum { APP_MEDIA_CONNECTION_USB, APP_MEDIA_CONNECTION_BLUETOOTH,
     APP_MEDIA_CONNECTION_COUNT } app_media_connection_t;
 typedef enum {
@@ -165,6 +175,9 @@ typedef struct {
     bool connection_known;
     app_media_connection_t connection;
     bool can_select_connection[APP_MEDIA_CONNECTION_COUNT];
+    /* Read-only fresh local PCM telemetry, never an action revision or proof
+     * of host recording. Unknown/stale observations carry no displayed level. */
+    app_media_mic_level_t microphone_level;
 } app_media_view_t;
 
 typedef struct {

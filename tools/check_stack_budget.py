@@ -441,6 +441,12 @@ for _name, _prefix in {
         AUDIO_ADAPTER_PATHS[f"audio_connection_{_name}_{_leaf}"] = _prefix + _tail
 USB_START_OBSERVER = CORE + [("main", "service_media"), ("media_controls", "app_media_controls_poll"),
     ("media_controls", "observe_usb_start_readiness")]
+MIC_LEVEL_OBSERVER = CORE + [("main", "service_media"), ("media_controls", "app_media_controls_poll")]
+for _name, _tail in {
+    "snapshot": [("board_audio", "board_audio_capture_snapshot")],
+    "convert": [("media_controls", "update_microphone_level")],
+}.items():
+    AUDIO_ADAPTER_PATHS[f"audio_microphone_level_{_name}"] = MIC_LEVEL_OBSERVER + _tail
 for _name, _tail in {
     "identity": [("audio_helpers", "ae_route_token_equal"), ("audio_helpers", "ae_id_equal")],
     "validity": [("audio_helpers", "ae_route_token_valid"), ("audio_helpers", "ae_id_empty")],
@@ -473,6 +479,19 @@ for _control in ("volume", "gain"):
         ("audio_engine", f"ae_{_control}"), ("board_audio", _control),
         ("board_audio", "exchange"), ("board_audio", "same_request"),
         ("board_audio", "same_format")])
+for _name, _tail in {
+    "prepare": [("audio_engine", "ae_poll"), ("audio_engine", "prepare_source"),
+        ("board_audio", "prepare"), ("board_audio", "exchange")],
+    "mute": [("audio_engine", "ae_poll"), ("audio_engine", "sync_roles"), ("board_audio", "mute")],
+    "prepare_mute": [("audio_engine", "ae_poll"), ("audio_engine", "prepare_source"),
+        ("audio_engine", "sync_roles"), ("board_audio", "mute")],
+    "stop": [("audio_engine", "ae_poll"), ("audio_engine", "stop_hardware"), ("board_audio", "stop")],
+    "enable": [("audio_manager", "dispatch"), ("audio_engine", "ae_enable"),
+        ("board_audio", "prepare"), ("board_audio", "exchange")],
+    "recover": [("audio_manager", "dispatch"), ("audio_engine", "ae_recover"), ("board_audio", "stop")],
+}.items():
+    AUDIO_RUNTIME_PATHS[f"audio_manager_level_invalidate_{_name}"] = ("audio_manager",
+        [("audio_manager", "worker")] + _tail + [("board_audio", "invalidate_capture_level")])
 for _name, _engine, _codec in (
     ("capture", "capture_frame", "read_pcm"),
     ("playback", "playback_frame", "write_pcm"),
@@ -601,6 +620,13 @@ BOARD_AUDIO_PATHS = {
     "board_audio_prepare_error": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_prepare"), ("board_audio", "remember")],
     "board_audio_unmute_error": BOARD_AUDIO_EXECUTE + [("board_audio", "hardware_unmute"), ("board_audio", "remember")],
     "board_audio_status_publish": BOARD_AUDIO_SERVICE + [("board_audio", "publish")],
+    "board_audio_capture_measure": BOARD_AUDIO_SERVICE + [("board_audio", "measure_capture"),
+        ("board_audio", "sample_get")],
+    "board_audio_capture_publish": BOARD_AUDIO_SERVICE + [("board_audio", "publish_capture_level"),
+        ("board_audio", "invalidate_capture_level")],
+    "board_audio_capture_failure": BOARD_AUDIO_SERVICE + [("board_audio", "invalidate_capture_level")],
+    "board_audio_capture_status_failure": BOARD_AUDIO_SERVICE + [("board_audio", "publish"),
+        ("board_audio", "invalidate_capture_level")],
 }
 # Codec SDK calls stay on the existing board worker. Clock enable/disable and
 # offline DMA purge are sibling calls; they never run on the submitting task.

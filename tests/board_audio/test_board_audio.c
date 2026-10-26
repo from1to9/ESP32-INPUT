@@ -31,6 +31,9 @@ static bool fail_start, corrupt_volume;
 static esp_err_t transfer_error;
 static size_t transfer_limit = SIZE_MAX;
 static size_t write_overreport;
+static size_t read_overreport;
+static bool custom_capture;
+static int16_t capture_samples[2];
 static int references[CODEC_REF_STAGE_NUM];
 static uint8_t registers[256];
 static uint8_t emitted[WIRE_BYTES_MAX];
@@ -196,6 +199,13 @@ esp_err_t i2s_channel_read(i2s_chan_handle_t channel, void *data, size_t bytes, 
     *actual = bytes < transfer_limit ? bytes : transfer_limit;
     uint8_t *output = data;
     for (size_t i = 0; i < *actual; ++i) output[i] = (uint8_t)(i + 1U);
+    if (custom_capture) {
+        for (size_t i = 0; i + 4U <= *actual; i += 4U) {
+            sample_put(output + i, capture_samples[(i / 4U) % 2U]);
+            sample_put(output + i + 2U, 32767); /* The right slot must not affect mono capture. */
+        }
+    }
+    *actual += read_overreport;
     if (inject_stop) { inject_stop = false; assert(port.stop(NULL, s.generation) == AE_AGAIN); }
     if (inject_mute) { inject_mute = false; assert(port.mute(NULL, AE_MICROPHONE, true, s.generation) == AE_AGAIN); }
     return transfer_error;

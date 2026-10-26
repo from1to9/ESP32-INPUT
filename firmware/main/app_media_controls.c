@@ -12,7 +12,9 @@
 #include "board_recording_flash.h"
 #include "audio_media.h"
 #include "bt_audio.h"
+#include "esp_timer.h"
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -23,6 +25,7 @@
 #define LIVE_SECONDS 3600U
 #define SPEECH_SECONDS 8U
 #define CURSOR_HISTORY 16U
+#define MIC_LEVEL_FRESH_MS 300U
 _Static_assert(APP_MEDIA_USB_START_SETTLE_MS > 0, "USB start settling must be positive");
 
 typedef struct {
@@ -67,6 +70,11 @@ typedef struct {
     app_media_id_t selected_request;
     uint64_t selected_revision;
     char message[97];
+    app_media_mic_level_t microphone_level;
+    board_audio_capture_snapshot_t microphone_level_source;
+    bool microphone_level_cached;
+    bool microphone_level_clock_known, microphone_level_clock_failed; /* Clock failure lasts until owner init. */
+    uint64_t microphone_level_read_ms;
 } controls_t;
 /* Coordinator task only, after PSRAM initialization; no ISR/cache-disabled access. */
 static MEDIA_CONTROLS_TASK_BSS controls_t controls;
@@ -78,6 +86,7 @@ typedef struct {
     app_recording_store_snapshot_t store;
     bt_audio_bond_list_t bonds;
     ae_record_metadata_t records[APP_MEDIA_ROWS];
+    board_audio_capture_snapshot_t capture_level;
 } poll_scratch_t;
 static MEDIA_CONTROLS_TASK_BSS poll_scratch_t poll_scratch;
 
@@ -538,12 +547,72 @@ static void map_options(void)
     controls.storage_view.remaining_time_known = options->known;
     controls.storage_view.remaining_seconds = options->maximum_duration_seconds;
 }
+static void update_microphone_level(const board_audio_capture_snapshot_t *source)
+{
+    const ae_snapshot_t *audio = &controls.runtime.audio;
+    app_media_mic_level_t level = {0};
+    if (!controls.runtime_known || !controls.runtime.initialized || !controls.runtime.audio_known ||
+        !controls.clock_known || controls.clock_failed || !controls.codec.available ||
+        audio->quarantined || audio->error != AE_OK) goto unavailable;
+    if (!audio->capture_gate_open) {
+        if (audio->hardware_off_confirmed ||
+            (audio->microphone_mute_confirmed && audio->microphone_mute_applied)) level.state = APP_MEDIA_LEVEL_OFF;
+        else if (audio->capture_indicator_required && !audio->microphone_muted) level.state = APP_MEDIA_LEVEL_WAITING;
+        goto unavailable;
+    }
+    if (!audio->microphone_enabled || audio->microphone_muted || controls.microphone_level_clock_failed) goto unavailable;
+    if (!source->known) {
+        if (source->result == AE_OK || source->result == AE_AGAIN) level.state = APP_MEDIA_LEVEL_WAITING;
+        goto unavailable;
+    }
+    /* The board worker may publish after the coordinator sampled now_ms.
+     * Order the snapshot copy before this clock read instead of treating
+     * ordinary concurrent progress as a future-dated sample. */
+    int64_t read_us = esp_timer_get_time();
+    if (read_us < 0) { controls.microphone_level_clock_failed = true; goto unavailable; }
+    uint64_t read_ms = (uint64_t)read_us / 1000U;
+    if (controls.microphone_level_clock_failed || read_ms < controls.now_ms ||
+        (controls.microphone_level_clock_known && read_ms < controls.microphone_level_read_ms)) {
+        controls.microphone_level_clock_failed = true; goto unavailable;
+    }
+    controls.microphone_level_clock_known = true; controls.microphone_level_read_ms = read_ms;
+    if (!source->current || source->result != AE_OK || source->generation != audio->audio_generation ||
+        source->observed_ms > read_ms ||
+        !source->samples || source->peak_abs > 32768U ||
+        source->sum_squares > UINT64_C(1073741824) * source->samples ||
+        ((source->sum_squares == 0) != (source->peak_abs == 0))) goto unavailable;
+    if (read_ms - source->observed_ms > MIC_LEVEL_FRESH_MS) {
+        level.state = APP_MEDIA_LEVEL_WAITING; goto unavailable;
+    }
+    const board_audio_capture_snapshot_t *cached = &controls.microphone_level_source;
+    if (controls.microphone_level_cached && source->generation == cached->generation &&
+        source->observed_ms == cached->observed_ms && source->sum_squares == cached->sum_squares &&
+        source->samples == cached->samples && source->peak_abs == cached->peak_abs) return;
+    level.state = APP_MEDIA_LEVEL_LIVE; level.silent = source->sum_squares == 0;
+    level.clipping = source->peak_abs >= 32767U;
+    level.dbfs = -96;
+    if (!level.silent) {
+        /* Convert only a new <=10 Hz snapshot, outside every owner lock.
+         * Digital RMS is relative to the PCM16 full-scale magnitude32768. */
+        double dbfs = 10.0 * log10((double)source->sum_squares / ((double)source->samples * 1073741824.0));
+        if (dbfs < -96.0) dbfs = -96.0;
+        if (dbfs > 0.0) dbfs = 0.0;
+        level.dbfs = (int16_t)(dbfs - 0.5);
+        if (level.dbfs > -60) level.percent = (uint8_t)((level.dbfs + 60) * 100 / 60);
+    }
+    controls.microphone_level_source = *source; controls.microphone_level_cached = true;
+    controls.microphone_level = level; return;
+unavailable:
+    controls.microphone_level_cached = false; controls.microphone_level = level;
+}
+
 static void rebuild(void)
 {
     app_media_record_list_view_t list = controls.view.recordings;
     controls.view = (app_media_view_t){.known = controls.runtime_known && controls.runtime.initialized && controls.runtime.audio_known,
         .management_generation = 1, .resource_revision = controls.revision, .recordings = list};
     app_media_view_t *view = &controls.view;
+    view->microphone_level = controls.microphone_level;
     const ae_snapshot_t *audio = &controls.runtime.audio;
     view->command_pending = controls.pending || controls.voice_link.active || controls.runtime.busy || controls.runtime.result_ready;
     if (view->known) {
@@ -1042,6 +1111,7 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
     if (!controls.initialized) return;
     if (controls.clock_known && now_ms < controls.now_ms) {
         controls.clock_failed = true; controls.review.valid = controls.prepare_review = false;
+        controls.microphone_level = (app_media_mic_level_t){0}; controls.microphone_level_cached = false;
         if (controls.voice_link.active) finish_voice_link(effect, AE_TIME_UNKNOWN);
         effect_result(effect, AE_TIME_UNKNOWN); return;
     }
@@ -1081,6 +1151,8 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
     if (!codec.capabilities || codec.capabilities(codec.context, &caps) != AE_OK) caps = (ae_codec_capabilities_t){0};
     if (!same_codec(&caps, &controls.codec)) increase(&controls.revision);
     controls.codec = caps;
+    board_audio_capture_snapshot(&poll_scratch.capture_level);
+    update_microphone_level(&poll_scratch.capture_level);
     bt_audio_snapshot_t bluetooth = bt_audio_snapshot();
     if (bluetooth.generation != controls.bluetooth.generation || bluetooth.control_inflight != controls.bluetooth.control_inflight ||
         bluetooth.request_status != controls.bluetooth.request_status) increase(&controls.revision);
