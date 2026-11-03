@@ -2253,6 +2253,22 @@ log continued to report `imu_fault` through the end of probation. That gate
 read the board's retained first-fault flag. The management API subsequently
 reported confirmed `a92c76a` and both saved hosts.
 
+### Confirmed USB update and mouse wheel test
+
+The USB loader wrote and verified all 4,730,192 bytes of `b511941` in the
+inactive application slot. It preserved the previous confirmed slot and
+settings. No backup was made. On first boot a brief IMU freshness failure
+reset the health timer. After 45 continuous healthy seconds the application
+requested confirmation. The management API reported the expected build and
+ELF digest, successful confirmation, probation closed and two saved hosts.
+The captured trial contained no display allocation failure or rollback.
+
+On the Mouse page, the tester tapped both arrows, slid one finger up and down
+from the gap between them, and held still before lifting. The tester confirmed
+the directions and that scrolling stopped. macOS received 19 nonzero USB wheel
+reports from the Mosaico, totaling 8 positive and 15 negative steps. This run
+covers the USB wheel path on this board and host.
+
 ## Device evidence template
 
 ```text
