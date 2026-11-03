@@ -28,6 +28,15 @@ def main():
         for name in ("trust", "update", "clock", "server"):
             if selected and selected!=name:
                 continue
+            if name == "update":
+                source = (ROOT / "firmware/main/app_control_runtime.c").read_text()
+                branch = source.index('!strcmp(resource, "/api/v1/firmware/state")')
+                first = source.index('        if (!(who->scopes &', branch)
+                after = source.index('    } else if (!strcmp(resource, "/api/v1/clock"))', first)
+                (temporary / "update_state_fixture.inc").write_text(
+                    "static cp_error_t production_firmware_state(const cp_identity_t *who, "
+                    "char *json, size_t capacity, size_t *length) { int n;\n" +
+                    source[first:after] + "}\n")
             modes=[("default",[])] if name not in ("clock","server") else [
                 ("external",["-DCONFIG_SPIRAM=1","-DCONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=1"]),
                 ("internal-no-psram",["-DCONFIG_SPIRAM=0","-DCONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=0"]),

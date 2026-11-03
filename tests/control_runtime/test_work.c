@@ -21,6 +21,9 @@ static bool identity_live;
 static unsigned interleave;
 static bool fail_runtime_task;
 static unsigned reordered;
+static cp_error_t update_authority_status;
+static app_update_authority_t published_authority;
+static unsigned update_host_calls;
 void *heap_caps_calloc(size_t n, size_t bytes, unsigned caps)
 { return test_heap_calloc(4, n, bytes, caps); }
 void *heap_caps_aligned_calloc(size_t alignment, size_t n, size_t bytes, unsigned caps)
@@ -68,12 +71,19 @@ esp_err_t app_wifi_profile_result(uint64_t id, app_wifi_profile_result_t *out)
     return ESP_ERR_INVALID_STATE;
 }
 void app_update_snapshot(app_update_snapshot_t *s) { *s = (app_update_snapshot_t){0}; }
-void app_update_publish_authority(const app_update_authority_t *a) { (void)a; }
+void app_update_publish_authority(const app_update_authority_t *a) { published_authority = *a; }
 cp_error_t app_control_runtime_update_authority(const cp_command_t *c, app_update_authority_t *a)
 {
     (void)c;
-    (void)a;
-    return CP_FORBIDDEN;
+    *a = (app_update_authority_t){.authorized = update_authority_status == CP_OK,
+                                  .policy_revision = 7};
+    return update_authority_status;
+}
+static cp_error_t update_host_authority(void *user, const cp_command_t *c, app_update_authority_t *a)
+{
+    (void)user; (void)c; (void)a;
+    ++update_host_calls;
+    return CP_OK;
 }
 esp_err_t app_control_server_complete(uint64_t key, const cp_result_t *r)
 {
@@ -225,6 +235,24 @@ int main(void)
     strcpy(native_state.ssid, "test-network");
     process_work(&fixture.work[0]);
     assert(mutations == 1 && fixture.work[0].result.state == CP_RESULT_APPLIED);
+    const cp_error_t statuses[] = {CP_UNAUTHENTICATED, CP_FORBIDDEN, CP_EXPIRED, CP_STALE, CP_OK};
+    for (unsigned i = 0; i < sizeof(statuses) / sizeof(statuses[0]); ++i) {
+        (void)begin();
+        fixture.host.update_authority = update_host_authority;
+        work_t *w = &fixture.work[0];
+        w->started = true;
+        w->command.operation = CP_OP_FIRMWARE_DOWNLOAD;
+        w->update_policy_revision = 7;
+        update_authority_status = statuses[i];
+        update_host_calls = 0;
+        process_work(w);
+        assert(update_host_calls == (statuses[i] == CP_OK ? 1U : 0U));
+        assert(published_authority.authorized == (statuses[i] == CP_OK));
+        assert(published_authority.policy_revision == 7);
+        assert(published_authority.observation.runtime_status_known &&
+               published_authority.observation.runtime_status == (int32_t)statuses[i] &&
+               published_authority.observation.observed_ms == clock_ms);
+    }
     puts("PASS: actual queued runtime work rechecks session/scopes/lock/generation/deadline; "
          "input-only loss stays scoped and started effects retain truthful results");
     return 0;

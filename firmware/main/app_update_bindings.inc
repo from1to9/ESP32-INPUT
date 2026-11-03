@@ -9,6 +9,7 @@ static struct {
     cp_command_t command;
     bool active, pending, main_unlocked, maintenance_ready;
     uint64_t cached_ms, admitted_until_ms;
+    uint32_t rejected;
 } s_update_gate;
 static bool s_update_maintenance;
 static uint64_t s_update_health_since;
@@ -33,18 +34,28 @@ static cp_error_t remote_update_authority(void *context, const cp_command_t *com
         return CP_INVALID;
     }
     cp_error_t error = app_control_runtime_update_authority(command, out);
+    out->observation.runtime_status_known = true;
+    out->observation.runtime_status = (int32_t)error;
+    out->observation.observed_ms = (uint64_t)esp_timer_get_time() / 1000U;
     if (error != CP_OK) {
         return error;
     }
     uint64_t now = (uint64_t)esp_timer_get_time() / 1000U;
+    out->observation.observed_ms = now;
     portENTER_CRITICAL(&s_update_gate_lock);
     bool fresh = now >= s_update_gate.cached_ms && now - s_update_gate.cached_ms <= 250;
+    out->observation.owner_observed = true;
+    out->observation.owner_cached_ms = s_update_gate.cached_ms;
+    out->observation.owner_rejected = s_update_gate.rejected;
+    if (!fresh) out->observation.owner_rejected |= APP_UPDATE_OWNER_STALE;
     if (s_update_gate.active && !remote_update_same_claim(&s_update_gate.command, command)) {
         error = CP_BUSY;
+        out->observation.owner_rejected |= APP_UPDATE_OWNER_CLAIM;
     }
     if (!s_update_gate.active && error == CP_OK) {
         if (now > command->deadline_ms) {
             error = CP_EXPIRED;
+            out->observation.owner_rejected |= APP_UPDATE_OWNER_EXPIRED;
         } else {
             s_update_gate.command = *command;
             s_update_gate.active = true;
@@ -61,6 +72,9 @@ static cp_error_t remote_update_authority(void *context, const cp_command_t *com
     if (error != CP_OK || !fresh || now >= out->authority_expires_ms) {
         out->authorized = false;
     }
+    if (!s_update_gate.main_unlocked) out->observation.owner_rejected |= APP_UPDATE_OWNER_LOCKED;
+    if (!out->maintenance_ready) out->observation.owner_rejected |= APP_UPDATE_OWNER_NOT_READY;
+    if (now >= out->authority_expires_ms) out->observation.owner_rejected |= APP_UPDATE_OWNER_EXPIRED;
     portEXIT_CRITICAL(&s_update_gate_lock);
     return error;
 }
@@ -174,6 +188,7 @@ static void __attribute__((noinline)) remote_update_service(void)
     s_update_maintenance = requested;
     app_wifi_set_maintenance(requested);
     bool ready = false;
+    uint32_t rejected = 0;
     if (active && requested) {
         app_update_authority_t authority = {0};
         cp_error_t allowed = app_control_runtime_update_authority(&command, &authority);
@@ -210,11 +225,21 @@ static void __attribute__((noinline)) remote_update_service(void)
                 s_management_generation == command.management_generation && neutral &&
                 !s_transport_switch_pending && s_pair_operation == APP_CONFIRM_NONE &&
                 media_known && remote_update_media_quiet(&media) && flash_quiet;
+        if (allowed != CP_OK) rejected |= APP_UPDATE_OWNER_POLICY;
+        if (s_engine.state.locked) rejected |= APP_UPDATE_OWNER_LOCKED;
+        if (s_management_generation != command.management_generation) rejected |= APP_UPDATE_OWNER_GENERATION;
+        if (!neutral) rejected |= APP_UPDATE_OWNER_HID;
+        if (s_transport_switch_pending) rejected |= APP_UPDATE_OWNER_TRANSPORT;
+        if (s_pair_operation != APP_CONFIRM_NONE) rejected |= APP_UPDATE_OWNER_PAIRING;
+        if (!media_known) rejected |= APP_UPDATE_OWNER_MEDIA_UNKNOWN;
+        else if (!remote_update_media_quiet(&media)) rejected |= APP_UPDATE_OWNER_MEDIA;
+        if (!flash_quiet) rejected |= APP_UPDATE_OWNER_FLASH;
     }
     portENTER_CRITICAL(&s_update_gate_lock);
     s_update_gate.main_unlocked = !s_engine.state.locked;
     s_update_gate.cached_ms = s_now_ms;
     s_update_gate.maintenance_ready = ready && s_update_gate.active;
+    s_update_gate.rejected = rejected;
     portEXIT_CRITICAL(&s_update_gate_lock);
     clear_private(&command, sizeof(command));
     remote_update_health_service();

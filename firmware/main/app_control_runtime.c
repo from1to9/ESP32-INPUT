@@ -316,6 +316,21 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
             s.probation_active ? "true" : "false",
             s.health_confirmation_attempted ? "true" : "false", s.running_state_error, health_error,
             s.error, reason);
+        if (n < 0 || (size_t)n >= capacity) return CP_TOO_LARGE;
+        /* Extend in the caller's existing bounded buffer; no large local copy. */
+        size_t used = (size_t)n - 1;
+        int k = snprintf(json + used, capacity - used, ",\"failure\":");
+        if (k < 0 || (size_t)k >= capacity - used) return CP_TOO_LARGE;
+        used += (size_t)k;
+        size_t failure_length = 0;
+        if (!app_update_failure_json(s.job_id, s.revision, json + used, capacity - used, &failure_length))
+            return CP_TOO_LARGE;
+        used += failure_length;
+        if (capacity - used < 2) return CP_TOO_LARGE;
+        json[used++] = '}';
+        json[used] = 0;
+        *length = used;
+        return CP_OK;
     } else if (!strcmp(resource, "/api/v1/clock")) {
         app_clock_snapshot_t s;
         app_clock_snapshot(&s);
@@ -752,7 +767,11 @@ static void process_work(work_t *w)
              w->command.operation == CP_OP_FIRMWARE_ACTIVATE) &&
             runtime->host.update_authority) {
             app_update_authority_t a = {0};
-            if (app_control_runtime_update_authority(&w->command, &a) != CP_OK ||
+            cp_error_t authority_status = app_control_runtime_update_authority(&w->command, &a);
+            a.observation.runtime_status_known = true;
+            a.observation.runtime_status = (int32_t)authority_status;
+            a.observation.observed_ms = now_ms();
+            if (authority_status != CP_OK ||
                 runtime->host.update_authority(runtime->host.user, &w->command, &a) != CP_OK) {
                 a.authorized = false;
                 a.policy_revision = w->update_policy_revision;

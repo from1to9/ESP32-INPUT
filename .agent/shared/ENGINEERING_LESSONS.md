@@ -756,3 +756,22 @@ rollback qualification.
 Evidence: [companion tests](../../tests/control_protocol/test_bridge.py),
 [LAN collector tests](../../tests/test_lan_debug.py), and
 [collector contract](../../tools/lan_debug.md).
+
+## 33. Preserve the checkpoint that actually terminates an update
+
+A shared SDK error number does not distinguish an authorization guard from a
+flash or transport failure. Retain the first terminal checkpoint and the copied
+authority evidence before cleanup or later refresh can replace it. Expected
+maintenance waiting is not a terminal failure. A nearby sensor timeout is a
+separate observation until a causal path is demonstrated.
+
+Bind separately copied diagnostics to both job identity and snapshot revision;
+download and activation can reuse a job. Unknown authority fields remain null,
+including after an SDK failure where no failing authority predicate was
+evaluated. Keep failed downloads separate from verified staging, boot selection
+and confirmed execution. Adding observation must not change deadlines, retry
+rules, cancellation or permission decisions.
+
+Evidence: [updater regressions](../../tests/control_runtime/test_update.c),
+[coordinator boundary cases](../../tests/coordinator/update_cases.inc), and
+[LAN update contract](../../docs/wifi-management-ota.md).

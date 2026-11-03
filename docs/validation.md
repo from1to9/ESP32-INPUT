@@ -2075,10 +2075,38 @@ evidence, boot changes, output limits and resource errors. Target compilation
 and declared diagnostic HTTPS stack paths, including JSON parser recursion and
 scalar canonicalization, passed. ISR and endurance qualification remain open.
 
-At this checkpoint, commissioning and authenticated reads are device-observed;
-the new diagnostic firmware and a complete signed OTA cycle still require their
-separate deployment evidence. These read results do not qualify rollback,
-power-loss recovery, physical HID or audio behavior.
+The first signed LAN download targeted clean `b4a7e79`, a 4,717,536-byte image
+with SHA-256
+`7f3d95a21ddff60c3a5fb9a1ec23beed2abcc077be4858662b38e9bc0ce66184`.
+Catalog verification and inactive-slot streaming succeeded, but the update owner
+aborted after 2,719,744 bytes with error 259 (`ESP_ERR_INVALID_STATE`). It reported
+`update_failed_no_success_claim`, no cleanup pending and no boot selection.
+Authenticated reconciliation still observed the same running boot and confirmed
+old image. No activation was attempted. The existing result does not identify
+which authorization or maintenance predicate failed; a nearby sensor cache-age
+fault does not establish causation. USB evidence also retained battery timeouts
+and that sensor fault, so its health check did not pass.
+
+The follow-up observation patch retains the first terminal update failure,
+distinguishing an authority rejection from an SDK error with the same numeric
+value. The existing firmware-state GET exports it with job/revision binding and
+null unobserved authority. Full control-runtime tests, 164 coordinator cases,
+45 stack-checker regressions, target compilation and the declared stack budget
+passed. Native cases preserve initial waiting without a false failure latch,
+first-error retention, unknown fields, authorization short-circuit behavior and
+the unchanged 250/251 ms freshness boundary. This is a diagnostic improvement,
+not a demonstrated fix for the interrupted physical download.
+
+A separate five-second HTTPS sensor collection verified 97 responses containing
+720 records (712 IMU samples, seven power records and one rejected IMU attempt).
+Its receipt retained the initial journal retention gap and source error; it was
+`complete_with_issues`, not a complete usable movement segment. No ongoing
+retention gap or wire-format anomaly was observed in that bounded collection.
+
+At this checkpoint, commissioning, authenticated reads and sensor retrieval are
+device-observed. The new runtime diagnostic firmware and a complete signed OTA
+cycle still require separate deployment evidence. These results do not qualify
+rollback, power-loss recovery, physical HID or audio behavior.
 
 ## Device evidence template
 

@@ -41,6 +41,13 @@ typedef struct {
 } release_t;
 typedef enum { WORK_NONE, WORK_CHECK, WORK_DOWNLOAD, WORK_ACTIVATE, WORK_DISCARD } work_kind_t;
 typedef struct {
+    app_update_failure_phase_t phase;
+    esp_err_t error;
+    uint32_t denied, received_bytes, written_bytes;
+    uint64_t job_id, observed_ms, started_ms, authority_expires_ms;
+    app_update_authority_observation_t authority;
+} failure_t;
+typedef struct {
     char catalog[UPDATE_SOURCE_BYTES], ca[UPDATE_CA_BYTES + 1], key_id[65], product[65], board[65],
         layout[65];
     uint8_t public_key[65];
@@ -50,6 +57,7 @@ typedef struct {
     uint32_t minimum_index, floor;
     app_update_snapshot_t view;
     app_update_authority_t authority;
+    failure_t failure;
     work_kind_t work, active_work;
     release_t release;
     const esp_partition_t *staged;
@@ -251,7 +259,27 @@ static esp_http_client_handle_t open_source(const char *url)
     }
     return client;
 }
-static bool authorized(bool activation)
+static void failure_locked(app_update_failure_phase_t phase, esp_err_t error, uint32_t denied,
+                           uint64_t now, const app_update_authority_t *authority)
+{
+    if (updater->failure.phase != APP_UPDATE_FAILURE_NONE) return;
+    updater->failure = (failure_t){.phase = phase, .error = error, .denied = denied,
+        .job_id = updater->view.job_id, .observed_ms = now, .started_ms = updater->started,
+        .received_bytes = updater->view.received_bytes, .written_bytes = updater->view.written_bytes,
+        .authority_expires_ms = authority ? authority->authority_expires_ms : 0};
+    if (authority) updater->failure.authority = authority->observation;
+}
+static esp_err_t failure(app_update_failure_phase_t phase, esp_err_t error)
+{
+    if (error != ESP_OK) {
+        uint64_t now = now_ms();
+        portENTER_CRITICAL(&update_lock);
+        failure_locked(phase, error, 0, now, NULL);
+        portEXIT_CRITICAL(&update_lock);
+    }
+    return error;
+}
+static bool authorized_at(bool activation, app_update_failure_phase_t phase)
 {
     uint64_t now = now_ms();
     portENTER_CRITICAL(&update_lock);
@@ -259,12 +287,30 @@ static bool authorized(bool activation)
     bool cancel = updater->cancel;
     uint64_t started = updater->started;
     portEXIT_CRITICAL(&update_lock);
-    return !cancel && a.authorized && a.unlocked && a.maintenance_ready &&
+    bool allowed = !cancel && a.authorized && a.unlocked && a.maintenance_ready &&
            now < a.authority_expires_ms && now >= started && now - started < UPDATE_JOB_MS &&
            a.policy_revision == updater->view.policy_revision &&
            (!activation || a.restart_authorized) &&
            !strcmp(a.expected_digest, updater->release.digest);
+    if (!allowed && phase != APP_UPDATE_FAILURE_NONE) {
+        uint32_t denied = 0;
+        if (cancel) denied |= APP_UPDATE_DENIED_CANCEL;
+        if (!a.authorized) denied |= APP_UPDATE_DENIED_AUTHORIZED;
+        if (!a.unlocked) denied |= APP_UPDATE_DENIED_UNLOCKED;
+        if (!a.maintenance_ready) denied |= APP_UPDATE_DENIED_MAINTENANCE;
+        if (now >= a.authority_expires_ms) denied |= APP_UPDATE_DENIED_EXPIRED;
+        if (now < started) denied |= APP_UPDATE_DENIED_CLOCK;
+        if (now >= started && now - started >= UPDATE_JOB_MS) denied |= APP_UPDATE_DENIED_JOB_TIME;
+        if (a.policy_revision != updater->view.policy_revision) denied |= APP_UPDATE_DENIED_POLICY;
+        if (activation && !a.restart_authorized) denied |= APP_UPDATE_DENIED_RESTART;
+        if (strcmp(a.expected_digest, updater->release.digest)) denied |= APP_UPDATE_DENIED_DIGEST;
+        portENTER_CRITICAL(&update_lock);
+        failure_locked(phase, ESP_ERR_INVALID_STATE, denied, now, &a);
+        portEXIT_CRITICAL(&update_lock);
+    }
+    return allowed;
 }
+static bool authorized(bool activation) { return authorized_at(activation, APP_UPDATE_FAILURE_NONE); }
 static bool layout_ready(void)
 {
     const esp_partition_t *a =
@@ -572,10 +618,10 @@ static esp_err_t partition_hash(const esp_partition_t *p, uint32_t length, uint8
 static esp_err_t download_image(void)
 {
     esp_err_t running_error = require_confirmed_running_image();
-    if (running_error != ESP_OK) return running_error;
+    if (running_error != ESP_OK) return failure(APP_UPDATE_FAILURE_RUNNING_STATE, running_error);
     uint64_t wall;
     if (!app_clock_wall_time(&wall) || wall >= updater->release.expires) {
-        return ESP_ERR_INVALID_STATE;
+        return failure(APP_UPDATE_FAILURE_RELEASE_TIME, ESP_ERR_INVALID_STATE);
     }
     const esp_partition_t *running = esp_ota_get_running_partition(),
                           *boot = esp_ota_get_boot_partition();
@@ -585,7 +631,7 @@ static esp_err_t download_image(void)
         (target->subtype != ESP_PARTITION_SUBTYPE_APP_OTA_0 &&
          target->subtype != ESP_PARTITION_SUBTYPE_APP_OTA_1) ||
         updater->release.size > target->size) {
-        return ESP_ERR_INVALID_STATE;
+        return failure(APP_UPDATE_FAILURE_LAYOUT, ESP_ERR_INVALID_STATE);
     }
     publish(APP_UPDATE_WAITING_MAINTENANCE, ESP_OK, "waiting_for_actual_maintenance");
     uint64_t until = now_ms() + 5000;
@@ -594,30 +640,33 @@ static esp_err_t download_image(void)
         bool cancel = updater->cancel;
         portEXIT_CRITICAL(&update_lock);
         if (cancel) {
+            (void)authorized_at(false, APP_UPDATE_FAILURE_MAINTENANCE);
             return ESP_ERR_INVALID_STATE;
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
-    if (!authorized(false)) {
+    if (!authorized_at(false, APP_UPDATE_FAILURE_MAINTENANCE)) {
         return ESP_ERR_INVALID_STATE;
     }
     esp_http_client_handle_t client = open_source(updater->release.url);
     if (!client) {
-        return ESP_FAIL;
+        return failure(APP_UPDATE_FAILURE_SOURCE, ESP_FAIL);
     }
     int64_t content = esp_http_client_get_content_length(client);
     if (content != (int64_t)updater->release.size) {
         esp_http_client_cleanup(client);
-        return ESP_ERR_INVALID_SIZE;
+        return failure(APP_UPDATE_FAILURE_CONTENT_LENGTH, ESP_ERR_INVALID_SIZE);
     }
     uint8_t *buffer = heap_caps_malloc(UPDATE_BUFFER, MALLOC_CAP_8BIT);
     if (!buffer) {
         esp_http_client_cleanup(client);
-        return ESP_ERR_NO_MEM;
+        return failure(APP_UPDATE_FAILURE_BUFFER, ESP_ERR_NO_MEM);
     }
     esp_ota_handle_t ota = 0;
-    esp_err_t error = authorized(false) ? require_confirmed_running_image() : ESP_ERR_INVALID_STATE;
-    if (error == ESP_OK) error = esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &ota);
+    esp_err_t error = authorized_at(false, APP_UPDATE_FAILURE_BEFORE_BEGIN) ?
+        failure(APP_UPDATE_FAILURE_RUNNING_STATE, require_confirmed_running_image()) : ESP_ERR_INVALID_STATE;
+    if (error == ESP_OK) error = failure(APP_UPDATE_FAILURE_OTA_BEGIN,
+        esp_ota_begin(target, OTA_WITH_SEQUENTIAL_WRITES, &ota));
     psa_hash_operation_t hash = PSA_HASH_OPERATION_INIT;
     psa_status_t status = psa_hash_setup(&hash, PSA_ALG_SHA_256);
     uint32_t received = 0;
@@ -625,7 +674,7 @@ static esp_err_t download_image(void)
         publish(APP_UPDATE_DOWNLOADING, ESP_OK, "streaming_inactive_slot");
     }
     while (error == ESP_OK && received < updater->release.size) {
-        if (!authorized(false)) {
+        if (!authorized_at(false, APP_UPDATE_FAILURE_BEFORE_READ)) {
             error = ESP_ERR_INVALID_STATE;
             break;
         }
@@ -635,23 +684,23 @@ static esp_err_t download_image(void)
         }
         int n = esp_http_client_read(client, (char *)buffer, (int)remaining);
         if (n <= 0) {
-            error = ESP_FAIL;
+            error = failure(APP_UPDATE_FAILURE_HTTP_READ, ESP_FAIL);
             break;
         }
         received += (uint32_t)n;
         portENTER_CRITICAL(&update_lock);
         updater->view.received_bytes = received;
         portEXIT_CRITICAL(&update_lock);
-        if (!authorized(false)) {
+        if (!authorized_at(false, APP_UPDATE_FAILURE_BEFORE_WRITE)) {
             error = ESP_ERR_INVALID_STATE;
             break;
         }
         status = psa_hash_update(&hash, buffer, (size_t)n);
         if (status != PSA_SUCCESS) {
-            error = ESP_FAIL;
+            error = failure(APP_UPDATE_FAILURE_HASH_UPDATE, ESP_FAIL);
             break;
         }
-        error = esp_ota_write(ota, buffer, (size_t)n);
+        error = failure(APP_UPDATE_FAILURE_OTA_WRITE, esp_ota_write(ota, buffer, (size_t)n));
         portENTER_CRITICAL(&update_lock);
         if (error == ESP_OK) {
             updater->view.written_bytes = received;
@@ -665,15 +714,15 @@ static esp_err_t download_image(void)
          !decode(updater->release.digest, expected, 32) ||
          psa_hash_finish(&hash, digest, sizeof(digest), &hash_size) != PSA_SUCCESS ||
          hash_size != 32 || memcmp(digest, expected, 32))) {
-        error = ESP_ERR_INVALID_CRC;
+        error = failure(APP_UPDATE_FAILURE_STREAM_DIGEST, ESP_ERR_INVALID_CRC);
     }
     psa_hash_abort(&hash);
     esp_http_client_cleanup(client);
     wipe(buffer, UPDATE_BUFFER);
     heap_caps_free(buffer);
-    if (error == ESP_OK && authorized(false)) {
+    if (error == ESP_OK && authorized_at(false, APP_UPDATE_FAILURE_BEFORE_END)) {
         publish(APP_UPDATE_VERIFYING, ESP_OK, "verifying_staged_image");
-        error = esp_ota_end(ota);
+        error = failure(APP_UPDATE_FAILURE_OTA_END, esp_ota_end(ota));
         ota = 0;
     } else if (error == ESP_OK) {
         error = ESP_ERR_INVALID_STATE;
@@ -682,21 +731,21 @@ static esp_err_t download_image(void)
         (void)esp_ota_abort(ota);
     }
     if (error == ESP_OK) {
-        error = partition_hash(target, updater->release.size, digest);
+        error = failure(APP_UPDATE_FAILURE_READBACK, partition_hash(target, updater->release.size, digest));
     }
     if (error == ESP_OK && memcmp(digest, expected, 32)) {
-        error = ESP_ERR_INVALID_CRC;
+        error = failure(APP_UPDATE_FAILURE_READBACK_DIGEST, ESP_ERR_INVALID_CRC);
     }
     esp_app_desc_t description;
     if (error == ESP_OK) {
-        error = esp_ota_get_partition_description(target, &description);
+        error = failure(APP_UPDATE_FAILURE_DESCRIPTION, esp_ota_get_partition_description(target, &description));
     }
     if (error == ESP_OK &&
         (strcmp(description.project_name, esp_app_get_description()->project_name) ||
          strcmp(description.version, updater->release.version))) {
-        error = ESP_ERR_INVALID_VERSION;
+        error = failure(APP_UPDATE_FAILURE_IMAGE_IDENTITY, ESP_ERR_INVALID_VERSION);
     }
-    if (error == ESP_OK && !authorized(false)) {
+    if (error == ESP_OK && !authorized_at(false, APP_UPDATE_FAILURE_BEFORE_STAGE)) {
         error = ESP_ERR_INVALID_STATE;
     }
     if (error == ESP_OK) {
@@ -833,6 +882,7 @@ static void worker(void *unused)
             updater->staged = NULL;
             publish(APP_UPDATE_IDLE, ESP_OK, "staged_reference_discarded");
         }
+        (void)failure(APP_UPDATE_FAILURE_OTHER, error);
         portENTER_CRITICAL(&update_lock);
         updater->active_work = WORK_NONE;
         bool uncertain = updater->view.state == APP_UPDATE_BOOT_SELECTION_UNCERTAIN;
@@ -986,6 +1036,7 @@ static esp_err_t admit(work_kind_t work, const app_update_authority_t *authority
         e = ESP_ERR_INVALID_STATE;
     }
     if (e == ESP_OK) {
+        memset(&updater->failure, 0, sizeof(updater->failure));
         if (work == WORK_CHECK) {
             esp_fill_random(&updater->view.job_id, sizeof(updater->view.job_id));
             if (!updater->view.job_id) {
@@ -1069,6 +1120,47 @@ void app_update_snapshot(app_update_snapshot_t *out)
     portENTER_CRITICAL(&update_lock);
     *out = updater->view;
     portEXIT_CRITICAL(&update_lock);
+}
+bool app_update_failure_json(uint64_t job_id, uint64_t revision, char *out, size_t capacity, size_t *length)
+{
+    if (!out || !capacity || !length) return false;
+    *length = 0;
+    out[0] = 0;
+    failure_t f = {0};
+    portENTER_CRITICAL(&update_lock);
+    if (updater && updater->view.job_id == job_id && updater->view.revision == revision &&
+        updater->failure.job_id == job_id) f = updater->failure;
+    portEXIT_CRITICAL(&update_lock);
+    int n;
+    if (f.phase == APP_UPDATE_FAILURE_NONE) {
+        n = snprintf(out, capacity, "null");
+    } else {
+        char runtime_status[24] = "null", owner_cached[32] = "null";
+        char authority_observed[32] = "null", authority_expires[32] = "null";
+        char owner_rejected[24] = "null";
+        if (f.authority.runtime_status_known)
+            snprintf(runtime_status, sizeof(runtime_status), "%" PRId32, f.authority.runtime_status);
+        if (f.authority.owner_observed) {
+            snprintf(owner_cached, sizeof(owner_cached), "\"%" PRIu64 "\"", f.authority.owner_cached_ms);
+            snprintf(owner_rejected, sizeof(owner_rejected), "%" PRIu32, f.authority.owner_rejected);
+        }
+        if (f.authority.runtime_status_known || f.authority.owner_observed)
+            snprintf(authority_observed, sizeof(authority_observed), "\"%" PRIu64 "\"", f.authority.observed_ms);
+        if (f.denied)
+            snprintf(authority_expires, sizeof(authority_expires), "\"%" PRIu64 "\"", f.authority_expires_ms);
+        n = snprintf(out, capacity,
+            "{\"phase\":%u,\"error\":%d,\"denied\":%" PRIu32
+            ",\"observed_ms\":\"%" PRIu64 "\",\"started_ms\":\"%" PRIu64
+            "\",\"authority_expires_ms\":%s,\"received_bytes\":%" PRIu32
+            ",\"written_bytes\":%" PRIu32 ",\"authority_observed_ms\":%s"
+            ",\"runtime_status\":%s,\"owner_cached_ms\":%s,\"owner_rejected\":%s}",
+            (unsigned)f.phase, f.error, f.denied, f.observed_ms, f.started_ms,
+            authority_expires, f.received_bytes, f.written_bytes, authority_observed,
+            runtime_status, owner_cached, owner_rejected);
+    }
+    if (n < 0 || (size_t)n >= capacity) { out[0] = 0; return false; }
+    *length = (size_t)n;
+    return true;
 }
 esp_err_t app_update_confirm_health(bool gates)
 {

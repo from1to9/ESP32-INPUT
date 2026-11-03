@@ -982,6 +982,33 @@ for _label, _steps in DIAGNOSTIC_PATHS.items():
     PATHS["diagnostics_http_" + _label] = DIAGNOSTIC_READ + _steps
     PATH_OWNERS["diagnostics_http_" + _label] = "https"
 
+UPDATE_WORK = [("firmware_update", "worker")]
+UPDATE_FAILURE_PATHS = {
+    "update_download_authority_failure": UPDATE_WORK + [("firmware_update", "download_image"),
+        ("firmware_update", "authorized_at"), ("firmware_update", "failure_locked")],
+    "update_download_sdk_failure": UPDATE_WORK + [("firmware_update", "download_image"),
+        ("firmware_update", "failure"), ("firmware_update", "failure_locked")],
+    "update_worker_failure": UPDATE_WORK + [("firmware_update", "failure"),
+        ("firmware_update", "failure_locked")],
+}
+for _label, _steps in UPDATE_FAILURE_PATHS.items():
+    PATHS[_label] = _steps
+    PATH_OWNERS[_label] = "firmware_update"
+PATHS["update_http_failure"] = HTTP_READ[:-1] + [("firmware_update", "app_update_failure_json")]
+PATH_OWNERS["update_http_failure"] = "https"
+PATHS["update_control_authority"] = [("control_runtime", "worker"),
+    ("control_runtime", "process_work"), ("main", "remote_update_authority"),
+    ("control_runtime", "app_control_runtime_update_authority"),
+    ("control_trust", "app_control_trust_update_policy")]
+PATH_OWNERS["update_control_authority"] = "control_runtime"
+PATHS["update_control_publish"] = [("control_runtime", "worker"),
+    ("control_runtime", "process_work"), ("firmware_update", "app_update_publish_authority")]
+PATH_OWNERS["update_control_publish"] = "control_runtime"
+PATHS["update_coordinator_authority"] = CORE + [("main", "remote_update_service"),
+    ("control_runtime", "app_control_runtime_update_authority"),
+    ("control_trust", "app_control_trust_update_policy")]
+PATH_OWNERS["update_coordinator_authority"] = "main"
+
 # This header function is file-static inline, despite its public-looking name.
 # Missing emission is charged to log_codec/poll; emitted bodies/clones still count.
 INLINABLE_HEADER_HELPERS = {("audio_diagnostics", "board_audio_sdk_operation_name")}
@@ -1020,6 +1047,7 @@ REQUIRED.update(step for path in TOUCH_PATHS.values() for step in path
 REQUIRED.update({("main", "send_report"), ("main", "remote_changed"), ("main", "remote_observe"),
     ("usb_hid", "usb_hid_send_generation"), ("usb_hid", "usb_hid_snapshot")})
 REQUIRED.add(("board_audio", "worker"))
+REQUIRED.add(("firmware_update", "worker"))
 REQUIRED.update({("audio_manager", "worker"), ("audio_engine", "ae_playback_capacity"),
     ("audio_engine", "ae_job_active")})
 REQUIRED.update({("ble", "control_worker"), ("ble", "gap_callback"), ("ble", "gatts_callback"),
@@ -1053,6 +1081,7 @@ BUDGET_FILES = {
     "board": "firmware/main/board_mosaico.c",
     "main": "firmware/main/main.c",
     "runtime": "firmware/main/app_control_runtime.c",
+    "firmware_update": UNITS["firmware_update"],
     "media_runtime": "firmware/main/app_media_runtime.c",
     "audio_manager": UNITS["audio_manager"],
     "board_audio": UNITS["board_audio"],
@@ -1169,6 +1198,7 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         match("board", rf"xTaskCreate\s*\(\s*{entry}\s*,\s*\"{name}\"\s*,\s*{symbol}\s*,")
         board[owner] = (size, symbol)
     runtime = integer_expression(single("runtime", r"xTaskCreate\s*\(\s*worker\s*,\s*\"control_runtime\"\s*,\s*(\d+)\s*,")[1])
+    update_stack = integer_expression(single("firmware_update", r"xTaskCreate\s*\(\s*worker\s*,\s*\"firmware_update\"\s*,\s*(\d+)\s*,")[1])
     def conditional_worker_stack(key, task):
         sizes = re.findall(r"xTaskCreate(?:WithCaps)?\s*\(\s*worker\s*,\s*\"" + re.escape(task) + r"\"\s*,\s*(\d+)\s*,", text[key])
         if not sizes or len(set(sizes)) != 1:
@@ -1237,6 +1267,8 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         "sensor": budget("board_sensor", board["sensor"][0], ["board"], [board["sensor"][1]]),
         "power": budget("board_power (brightness)", board["power"][0], ["board"], [board["power"][1]]),
         "control_runtime": budget("control_runtime", runtime, ["runtime"], ["xTaskCreate(worker, control_runtime)"]),
+        "firmware_update": budget("firmware_update", update_stack, ["firmware_update"],
+            ["xTaskCreate(worker, firmware_update)"]),
         "media_control": budget("media_control", media_stack, ["media_runtime"],
             ["xTaskCreate[WithCaps](worker, media_control)"]),
         "board_audio": budget("board_audio", audio_stack, ["board_audio"],
@@ -1563,6 +1595,7 @@ def main():
                              "Other SDK/vendor dependencies are not covered by this drift check.",
               "paths": chains, "all_frames": frames, "errors": errors,
               "limits": "Task PASS covers declared task paths only. Interrupt inventory remains explicitly unqualified. "
+                        "OTA worker coverage is limited to failure recording and authorization paths, excluding SDK flash/TLS internals. "
                         "Audio-manager worker coverage is limited to the playback-capacity query, excluding dispatch and engine polling. "
                         "Declared task/callback paths include named measured vendor wrappers. "
                         "Main/timer SDK libc stack supplements are reported but excluded from the checked "

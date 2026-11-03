@@ -1,6 +1,6 @@
 # Wi-Fi management, LAN services and firmware updates
 
-Status: implemented source and host/target-tested integration candidate, 2026-10-21. The historical `d0f1f6` baseline had a single stored network and no runtime backend; current sources add eight-profile storage, station HTTPS/WSS/MCP, explicit local trust and a signed-catalog OTA worker. [Companion instructions](../bridge/README.md) specify actual commissioning/signing commands and wire limits. This source stage performs no download to a device, partition migration, flash write or deployment. Device/radio/browser/power-loss qualification remains separate.
+Status: implementation and device investigation, 2026-11-03. The historical `d0f1f6` baseline had a single stored network and no runtime backend; current sources add eight-profile storage, station HTTPS/WSS/MCP, explicit local trust and a signed-catalog OTA worker. [Companion instructions](../bridge/README.md) specify actual commissioning/signing commands and wire limits. Commissioning, authenticated status reads and bounded sensor retrieval have device evidence. The first signed OTA download aborted before staging or boot selection; complete OTA operation remains unqualified. See the [validation record](validation.md#wi-fi-development-management-and-diagnostics-2026-11-03) for exact image, observations and limitations. Browser, power-loss and long-run qualification remain separate.
 
 ## 1. Product and module boundaries
 
@@ -36,6 +36,17 @@ telemetry boot/image/configuration, which is distinct from the protocol session
 boot. Queries are serialized with bounded scratch storage and return busy on
 contention. See the [LAN collector](../tools/lan_debug.md) for private bounded
 status captures and the [sensor API](sensor-api.md) for ordered USB/HTTPS samples.
+
+The firmware-state resource also exposes nullable `failure` evidence for the
+current update job. It retains the first terminal checkpoint, SDK error,
+authorization rejection mask and available coordinator observation. Numeric
+phases and masks are defined in
+[`app_firmware_update.h`](../firmware/main/app_firmware_update.h). Unobserved
+authority fields are null; a zero rejection mask does not establish that an
+authority check ran. Initial maintenance waiting does not latch a failure.
+Reads bind the copied job and revision, returning null if the owner advanced
+between copies. New admitted work clears the prior receipt. This observation
+does not extend a deadline, retry a download or relax a safety condition.
 
 The catalog's `diagnostics.snapshot/capture/stop` operations still have no raw-log
 capture provider. The older [ordered Motion capture](motion-capture.md) remains

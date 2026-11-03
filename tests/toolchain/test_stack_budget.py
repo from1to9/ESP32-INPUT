@@ -69,7 +69,7 @@ class StackBudgets(unittest.TestCase):
         budgets = stack.task_budgets(CONFIG)
         self.assertEqual({key: value["budget_bytes"] for key, value in budgets.items()}, {
             "main": 8192, "esp_timer": 3584, "sensor": 4096, "power": 3072,
-            "control_runtime": 12288, "media_control": 6144, "board_audio": 6144,
+            "control_runtime": 12288, "firmware_update": 16384, "media_control": 6144, "board_audio": 6144,
             "audio_manager": 8192,
             "ble_control": 6144, "btc": 3072, "usb_audio": 3072, "tinyusb": 4096, "https": 12288, "lvgl": 8192})
         self.assertEqual(budgets["main"]["allocated_bytes"], 8704)
@@ -94,6 +94,24 @@ class StackBudgets(unittest.TestCase):
         self.assertEqual(chains["small"]["allocated_bytes"], 4096)
         self.assertEqual(chains["small"]["reserve_bytes"], 2048)
         self.assertGreater(chains["main"]["remaining_after_reserve_bytes"], 0)
+
+    def test_update_failure_budget_tracks_worker_not_http(self):
+        root = self.fixture()
+        source = root / stack.BUDGET_FILES["firmware_update"]
+        source.write_text(source.read_text().replace('"firmware_update", 16384,',
+                                                   '"firmware_update", 2048,'))
+        budgets = stack.task_budgets(CONFIG, root)
+        labels = ("update_download_authority_failure", "update_http_failure")
+        paths = {label: stack.PATHS[label] for label in labels}
+        owners = {label: stack.PATH_OWNERS[label] for label in labels}
+        frames = {}
+        for steps in paths.values():
+            for unit, function in steps:
+                frames.setdefault(unit, {})[function] = self.frame(32)
+        _, errors = stack.evaluate_paths(frames, budgets, paths, owners)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("update_download_authority_failure (firmware_update)", errors[0])
+        self.assertEqual(budgets["https"]["budget_bytes"], 12288)
 
     def test_source_budget_drift_changes_gate_and_hash(self):
         root = self.fixture()

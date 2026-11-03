@@ -6,16 +6,22 @@
 #include <string.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include "control_protocol.h"
+#include "control_registry.h"
 static int test_getaddrinfo(const char *,const char *,const struct addrinfo *,struct addrinfo **);
 static void test_freeaddrinfo(struct addrinfo *);
 #define getaddrinfo test_getaddrinfo
 #define freeaddrinfo test_freeaddrinfo
 #include "../../firmware/main/app_firmware_update.c"
 #include "weak_heap.h"
+#include "update_state_fixture.inc"
 
 static uint64_t clock_ms=100;static unsigned critical,begins,writes,ends,aborts,boot_writes,restarts,health_marks;
 static bool signature_valid=true,known_clock=true,fail_read,flip_readback,cancel_on_read,bad_encoding,probation;
 static esp_err_t ota_end_error,floor_error,boot_error;static bool apply_failed_floor,apply_failed_boot;
+static esp_err_t ota_write_error;
+static unsigned maintenance_waits;
+static bool revoke_on_read;
 static esp_err_t state_query_error,mark_error,floor_read_error,floor_open_error;
 static unsigned state_queries,rollback_calls;
 static bool new_image,apply_failed_mark,ignore_successful_mark,fail_state_after_mark,fail_state_on_image_open,cancel_on_staged_publish;
@@ -48,7 +54,15 @@ void *heap_caps_aligned_calloc(size_t a,size_t n,size_t s,unsigned caps){return 
 void *heap_caps_malloc(size_t n,unsigned caps){return test_heap_calloc(4,1,n,caps);}
 void heap_caps_free(void *p){test_heap_free(p);}
 int xTaskCreate(void (*fn)(void *),const char *name,unsigned stack,void *arg,unsigned priority,void *out){assert(fn==worker&&!strcmp(name,"firmware_update")&&stack==16384&&priority==1&&!arg&&!out);return pdPASS;}
-void vTaskDelay(TickType_t ticks){assert(!critical);if(ticks==20)longjmp(loop_end,1);clock_ms+=ticks;}
+void vTaskDelay(TickType_t ticks){
+    assert(!critical);
+    if(maintenance_waits){
+        assert(ticks==20&&updater->view.state==APP_UPDATE_WAITING_MAINTENANCE);
+        assert(updater->failure.phase==APP_UPDATE_FAILURE_NONE);
+        clock_ms+=ticks;if(!--maintenance_waits)updater->authority.maintenance_ready=true;return;
+    }
+    if(ticks==20)longjmp(loop_end,1);clock_ms+=ticks;
+}
 bool app_clock_wall_time(uint64_t *seconds){if(!known_clock)return false;*seconds=1900000000;return true;}
 const esp_app_desc_t *esp_app_get_description(void){return &running;}
 const esp_partition_t *esp_partition_find_first(unsigned type,unsigned subtype,const char *label){
@@ -60,7 +74,7 @@ const esp_partition_t *esp_ota_get_running_partition(void){return &partitions[0]
 const esp_partition_t *esp_ota_get_boot_partition(void){return boot;}
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *p){assert(!p);return next;}
 esp_err_t esp_ota_begin(const esp_partition_t *p,size_t n,esp_ota_handle_t *handle){assert(p==&partitions[1]&&p!=boot&&n==OTA_WITH_SEQUENTIAL_WRITES);*handle=1;++begins;memset(slot,0,sizeof(slot));return ESP_OK;}
-esp_err_t esp_ota_write(esp_ota_handle_t handle,const void *data,size_t n){assert(handle==1&&n<=sizeof(image));memcpy(slot,data,n);++writes;return ESP_OK;}
+esp_err_t esp_ota_write(esp_ota_handle_t handle,const void *data,size_t n){assert(handle==1&&n<=sizeof(image));++writes;if(ota_write_error)return ota_write_error;memcpy(slot,data,n);return ESP_OK;}
 esp_err_t esp_ota_end(esp_ota_handle_t handle){assert(handle==1);++ends;return ota_end_error;}
 esp_err_t esp_ota_abort(esp_ota_handle_t handle){assert(handle==1);++aborts;return ESP_OK;}
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t *p){assert(p==&partitions[1]);++boot_writes;if(!boot_error||apply_failed_boot)boot=p;return boot_error;}
@@ -89,7 +103,15 @@ esp_err_t esp_http_client_open(esp_http_client_handle_t c,int n){assert(c==&http
 int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c){assert(c==&http);return(int64_t)c->length;}
 int esp_http_client_get_status_code(esp_http_client_handle_t c){assert(c==&http);return status;}
 int64_t esp_http_client_get_content_length(esp_http_client_handle_t c){return(int64_t)c->length+length_delta;}
-int esp_http_client_read(esp_http_client_handle_t c,char *out,int capacity){assert(c==&http&&capacity>0);if(fail_read)return -1;size_t n=c->length-c->offset;if(n>(size_t)capacity)n=(size_t)capacity;memcpy(out,c->bytes+c->offset,n);c->offset+=n;if(cancel_on_read)updater->cancel=true;return(int)n;}
+int esp_http_client_read(esp_http_client_handle_t c,char *out,int capacity){assert(c==&http&&capacity>0);if(fail_read)return -1;size_t n=c->length-c->offset;if(n>(size_t)capacity)n=(size_t)capacity;memcpy(out,c->bytes+c->offset,n);c->offset+=n;if(cancel_on_read)updater->cancel=true;
+    if(revoke_on_read&&c->bytes==image){
+        app_update_authority_t a=updater->authority;a.authorized=false;
+        a.observation=(app_update_authority_observation_t){.observed_ms=clock_ms,
+            .runtime_status_known=true,.runtime_status=CP_UNAUTHENTICATED};
+        app_update_publish_authority(&a);
+    }
+    return(int)n;
+}
 bool esp_http_client_is_complete_data_received(esp_http_client_handle_t c){return c->offset==c->length;}
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t c){assert(c==&http);return ESP_OK;}
 void psa_set_key_type(psa_key_attributes_t *a,unsigned n){a->type=n;}
@@ -122,6 +144,7 @@ static void regression_boot(const app_update_config_t *config,bool pending,esp_e
     apply_failed_mark=ignore_successful_mark=fail_state_after_mark=fail_state_on_image_open=cancel_on_staged_publish=false;
     signature_valid=known_clock=true;fail_read=flip_readback=cancel_on_read=bad_encoding=false;
     ota_end_error=floor_error=boot_error=ESP_OK;apply_failed_floor=apply_failed_boot=floor_present=false;
+    ota_write_error=ESP_OK;maintenance_waits=0;revoke_on_read=false;
     begins=writes=ends=aborts=boot_writes=restarts=health_marks=state_queries=rollback_calls=0;
     boot=&partitions[0];next=&partitions[1];status=200;length_delta=0;
     esp_err_t expected=pending||query_error!=ESP_OK?ESP_ERR_NOT_SUPPORTED:ESP_OK;
@@ -234,6 +257,73 @@ static void confirmed_boot_cannot_override_failed_downgrade_floor_validation(con
         assert(updater->view.state==APP_UPDATE_ERROR&&!begins&&!writes&&!boot_writes&&updater->floor==9);
     }
 }
+static void first_terminal_failure_survives_wait_cleanup_and_authority_refresh(const app_update_config_t *config)
+{
+    regression_boot(config,false,ESP_OK);prepare_release();
+    app_update_authority_t a=authority_make();a.maintenance_ready=false;
+    assert(app_update_download("release-2",&a)==ESP_OK);
+    maintenance_waits=2;revoke_on_read=true;step_worker();revoke_on_read=false;
+    failure_t first=updater->failure;
+    assert(updater->view.state==APP_UPDATE_ERROR&&updater->view.error==ESP_ERR_INVALID_STATE);
+    assert(first.phase==APP_UPDATE_FAILURE_BEFORE_WRITE&&first.denied==APP_UPDATE_DENIED_AUTHORIZED);
+    assert(first.observed_ms==140&&first.received_bytes==sizeof(image)&&!first.written_bytes);
+    assert(first.authority.runtime_status_known&&first.authority.runtime_status==CP_UNAUTHENTICATED);
+    assert(begins==1&&!writes&&aborts==1&&!boot_writes);
+    a=authority_make();app_update_publish_authority(&a);
+    assert(failure(APP_UPDATE_FAILURE_OTA_END,ESP_FAIL)==ESP_FAIL);
+    step_worker();assert(!memcmp(&first,&updater->failure,sizeof(first)));
+
+    char json[4096];size_t length=0;cp_identity_t who={.scopes=CP_SCOPE_UPDATE_STAGE};
+    assert(production_firmware_state(&who,json,sizeof(json),&length)==CP_OK);
+    cj_document_t *d=calloc(1,sizeof(*d));assert(d&&cj_parse(d,json,length));
+    uint16_t f=cj_get(d,0,"failure");
+    assert(f!=CJ_NONE&&d->nodes[f].type==CJ_OBJECT);
+    char expected_status[40];snprintf(expected_status,sizeof(expected_status),"\"runtime_status\":%d",CP_UNAUTHENTICATED);
+    assert(cj_get(d,f,"phase")!=CJ_NONE&&strstr(json,expected_status));
+    assert(!strstr(json,"principal")&&!strstr(json,"session")&&!strstr(json,"owner_cached_ms\":\"0"));
+    assert(app_update_failure_json(first.job_id+1,updater->view.revision,json,sizeof(json),&length)&&!strcmp(json,"null"));
+    uint64_t previous_revision=updater->view.revision;
+    ++updater->view.revision;
+    assert(app_update_failure_json(first.job_id,previous_revision,json,sizeof(json),&length)&&!strcmp(json,"null"));
+    assert(app_update_failure_json(first.job_id,updater->view.revision,json,sizeof(json),&length)&&strcmp(json,"null"));
+    char tiny[4]="xxx";length=99;
+    assert(!app_update_failure_json(first.job_id,updater->view.revision,tiny,sizeof(tiny),&length)&&!tiny[0]&&!length);
+    who.scopes=0;assert(production_firmware_state(&who,json,sizeof(json),&length)==CP_FORBIDDEN);
+
+    prepare_release();a=authority_make();assert(app_update_download("release-2",&a)==ESP_OK);
+    assert(updater->failure.phase==APP_UPDATE_FAILURE_NONE);step_worker();
+    assert(updater->view.state==APP_UPDATE_STAGED);
+    assert(app_update_failure_json(updater->view.job_id,updater->view.revision,json,sizeof(json),&length)&&!strcmp(json,"null"));
+
+    prepare_release();a=authority_make();assert(app_update_download("release-2",&a)==ESP_OK);
+    ota_write_error=ESP_ERR_INVALID_STATE;step_worker();ota_write_error=ESP_OK;
+    assert(updater->failure.phase==APP_UPDATE_FAILURE_OTA_WRITE&&!updater->failure.denied);
+    assert(updater->failure.error==first.error&&updater->failure.received_bytes==sizeof(image));
+    assert(!updater->failure.written_bytes&&!updater->failure.authority.runtime_status_known);
+    assert(!updater->view.boot_selected&&!boot_writes);
+    assert(app_update_failure_json(updater->view.job_id,updater->view.revision,json,sizeof(json),&length));
+    assert(strstr(json,"\"authority_expires_ms\":null")&&strstr(json,"\"authority_observed_ms\":null")&&
+           strstr(json,"\"owner_cached_ms\":null")&&strstr(json,"\"owner_rejected\":null")&&
+           strstr(json,"\"runtime_status\":null"));
+
+    /* Maximum-width counters and fully escaped reason still fit the actual
+     * 4 KiB firmware-state serializer, including the retained failure object. */
+    updater->failure.observed_ms=updater->failure.started_ms=updater->failure.authority_expires_ms=UINT64_MAX;
+    updater->failure.authority=(app_update_authority_observation_t){.observed_ms=UINT64_MAX,
+        .owner_cached_ms=UINT64_MAX,.owner_rejected=UINT32_MAX,.runtime_status=INT32_MIN,
+        .runtime_status_known=true,.owner_observed=true};
+    updater->failure.received_bytes=updater->failure.written_bytes=updater->failure.denied=UINT32_MAX;
+    memset(updater->view.reason,1,sizeof(updater->view.reason)-1);updater->view.reason[64]=0;
+    memset(updater->view.release_id,'r',64);updater->view.release_id[64]=0;
+    updater->view.job_id=updater->failure.job_id=updater->view.revision=updater->view.policy_revision=UINT64_MAX;
+    updater->view.received_bytes=updater->view.written_bytes=updater->view.total_bytes=UINT32_MAX;
+    who.scopes=CP_SCOPE_UPDATE_STAGE;
+    assert(production_firmware_state(&who,json,sizeof(json),&length)==CP_OK&&length<sizeof(json));
+    assert(cj_parse(d,json,length));
+    assert(strstr(json,"\"runtime_status\":-2147483648"));
+    assert(production_firmware_state(&who,json,64,&length)==CP_TOO_LARGE);
+    free(d);
+}
 int main(void){
     for(unsigned i=0;i<sizeof(image);++i)image[i]=(uint8_t)i;catalog_make();uint8_t public_key[65]={4};
     app_update_config_t c={.abi_version=1,.catalog_url="https://publisher.example/catalog",.tls_ca_pem="TEST CA",.signing_key_id="release-key",.signing_public_key=public_key,.product="input",.board="mosaico",.layout=APP_UPDATE_LAYOUT};
@@ -272,6 +362,7 @@ int main(void){
     staged_and_queued_cancellation_revokes_actual_stage_authority(&c);
     confirmation_readback_and_terminal_probation_deadline(&c);
     confirmed_boot_cannot_override_failed_downgrade_floor_validation(&c);
+    first_terminal_failure_survives_wait_cleanup_and_authority_refresh(&c);
     assert(critical==0);wipe(updater,sizeof(*updater));heap_caps_free(updater);updater=NULL;assert(!test_heap_live);
     puts("PASS: production OTA trust/signature boundary, source/TLS/DNS binding, inactive-slot stream/hash/readback, cancellation, uncertain boot and health probation");return 0;
 }

@@ -67,10 +67,55 @@ typedef struct {
     bool allow_private_source;
 } app_update_provisioned_config_t;
 typedef struct {
+    /* Observation only; known flags distinguish missing evidence from valid
+     * zero values such as CP_OK and a zero monotonic timestamp. */
+    uint64_t observed_ms, owner_cached_ms;
+    uint32_t owner_rejected;
+    int32_t runtime_status;
+    bool runtime_status_known, owner_observed;
+} app_update_authority_observation_t;
+enum {
+    APP_UPDATE_OWNER_STALE = 1U << 0,
+    APP_UPDATE_OWNER_CLAIM = 1U << 1,
+    APP_UPDATE_OWNER_EXPIRED = 1U << 2,
+    APP_UPDATE_OWNER_LOCKED = 1U << 3,
+    APP_UPDATE_OWNER_POLICY = 1U << 4,
+    APP_UPDATE_OWNER_GENERATION = 1U << 5,
+    APP_UPDATE_OWNER_HID = 1U << 6,
+    APP_UPDATE_OWNER_TRANSPORT = 1U << 7,
+    APP_UPDATE_OWNER_PAIRING = 1U << 8,
+    APP_UPDATE_OWNER_MEDIA_UNKNOWN = 1U << 9,
+    APP_UPDATE_OWNER_MEDIA = 1U << 10,
+    APP_UPDATE_OWNER_FLASH = 1U << 11,
+    APP_UPDATE_OWNER_NOT_READY = 1U << 12
+};
+typedef struct {
     uint64_t policy_revision, authority_expires_ms;
     bool authorized, unlocked, maintenance_ready, restart_authorized;
     char expected_digest[65];
+    app_update_authority_observation_t observation;
 } app_update_authority_t;
+typedef enum {
+    APP_UPDATE_FAILURE_NONE, APP_UPDATE_FAILURE_RUNNING_STATE,
+    APP_UPDATE_FAILURE_RELEASE_TIME, APP_UPDATE_FAILURE_LAYOUT,
+    APP_UPDATE_FAILURE_MAINTENANCE, APP_UPDATE_FAILURE_SOURCE,
+    APP_UPDATE_FAILURE_CONTENT_LENGTH, APP_UPDATE_FAILURE_BUFFER,
+    APP_UPDATE_FAILURE_BEFORE_BEGIN, APP_UPDATE_FAILURE_OTA_BEGIN,
+    APP_UPDATE_FAILURE_BEFORE_READ, APP_UPDATE_FAILURE_HTTP_READ,
+    APP_UPDATE_FAILURE_BEFORE_WRITE, APP_UPDATE_FAILURE_HASH_UPDATE,
+    APP_UPDATE_FAILURE_OTA_WRITE, APP_UPDATE_FAILURE_STREAM_DIGEST,
+    APP_UPDATE_FAILURE_BEFORE_END, APP_UPDATE_FAILURE_OTA_END,
+    APP_UPDATE_FAILURE_READBACK, APP_UPDATE_FAILURE_READBACK_DIGEST,
+    APP_UPDATE_FAILURE_DESCRIPTION, APP_UPDATE_FAILURE_IMAGE_IDENTITY,
+    APP_UPDATE_FAILURE_BEFORE_STAGE, APP_UPDATE_FAILURE_OTHER
+} app_update_failure_phase_t;
+enum {
+    APP_UPDATE_DENIED_CANCEL = 1U << 0, APP_UPDATE_DENIED_AUTHORIZED = 1U << 1,
+    APP_UPDATE_DENIED_UNLOCKED = 1U << 2, APP_UPDATE_DENIED_MAINTENANCE = 1U << 3,
+    APP_UPDATE_DENIED_EXPIRED = 1U << 4, APP_UPDATE_DENIED_CLOCK = 1U << 5,
+    APP_UPDATE_DENIED_JOB_TIME = 1U << 6, APP_UPDATE_DENIED_POLICY = 1U << 7,
+    APP_UPDATE_DENIED_RESTART = 1U << 8, APP_UPDATE_DENIED_DIGEST = 1U << 9
+};
 
 /* No initialization/download/activation resumes old executable work. Only
  * actual inactive OTA_0/OTA_1 partitions are writable; factory/NVS/bootloader/
@@ -101,6 +146,12 @@ esp_err_t app_update_discard(uint64_t job_id);
 esp_err_t app_update_cancel(uint64_t job_id);
 void app_update_publish_authority(const app_update_authority_t *);
 void app_update_snapshot(app_update_snapshot_t *);
+/* Appendable JSON value for this exact observed job/revision; null before a
+ * terminal failure or for a replaced snapshot. The first download guard/SDK
+ * failure survives cleanup and authority refreshes until next admission.
+ * Missing source observations are null; denied=0 means no authorization
+ * predicate failed at this checkpoint (for example, an SDK error). No IDs. */
+bool app_update_failure_json(uint64_t job_id, uint64_t revision, char *, size_t capacity, size_t *length);
 /* Application-controlled probation; true means all required local gates were
  * actually observed, not HID-host/Internet presence. No early auto-confirm. */
 esp_err_t app_update_confirm_health(bool required_gates_passed);

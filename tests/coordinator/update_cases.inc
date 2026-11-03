@@ -53,6 +53,7 @@ static void update_maintenance_waits_for_actual_neutral_and_cleanup(void)
            s_engine.state.release_pending);
     assert(remote_update_authority(NULL, &claim, &authority) == CP_OK &&
            !authority.maintenance_ready);
+    assert(authority.observation.owner_rejected & APP_UPDATE_OWNER_MEDIA);
     for (unsigned i = 0; i < 12; ++i) {
         s_now_ms += 10;
         remote_update_service();
@@ -71,6 +72,7 @@ static void update_maintenance_waits_for_actual_neutral_and_cleanup(void)
     remote_update_service();
     assert(remote_update_authority(NULL, &claim, &authority) == CP_OK &&
            !authority.maintenance_ready);
+    assert(authority.observation.owner_rejected & APP_UPDATE_OWNER_FLASH);
     test_storage.pending = false;
     test_bonds.known = false;
     remote_update_service();
@@ -109,6 +111,7 @@ static void update_mailbox_rejects_competing_stale_and_lost_authority(void)
     cp_command_t changed = claim;
     changed.command_key++;
     assert(remote_update_authority(NULL, &changed, &authority) == CP_BUSY && !authority.authorized);
+    assert(authority.observation.owner_rejected & APP_UPDATE_OWNER_CLAIM);
     changed = claim;
     changed.identity.session_id[0]++;
     assert(remote_update_authority(NULL, &changed, &authority) == CP_BUSY && !authority.authorized);
@@ -119,6 +122,9 @@ static void update_mailbox_rejects_competing_stale_and_lost_authority(void)
            authority.maintenance_ready);
     test_update_authority_error = CP_UNAUTHENTICATED;
     assert(remote_update_authority(NULL, &claim, &authority) == CP_UNAUTHENTICATED);
+    assert(authority.observation.runtime_status_known &&
+           authority.observation.runtime_status == CP_UNAUTHENTICATED &&
+           !authority.observation.owner_observed);
     remote_update_service();
     assert(!s_update_gate.maintenance_ready && remote_update_maintenance());
     test_update_snapshot.state = APP_UPDATE_CANCELLED;
@@ -133,9 +139,15 @@ static void update_mailbox_rejects_competing_stale_and_lost_authority(void)
     cp_command_t fresh = update_test_claim(903);
     remote_update_service();
     assert(remote_update_authority(NULL, &fresh, &authority) == CP_OK);
-    s_now_ms += 251;
+    s_now_ms += 250;
+    assert(remote_update_authority(NULL, &fresh, &authority) == CP_OK && authority.authorized &&
+           !(authority.observation.owner_rejected & APP_UPDATE_OWNER_STALE));
+    ++s_now_ms;
     assert(remote_update_authority(NULL, &fresh, &authority) == CP_OK && !authority.authorized &&
            !authority.maintenance_ready);
+    assert(authority.observation.owner_observed &&
+           authority.observation.observed_ms - authority.observation.owner_cached_ms == 251 &&
+           (authority.observation.owner_rejected & APP_UPDATE_OWNER_STALE));
 }
 static void update_lock_and_transport_ack_are_independent_gates(void)
 {
@@ -150,6 +162,7 @@ static void update_lock_and_transport_ack_are_independent_gates(void)
     remote_update_service();
     assert(remote_update_authority(NULL, &claim, &authority) == CP_OK && !authority.unlocked &&
            !authority.maintenance_ready);
+    assert(authority.observation.owner_rejected & APP_UPDATE_OWNER_LOCKED);
     s_engine.state.locked = false;
     test_link.connected = false;
     test_link.ready = false;

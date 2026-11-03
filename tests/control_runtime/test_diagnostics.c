@@ -49,6 +49,12 @@ ble_hid_failure_t ble_hid_failure(void) { ++owner_reads; return owners.failure; 
 bool app_audio_snapshot(ae_snapshot_t *out) { ++owner_reads; *out = owners.audio; return audio_known; }
 board_audio_status_t board_audio_mosaico_status(void) { ++owner_reads; return owners.codec; }
 void app_update_snapshot(app_update_snapshot_t *out) { ++owner_reads; *out = owners.update; }
+bool app_update_failure_json(uint64_t job_id, uint64_t revision, char *out, size_t capacity, size_t *length)
+{
+    (void)job_id; (void)revision;
+    if (capacity < 5) return false;
+    memcpy(out, "null", 5); *length = 4; return true;
+}
 cp_error_t app_sensor_api_read(const char *resource, char *out, size_t capacity, size_t *length)
 {
     assert(!strcmp(resource, "/api/v1/sensors/catalog")); ++catalog_reads;
