@@ -40,9 +40,10 @@ static cp_error_t remote_update_authority(void *context, const cp_command_t *com
     if (error != CP_OK) {
         return error;
     }
+    portENTER_CRITICAL(&s_update_gate_lock);
+    /* The mailbox and its comparison time must describe the same lock view. */
     uint64_t now = (uint64_t)esp_timer_get_time() / 1000U;
     out->observation.observed_ms = now;
-    portENTER_CRITICAL(&s_update_gate_lock);
     bool fresh = now >= s_update_gate.cached_ms && now - s_update_gate.cached_ms <= 250;
     out->observation.owner_observed = true;
     out->observation.owner_cached_ms = s_update_gate.cached_ms;
@@ -107,12 +108,15 @@ static bool remote_update_media_quiet(const app_media_snapshot_t *media)
            audio->playback.state != AE_JOB_RUNNING && audio->playback.state != AE_JOB_STOPPING &&
            audio->playback.state != AE_JOB_FINALIZING;
 }
+#include "app_update_health_diagnostics.inc"
+
 static void remote_update_health_service(void)
 {
     app_update_snapshot_t update;
     app_update_snapshot(&update);
     if (update.state != APP_UPDATE_PENDING_HEALTH) {
         s_update_health_since = 0;
+        remote_update_health_report(update.state);
         return;
     }
     board_capabilities_t capabilities = board_capabilities();
@@ -129,24 +133,40 @@ static void remote_update_health_service(void)
         (!capabilities.imu ||
          (imu.initialization_succeeded && imu.start_succeeded && imu.worker_running &&
           imu.sample_valid && imu.sample_fresh && !imu.fault_latched && imu.error == ESP_OK));
+    /* These two getters are pure local reads/validation. Capture once so the
+     * trace describes the same values used by the acceptance predicate. */
+    bool display_present = board_display_get() != NULL;
+    bool settings_valid = device_settings_validate(&s_settings);
     bool healthy = capabilities.display && capabilities.touch && capabilities.lock_button &&
                    s_multitouch_available && ui.initialized && ui.init_error == ESP_OK &&
                    ui.has_applied && ui.apply_age_ms <= 500 && renderer.bound &&
                    renderer.owner_alive && renderer.error == ESP_OK &&
-                   board_display_get() != NULL && settings.available && !settings.pending &&
-                   settings.error == ESP_OK && device_settings_validate(&s_settings) && sensors &&
+                   display_present && settings.available && !settings.pending &&
+                   settings.error == ESP_OK && settings_valid && sensors &&
                    bluetooth.initialized && !bluetooth.failed && usb.initialized && !usb.failed &&
                    media_known && remote_update_media_quiet(&media);
     /* A live local coordinator, renderer and actual manager observations must
      * remain healthy for 45 seconds. No host connection, pairing or Internet
      * is a health gate; no queued render or accepted stop substitutes for ACK. */
+    uint64_t previous_since = s_update_health_since;
+    bool requested = false;
+    esp_err_t request_error = ESP_OK;
     if (!healthy || s_now_ms < s_update_health_since) {
         s_update_health_since = 0;
     } else if (!s_update_health_since) {
         s_update_health_since = s_now_ms;
     } else if (s_now_ms - s_update_health_since >= 45000) {
-        (void)app_update_confirm_health(true);
+        requested = true;
+        request_error = app_update_confirm_health(true);
     }
+    uint64_t missing = 0;
+    bool audio_known = media_known && media.audio_known;
+#define UPDATE_HEALTH_MISSING(name, condition) \
+    if (!(condition)) missing |= UINT64_C(1) << UPDATE_HEALTH_GATE_##name;
+    UPDATE_HEALTH_GATES(UPDATE_HEALTH_MISSING)
+#undef UPDATE_HEALTH_MISSING
+    remote_update_health_observe(missing, previous_since, requested, request_error);
+    remote_update_health_report(update.state);
 }
 /* Keep maintenance-only temporaries out of the loop's permanent frame. */
 static void __attribute__((noinline)) remote_update_service(void)

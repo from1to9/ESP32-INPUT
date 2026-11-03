@@ -176,6 +176,64 @@ static void update_lock_and_transport_ack_are_independent_gates(void)
     remote_update_service();
     assert(!remote_update_maintenance());
 }
+static cp_command_t update_test_streaming_claim(uint64_t key)
+{
+    setup(INPUT_MOUSE);
+    update_test_allow();
+    cp_command_t claim = update_test_claim(key);
+    app_update_authority_t authority;
+    assert(remote_update_authority(NULL, &claim, &authority) == CP_OK);
+    test_update_snapshot.state = APP_UPDATE_DOWNLOADING;
+    remote_update_service();
+    release_barrier();
+    remote_update_service();
+    assert(remote_update_authority(NULL, &claim, &authority) == CP_OK &&
+           authority.authorized && authority.unlocked && authority.maintenance_ready);
+    test_clock_override = true;
+    test_clock_ms = s_now_ms;
+    return claim;
+}
+static void update_test_pause_reader(void) { test_clock_ms += 263; }
+static void update_reader_cannot_accept_owner_expired_while_acquiring_lock(void)
+{
+    cp_command_t claim = update_test_streaming_claim(905);
+    app_update_authority_t authority;
+    test_update_gate_entry_hook = update_test_pause_reader;
+    assert(remote_update_authority(NULL, &claim, &authority) == CP_OK && !authority.authorized &&
+           !authority.unlocked && !authority.maintenance_ready);
+    assert(!test_update_gate_entry_hook && authority.observation.runtime_status == CP_OK &&
+           authority.observation.observed_ms - authority.observation.owner_cached_ms == 263 &&
+           authority.observation.owner_rejected == (APP_UPDATE_OWNER_STALE | APP_UPDATE_OWNER_NOT_READY));
+}
+static void update_test_publish_while_reader_waits(void)
+{
+    s_now_ms = ++test_clock_ms;
+    remote_update_service();
+}
+static void update_reader_uses_new_publication_without_false_clock_regression(void)
+{
+    cp_command_t claim = update_test_streaming_claim(906);
+    app_update_authority_t authority;
+    test_update_gate_entry_hook = update_test_publish_while_reader_waits;
+    assert(remote_update_authority(NULL, &claim, &authority) == CP_OK && authority.authorized &&
+           authority.unlocked && authority.maintenance_ready);
+    assert(!test_update_gate_entry_hook && authority.observation.observed_ms == test_clock_ms &&
+           authority.observation.owner_cached_ms == test_clock_ms && !authority.observation.owner_rejected);
+}
+static void update_real_owner_gap_and_clock_regression_stay_rejected(void)
+{
+    cp_command_t claim = update_test_streaming_claim(907);
+    app_update_authority_t authority;
+    /* The real device's 263 ms owner gap is a genuine missing-freshness
+     * rejection, independent of where this reader is scheduled. */
+    test_clock_ms += 263;
+    assert(remote_update_authority(NULL, &claim, &authority) == CP_OK && !authority.authorized &&
+           !authority.unlocked && !authority.maintenance_ready);
+    assert(authority.observation.owner_rejected == (APP_UPDATE_OWNER_STALE | APP_UPDATE_OWNER_NOT_READY));
+    test_clock_ms = s_update_gate.cached_ms - 1;
+    assert(remote_update_authority(NULL, &claim, &authority) == CP_OK && !authority.authorized &&
+           (authority.observation.owner_rejected & APP_UPDATE_OWNER_STALE));
+}
 static void update_test_health_ready(void)
 {
     update_test_quiet_media();
@@ -248,6 +306,10 @@ static void update_health_rejects_queued_render_codec_and_clock_regression(void)
     s_now_ms = 999;
     remote_update_health_service();
     assert(!s_update_health_since && !test_update_health_requests);
+    const size_t last = (s_update_health_trace.head + s_update_health_trace.count - 1U) %
+                        UPDATE_HEALTH_TRACE_CAPACITY;
+    assert(s_update_health_trace.events[last].kind == UPDATE_HEALTH_CLOCK &&
+           s_update_health_trace.events[last].reset && !s_update_health_trace.events[last].duration_known);
     s_now_ms = 2000;
     remote_update_health_service();
     assert(s_update_health_since == 2000);
@@ -256,9 +318,188 @@ static void update_health_rejects_queued_render_codec_and_clock_regression(void)
     remote_update_health_service();
     assert(!s_update_health_since && !test_update_health_requests);
 }
+static void update_health_trace_retains_subsecond_failures(void)
+{
+    setup(INPUT_MOUSE);
+    update_test_health_ready();
+    test_diagnostic_logs_enabled = true;
+    remote_update_health_service();
+    assert(test_diagnostic_log_count == 2);
+    s_now_ms = 1110;
+    test_update_presentation.apply_age_ms = 501;
+    remote_update_health_service();
+    s_now_ms = 1120;
+    test_update_presentation.apply_age_ms = 500;
+    remote_update_health_service();
+    s_now_ms = 1130;
+    test_update_imu.sample_fresh = false;
+    remote_update_health_service();
+    s_now_ms = 1140;
+    test_storage.pending = true;
+    remote_update_health_service();
+    s_now_ms = 1150;
+    test_update_imu.sample_fresh = true;
+    test_storage.pending = false;
+    remote_update_health_service();
+    assert(test_diagnostic_log_count == 2); /* No I/O for the five fast changes. */
+    assert(s_update_health_trace.count == 5 && s_update_health_trace.resets == 2);
+    const update_health_event_t *event = &s_update_health_trace.events[s_update_health_trace.head];
+    assert(event->at_ms == 1110 && event->reset_ms == 110 && event->state_ms == 110);
+    assert(event->missing == (UINT64_C(1) << UPDATE_HEALTH_GATE_ui_apply_age));
+    assert(s_update_health_trace.events[2].at_ms == 1120 &&
+           s_update_health_trace.events[2].state_ms == 10);
+    assert(s_update_health_trace.events[3].reset_ms == 10);
+    assert(!test_update_health_requests && s_update_health_since == 1150);
+    for (s_now_ms = 2000; s_now_ms <= 4000; s_now_ms += 1000) remote_update_health_service();
+    assert(!s_update_health_trace.count && !s_update_health_trace.dropped);
+    assert(strstr(test_diagnostic_logs[3], "at_ms=1110 kind=change"));
+    assert(strstr(test_diagnostic_logs[3], "reset_ms=110 request_error=0 gates=ui_apply_age"));
+    assert(strstr(test_diagnostic_logs[4], "previous_state_ms=10 reset_ms=0"));
+    assert(strstr(test_diagnostic_logs[6], "gates=imu_sample_fresh"));
+    assert(strstr(test_diagnostic_logs[7], "gates=settings_pending|imu_sample_fresh"));
+    assert(strstr(test_diagnostic_logs[9], "previous_state_ms=10 reset_ms=0"));
+    s_now_ms = 46149;
+    remote_update_health_service();
+    assert(!test_update_health_requests);
+    s_now_ms = 46150;
+    remote_update_health_service();
+    assert(test_update_health_requests == 1);
+}
+
+static void update_health_trace_has_bounded_output_and_explicit_loss(void)
+{
+    setup(INPUT_MOUSE);
+    update_test_health_ready();
+    test_diagnostic_logs_enabled = true;
+    remote_update_health_service();
+    for (unsigned i = 1; i <= 200; ++i) {
+        s_now_ms = 1000 + i;
+        test_update_imu.sample_fresh = (i % 2U) == 0;
+        remote_update_health_service();
+    }
+    assert(test_diagnostic_log_count == 2);
+    assert(s_update_health_trace.count == UPDATE_HEALTH_TRACE_CAPACITY);
+    assert(s_update_health_trace.resets == 100 && s_update_health_trace.dropped == 168);
+    assert(s_update_health_trace.dropped_resets == 84 && s_update_health_trace.dropped_max_reset_ms == 1);
+    assert(s_update_health_trace.dropped_missing == (UINT64_C(1) << UPDATE_HEALTH_GATE_imu_sample_fresh));
+    s_now_ms = 2000;
+    remote_update_health_service();
+    assert(test_diagnostic_log_count == 5 && s_update_health_trace.count == 30);
+    assert(strstr(test_diagnostic_logs[2], "dropped=168 dropped_resets=84"));
+    assert(strstr(test_diagnostic_logs[2], "dropped_gates=imu_sample_fresh"));
+    for (unsigned i = 0; i < 1000; ++i) remote_update_health_service();
+    assert(test_diagnostic_log_count == 5 && !test_update_health_requests);
+    s_now_ms = 1999;
+    remote_update_health_service();
+    assert(test_diagnostic_log_count == 5); /* Regression never bypasses the I/O limit. */
+}
+
+static void update_health_trace_names_each_observed_gate(void)
+{
+#define FAIL_GATE(name, mutation) do { \
+    setup(INPUT_MOUSE); update_test_health_ready(); mutation; remote_update_health_service(); \
+    assert(s_update_health_trace.missing == (UINT64_C(1) << UPDATE_HEALTH_GATE_##name)); \
+    assert(!s_update_health_since && !test_update_health_requests); \
+} while (0)
+    FAIL_GATE(display, test_capabilities.display = false);
+    FAIL_GATE(touch, test_capabilities.touch = false);
+    FAIL_GATE(lock_button, test_capabilities.lock_button = false);
+    FAIL_GATE(multitouch, s_multitouch_available = false);
+    FAIL_GATE(ui_initialized, test_update_presentation.initialized = false);
+    FAIL_GATE(ui_init_error, test_update_presentation.init_error = ESP_FAIL);
+    FAIL_GATE(ui_applied, test_update_presentation.has_applied = false);
+    FAIL_GATE(ui_apply_age, test_update_presentation.apply_age_ms = 501);
+    FAIL_GATE(renderer_bound, test_indicator.bound = false);
+    FAIL_GATE(renderer_alive, test_indicator.owner_alive = false);
+    FAIL_GATE(renderer_error, test_indicator.error = ESP_FAIL);
+    FAIL_GATE(display_handle, test_boot_display = NULL);
+    FAIL_GATE(settings_available, test_storage.available = false);
+    FAIL_GATE(settings_pending, test_storage.pending = true);
+    FAIL_GATE(settings_error, test_storage.error = ESP_FAIL);
+    FAIL_GATE(settings_valid, s_settings.brightness_percent = 0);
+    FAIL_GATE(imu_initialized, test_update_imu.initialization_succeeded = false);
+    FAIL_GATE(imu_started, test_update_imu.start_succeeded = false);
+    FAIL_GATE(imu_worker, test_update_imu.worker_running = false);
+    FAIL_GATE(imu_sample_valid, test_update_imu.sample_valid = false);
+    FAIL_GATE(imu_sample_fresh, test_update_imu.sample_fresh = false);
+    FAIL_GATE(imu_fault, test_update_imu.fault_latched = true);
+    FAIL_GATE(imu_error, test_update_imu.error = ESP_FAIL);
+    FAIL_GATE(ble_initialized, test_link.initialized = false);
+    FAIL_GATE(ble_failed, test_link.failed = true);
+    FAIL_GATE(usb_initialized, test_usb.initialized = false);
+    FAIL_GATE(usb_failed, test_usb.failed = true);
+    FAIL_GATE(media_known, test_media_snapshot_unavailable = true);
+    FAIL_GATE(media_initialized, test_media_snapshot.initialized = false;
+              test_media_uninitialized_snapshot_available = true);
+    FAIL_GATE(audio_known, test_media_snapshot.audio_known = false);
+    FAIL_GATE(media_busy, test_media_snapshot.busy = true);
+    FAIL_GATE(audio_off, test_media_snapshot.audio.hardware_off_confirmed = false);
+    FAIL_GATE(capture_gate, test_media_snapshot.audio.capture_gate_open = true);
+    FAIL_GATE(playback_gate, test_media_snapshot.audio.playback_gate_open = true);
+    FAIL_GATE(microphone, test_media_snapshot.audio.microphone_enabled = true);
+    FAIL_GATE(speaker, test_media_snapshot.audio.speaker_enabled = true);
+    FAIL_GATE(capture_indicator, test_media_snapshot.audio.capture_indicator_required = true);
+    FAIL_GATE(audio_quarantined, test_media_snapshot.audio.quarantined = true);
+    FAIL_GATE(capture0_cleanup, test_media_snapshot.audio.capture[0].cleanup_pending = true);
+    FAIL_GATE(capture1_cleanup, test_media_snapshot.audio.capture[1].cleanup_pending = true);
+    FAIL_GATE(capture2_cleanup, test_media_snapshot.audio.capture[2].cleanup_pending = true);
+    FAIL_GATE(playback_cleanup, test_media_snapshot.audio.playback.cleanup_pending = true);
+    for (ae_job_state_t state = AE_JOB_STARTING; state <= AE_JOB_FINALIZING; ++state) {
+        FAIL_GATE(capture0_idle, test_media_snapshot.audio.capture[0].state = state);
+        FAIL_GATE(capture1_idle, test_media_snapshot.audio.capture[1].state = state);
+        FAIL_GATE(capture2_idle, test_media_snapshot.audio.capture[2].state = state);
+        FAIL_GATE(playback_idle, test_media_snapshot.audio.playback.state = state);
+    }
+#undef FAIL_GATE
+    setup(INPUT_MOUSE);
+    update_test_health_ready();
+    test_capabilities.imu = false;
+    test_update_imu = (board_imu_status_t){.fault_latched = true, .error = ESP_FAIL};
+    remote_update_health_service();
+    assert(!s_update_health_trace.missing && s_update_health_since == s_now_ms);
+    test_media_snapshot.audio_known = false;
+    test_media_snapshot.audio.quarantined = true;
+    remote_update_health_service();
+    assert(s_update_health_trace.missing == (UINT64_C(1) << UPDATE_HEALTH_GATE_audio_known));
+}
+
+static void update_health_trace_observes_confirmation_without_changing_retries(void)
+{
+    setup(INPUT_MOUSE);
+    update_test_health_ready();
+    test_diagnostic_logs_enabled = true;
+    remote_update_health_service();
+    test_update_health_error = ESP_FAIL;
+    s_now_ms = 46000;
+    remote_update_health_service();
+    assert(test_update_health_requests == 1 && s_update_health_trace.request_error == ESP_FAIL);
+    assert(strstr(test_diagnostic_logs[3], "kind=request"));
+    s_now_ms = 47000;
+    remote_update_health_service();
+    assert(test_update_health_requests == 2 && s_update_health_trace.count == 0);
+    test_update_health_error = ESP_OK;
+    s_now_ms = 48000;
+    remote_update_health_service();
+    assert(test_update_health_requests == 3 && s_update_health_trace.request_error == ESP_OK);
+    test_update_snapshot.state = APP_UPDATE_CONFIRMED;
+    s_now_ms = 48001;
+    remote_update_health_service();
+    assert(!s_update_health_since && !s_update_health_trace.active);
+    s_now_ms = 49000;
+    remote_update_health_service();
+    assert(strstr(test_diagnostic_logs[test_diagnostic_log_count - 1U], "kind=end"));
+}
+
 #define REMOTE_UPDATE_CASES(RUN)                                                                   \
     RUN(update_maintenance_waits_for_actual_neutral_and_cleanup);                                  \
     RUN(update_mailbox_rejects_competing_stale_and_lost_authority);                                \
     RUN(update_lock_and_transport_ack_are_independent_gates);                                      \
+    RUN(update_reader_cannot_accept_owner_expired_while_acquiring_lock);                           \
+    RUN(update_reader_uses_new_publication_without_false_clock_regression);                        \
+    RUN(update_real_owner_gap_and_clock_regression_stay_rejected);                                 \
     RUN(update_health_requires_continuous_local_proof_and_no_host);                                \
-    RUN(update_health_rejects_queued_render_codec_and_clock_regression)
+    RUN(update_health_rejects_queued_render_codec_and_clock_regression);                            \
+    RUN(update_health_trace_retains_subsecond_failures);                                           \
+    RUN(update_health_trace_has_bounded_output_and_explicit_loss);                                 \
+    RUN(update_health_trace_names_each_observed_gate);                                             \
+    RUN(update_health_trace_observes_confirmation_without_changing_retries)

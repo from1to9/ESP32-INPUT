@@ -6,6 +6,12 @@
 #include <math.h>
 #include <stdarg.h>
 #include "../audio_engine/heap_caps_model.h"
+#include "freertos/FreeRTOS.h"
+/* The SDK lock-acquisition boundary can schedule the other mailbox owner
+ * before this test task obtains the lock. Production decisions are unchanged. */
+static void coordinator_test_lock_entry(portMUX_TYPE *lock);
+#undef portENTER_CRITICAL
+#define portENTER_CRITICAL(lock) coordinator_test_lock_entry(lock)
 
 /* Include production helpers unchanged, preserving their actual static state.
  * Hardware interfaces are substituted only through the included public headers. */
@@ -56,6 +62,7 @@ static app_wifi_snapshot_t test_wifi;
 static app_wifi_scan_diagnostics_t test_scan_diagnostics;
 static app_control_runtime_snapshot_t test_control_runtime;
 static bool test_media_snapshot_unavailable;
+static bool test_media_uninitialized_snapshot_available;
 static app_wifi_setup_info_t test_wifi_info;
 static esp_err_t test_wifi_start_error, test_wifi_stop_error, test_wifi_forget_error;
 static esp_err_t test_wifi_info_error;
@@ -93,6 +100,15 @@ static esp_err_t test_name_error;
 static unsigned test_name_requests;
 static bool test_clock_override;
 static uint64_t test_clock_ms;
+static void (*test_update_gate_entry_hook)(void);
+static void coordinator_test_lock_entry(portMUX_TYPE *lock)
+{
+    if (lock == &s_update_gate_lock && test_update_gate_entry_hook) {
+        void (*hook)(void) = test_update_gate_entry_hook;
+        test_update_gate_entry_hook = NULL;
+        hook();
+    }
+}
 static uint32_t test_selection_lifetime_ms;
 static bool test_boot_boundary_enabled, test_boot_lock_allowed, test_boot_locked;
 static bool test_boot_active;
@@ -123,6 +139,7 @@ static app_update_authority_t test_update_authority;
 static cp_error_t test_update_authority_error = CP_UNAVAILABLE;
 static bool test_update_busy, test_wifi_maintenance;
 static unsigned test_update_health_requests;
+static esp_err_t test_update_health_error;
 static board_haptic_status_t test_haptic_status;
 static board_imu_status_t test_update_imu;
 static app_presenter_status_t test_update_presentation;
@@ -181,7 +198,7 @@ cp_error_t app_control_runtime_update_authority(const cp_command_t *command, app
 void app_update_snapshot(app_update_snapshot_t *out) { *out = test_update_snapshot; }
 bool app_update_flash_busy(void) { return test_update_busy; }
 esp_err_t app_update_confirm_health(bool gates)
-{ assert(gates); ++test_update_health_requests; return ESP_OK; }
+{ assert(gates); ++test_update_health_requests; return test_update_health_error; }
 void app_wifi_set_maintenance(bool active) { test_wifi_maintenance = active; }
 esp_err_t ble_hid_target_select(uint64_t revision, const ble_hid_target_t *target)
 {
@@ -314,7 +331,7 @@ bool app_media_runtime_snapshot(app_media_snapshot_t *snapshot)
 {
     if (test_media_snapshot_unavailable) return false;
     *snapshot = test_media_snapshot;
-    return snapshot->initialized;
+    return snapshot->initialized || test_media_uninitialized_snapshot_available;
 }
 /* The observer has a separate production-code suite; this boundary never
  * grants audio or input authority to coordinator tests. */
@@ -911,12 +928,15 @@ static void setup(input_mode_t mode)
     memset(s_remote_device_reviews, 0, sizeof(s_remote_device_reviews));
     memset(s_remote_device_local_review, 0, sizeof(s_remote_device_local_review));
     memset(&s_update_gate, 0, sizeof(s_update_gate));
+    test_update_gate_entry_hook = NULL;
     s_update_maintenance = false; s_update_health_since = 0;
+    memset(&s_update_health_trace, 0, sizeof s_update_health_trace);
     test_update_snapshot = (app_update_snapshot_t){.state = APP_UPDATE_UNAVAILABLE};
     test_update_authority = (app_update_authority_t){0};
     test_update_authority_error = CP_UNAVAILABLE;
     test_update_busy = test_wifi_maintenance = false;
     test_update_health_requests = 0;
+    test_update_health_error = ESP_OK;
     test_haptic_status = (board_haptic_status_t){0};
     test_update_imu = (board_imu_status_t){0};
     test_update_presentation = (app_presenter_status_t){0};
@@ -950,6 +970,7 @@ static void setup(input_mode_t mode)
     memset(&s_motion_trace, 0, sizeof s_motion_trace);
     test_media_snapshot_unavailable = false;
     test_media_snapshot = (app_media_snapshot_t){0};
+    test_media_uninitialized_snapshot_available = false;
     test_indicator = (app_presenter_indicator_status_t){0};
     test_media_environment = (ae_environment_t){0};
     test_capture_context = (app_audio_capture_context_t){0}; test_capture_context_ms = 0;
