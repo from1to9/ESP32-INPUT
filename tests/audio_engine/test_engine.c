@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const ae_format_t mono = {16000, 1, 20, AE_PCM_S16_LE};
+static ae_format_t mono = {16000, 1, 20, AE_PCM_S16_LE};
 static struct {
     uint64_t now, unix_seconds, id, generation;
     bool cancel, allowed, owner_alive, background, trusted_time;
@@ -16,7 +16,7 @@ static struct {
     bool revoke_in_read, cancel_in_read, replace_in_read, expire_in_read;
     bool block_live, fail_append, fail_finish, corrupt_finish, delete_allowed;
     bool corrupt_store_owner, revoke_only, duplex, reject_reserve, verify_fragments;
-    bool pending_mute, pending_unmute, unmute_cancelled, deny_recognition;
+    bool pending_mute, pending_unmute, unmute_cancelled, deny_recognition, pending_prepare;
     ae_role_t held_role;
     bool pending_unbind;
     uint64_t bound_consumer;
@@ -45,7 +45,7 @@ static ae_result_t codec_caps(void *context, ae_codec_capabilities_t *caps)
 static ae_result_t prepare(void *context, const ae_format_t *format, uint8_t roles, uint64_t generation)
 {
     (void)context; assert(ae_format_equal(format, &mono)); assert(roles == AE_MICROPHONE || roles == AE_SPEAKER || (model.duplex && roles == 3));
-    ++model.prepares; model.generation = generation; model.mic = model.speaker = false; return AE_OK;
+    ++model.prepares; model.generation = generation; model.mic = model.speaker = false; return model.pending_prepare ? AE_AGAIN : AE_OK;
 }
 static ae_result_t mute(void *context, ae_role_t role, bool value, uint64_t generation)
 {
@@ -250,8 +250,9 @@ static void step(unsigned count)
 {
     for (unsigned i = 0; i < count; ++i) { model.now += 20; visible(); (void)ae_poll(engine, model.now); }
 }
-static void setup(void)
+static void setup_with_route(const ae_route_port_t *route, const ae_format_t *format)
 {
+    mono = format ? *format : (ae_format_t){16000, 1, 20, AE_PCM_S16_LE};
     free(memory); memory = calloc(1, ae_engine_bytes()); assert(memory);
     memset(&model, 0, sizeof(model)); model.now = 1000; model.unix_seconds = 100000;
     model.allowed = model.owner_alive = model.background = model.trusted_time = model.read_enabled = model.delete_allowed = true;
@@ -268,12 +269,14 @@ static void setup(void)
         .monotonic_ms = clock_now, .safety_stop_requested = cancelled,
         .capture_sink = sink, .capture_cancel = cancel_sink, .fanout_enabled = true,
     };
+    if (route) dependencies.route = *route;
     assert(ae_init(memory, ae_engine_bytes(), &dependencies, model.now, &engine) == AE_OK);
     ae_snapshot_t view = snapshot(); assert(view.state == AE_OFF && view.hardware_off_confirmed);
     assert(view.microphone_muted && view.speaker_muted && !model.mic && !model.speaker);
     assert(ae_route_select(engine, AE_ROUTE_LOCAL, view.audio_generation, view.revision, model.now) == AE_OK);
     visible();
 }
+static void setup(void) { setup_with_route(NULL, NULL); }
 static ae_start_request_t request(ae_job_kind_t kind)
 {
     ae_snapshot_t view = snapshot();
@@ -685,9 +688,33 @@ static void duplex_and_storage_boundaries(void)
     puts("PASS: same-session duplex independent stops, off-state volume, eight-hour bounded admission, reservation rejection, independent finalization and post-storage revocation");
 }
 
+static void pending_prepare_privacy_cleanup(void)
+{
+    for (unsigned path = 0; path < 2; ++path) {
+        setup(); size_t initial_stops = model.stops; model.pending_prepare = true;
+        if (!path) assert(ae_enable(engine, AE_MICROPHONE, true, &mono, model.now) == AE_AGAIN);
+        else {
+            ae_snapshot_t view = snapshot();
+            assert(ae_route_select(engine, AE_ROUTE_HFP_HF, view.audio_generation, view.revision, model.now) == AE_OK);
+            (void)start(AE_CAPTURE_LIVE); step(2);
+        }
+        assert(!snapshot().hardware_off_confirmed && model.prepares > 0);
+        model.pending_stop = model.cancel = true;
+        ae_environment_t locked = {.unlocked = false}; ae_environment(engine, &locked, model.now);
+        step(3); ae_snapshot_t view = snapshot();
+        assert(view.state == AE_STOPPING && !view.hardware_off_confirmed && !view.quarantined);
+        assert(model.stops == initial_stops + 3);
+        model.pending_stop = model.pending_prepare = false; step(3); view = snapshot();
+        assert(view.hardware_off_confirmed && view.state == AE_OFF && !view.quarantined);
+        model.cancel = false; visible(); (void)start(AE_CAPTURE_LIVE); step(8);
+        assert(snapshot().capture[AE_CAPTURE_LIVE].state == AE_JOB_RUNNING && !snapshot().quarantined);
+    }
+    puts("PASS: pending local/HFP codec preparation retains unknown hardware-off until privacy cleanup acknowledgement and fresh start");
+}
+
 int main(void)
 {
-    lifecycle(); callback_races(); safety_and_overflow(); playback_checks(); pending_capture_keeps_playback_progressing(); recording_checks(); background_checks(); duplex_and_storage_boundaries(); uncertain_reconciliation(); duplex_file_fragments(); physical_mute_acknowledgement(); controls_retire_pending_unmute(); transport_binding_lifecycle();
+    pending_prepare_privacy_cleanup(); lifecycle(); callback_races(); safety_and_overflow(); playback_checks(); pending_capture_keeps_playback_progressing(); recording_checks(); background_checks(); duplex_and_storage_boundaries(); uncertain_reconciliation(); duplex_file_fragments(); physical_mute_acknowledgement(); controls_retire_pending_unmute(); transport_binding_lifecycle();
     printf("Resource bytes: engine=%zu (caller-provided external memory)\n", ae_engine_bytes());
     free(memory); return 0;
 }

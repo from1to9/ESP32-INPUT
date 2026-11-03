@@ -14,8 +14,9 @@ typedef uint8_t esp_bt_pin_code_t[16];
 typedef enum { ESP_BT_NON_CONNECTABLE, ESP_BT_CONNECTABLE } esp_bt_connection_mode_t;
 typedef enum { ESP_BT_NON_DISCOVERABLE, ESP_BT_LIMITED_DISCOVERABLE, ESP_BT_GENERAL_DISCOVERABLE } esp_bt_discovery_mode_t;
 typedef enum { ESP_BT_GAP_AUTH_CMPL_EVT, ESP_BT_GAP_REMOVE_BOND_DEV_COMPLETE_EVT,
-    ESP_BT_GAP_CFM_REQ_EVT, ESP_BT_GAP_PIN_REQ_EVT, ESP_BT_GAP_KEY_REQ_EVT } esp_bt_gap_cb_event_t;
+    ESP_BT_GAP_CFM_REQ_EVT, ESP_BT_GAP_PIN_REQ_EVT, ESP_BT_GAP_KEY_REQ_EVT, ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT } esp_bt_gap_cb_event_t;
 typedef union {
+    struct { unsigned int status; char *name; } get_dev_name_cmpl;
     struct { uint8_t bda[6]; unsigned int stat; } auth_cmpl;
     struct { uint8_t bda[6]; } cfm_req;
     struct { uint8_t bda[6]; } pin_req;
@@ -23,6 +24,7 @@ typedef union {
 } esp_bt_gap_cb_param_t;
 typedef void (*esp_bt_gap_cb_t)(esp_bt_gap_cb_event_t, esp_bt_gap_cb_param_t *);
 typedef struct { esp_bt_connection_mode_t conn_mode; esp_bt_discovery_mode_t disc_mode; } esp_bt_gap_profile_status_t;
+esp_err_t esp_bt_gap_get_device_name(void);
 esp_err_t esp_bt_gap_register_callback(esp_bt_gap_cb_t);
 esp_err_t esp_bt_gap_set_security_param(unsigned int, void *, uint8_t);
 int esp_bt_gap_get_bond_device_num(void);

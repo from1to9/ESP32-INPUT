@@ -12,6 +12,7 @@
 #include "board_recording_flash.h"
 #include "audio_media.h"
 #include "bt_audio.h"
+#include "ble_hid.h"
 #include "esp_timer.h"
 #include <limits.h>
 #include <math.h>
@@ -32,7 +33,8 @@ typedef struct {
     bool initialized, clock_known, clock_failed, runtime_known, store_known;
     bool list_requested, list_loaded, query_get, pending, prepare_review, confirmation_owned;
     bool capture_obligation;
-    bool message_clear_pending;
+    bool message_clear_pending, audio_pairing_owned;
+    esp_err_t audio_pairing_request_error;
     uint64_t capture_generation;
     uint64_t now_ms, serial, pending_token, revision, store_revision, speech_revision;
     uint64_t old_audio_generation, old_audio_revision, old_speech_token;
@@ -359,6 +361,8 @@ static app_media_start_block_t live_start_block(ae_role_t role)
     if (controls.pending || controls.voice_link.active || controls.runtime.busy || controls.runtime.result_ready)
         return APP_MEDIA_START_PENDING;
     if (controls.runtime.audio.quarantined) return APP_MEDIA_START_QUARANTINED;
+    if ((controls.runtime.audio.route == AE_ROUTE_HFP_HF || controls.runtime.audio.route == AE_ROUTE_A2DP_SINK) &&
+        (controls.bluetooth.pairing_busy || controls.bluetooth.pairing_requested || controls.bluetooth.pairing_handshake_pending)) return APP_MEDIA_START_PENDING;
     ae_route_t selected = live_route(role);
     if (selected <= AE_ROUTE_LOCAL || selected >= AE_ROUTE_COUNT) return APP_MEDIA_START_CONNECTION_REQUIRED;
     const ae_route_capabilities_t *next = &controls.routes[selected];
@@ -381,7 +385,9 @@ static app_media_start_block_t live_start_block(ae_role_t role)
     if (selected != controls.runtime.audio.route) {
         const ae_route_capabilities_t *current = &controls.routes[controls.runtime.audio.route];
         if (any_jobs() || !controls.runtime.audio.hardware_off_confirmed) return APP_MEDIA_START_STOP_REQUIRED;
-        if (!current->connected) return APP_MEDIA_START_HOST_UNAVAILABLE;
+        const ae_id_t *previous_peer = &controls.runtime.audio.route_token.peer_id;
+        if (!ae_id_empty(previous_peer) && !ae_id_equal(previous_peer, &next->token.peer_id)) return APP_MEDIA_START_PEER_MISMATCH;
+        if (!current->connected && ae_id_empty(&current->token.peer_id)) return APP_MEDIA_START_ALLOWED;
         if (ae_id_empty(&current->token.peer_id)) return APP_MEDIA_START_IDENTITY_UNAVAILABLE;
         return ae_id_equal(&current->token.peer_id, &next->token.peer_id) ? APP_MEDIA_START_ALLOWED : APP_MEDIA_START_PEER_MISMATCH;
     }
@@ -606,6 +612,34 @@ unavailable:
     controls.microphone_level_cached = false; controls.microphone_level = level;
 }
 
+static void rebuild_audio_pairing(void)
+{
+    app_media_pairing_view_t *view = &controls.view.pairing;
+    const bt_audio_snapshot_t *bt = &controls.bluetooth;
+    bool selected = controls.view.connection_known && controls.view.connection == APP_MEDIA_CONNECTION_BLUETOOTH;
+    view->name_known = bt->device_name_known;
+    if (view->name_known) snprintf(view->device_name, sizeof(view->device_name), "%s", bt->device_name);
+    view->remaining_seconds = (bt->pairing_remaining_ms + 999U) / 1000U;
+    view->can_open = selected && idle_controls() && !any_jobs() && controls.runtime.audio.hardware_off_confirmed &&
+        bt->supported && bt->initialized && !bt->failed && bt->classic_bonds_known && !bt->pairing_requested &&
+        !bt->pairing_busy && !bt->pairing_handshake_pending && !bt->control_inflight && bt->request_status != BT_AUDIO_JOB_PENDING &&
+        bt->request_status != BT_AUDIO_JOB_WAITING;
+    view->can_close = selected && local_ready() && bt->pairing_requested;
+    bool current_failure = bt->failed || bt->pairing_error != ESP_OK;
+    esp_err_t error = current_failure ? (bt->pairing_error != ESP_OK ? bt->pairing_error : bt->error) : controls.audio_pairing_request_error;
+    const char *reason;
+    if (!bt->supported) { view->state = APP_MEDIA_PAIR_UNAVAILABLE; reason = "Bluetooth audio is unavailable."; }
+    else if (bt->failed || error != ESP_OK) { view->state = APP_MEDIA_PAIR_ERROR; reason = !current_failure && controls.audio_pairing_request_error == ESP_ERR_NO_MEM ? "Bluetooth pairings are full; existing hosts are preserved." : error == ESP_ERR_INVALID_STATE ? "Bluetooth pairing is busy. Wait for the current change." : error == ESP_ERR_TIMEOUT ? "Audio pairing timed out. Try again." : "Audio pairing failed. Try again."; }
+    else if (!bt->initialized) { view->state = APP_MEDIA_PAIR_UNAVAILABLE; reason = "Bluetooth audio is starting."; }
+    else if (bt->pairing_handshake_pending) { view->state = APP_MEDIA_PAIR_AUTHENTICATING; reason = "Finishing audio pairing; audio has not started."; }
+    else if (bt->pairing_requested) { view->state = bt->discovery_known && bt->discoverable ? APP_MEDIA_PAIR_DISCOVERABLE : APP_MEDIA_PAIR_PREPARING; reason = view->state == APP_MEDIA_PAIR_DISCOVERABLE ? "Choose this device in your host's Bluetooth settings." : "Preparing audio discoverability..."; }
+    else if (bt->pairing_busy) { view->state = APP_MEDIA_PAIR_CLOSING; reason = "Closing audio discoverability. Wait before pairing again."; }
+    else if (bt->pairing_completed) { view->state = APP_MEDIA_PAIR_COMPLETED; reason = "Paired. Open Mic or play audio on the host."; }
+    else if (bt->pairing_expired) { view->state = APP_MEDIA_PAIR_EXPIRED; reason = "Audio pairing expired. Open a new window to retry."; }
+    else { view->state = APP_MEDIA_PAIR_CLOSED; reason = "Pair audio first; input pairing is separate."; }
+    snprintf(view->reason, sizeof(view->reason), "%s", reason);
+}
+
 static void rebuild(void)
 {
     app_media_record_list_view_t list = controls.view.recordings;
@@ -689,6 +723,7 @@ static void rebuild(void)
         app_media_route_view_t *route = &view->routes[view->route];
         route->connected = connected; /* Profile link, not negotiated voice readiness. */
         bool link_idle = idle_controls() && !any_jobs() && bt->initialized && !bt->failed && !bt->control_inflight &&
+            !bt->pairing_busy && !bt->pairing_requested && !bt->pairing_handshake_pending &&
             bt->request_status != BT_AUDIO_JOB_PENDING && bt->request_status != BT_AUDIO_JOB_WAITING;
         route->can_connect = link_idle && (hfp && connected ? current_known && saved_bond(peer) >= 0 && !voice_ready(bt) :
             selected >= 0 && !connected && (!hfp || !bt->hfp_peer_known));
@@ -738,6 +773,7 @@ static void rebuild(void)
     spoken->can_confirm = spoken->can_reject && controls.context.preview_characters < APP_UI_DRAFT_CAPACITY &&
         speech->epoch == controls.context.epoch && speech->ui_revision == controls.context.ui_revision;
     if (speech->result != AE_OK) snprintf(spoken->reason, sizeof(spoken->reason), "%s", result_text(speech->result));
+    rebuild_audio_pairing();
     bool host_preparing = view->microphone.start_block == APP_MEDIA_START_HOST_PREPARING ||
         view->speaker.start_block == APP_MEDIA_START_HOST_PREPARING;
     bool primary_audio = controls.context.mode == INPUT_AUDIO &&
@@ -758,6 +794,9 @@ bool app_media_controls_init(void)
 void app_media_controls_context(const app_media_controls_context_t *context)
 {
     if (!context || !controls.initialized) return;
+    if (controls.audio_pairing_owned && (context->locked || context->screen_off || context->mode != INPUT_AUDIO)) {
+        bt_audio_pairing_close(); controls.audio_pairing_owned = false;
+    }
     if (controls.voice_link.active && (context->epoch != controls.voice_link.epoch || context->locked ||
         context->screen_off || context->mode != INPUT_AUDIO)) finish_voice_link(NULL, AE_PRIVACY);
     if (context->epoch != controls.context.epoch || context->locked || context->screen_off ||
@@ -838,6 +877,8 @@ static bool allowed_panel(app_media_operation_t operation)
     if (controls.context.mode != INPUT_AUDIO) return false;
     if (operation == APP_MEDIA_LIVE_START || operation == APP_MEDIA_LIVE_STOP) return panel == APP_OVERLAY_NONE;
     if (operation == APP_MEDIA_SELECT_CONNECTION) return panel == APP_OVERLAY_NONE || panel == APP_OVERLAY_MEDIA_OPTIONS;
+    if (operation == APP_MEDIA_PAIR_AUDIO_OPEN || operation == APP_MEDIA_PAIR_AUDIO_CLOSE)
+        return panel == APP_OVERLAY_MEDIA_OPTIONS;
     if (operation == APP_MEDIA_SELECT_PEER) return panel == APP_OVERLAY_MEDIA_OPTIONS;
     if (operation <= APP_MEDIA_SET_GAIN) return panel == APP_OVERLAY_MEDIA_OPTIONS || panel == APP_OVERLAY_NONE;
     switch (operation) {
@@ -896,6 +937,18 @@ static ae_result_t confirm_review(const app_intent_t *intent)
         !same_ui_id(intent->media.job_id, review.request.job_id) ||
         intent->media.consumer_generation != review.request.consumer_generation) return AE_STALE;
     switch (review.request.operation) {
+    case APP_MEDIA_PAIR_AUDIO_OPEN:
+        if (!controls.view.pairing.can_open) return AE_STALE;
+        ble_hid_pairing_close();
+        controls.audio_pairing_request_error = bt_audio_pairing_open(BT_AUDIO_PAIRING_DEFAULT_MS);
+        controls.bluetooth = bt_audio_snapshot();
+        controls.audio_pairing_owned = controls.audio_pairing_request_error == ESP_OK;
+        increase(&controls.revision);
+        return controls.audio_pairing_owned ? AE_OK : AE_UNAVAILABLE;
+    case APP_MEDIA_PAIR_AUDIO_CLOSE:
+        if (!controls.view.pairing.can_close) return AE_STALE;
+        bt_audio_pairing_close(); controls.audio_pairing_owned = false;
+        controls.audio_pairing_request_error = ESP_OK; increase(&controls.revision); return AE_OK;
     case APP_MEDIA_RECORD_START_REQUEST:
         if (!controls.view.recording_options.can_start || review.options.profile_id != controls.profile_id ||
             review.options.duration_seconds != controls.view.recording_options.duration_seconds ||
@@ -924,14 +977,17 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
     }
     if (confirmation) {
         if (controls.context.overlay != APP_OVERLAY_CONFIRM) { effect_result(effect, AE_STALE); return true; }
+        bool pairing = controls.review.request.operation == APP_MEDIA_PAIR_AUDIO_OPEN ||
+            controls.review.request.operation == APP_MEDIA_PAIR_AUDIO_CLOSE;
         if (!intent->x) {
             controls.review.valid = controls.prepare_review = false;
-            open_panel(effect, APP_OVERLAY_AUDIO, APP_CONFIRM_NONE);
+            open_panel(effect, pairing ? APP_OVERLAY_MEDIA_OPTIONS : APP_OVERLAY_AUDIO, APP_CONFIRM_NONE);
             return true;
         }
         ae_result_t result = confirm_review(intent);
         effect_result(effect, result);
-        if (result == AE_OK) open_panel(effect, controls.pending_action == APP_MEDIA_PREPARE_STORE ?
+        if (pairing) open_panel(effect, APP_OVERLAY_MEDIA_OPTIONS, APP_CONFIRM_NONE);
+        else if (result == AE_OK) open_panel(effect, controls.pending_action == APP_MEDIA_PREPARE_STORE ?
             APP_OVERLAY_RECORDING_STORAGE : controls.pending_action == APP_MEDIA_QUERY_DELETE ? APP_OVERLAY_RECORDING_DETAIL :
             APP_OVERLAY_RECORDING_START, APP_CONFIRM_NONE);
         rebuild(); return true;
@@ -949,9 +1005,18 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
     if (!valid_identity(request) || !allowed_panel(request->operation)) { effect_result(effect, AE_STALE); return true; }
     ae_result_t result = AE_DENIED;
     switch (request->operation) {
+    case APP_MEDIA_PAIR_AUDIO_OPEN: case APP_MEDIA_PAIR_AUDIO_CLOSE:
+        if (request->operation == APP_MEDIA_PAIR_AUDIO_OPEN ? controls.view.pairing.can_open : controls.view.pairing.can_close) {
+            controls.review = (app_media_review_t){.valid = true, .request = *request};
+            open_panel(effect, APP_OVERLAY_CONFIRM, APP_CONFIRM_AUDIO_PAIR); result = AE_OK;
+        }
+        break;
     case APP_MEDIA_SELECT_CONNECTION:
         if ((unsigned)request->value.connection < APP_MEDIA_CONNECTION_COUNT &&
             controls.view.can_select_connection[request->value.connection]) {
+            if (request->value.connection == APP_MEDIA_CONNECTION_USB && controls.audio_pairing_owned) {
+                bt_audio_pairing_close(); controls.audio_pairing_owned = false;
+            }
             ae_route_t route = connection_route(request->value.connection);
             result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_ROUTE, .route = route});
         }

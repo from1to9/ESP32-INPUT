@@ -450,6 +450,18 @@ AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_operation"] = AUDIO_OBSERVER + [
     ("audio_diagnostics", "log_codec"), ("audio_diagnostics", "board_audio_sdk_operation_name")]
 PATHS.update(AUDIO_DIAGNOSTIC_PATHS)
 AUDIO_ADAPTER_PATHS = {
+    "audio_pairing_startup_name": [("main", "app_main"), ("media_runtime", "app_media_runtime_init"),
+        ("classic", "bt_audio_init"), ("classic", "request_device_name")],
+    "audio_pairing_open_name": MEDIA_INTENT + [("media_controls", "confirm_review"),
+        ("classic", "bt_audio_pairing_open"), ("classic", "request_device_name")],
+    "audio_pairing_open_claim": MEDIA_INTENT + [("media_controls", "confirm_review"),
+        ("classic", "bt_audio_pairing_open"), ("ble", "ble_hid_pairing_claim_classic")],
+    "audio_pairing_open_ready": MEDIA_INTENT + [("media_controls", "confirm_review"),
+        ("classic", "bt_audio_pairing_open"), ("classic", "pairing_ready_locked")],
+    "audio_pairing_le_close": MEDIA_INTENT + [("media_controls", "confirm_review"), ("ble", "ble_hid_pairing_close")],
+    "audio_pairing_close": MEDIA_INTENT + [("media_controls", "confirm_review"), ("classic", "bt_audio_pairing_close")],
+    "audio_pairing_context_close": CORE + [("main", "handle_intent"), ("main", "refresh_media_context"),
+        ("media_controls", "app_media_controls_context"), ("classic", "bt_audio_pairing_close")],
     "audio_select_connection_ready": MANAGEMENT_PATHS["audio_select_connection_resolve"] + [("media_controls", "route_ready")],
     "audio_select_connection_submit_wipe": MANAGEMENT_PATHS["audio_select_connection_submit"] + [("audio_helpers", "ae_secure_zero")],
     "audio_live_start_route": LOCAL_INTENT + [("media_controls", "app_media_controls_handle"),
@@ -474,6 +486,8 @@ for _name, _prefix in {
         "capture_jobs": [("media_controls", "live_start_block"), ("media_controls", "capture_jobs"), ("media_controls", "job_active")],
         "live_job": [("media_controls", "live_start_block"), ("media_controls", "job_active")],
         "usb_settled": [("media_controls", "live_start_block"), ("media_controls", "usb_start_settled")],
+        "pairing_idle": [("media_controls", "rebuild_audio_pairing"), ("media_controls", "idle_controls"), ("media_controls", "local_ready")],
+        "pairing_jobs": [("media_controls", "rebuild_audio_pairing"), ("media_controls", "any_jobs"), ("media_controls", "job_active")],
     }.items():
         AUDIO_ADAPTER_PATHS[f"audio_connection_{_name}_{_leaf}"] = _prefix + _tail
 USB_START_OBSERVER = CORE + [("main", "service_media"), ("media_controls", "app_media_controls_poll"),
@@ -497,6 +511,13 @@ MEDIA_PROCESS = [("media_runtime", "worker"), ("media_runtime", "media_step"),
 MEDIA_START = MEDIA_PROCESS + [("media_runtime", "start_job")]
 MEDIA_SEND = [("media_runtime", "send_audio"), ("audio_manager", "app_audio_submit")]
 AUDIO_RUNTIME_PATHS = {
+    "audio_manager_prepare_busy": ("audio_manager", [("audio_manager", "worker"),
+        ("audio_engine", "ae_poll"), ("audio_engine", "prepare_source"),
+        ("audio_engine", "ae_end_job"), ("audio_helpers", "ae_ring_reset")]),
+    "audio_manager_end_job_stop": ("audio_manager", [("audio_manager", "worker"),
+        ("audio_engine", "ae_poll"), ("audio_engine", "validate_jobs"),
+        ("audio_engine", "ae_end_job"),
+        ("audio_engine", "ae_request_hardware_stop"), ("audio_helpers", "ae_secure_zero")]),
     # These are focused declared paths, not complete manager/engine coverage.
     "audio_manager_playback_capacity": ("audio_manager", [("audio_manager", "worker"),
         ("audio_engine", "ae_playback_capacity"), ("audio_engine", "ae_job_active")]),

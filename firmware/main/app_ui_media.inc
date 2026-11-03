@@ -12,6 +12,7 @@ static size_t s_media_binding_count, s_core_media_bindings;
 static lv_obj_t *s_voice_reject;
 static lv_obj_t *s_media_connections[2], *s_media_connection_state, *s_media_connection_reason;
 static lv_obj_t *s_media_peer, *s_media_link, *s_media_disconnect;
+static lv_obj_t *s_media_pair_open, *s_media_pair_close;
 static lv_obj_t *s_record_profile, *s_record_duration, *s_record_duration_buttons[2];
 static lv_obj_t *s_record_details, *s_record_state, *s_record_reason, *s_record_action, *s_record_cancel[2];
 static lv_obj_t *s_record_rows[APP_MEDIA_ROWS], *s_record_meta[APP_MEDIA_ROWS];
@@ -332,6 +333,7 @@ static void clear_media_panel(void)
     memset(s_record_cancel, 0, sizeof(s_record_cancel));
     memset(s_record_pages, 0, sizeof(s_record_pages));
     s_media_peer = s_media_link = s_media_disconnect = NULL;
+    s_media_pair_open = s_media_pair_close = NULL;
     s_media_connection_state = s_media_connection_reason = NULL;
     s_record_profile = s_record_duration = s_record_details = s_record_state = s_record_reason = NULL;
     s_record_action = s_record_page = s_record_play = s_record_delete = NULL;
@@ -356,12 +358,14 @@ static void create_media_panel(lv_obj_t *body, lv_obj_t *title, app_overlay_t ki
         label_text(title, "Audio connection");
         s_media_connections[0] = button(body, "USB", 0, 0, 224, 56, APP_MEDIA_CONTROL, 0);
         s_media_connections[1] = button(body, "Bluetooth", 232, 0, 224, 56, APP_MEDIA_CONTROL, 0);
-        s_media_connection_state = media_label(body, 72, 32, INK);
-        s_media_connection_reason = media_label(body, 112, 56, MUTED);
-        s_media_peer = media_button(body, "Choose audio device", 0, 184, 456);
-        s_media_link = media_button(body, "Connect", 0, 244, 224);
-        s_media_disconnect = media_button(body, "Disconnect", 232, 244, 224);
-        label_text(media_label(body, 312, 40, MUTED), "Connection selection does not start audio.");
+        s_media_connection_state = media_label(body, 60, 60, INK);
+        lv_label_set_long_mode(s_media_connection_state, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        s_media_connection_reason = media_label(body, 120, 56, MUTED);
+        s_media_pair_open = media_button(body, "Pair audio", 0, 184, 224);
+        s_media_pair_close = media_button(body, "Close pairing", 232, 184, 224);
+        s_media_peer = media_button(body, "Choose audio device", 0, 244, 456);
+        s_media_link = media_button(body, "Connect", 0, 304, 224);
+        s_media_disconnect = media_button(body, "Disconnect", 232, 304, 224);
         button(body, "Back to Audio", 0, 360, 456, 48, APP_CLOSE, 0);
     } else if (kind == APP_OVERLAY_RECORDING_START) {
         label_text(title, "Record");
@@ -451,6 +455,32 @@ static void render_media_panel(void)
         label_text(s_media_connection_reason, !media->known ? "Audio status unavailable." : *media->reason ? media->reason :
             route && *route->reason ? route->reason : bluetooth ? "Select your audio device and connect." :
             connection ? "Connect the USB cable to use audio." : "Choose USB or Bluetooth. Audio stays off until started.");
+        if (bluetooth) {
+            char caption[128];
+            snprintf(caption, sizeof(caption), "Audio name: %s", media->pairing.name_known ? media->pairing.device_name : "unavailable");
+            label_text(s_media_connection_state, caption);
+            const char *state = media->pairing.state == APP_MEDIA_PAIR_PREPARING ? "Preparing" :
+                media->pairing.state == APP_MEDIA_PAIR_DISCOVERABLE ? "Discoverable" :
+                media->pairing.state == APP_MEDIA_PAIR_AUTHENTICATING ? "Finishing pairing" :
+                media->pairing.state == APP_MEDIA_PAIR_COMPLETED ? "Paired" :
+                media->pairing.state == APP_MEDIA_PAIR_EXPIRED ? "Expired" :
+                media->pairing.state == APP_MEDIA_PAIR_ERROR ? "Pairing error" :
+                media->pairing.state == APP_MEDIA_PAIR_CLOSING ? "Closing pairing" :
+                media->pairing.state == APP_MEDIA_PAIR_UNAVAILABLE ? "Unavailable" : "Pairing closed";
+            const char *reason = media->pairing.reason;
+            if (media->pairing.state == APP_MEDIA_PAIR_CLOSED || media->pairing.state == APP_MEDIA_PAIR_COMPLETED) {
+                if (*media->reason) reason = media->reason;
+                else if (media->command_pending) reason = "Updating audio connection...";
+                else if (route && route->connected) reason = "Link connected. Open Mic or play audio on the host.";
+            }
+            if (media->pairing.state == APP_MEDIA_PAIR_PREPARING || media->pairing.state == APP_MEDIA_PAIR_DISCOVERABLE)
+                snprintf(caption, sizeof(caption), "%s / %lus\n%s", state, (unsigned long)media->pairing.remaining_seconds, reason);
+            else snprintf(caption, sizeof(caption), "%s\n%s", state, reason);
+            label_text(s_media_connection_reason, caption);
+        }
+        visible(s_media_pair_open, bluetooth); visible(s_media_pair_close, bluetooth);
+        media_bind(s_media_pair_open, media_request(APP_MEDIA_PAIR_AUDIO_OPEN), bluetooth && media->pairing.can_open && !media->command_pending);
+        media_bind(s_media_pair_close, media_request(APP_MEDIA_PAIR_AUDIO_CLOSE), bluetooth && media->pairing.can_close);
         visible(s_media_peer, bluetooth); visible(s_media_link, bluetooth); visible(s_media_disconnect, bluetooth);
         text(s_media_peer, *media->peer_label ? media->peer_label : "Choose audio device");
         app_media_request_t peer_request = media_request(APP_MEDIA_SELECT_PEER);
@@ -539,6 +569,18 @@ static void render_media_panel(void)
 static void render_media_confirmation(void)
 {
     const app_media_review_t *review = &s_view.media_review;
+    if (s_view.confirmation == APP_CONFIRM_AUDIO_PAIR) {
+        bool open = review->request.operation == APP_MEDIA_PAIR_AUDIO_OPEN;
+        bool valid = review->valid && (open ? s_view.media.pairing.can_open :
+            review->request.operation == APP_MEDIA_PAIR_AUDIO_CLOSE && s_view.media.pairing.can_close);
+        label_text(s_confirm_title, open ? "Pair audio?" : "Close audio pairing?");
+        label_text(s_confirm_detail, !valid ? "This review has expired. Cancel and try again." : open ?
+            "Allow audio pairing for 120 seconds.\nInput pairing will close. Saved hosts stay paired.\nMic and Speaker stay off until separately started." :
+            "Stop accepting new audio pairings.\nA pairing already being completed may finish.\nSaved hosts stay paired.");
+        text(s_confirm_accept, open ? "Pair audio" : "Close pairing");
+        media_bind(s_confirm_accept, review->request, valid);
+        return;
+    }
     bool valid = review->valid &&
         (s_view.confirmation == APP_CONFIRM_RECORDING_START ?
             review->request.operation == APP_MEDIA_RECORD_START_REQUEST && record_options_valid(&review->options) :
@@ -600,6 +642,7 @@ static void sanitize_media(void)
 {
     app_media_view_t *media = &s_view.media;
     media->peer_label[48] = media->reason[96] = 0;
+    media->pairing.device_name[64] = media->pairing.reason[96] = 0;
     for (size_t i = 0; i < APP_MEDIA_ROUTE_COUNT; ++i) media->routes[i].reason[64] = 0;
     sanitize_record_options(&media->recording_options);
     media->recording.reason[96] = media->playback.reason[96] = media->live_capture.reason[96] = media->recordings.reason[96] = 0;

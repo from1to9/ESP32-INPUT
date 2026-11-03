@@ -10,6 +10,7 @@ with tempfile.TemporaryDirectory(prefix="esp32-media-controls-") as directory:
     command = [shutil.which("clang") or "cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wconversion", "-Wshadow", "-pedantic",
                "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(ROOT / "tests/presenter/stubs"),
                "-I", str(ROOT / "components/input_core/include"), "-I", str(ROOT / "components/audio_engine/include"),
+               "-I", str(ROOT / "components/device_settings/include"),
                "-I", str(ROOT / "components/spoken_letters/include"), str(ROOT / "tests/media_controls/test_media_controls.c"),
                str(ROOT / "components/audio_engine/audio_media.c"), "-lm", "-o", str(binary)]
     subprocess.run(command, check=True)

@@ -96,6 +96,7 @@ void ae_request_hardware_stop(ae_engine_t *engine, uint64_t now_ms)
     engine->route_stop_pending = engine->view.route != AE_ROUTE_LOCAL && engine->view.route != AE_ROUTE_OFF;
     engine->codec_running = false;
     engine->view.state = AE_STOPPING;
+    engine->view.hardware_off_confirmed = false;
     engine->view.microphone_muted = engine->view.speaker_muted = true;
     engine->view.capture_gate_open = engine->view.playback_gate_open = false;
     ae_secure_zero(&engine->work_frame, sizeof(engine->work_frame));
@@ -131,7 +132,11 @@ void ae_end_job(ae_engine_t *engine, ae_job_t *job, ae_stop_reason_t reason,
             AE_JOB_COMPLETED : job->view.first_frame_seen ? AE_JOB_PARTIAL : AE_JOB_ERROR;
     }
     if (job->request.kind == AE_PLAYBACK_STREAM && job->route_binding_started) job->view.cleanup_pending = true;
-    if (!ae_jobs_active(engine)) ae_request_hardware_stop(engine, now_ms);
+    if (!ae_jobs_active(engine)) {
+        if (engine->source_prepare_started || engine->codec_prepared || !engine->view.hardware_off_confirmed)
+            ae_request_hardware_stop(engine, now_ms);
+        else engine->view.state = AE_OFF;
+    }
     else if (engine->codec_running) {
         if (!capture_count(engine) && ((engine->active_roles | engine->unmute_pending) & AE_MICROPHONE)) {
             if (!(engine->closing_roles&AE_MICROPHONE)) engine->closing_started_ms[0]=now_ms;
@@ -152,7 +157,7 @@ void ae_safety_stop(ae_engine_t *engine, ae_stop_reason_t reason, uint64_t now_m
     for (unsigned i = 0; i < AE_CONSUMERS_MAX; ++i)
         ae_end_job(engine, &engine->capture[i], reason, AE_PRIVACY, now_ms);
     ae_end_job(engine, &engine->playback, reason, AE_PRIVACY, now_ms);
-    if (engine->codec_prepared || engine->microphone_may_be_active || !engine->view.hardware_off_confirmed)
+    if (engine->source_prepare_started || engine->codec_prepared || engine->microphone_may_be_active || !engine->view.hardware_off_confirmed)
         ae_request_hardware_stop(engine, now_ms);
     ae_refresh_view(engine);
 }
@@ -398,6 +403,7 @@ ae_result_t ae_start(ae_engine_t *engine, const ae_start_request_t *request,
         engine->capture_sequence = AE_FIRST_SEQUENCE; engine->capture_sample_offset = 0;
         engine->codec_prepared = prepared; engine->codec_running = false;
         engine->prepare_stage = prepared ? 2 : 0;
+        engine->source_prepare_started = prepared;
         engine->source_roles = prepared ? engine->source_roles : capture ? AE_MICROPHONE : AE_SPEAKER;
         bool duplex = !prepared && engine->codec_capabilities.full_duplex;
         bool both = false;
@@ -551,6 +557,7 @@ static ae_result_t stop_hardware(ae_engine_t *engine, uint64_t now_ms)
     if (!engine->codec_stop_pending && !engine->route_stop_pending) {
         engine->microphone_may_be_active = false;
         engine->codec_prepared = engine->codec_running = false;
+        engine->source_prepare_started = false;
         engine->control_pending = engine->io_pending = engine->closing_roles = engine->active_roles = 0;
         engine->view.microphone_enabled = engine->view.speaker_enabled = false;
         engine->view.microphone_muted = engine->view.speaker_muted = true;
@@ -659,13 +666,19 @@ static ae_result_t prepare_source(ae_engine_t *engine, uint64_t now_ms)
     switch (engine->prepare_stage) {
     case 0:
         if (engine->view.route == AE_ROUTE_LOCAL) result = AE_OK;
-        else result = engine->dependencies.route.prepare ? engine->dependencies.route.prepare(
-            engine->dependencies.route.context, engine->view.route, &engine->view.format, engine->source_roles,
-            engine->view.audio_generation, &engine->view.route_token) : AE_UNAVAILABLE;
+        else {
+            engine->source_prepare_started = true;
+            result = engine->dependencies.route.prepare ? engine->dependencies.route.prepare(
+                engine->dependencies.route.context, engine->view.route, &engine->view.format, engine->source_roles,
+                engine->view.audio_generation, &engine->view.route_token) : AE_UNAVAILABLE;
+            if (result == AE_BUSY) engine->source_prepare_started = false;
+        }
         break;
     case 1:
         result = playback_binding(engine, now_ms);
         if (result != AE_OK) return result;
+        engine->source_prepare_started = true;
+        engine->view.hardware_off_confirmed = false;
         result = codec->prepare ? codec->prepare(codec->context, &engine->view.format, engine->source_roles,
             engine->view.audio_generation) : AE_UNAVAILABLE;
         if (result == AE_OK) {
@@ -688,6 +701,14 @@ static ae_result_t prepare_source(ae_engine_t *engine, uint64_t now_ms)
     }
     now_ms = after_io(engine, now_ms); validate_jobs(engine, now_ms);
     if (!ae_jobs_active(engine)) return AE_AGAIN;
+    if (engine->prepare_stage == 0 && result == AE_BUSY) {
+        /* Busy rejects preparation without acquiring a transport or codec.
+         * End these starts without quarantining or stopping an unowned source. */
+        for (unsigned i = 0; i < AE_CONSUMERS_MAX; ++i)
+            ae_end_job(engine, &engine->capture[i], AE_STOP_BUSY, AE_BUSY, now_ms);
+        ae_end_job(engine, &engine->playback, AE_STOP_BUSY, AE_BUSY, now_ms);
+        return AE_BUSY;
+    }
     if (result == AE_OK) ++engine->prepare_stage;
     else if (result != AE_AGAIN) return failure(engine, result, now_ms);
     ae_refresh_view(engine); return AE_AGAIN;
@@ -979,9 +1000,11 @@ ae_result_t ae_enable(ae_engine_t *engine, ae_role_t role, bool enabled,
     ae_result_t result = codec_format(engine, format, role);
     if (result != AE_OK) return result;
     if (!engine->dependencies.codec.prepare) return AE_UNAVAILABLE;
+    engine->source_prepare_started = true;
     uint8_t roles = (uint8_t)role;
     for (unsigned i = 0; engine->codec_capabilities.full_duplex && i < engine->codec_capabilities.format_count; ++i)
         if (ae_format_equal(format, &engine->codec_capabilities.formats[i].format) && engine->codec_capabilities.formats[i].roles == 3) roles = 3;
+    engine->view.hardware_off_confirmed = false;
     result = engine->dependencies.codec.prepare(engine->dependencies.codec.context,
         format, roles, engine->view.audio_generation);
     engine->control_pending = result == AE_AGAIN ? 3 : 0; engine->control_value = (uint8_t)role;
@@ -1070,6 +1093,7 @@ ae_result_t ae_recover(ae_engine_t *engine, uint64_t now_ms)
         if (result != AE_OK) return result;
     }
     engine->codec_prepared = engine->codec_running = engine->codec_stop_pending = false;
+    engine->source_prepare_started = false;
     engine->unmute_pending = engine->unmute_cancelled = engine->closing_roles = engine->active_roles = engine->io_pending = engine->control_pending = 0;
     mute_ack(engine, AE_MICROPHONE | AE_SPEAKER, true);
     engine->microphone_may_be_active = engine->clock_fault = false;

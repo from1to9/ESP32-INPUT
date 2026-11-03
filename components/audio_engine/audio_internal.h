@@ -39,6 +39,7 @@ struct ae_engine {
     uint8_t mute_known_roles, unmute_pending, unmute_cancelled;
     bool playback_turn;
     bool codec_prepared, codec_running;
+    bool source_prepare_started; /* Includes pending I/O; AE_BUSY explicitly acquired nothing. */
     bool codec_stop_pending, route_stop_pending;
     bool microphone_may_be_active;
     bool clock_fault;

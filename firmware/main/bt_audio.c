@@ -62,6 +62,8 @@ static struct {
     ae_id_t boot_id;
     uint8_t classic_bonds[BT_AUDIO_CLASSIC_BONDS_MAX][6];
     bool bond_refresh_pending, pairing_claimed, scan_pending, scan_submitted;
+    bool name_pending;
+    uint64_t name_started_us;
     bool scan_expected, security_pending;
     unsigned int security_kind; /* 1 confirmation, 2 legacy PIN, 3 passkey. */
     uint8_t security_peer[6], handshake_peer[6];
@@ -216,6 +218,7 @@ static void watchdog(TimerHandle_t timer)
     portENTER_CRITICAL(&audio_lock);
     if (audio.public.pairing_requested && now >= audio.pairing_deadline_us) {
         audio.public.pairing_requested = false; audio.public.pairing_remaining_ms = 0;
+        audio.public.pairing_expired = true;
         audio.scan_pending = true;
     } else if (audio.public.pairing_requested)
         audio.public.pairing_remaining_ms = (uint32_t)((audio.pairing_deadline_us - now + 999U) / 1000U);
@@ -226,6 +229,8 @@ static void watchdog(TimerHandle_t timer)
         error_locked("Classic pairing completion timeout", ESP_ERR_TIMEOUT, true);
         /* Retain shared admission claim: late bond persistence is uncertain. */
     }
+    if (audio.name_pending && now >= audio.name_started_us && now - audio.name_started_us >= BT_AUDIO_INIT_TIMEOUT_US)
+        audio.public.device_name_error = ESP_ERR_TIMEOUT;
     if (!audio.public.failed && audio.init_pending && now >= audio.init_started_us &&
         now - audio.init_started_us >= BT_AUDIO_INIT_TIMEOUT_US) {
         error_locked("Audio profile initialization timeout", ESP_ERR_TIMEOUT, true);
@@ -240,7 +245,19 @@ static void watchdog(TimerHandle_t timer)
 static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *parameter)
 {
     portENTER_CRITICAL(&audio_lock);
-    if (event == ESP_BT_GAP_AUTH_CMPL_EVT || event == ESP_BT_GAP_REMOVE_BOND_DEV_COMPLETE_EVT) {
+    if (event == ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT && audio.name_pending) {
+        audio.name_pending = false; audio.public.device_name_known = false;
+        audio.public.device_name_error = ESP_FAIL;
+        if (parameter->get_dev_name_cmpl.status == ESP_BT_STATUS_SUCCESS && parameter->get_dev_name_cmpl.name) {
+            size_t length = 0;
+            while (length <= BT_AUDIO_DEVICE_NAME_MAX_BYTES && parameter->get_dev_name_cmpl.name[length]) ++length;
+            if (length && length <= BT_AUDIO_DEVICE_NAME_MAX_BYTES) {
+                memcpy(audio.public.device_name, parameter->get_dev_name_cmpl.name, length);
+                audio.public.device_name[length] = 0;
+                audio.public.device_name_known = true; audio.public.device_name_error = ESP_OK;
+            } else audio.public.device_name_error = ESP_ERR_INVALID_SIZE;
+        }
+    } else if (event == ESP_BT_GAP_AUTH_CMPL_EVT || event == ESP_BT_GAP_REMOVE_BOND_DEV_COMPLETE_EVT) {
         invalidate_locked(true);
         ++audio.bond_revision;
         if (audio.classic_list_revision != UINT64_MAX) ++audio.classic_list_revision;
@@ -250,6 +267,8 @@ static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
             if (audio.public.pairing_handshake_pending && peer_matches(audio.handshake_peer, parameter->auth_cmpl.bda)) {
                 audio.public.pairing_handshake_pending = false;
                 audio.public.pairing_error = parameter->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS ? ESP_OK : ESP_FAIL;
+                audio.public.pairing_completed = parameter->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS;
+                audio.public.pairing_expired = false;
             }
             if (parameter->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
                 audio.public.pairing_requested = false; audio.scan_pending = true;
@@ -268,6 +287,25 @@ static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
         }
     }
     refresh_locked(); portEXIT_CRITICAL(&audio_lock);
+}
+
+/* Informational readback stays on task context. A missing name is explicit
+ * and cannot prevent closing security/discovery or create a guessed HID name. */
+static void request_device_name(void)
+{
+    portENTER_CRITICAL(&audio_lock);
+    bool request = !audio.name_pending;
+    if (request) {
+        audio.name_pending = true; audio.name_started_us = now_us();
+        audio.public.device_name_known = false; audio.public.device_name_error = ESP_OK;
+    }
+    portEXIT_CRITICAL(&audio_lock);
+    if (!request) return;
+    esp_err_t error = esp_bt_gap_get_device_name();
+    if (error != ESP_OK) {
+        portENTER_CRITICAL(&audio_lock); audio.name_pending = false;
+        audio.public.device_name_error = error; portEXIT_CRITICAL(&audio_lock);
+    }
 }
 
 static void service_classic_pairing(void)
@@ -365,7 +403,10 @@ static void service_classic_pairing(void)
         audio.public.discovery_known && !audio.public.discoverable && !audio.scan_pending && !audio.scan_submitted && !audio.public.failed;
     if (release) audio.pairing_claimed = false;
     refresh_locked(); portEXIT_CRITICAL(&audio_lock);
-    if (release) ble_hid_pairing_release_classic();
+    if (release) {
+        ble_hid_pairing_release_classic();
+        portENTER_CRITICAL(&audio_lock); audio.public.pairing_busy = false; portEXIT_CRITICAL(&audio_lock);
+    }
 }
 
 static void complete_command_locked(bt_audio_command_t command, const uint8_t peer[6], esp_err_t error)
@@ -646,6 +687,7 @@ esp_err_t bt_audio_init(void)
     audio.submitted = error == ESP_OK;
     if (error != ESP_OK) error_locked(stage, error, true);
     refresh_locked(); portEXIT_CRITICAL(&audio_lock);
+    if (error == ESP_OK) request_device_name();
     return error;
 #else
     return ESP_ERR_NOT_SUPPORTED;
@@ -660,14 +702,24 @@ bt_audio_snapshot_t bt_audio_snapshot(void)
     return snapshot;
 }
 
+#if AUDIO_PROFILES_SUPPORTED
+static bool pairing_ready_locked(void)
+{
+    return audio.public.initialized && !audio.public.failed && audio.public.classic_bonds_known &&
+        !audio.public.pairing_busy && !audio.public.pairing_handshake_pending &&
+        audio.public.microphone_muted && audio.public.speaker_muted &&
+        (!audio.adapter.prepared || audio.adapter.stopped);
+}
+#endif
+
 esp_err_t bt_audio_pairing_open(uint32_t duration_ms)
 {
     if (!AUDIO_PROFILES_SUPPORTED) return ESP_ERR_NOT_SUPPORTED;
     if (!duration_ms || duration_ms > BT_AUDIO_PAIRING_MAX_MS) return ESP_ERR_INVALID_ARG;
 #if AUDIO_PROFILES_SUPPORTED
     portENTER_CRITICAL(&audio_lock);
-    bool ready = audio.public.initialized && !audio.public.failed && audio.public.classic_bonds_known &&
-        !audio.pairing_claimed && !audio.public.pairing_handshake_pending;
+    bool ready = pairing_ready_locked();
+    if (!audio.public.failed && !audio.public.pairing_busy) audio.public.pairing_error = ESP_OK;
     portEXIT_CRITICAL(&audio_lock);
     if (!ready || !ble_hid_pairing_claim_classic()) return ESP_ERR_INVALID_STATE;
     int count = btc_storage_get_num_all_bond_devices();
@@ -676,12 +728,20 @@ esp_err_t bt_audio_pairing_open(uint32_t duration_ms)
         return count < 0 ? ESP_ERR_INVALID_STATE : ESP_ERR_NO_MEM;
     }
     portENTER_CRITICAL(&audio_lock);
+    /* Audio preparation can race the SDK capacity query; both admissions commit
+     * under this lock, so a queued local or remote start cannot cross a window. */
+    if (!pairing_ready_locked()) {
+        portEXIT_CRITICAL(&audio_lock); ble_hid_pairing_release_classic(); return ESP_ERR_INVALID_STATE;
+    }
     audio.pairing_claimed = true;
+    audio.public.pairing_busy = true;
     audio.public.pairing_requested = true; audio.public.pairing_remaining_ms = duration_ms;
+    audio.public.pairing_completed = audio.public.pairing_expired = false;
     audio.public.pairing_error = ESP_OK;
     audio.pairing_deadline_us = now_us() + (uint64_t)duration_ms * 1000U;
     audio.scan_pending = true;
     portEXIT_CRITICAL(&audio_lock);
+    request_device_name();
     return ESP_OK;
 #else
     return ESP_ERR_NOT_SUPPORTED;
@@ -691,6 +751,7 @@ esp_err_t bt_audio_pairing_open(uint32_t duration_ms)
 void bt_audio_pairing_close(void)
 {
     portENTER_CRITICAL(&audio_lock);
+    audio.public.pairing_expired = false;
     audio.public.pairing_requested = false; audio.public.pairing_remaining_ms = 0;
     audio.scan_pending = true;
     portEXIT_CRITICAL(&audio_lock);
@@ -716,6 +777,7 @@ esp_err_t bt_audio_set_policy(uint64_t generation, bt_audio_route_t route,
         (route == BT_AUDIO_OFF && !speaker_muted)) return ESP_ERR_INVALID_ARG;
     portENTER_CRITICAL(&audio_lock);
     bool ready = audio.public.initialized && !audio.public.failed && generation == audio.public.generation;
+    if (audio.public.pairing_busy && (!microphone_muted || !speaker_muted)) ready = false;
     if (route == BT_AUDIO_HFP) ready = ready && audio.public.hfp_connected &&
         audio.public.hfp_audio_connected && audio.public.hfp_format_known && audio.public.classic_hfp_peer_bonded;
     if (route == BT_AUDIO_A2DP) ready = ready && audio.public.a2dp_connected && audio.public.a2dp_format_known &&
@@ -1001,7 +1063,8 @@ static ae_result_t port_prepare(void *context, ae_route_t route, const ae_format
     ae_route_token_t token = token_locked(route);
     ae_format_t actual = format_locked(route);
     ae_result_t result = AE_OK;
-    if (!same_token(expected, &token)) result = AE_STALE;
+    if (audio.public.pairing_busy) result = AE_BUSY;
+    else if (!same_token(expected, &token)) result = AE_STALE;
     else if (!route_live_locked(route)) result = AE_UNAVAILABLE;
     else if (!same_format(format, &actual)) result = AE_NOT_SUPPORTED;
     else if (audio.adapter.generation == generation &&

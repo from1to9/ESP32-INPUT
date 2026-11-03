@@ -27,7 +27,15 @@ def main():
         subprocess.run(command, check=True)
         for scenario in ("normal", "init-timeout", "init-event-failure", "command-timeout",
                          "command-failure", "allocation-failure", "registration-failure", "stack-unready",
+                         "audio-exclusion", "retry-capacity", "name-normal", "name-invalid", "name-missing", "name-event-failure", "name-submit-failure", "name-timeout",
                          "pairing", "pairing-expiry", "pairing-timeout", "discovery-timeout", "playback-binding"):
+            subprocess.run([str(binary), scenario], check=True)
+        composition = [part for part in command if part != str(SUITE / "test_bt_audio.c")]
+        composition += [str(SUITE / "engine_pairing_transport.c"), str(SUITE / "test_engine_pairing.c")]
+        composition += [str(ROOT / "components/audio_engine" / name) for name in
+                        ("audio_engine.c", "audio_media.c", "audio_recording.c")]
+        subprocess.run(composition, check=True)
+        for scenario in ("before-start", "before-prepare", "owner-loss", "privacy"):
             subprocess.run([str(binary), scenario], check=True)
         subprocess.run(command + ["-DCONFIG_BT_CLASSIC_ENABLED=0"], check=True)
         subprocess.run([str(binary), "unsupported"], check=True)

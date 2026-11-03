@@ -19,6 +19,7 @@ extern "C" {
 #define BT_AUDIO_PAIRING_MAX_MS 300000U
 #define BT_AUDIO_CLASSIC_BONDS_MAX 32U
 #define BT_AUDIO_PEER_NAME_MAX_BYTES 64U
+#define BT_AUDIO_DEVICE_NAME_MAX_BYTES 64U
 
 typedef struct {
     uint8_t address[6];           /* Actual saved BR/EDR address, never a HID key. */
@@ -99,6 +100,12 @@ typedef struct {
     uint8_t classic_bond_capacity;
     bool classic_hfp_peer_bonded;
     bool classic_a2dp_peer_bonded;
+    bool device_name_known;       /* Actual Classic GAP cache readback, not the HID name. */
+    char device_name[BT_AUDIO_DEVICE_NAME_MAX_BYTES + 1U];
+    esp_err_t device_name_error;
+    bool pairing_completed;      /* Matching authentication, not a profile or PCM stream. */
+    bool pairing_expired;
+    bool pairing_busy;           /* Held until Classic releases shared admission after closure/auth. */
     bool pairing_requested;
     uint32_t pairing_remaining_ms;
     bool discovery_known;       /* SDK GAP cache evidence, not radio readback. */

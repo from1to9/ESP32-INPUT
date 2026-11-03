@@ -126,6 +126,8 @@ typedef struct {
 typedef struct {
     void *context;
     ae_result_t (*capabilities)(void *, ae_route_t, ae_route_capabilities_t *);
+    /* AE_BUSY rejects preparation without acquiring a reservation or I/O.
+     * The engine ends that start without calling stop on an unowned route. */
     ae_result_t (*prepare)(void *, ae_route_t, const ae_format_t *, uint8_t roles,
                            uint64_t generation, const ae_route_token_t *expected);
     ae_result_t (*capture)(void *, ae_route_t, const ae_frame_t *);

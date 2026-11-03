@@ -19,8 +19,12 @@ The transport never initializes/enables/disables those singletons, opens I2S or
 a codec, changes a device name, automatically pairs or starts capture.
 `ble_hid_init` is the current shared lifecycle owner: it enables BTDM when
 Classic is configured, and retains BLE mode for a BLE-only image. The audio
-module owns Classic GAP/security and bounded discoverability; the shared
-settings owner supplies the Classic device name.
+module owns Classic GAP/security and bounded discoverability. Its device name
+comes from asynchronous Classic GAP cache readback at initialization and each
+explicit pairing window. Read failure/timeout leaves the name unavailable and
+does not fail audio or prevent closing pairing. The application currently has no
+Classic name writer: the Classic name can differ from the separately configured
+HID name. Neither a GAP name nor discovery cache observation proves radio receipt.
 BLE HID readiness is unrelated to either Classic profile's readiness.
 
 The shared owner must enable Classic A2DP, HFP client, HFP HCI audio and WBS,
@@ -57,6 +61,67 @@ refreshed from the actual Classic SDK list, independently of HID identity.
 Unverified/unbonded peers cannot receive microphone PCM or supply playback.
 Legacy PIN/passkey-entry requests are rejected. SSP Just Works has no MITM
 claim, no numeric-comparison UI and no inferred nearby-host list.
+
+Audio → Bluetooth exposes **Pair audio** and **Close pairing**, each with a local
+confirmation. Pair audio closes LE admission, then requests the existing 120-second
+Classic window; it preserves all saved bonds. The page distinguishes preparing,
+SDK-confirmed discoverability with a countdown, finishing authentication,
+authentication completed, expiry and failure. Authentication completed does not
+mean a profile or PCM stream is ready. Lock, screen-off, leaving Audio mode or
+selecting USB closes a window opened by this coordinator; an already admitted
+handshake still follows the transport's existing completion rule.
+Closing denies new admission immediately, but remains visible as closing and
+cannot reopen until the GAP owner confirms non-discoverability and actually
+releases shared admission. Only a capacity rejection from opening a window is
+labelled full; asynchronous security errors retain a general failure message.
+
+Pairing requires idle, hardware-off audio. Mic/Speaker start waits until the
+pairing window and admitted handshake end, then still requires the actual
+negotiated role, format and Classic peer identity. An empty, disconnected idle
+profile selection may yield to the other ready Bluetooth profile; an existing
+different peer, an active consumer or unconfirmed hardware-off still blocks it.
+The retained audio-owner peer is checked even if the transport already cleared
+its disconnected peer. Shared transport preparation and the legacy policy entry
+point reject audio activation while shared Classic admission is held, including
+pending authentication and closure. Pairing opening rechecks audio idleness under
+the same lock after querying SDK capacity, so queued remote/local starts and
+pairing cannot both be admitted.
+An engine start rejected as busy during transport preparation ends with a busy
+job error, without codec preparation, quarantine or a stop for an unowned
+transport. Closing pairing permits a fresh, separately authorized start.
+Current transport faults take precedence over an older window-opening error.
+A new opening attempt clears a previous nonfatal pairing error; fatal transport
+faults remain latched. The coordinator copies the actual post-attempt snapshot.
+Preparation ownership is recorded before authority/privacy rechecks, so a
+simultaneous revocation retains its own reason without stopping an unowned
+source. An ordinary busy rejection uses the distinct busy stop reason.
+Submitting codec preparation revokes the previous hardware-off confirmation.
+Privacy cleanup includes pending preparation even without an active job, and
+hardware-off becomes confirmed only after the full stop acknowledgement.
+HFP Connect uses actual SLC completion before requesting SCO. A2DP Speaker waits
+for the host to supply a decoded audio stream. Neither action grants capture.
+
+### Device acceptance
+
+Use a candidate built with the pinned target configuration; coordinate flashing
+and serial ownership separately. Host tests and UI renders do not qualify radio,
+host compatibility, acoustic output or microphone capture.
+
+1. Keep existing HID pairings. Select Audio → Bluetooth, confirm Pair audio and
+   search on a Classic-capable host for the displayed audio name. Check preparing
+   versus discoverable/countdown, cancel, expiry and reopen without bond loss.
+2. Complete pairing; verify the saved Classic peer and actual profile link. Check
+   that pairing alone starts neither Mic nor Speaker. Reconnect an existing peer
+   with Connect; HFP must wait for actual SLC and SCO/format readiness.
+3. Select the device as the host microphone, open its recording stream, then
+   explicitly Start mic. Record and listen to captured speech. Stop/mute and
+   verify host capture stops; a ready label alone is insufficient.
+4. Start host playback to the device, explicitly Start speaker and listen to the
+   physical output. Verify Speaker never enables Mic. Exercise idle HFP-to-A2DP
+   and A2DP-to-HFP role changes, retaining different-peer and active-job barriers.
+5. Check lock, screen-off, leaving Audio and USB selection close new admission.
+   Return to USB and verify the existing independent Mic/Speaker flows. Record
+   host OS, actual profile/format, observed results and any untested step.
 
 The upstream pinned SDK auto-accepts Just Works before notifying the app. The
 reviewed [SDK patch](../patches/esp-idf-classic-pairing-admission.patch) routes

@@ -1,6 +1,83 @@
 // SPDX-License-Identifier: Apache-2.0
+static void audio_pairing_checks(void)
+{
+    app_view_t original = s_state;
+    s_state.mode = INPUT_AUDIO; s_state.overlay = APP_OVERLAY_MEDIA_OPTIONS;
+    s_state.locked = s_state.screen_off = s_state.remote_owned = false;
+    ui_fixture_media(&s_state); ++s_state.ui_revision;
+    screenshot("audio-pair-hidden-usb");
+    assert(!find_control(lv_screen_active(), "Pair audio"));
+    s_state.media.connection = APP_MEDIA_CONNECTION_BLUETOOTH; s_state.media.route = APP_MEDIA_ROUTE_HFP;
+    s_state.media.pairing = (app_media_pairing_view_t){.state = APP_MEDIA_PAIR_CLOSED, .can_open = true, .name_known = true};
+    strcpy(s_state.media.pairing.device_name, "Classic Audio");
+    strcpy(s_state.media.pairing.reason, "Pair audio first; input pairing is separate.");
+    screenshot("audio-pair-closed");
+    assert(has_visible_label(lv_screen_active(), "Audio name: Classic Audio"));
+    assert_rect(control("Pair audio"), 12, 248, 224, 48);
+    assert_rect(control("Close pairing"), 244, 248, 224, 48);
+    clear_intents(); tap_control("Pair audio");
+    app_media_request_t request = last_action(APP_MEDIA_CONTROL)->media;
+    assert(request.operation == APP_MEDIA_PAIR_AUDIO_OPEN && s_state.media.pairing.state == APP_MEDIA_PAIR_CLOSED);
+    s_state.media_review = (app_media_review_t){.valid = true, .request = request};
+    s_state.overlay = APP_OVERLAY_CONFIRM; s_state.confirmation = APP_CONFIRM_AUDIO_PAIR; ++s_state.ui_revision;
+    screenshot("audio-pair-open-review");
+    clear_intents(); tap_control("Pair audio");
+    assert(last_action(APP_CONFIRM)->media.operation == APP_MEDIA_PAIR_AUDIO_OPEN && last_action(APP_CONFIRM)->x == 1);
+    clear_intents(); pointer(356, 448, true); ++s_state.media_review.request.resource_revision; render(); pointer(356, 448, false);
+    assert(action_count(APP_CONFIRM) == 0);
+    s_state.overlay = APP_OVERLAY_MEDIA_OPTIONS; ++s_state.ui_revision;
+    s_state.media.pairing.can_open = false; s_state.media.pairing.can_close = true;
+    s_state.media.routes[APP_MEDIA_ROUTE_HFP].can_connect = false;
+    s_state.media.pairing.state = APP_MEDIA_PAIR_PREPARING; s_state.media.pairing.remaining_seconds = 120;
+    strcpy(s_state.media.pairing.reason, "Preparing audio discoverability...");
+    screenshot("audio-pair-preparing");
+    assert(has_visible_label(lv_screen_active(), "Preparing / 120s\nPreparing audio discoverability..."));
+    s_state.media.pairing.state = APP_MEDIA_PAIR_DISCOVERABLE;
+    strcpy(s_state.media.pairing.reason, "Choose this device in your host's Bluetooth settings.");
+    screenshot("audio-pair-discoverable");
+    audio_assert_text_fits("Discoverable / 120s\nChoose this device in your host's Bluetooth settings.");
+    clear_intents(); tap_control("Connect"); assert(action_count(APP_MEDIA_CONTROL) == 0);
+    clear_intents(); tap_control("Close pairing");
+    request = last_action(APP_MEDIA_CONTROL)->media; assert(request.operation == APP_MEDIA_PAIR_AUDIO_CLOSE);
+    s_state.media_review = (app_media_review_t){.valid = true, .request = request};
+    s_state.overlay = APP_OVERLAY_CONFIRM; s_state.confirmation = APP_CONFIRM_AUDIO_PAIR; ++s_state.ui_revision;
+    screenshot("audio-pair-close-review");
+    clear_intents(); tap_control("Close pairing"); assert(last_action(APP_CONFIRM)->media.operation == APP_MEDIA_PAIR_AUDIO_CLOSE);
+    s_state.overlay = APP_OVERLAY_MEDIA_OPTIONS; ++s_state.ui_revision;
+    s_state.media.pairing.state = APP_MEDIA_PAIR_AUTHENTICATING;
+    strcpy(s_state.media.pairing.reason, "Finishing audio pairing; audio has not started.");
+    screenshot("audio-pair-authenticating");
+    s_state.media.pairing.state = APP_MEDIA_PAIR_COMPLETED; s_state.media.pairing.can_close = false;
+    s_state.media.routes[APP_MEDIA_ROUTE_HFP].can_connect = true;
+    strcpy(s_state.media.pairing.reason, "Paired. Open Mic or play audio on the host.");
+    screenshot("audio-pair-completed");
+    s_state.media.pairing.state = APP_MEDIA_PAIR_EXPIRED; s_state.media.pairing.can_open = true;
+    strcpy(s_state.media.pairing.reason, "Audio pairing expired. Open a new window to retry.");
+    screenshot("audio-pair-expired");
+    s_state.media.pairing.state = APP_MEDIA_PAIR_CLOSING; s_state.media.pairing.can_open = false;
+    s_state.media.routes[APP_MEDIA_ROUTE_HFP].can_connect = false;
+    strcpy(s_state.media.pairing.reason, "Closing audio discoverability. Wait before pairing again.");
+    screenshot("audio-pair-closing");
+    clear_intents(); tap_control("Pair audio"); assert(action_count(APP_MEDIA_CONTROL) == 0);
+    s_state.media.pairing.state = APP_MEDIA_PAIR_ERROR;
+    s_state.media.routes[APP_MEDIA_ROUTE_HFP].can_connect = true;
+    strcpy(s_state.media.pairing.reason, "Bluetooth pairings are full; existing hosts are preserved.");
+    screenshot("audio-pair-capacity");
+    audio_assert_text_fits("Pairing error\nBluetooth pairings are full; existing hosts are preserved.");
+    s_state.media.pairing.name_known = false; screenshot("audio-pair-name-unavailable");
+    assert(has_visible_label(lv_screen_active(), "Audio name: unavailable"));
+    s_state.media.pairing.name_known = true;
+    memset(s_state.media.pairing.device_name, 'W', 64); s_state.media.pairing.device_name[64] = 0;
+    screenshot("audio-pair-long-name");
+    char long_name[80]; snprintf(long_name, sizeof(long_name), "Audio name: %s", s_state.media.pairing.device_name);
+    lv_obj_t *name = find_visible_label(lv_screen_active(), long_name);
+    assert(name && !strcmp(lv_label_get_text(name), long_name) && lv_label_get_long_mode(name) == LV_LABEL_LONG_SCROLL_CIRCULAR);
+    s_state = original; render(); clear_intents();
+}
+
 static void media_checks(void)
 {
+    audio_pairing_checks();
     audio_core_checks();
     audio_level_checks();
     app_view_t original = s_state;

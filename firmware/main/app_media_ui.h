@@ -60,7 +60,7 @@ typedef enum {
     APP_MEDIA_PLAYBACK_STOP, APP_MEDIA_SPEECH_START, APP_MEDIA_SPEECH_STOP,
     APP_MEDIA_SPEECH_REJECT, APP_MEDIA_SPEECH_CONFIRM,
     APP_MEDIA_LIVE_START, APP_MEDIA_LIVE_STOP, APP_MEDIA_SELECT_PEER,
-    APP_MEDIA_SELECT_CONNECTION
+    APP_MEDIA_SELECT_CONNECTION, APP_MEDIA_PAIR_AUDIO_OPEN, APP_MEDIA_PAIR_AUDIO_CLOSE
 } app_media_operation_t;
 
 typedef struct {
@@ -151,6 +151,18 @@ typedef struct {
     char profile[33];
     char reason[97];
 } app_media_speech_view_t;
+typedef enum {
+    APP_MEDIA_PAIR_UNAVAILABLE, APP_MEDIA_PAIR_CLOSED, APP_MEDIA_PAIR_PREPARING,
+    APP_MEDIA_PAIR_DISCOVERABLE, APP_MEDIA_PAIR_AUTHENTICATING,
+    APP_MEDIA_PAIR_COMPLETED, APP_MEDIA_PAIR_EXPIRED, APP_MEDIA_PAIR_ERROR, APP_MEDIA_PAIR_CLOSING
+} app_media_pair_state_t;
+typedef struct {
+    app_media_pair_state_t state;
+    bool can_open, can_close, name_known;
+    uint32_t remaining_seconds;
+    char device_name[65];
+    char reason[97];
+} app_media_pairing_view_t;
 typedef struct {
     bool known, command_pending;
     uint64_t management_generation, audio_generation, resource_revision;
@@ -175,6 +187,7 @@ typedef struct {
     bool connection_known;
     app_media_connection_t connection;
     bool can_select_connection[APP_MEDIA_CONNECTION_COUNT];
+    app_media_pairing_view_t pairing;
     /* Read-only fresh local PCM telemetry, never an action revision or proof
      * of host recording. Unknown/stale observations carry no displayed level. */
     app_media_mic_level_t microphone_level;

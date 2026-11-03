@@ -564,7 +564,8 @@ static void on_action(lv_event_t *event)
         binding->action == APP_BLUETOOTH_TARGET_CONTROL || binding->action == APP_API_INPUT_ALLOW_SET) { connection_action(binding->object); return; }
     if (binding->action == APP_MEDIA_CONTROL || binding->object == s_voice_confirm ||
         (binding->action == APP_CONFIRM && binding->value == 1 &&
-         s_view.confirmation >= APP_CONFIRM_RECORDING_START && s_view.confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD)) {
+         ((s_view.confirmation >= APP_CONFIRM_RECORDING_START && s_view.confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD) ||
+          s_view.confirmation == APP_CONFIRM_AUDIO_PAIR))) {
         media_action(binding->object, -1);
         return;
     }
@@ -2217,7 +2218,8 @@ static void render_device(const app_view_t *view, const char *link)
     default: break;
     }
     if (view->confirmation == APP_CONFIRM_REMOTE) { render_remote_review(); return; }
-    if (view->confirmation >= APP_CONFIRM_RECORDING_START && view->confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD) {
+    if ((view->confirmation >= APP_CONFIRM_RECORDING_START && view->confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD) ||
+        view->confirmation == APP_CONFIRM_AUDIO_PAIR) {
         render_media_confirmation();
         return;
     }

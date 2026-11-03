@@ -20,7 +20,8 @@ typedef enum { AE_DISCONNECT_STOP, AE_DISCONNECT_CONTINUE_LOCAL } ae_disconnect_
 typedef enum { AE_STOP_REQUESTED, AE_STOP_CANCEL_KEEP, AE_STOP_CANCEL_DISCARD,
     AE_STOP_DURATION, AE_STOP_BYTES, AE_STOP_OWNER_LOST, AE_STOP_CONSENT,
     AE_STOP_PRIVACY, AE_STOP_INDICATOR, AE_STOP_OVERFLOW, AE_STOP_IO,
-    AE_STOP_START_TIMEOUT, AE_STOP_UNDERRUN, AE_STOP_TIME, AE_STOP_MAINTENANCE } ae_stop_reason_t;
+    AE_STOP_START_TIMEOUT, AE_STOP_UNDERRUN, AE_STOP_TIME, AE_STOP_MAINTENANCE,
+    AE_STOP_BUSY } ae_stop_reason_t;
 
 /* Trusted coordinator admission, not a wire authorization token. Every grant
  * is rechecked through authority below at activation and while running.

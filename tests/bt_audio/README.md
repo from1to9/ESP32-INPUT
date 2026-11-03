@@ -18,6 +18,13 @@ It also covers bounded Classic pairing, fresh shared-capacity exhaustion,
 cross-profile admission denial, window expiry, legacy PIN/passkey rejection,
 retention of an uncertain handshake guard, discovery-verification timeout and
 the unavailable unpatched-SDK build.
+The engine/transport composition uses both production owners and SDK/codec
+boundary models. Pairing before start or before preparation must end the start
+as busy without codec activation or quarantine, and a fresh request after
+closure must run. It also checks prepared-audio rejection of pairing and the
+capacity-query/preparation interleaving.
+Session loss and privacy revocation during the same rejection preserve their
+actual job errors, leave hardware off and permit a fresh authorized request.
 `playback-binding` additionally verifies immutable consumer stamping, partial
 and queued RX flush, sequence/offset reset, idempotent binding, old-close and
 closed-consumer rejection, capture preservation and a callback interrupted

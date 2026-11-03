@@ -17,7 +17,8 @@ static app_media_local_request_t submitted;
 static unsigned submissions, confirmations, rejections;
 static struct { bt_audio_command_t command; uint64_t generation, bond_revision, token; uint8_t peer[6]; } links[8];
 static unsigned link_count;
-static esp_err_t link_result = ESP_OK;
+static esp_err_t link_result = ESP_OK, pairing_result = ESP_OK;
+static unsigned pairing_opens, pairing_closes, le_pairing_closes;
 static uint64_t next_link_token = 100;
 static ae_result_t submit_result = AE_OK;
 static bool snapshot_available = true;
@@ -39,6 +40,16 @@ bool app_media_runtime_snapshot(app_media_snapshot_t *out) { if (snapshot_availa
 bool app_recording_store_snapshot(app_recording_store_snapshot_t *out)
 { if (store_snapshot_available) *out = disk; return store_snapshot_available; }
 board_recording_flash_status_t board_recording_flash_status(void) { return physical; }
+void ble_hid_pairing_close(void) { ++le_pairing_closes; }
+esp_err_t bt_audio_pairing_open(uint32_t duration)
+{
+    assert(duration == BT_AUDIO_PAIRING_DEFAULT_MS && le_pairing_closes == pairing_opens + 1U);
+    ++pairing_opens;
+    bluetooth.pairing_error = ESP_OK;
+    if (pairing_result == ESP_OK) { bluetooth.pairing_busy = bluetooth.pairing_requested = true; bluetooth.pairing_remaining_ms = duration; bluetooth.pairing_completed = bluetooth.pairing_expired = false; }
+    return pairing_result;
+}
+void bt_audio_pairing_close(void) { ++pairing_closes; bluetooth.pairing_requested = false; }
 bt_audio_snapshot_t bt_audio_snapshot(void) { return bluetooth; }
 void bt_audio_copy_bond_list(bt_audio_bond_list_t *out) { assert(out); *out = bonds; }
 esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t revision, bt_audio_command_t command,
@@ -123,6 +134,80 @@ static void complete(ae_result_t result)
     owner.request_token = submitted.token; owner.result = result; owner.result_ready = true; owner.busy = false;
     poll_at(controls.now_ms + 10);
 }
+static void pairing_setup(void)
+{
+    setup(); context.overlay = APP_OVERLAY_MEDIA_OPTIONS; owner.audio.route = AE_ROUTE_HFP_HF;
+    bluetooth = (bt_audio_snapshot_t){.supported = true, .initialized = true, .classic_bonds_known = true,
+        .device_name_known = true};
+    strcpy(bluetooth.device_name, "Classic Audio"); poll_at(1010);
+    assert(view.media.pairing.can_open && !strcmp(view.media.pairing.device_name, "Classic Audio"));
+}
+static app_media_controls_effect_t pair_confirm(app_media_operation_t operation)
+{
+    app_intent_t request = intent(operation); app_media_controls_effect_t effect = handle(request);
+    assert(effect.open_overlay && effect.confirmation == APP_CONFIRM_AUDIO_PAIR);
+    apply_effect(effect);
+    request = intent(operation); request.action = APP_CONFIRM; request.x = 1;
+    effect = handle(request); apply_effect(effect); poll_at(controls.now_ms + 1U); return effect;
+}
+static void test_pairing_window(void)
+{
+    pairing_setup(); pair_confirm(APP_MEDIA_PAIR_AUDIO_OPEN);
+    assert(pairing_opens == 1 && !submissions && !link_count);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_PREPARING && view.media.pairing.can_close);
+    assert(view.media.pairing.remaining_seconds == 120);
+    bluetooth.discovery_known = true; bluetooth.discoverable = true; poll_at(1020);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_DISCOVERABLE && !view.media.pairing.can_open);
+    assert(!view.media.routes[APP_MEDIA_ROUTE_HFP].can_connect);
+    context.overlay = APP_OVERLAY_NONE; poll_at(1021);
+    assert(!view.media.microphone.can_start && !view.media.speaker.can_start);
+    context.overlay = APP_OVERLAY_MEDIA_OPTIONS; poll_at(1022);
+    app_media_controls_effect_t effect = handle(intent(APP_MEDIA_PAIR_AUDIO_CLOSE)); apply_effect(effect);
+    uint64_t revision = view.media.resource_revision;
+    bluetooth.pairing_remaining_ms = 110999; poll_at(1030);
+    assert(view.media.resource_revision == revision && view.media.pairing.remaining_seconds == 111);
+    app_intent_t close = intent(APP_MEDIA_PAIR_AUDIO_CLOSE); close.action = APP_CONFIRM; close.x = 1;
+    effect = handle(close); apply_effect(effect); poll_at(1031);
+    assert(pairing_closes == 1 && view.media.pairing.state == APP_MEDIA_PAIR_CLOSING && !view.media.pairing.can_open);
+    bluetooth.pairing_busy = bluetooth.discoverable = false; poll_at(1032);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_CLOSED && view.media.pairing.can_open);
+    assert(!submissions && !link_count);
+}
+static void test_pairing_outcomes(void)
+{
+    pairing_setup(); bluetooth.device_name_known = false; poll_at(1020);
+    assert(!view.media.pairing.name_known && !*view.media.pairing.device_name && view.media.pairing.can_open);
+    pairing_result = ESP_ERR_NO_MEM; pair_confirm(APP_MEDIA_PAIR_AUDIO_OPEN);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_ERROR && strstr(view.media.pairing.reason, "full"));
+    pairing_result = ESP_OK; pair_confirm(APP_MEDIA_PAIR_AUDIO_OPEN);
+    bluetooth.pairing_handshake_pending = true; poll_at(1030);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_AUTHENTICATING);
+    bluetooth.pairing_busy = bluetooth.pairing_handshake_pending = bluetooth.pairing_requested = false;
+    bluetooth.pairing_completed = true; poll_at(1031);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_COMPLETED && !submissions);
+    bluetooth.pairing_completed = false; bluetooth.pairing_expired = true; poll_at(1032);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_EXPIRED && view.media.pairing.can_open);
+}
+static void test_pairing_context_and_stale(void)
+{
+    pairing_setup(); app_intent_t request = intent(APP_MEDIA_PAIR_AUDIO_OPEN);
+    request.media.resource_revision++; handle(request); assert(!le_pairing_closes && !pairing_opens);
+    bluetooth.control_inflight = true; poll_at(1011); assert(!view.media.pairing.can_open);
+    bluetooth.control_inflight = false; poll_at(1012);
+    owner.audio.hardware_off_confirmed = false; poll_at(1020); assert(!view.media.pairing.can_open);
+    owner.audio.hardware_off_confirmed = true; poll_at(1021);
+    app_media_controls_effect_t effect = handle(intent(APP_MEDIA_PAIR_AUDIO_OPEN)); apply_effect(effect);
+    owner.audio.revision++; poll_at(1022);
+    request = intent(APP_MEDIA_PAIR_AUDIO_OPEN); request.action = APP_CONFIRM; request.x = 1;
+    effect = handle(request); apply_effect(effect); assert(!pairing_opens && !le_pairing_closes);
+    pair_confirm(APP_MEDIA_PAIR_AUDIO_OPEN);
+    context.locked = true; poll_at(1030); assert(pairing_closes == 1);
+    context.locked = false; context.mode = INPUT_MOUSE; poll_at(1031); assert(pairing_closes == 1);
+    context.mode = INPUT_AUDIO; owner.audio.route = AE_ROUTE_USB_UAC; poll_at(1032);
+    assert(!view.media.pairing.can_open && !view.media.pairing.can_close);
+    handle(intent(APP_MEDIA_PAIR_AUDIO_OPEN)); assert(pairing_opens == 1);
+}
+
 static void test_review_and_quota(void)
 {
     setup(); assert(view.recording_storage.capacity_known && view.recording_storage.free_bytes == 524288);
@@ -280,6 +365,69 @@ static void test_connection_observed_completion(void)
     snapshot_available = false; poll_at(1060);
     assert(!view.media.connection_known && !view.media.can_select_connection[APP_MEDIA_CONNECTION_USB] &&
         !view.media.can_select_connection[APP_MEDIA_CONNECTION_BLUETOOTH]);
+}
+static void test_bluetooth_stream_after_idle_selection(void)
+{
+    setup(); distinct_routes = true;
+    owner.audio.route = AE_ROUTE_HFP_HF;
+    routes_by_id[AE_ROUTE_HFP_HF] = (ae_route_capabilities_t){.implemented = true, .available = true, .reason = AE_UNAVAILABLE};
+    routes_by_id[AE_ROUTE_A2DP_SINK] = route; routes_by_id[AE_ROUTE_A2DP_SINK].capture = false;
+    context.overlay = APP_OVERLAY_NONE; poll_at(1010);
+    assert(view.media.speaker.can_start);
+    app_intent_t start = intent(APP_MEDIA_LIVE_START); start.media.value.role.role = APP_MEDIA_SPEAKER;
+    handle(start); assert(submissions == 1 && submitted.action == APP_MEDIA_START && submitted.route == AE_ROUTE_A2DP_SINK);
+}
+static void test_bluetooth_microphone_after_idle_selection(void)
+{
+    setup(); distinct_routes = true; owner.audio.route = AE_ROUTE_A2DP_SINK;
+    routes_by_id[AE_ROUTE_A2DP_SINK] = (ae_route_capabilities_t){.implemented = true, .reason = AE_UNAVAILABLE};
+    routes_by_id[AE_ROUTE_HFP_HF] = route; context.overlay = APP_OVERLAY_NONE; poll_at(1010);
+    assert(view.media.microphone.can_start);
+    routes_by_id[AE_ROUTE_A2DP_SINK].token.peer_id.bytes[0] = 99; poll_at(1011);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_PEER_MISMATCH);
+    routes_by_id[AE_ROUTE_A2DP_SINK].token.peer_id = (ae_id_t){0};
+    owner.audio.hardware_off_confirmed = false; poll_at(1012);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_STOP_REQUIRED);
+    owner.audio.hardware_off_confirmed = true; poll_at(1013);
+    app_intent_t start = intent(APP_MEDIA_LIVE_START); start.media.value.role.role = APP_MEDIA_MICROPHONE;
+    handle(start); assert(submissions == 1 && submitted.route == AE_ROUTE_HFP_HF && submitted.kind == AE_CAPTURE_LIVE);
+}
+static void test_bluetooth_retained_owner_peer(void)
+{
+    setup(); distinct_routes = true; owner.audio.route = AE_ROUTE_A2DP_SINK;
+    owner.audio.route_token.peer_id.bytes[0] = 77;
+    routes_by_id[AE_ROUTE_A2DP_SINK] = (ae_route_capabilities_t){.implemented = true, .reason = AE_UNAVAILABLE};
+    routes_by_id[AE_ROUTE_HFP_HF] = route; context.overlay = APP_OVERLAY_NONE; poll_at(1010);
+    assert(view.media.microphone.start_block == APP_MEDIA_START_PEER_MISMATCH);
+    app_intent_t start = intent(APP_MEDIA_LIVE_START); start.media.value.role.role = APP_MEDIA_MICROPHONE;
+    handle(start); assert(!submissions);
+    owner.audio.route_token.peer_id = route.token.peer_id; poll_at(1011);
+    assert(view.media.microphone.can_start);
+}
+static void test_pairing_close_pending(void)
+{
+    pairing_setup(); pair_confirm(APP_MEDIA_PAIR_AUDIO_OPEN);
+    bluetooth.discovery_known = bluetooth.discoverable = true; poll_at(1020);
+    pair_confirm(APP_MEDIA_PAIR_AUDIO_CLOSE);
+    assert(!view.media.pairing.can_open && view.media.pairing.state != APP_MEDIA_PAIR_CLOSED);
+}
+static void test_pairing_old_capacity_error(void)
+{
+    pairing_setup(); pairing_result = ESP_ERR_NO_MEM; pair_confirm(APP_MEDIA_PAIR_AUDIO_OPEN);
+    assert(strstr(view.media.pairing.reason, "full"));
+    bluetooth.failed = true; bluetooth.pairing_error = ESP_FAIL; poll_at(1050);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_ERROR && !strstr(view.media.pairing.reason, "full"));
+}
+static void test_pairing_new_capacity_error(void)
+{
+    pairing_setup(); bluetooth.pairing_error = ESP_FAIL; poll_at(1020);
+    pairing_result = ESP_ERR_NO_MEM; pair_confirm(APP_MEDIA_PAIR_AUDIO_OPEN);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_ERROR && strstr(view.media.pairing.reason, "full"));
+}
+static void test_pairing_error_origin(void)
+{
+    pairing_setup(); bluetooth.failed = true; bluetooth.pairing_error = ESP_ERR_NO_MEM; poll_at(1020);
+    assert(view.media.pairing.state == APP_MEDIA_PAIR_ERROR && !strstr(view.media.pairing.reason, "full"));
 }
 static void test_connection_profile_capabilities(void)
 {
@@ -837,8 +985,8 @@ static void test_usb_settle_stop_and_clock(void)
 }
 int main(int argc, char **argv)
 {
-    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock", "operation_message_lifecycle", "late_success_notice_scope", "microphone_level_values", "microphone_level_validity", "microphone_level_preserves_controls", "microphone_level_clock_order"};
-    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock, test_operation_message_lifecycle, test_late_success_notice_scope, test_microphone_level_values, test_microphone_level_validity, test_microphone_level_preserves_controls, test_microphone_level_clock_order};
+    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "bluetooth_idle_stream", "bluetooth_idle_microphone", "bluetooth_retained_peer", "pairing_close_pending", "pairing_error_origin", "pairing_old_capacity_error", "pairing_new_capacity_error", "pairing_window", "pairing_outcomes", "pairing_context_and_stale", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock", "operation_message_lifecycle", "late_success_notice_scope", "microphone_level_values", "microphone_level_validity", "microphone_level_preserves_controls", "microphone_level_clock_order"};
+    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_bluetooth_stream_after_idle_selection, test_bluetooth_microphone_after_idle_selection, test_bluetooth_retained_owner_peer, test_pairing_close_pending, test_pairing_error_origin, test_pairing_old_capacity_error, test_pairing_new_capacity_error, test_pairing_window, test_pairing_outcomes, test_pairing_context_and_stale, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock, test_operation_message_lifecycle, test_late_success_notice_scope, test_microphone_level_values, test_microphone_level_validity, test_microphone_level_preserves_controls, test_microphone_level_clock_order};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: media controls %s\n", names[i]); return 0; }

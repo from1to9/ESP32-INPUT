@@ -38,6 +38,9 @@ the connection choice, not another functional mode. Keep Routes/Roles/Voice and
 recording configuration out of the primary workspace. Bluetooth profile choice
 belongs to the audio owner and must reflect actual capabilities; HID connection
 does not prove an audio link. Speaker activation never enables the microphone.
+Audio → Bluetooth offers **Pair audio** and **Close pairing** with local review,
+the actual Classic device name (or unavailable), and bounded pairing status and
+countdown. HID pairing remains separate; pairing completion does not start audio.
 Independent audio mode produces no motion or character output. Background audio
 becomes available in mouse/keyboard mode only after its concurrency capability is
 qualified. This primary-workspace revision was explicitly requested on 2026-10-23.

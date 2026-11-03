@@ -34,7 +34,8 @@ static uint64_t clock_us = 1000000;
 static void (*clock_hook)(void);
 static bool no_memory, stack_enabled = true;
 static unsigned calls, kicks, fail_call;
-static esp_err_t command_error;
+static esp_err_t command_error, name_error;
+static unsigned name_requests;
 static esp_hf_client_cb_t hf;
 static esp_a2d_cb_t a2;
 static esp_bt_gap_cb_t gap;
@@ -43,6 +44,7 @@ static bool pairing_claim, deny_claim, security_accept, drop_scan;
 static unsigned security_replies;
 static int bond_count = 1, shared_count = 1;
 static esp_err_t bond_list_error;
+static void (*bond_count_hook)(void);
 static void (*hf_rx)(const uint8_t *, uint32_t), (*a2_rx)(const uint8_t *, uint32_t);
 static uint32_t (*hf_tx)(uint8_t *, uint32_t);
 static void (*deadline)(TimerHandle_t);
@@ -66,8 +68,10 @@ static esp_err_t submit(void) { return ++calls == fail_call ? ESP_FAIL : ESP_OK;
 esp_err_t esp_bt_gap_register_callback(esp_bt_gap_cb_t callback) { gap = callback; return submit(); }
 esp_err_t esp_bt_gap_set_security_param(unsigned int parameter, void *value, uint8_t bytes)
 { assert(parameter == ESP_BT_SP_IOCAP_MODE && bytes == 1 && *(uint8_t *)value == ESP_BT_IO_CAP_NONE); return submit(); }
+esp_err_t esp_bt_gap_get_device_name(void) { ++name_requests; return name_error; }
 int esp_bt_gap_get_bond_device_num(void) { return bond_count; }
-int btc_storage_get_num_all_bond_devices(void) { return shared_count; }
+int btc_storage_get_num_all_bond_devices(void)
+{ if (bond_count_hook) { void (*hook)(void) = bond_count_hook; bond_count_hook = NULL; hook(); } return shared_count; }
 esp_err_t esp_bt_gap_get_bond_device_list(int *count, esp_bd_addr_t *list)
 { assert(*count >= bond_count); *count = bond_count; if (bond_count == 1) memcpy(list[0], peer, 6); return bond_list_error; }
 esp_err_t esp_bt_gap_set_scan_mode(esp_bt_connection_mode_t connection, esp_bt_discovery_mode_t discovery)
@@ -334,6 +338,88 @@ static void security_event(esp_bt_gap_cb_event_t event)
     gap(event, &parameter);
 }
 
+static void prepare_during_pairing_capacity(void)
+{
+    ae_route_port_t port = bt_audio_route_port(); ae_route_capabilities_t h = caps(port, AE_ROUTE_HFP_HF);
+    assert(port.prepare(NULL, AE_ROUTE_HFP_HF, &h.format, 3, 103, &h.token) == AE_OK);
+}
+static void pairing_audio_exclusion(void)
+{
+    initialized(); bt_audio_service(); hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+    voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC); bt_audio_service();
+    ae_route_port_t port = bt_audio_route_port(); ae_route_capabilities_t h = caps(port, AE_ROUTE_HFP_HF);
+    assert(bt_audio_pairing_open(1000) == ESP_OK); bt_audio_service();
+    assert(bt_audio_snapshot().discoverable && bt_audio_snapshot().pairing_busy);
+    assert(port.prepare(NULL, AE_ROUTE_HFP_HF, &h.format, 3, 100, &h.token) == AE_BUSY);
+    assert(bt_audio_set_policy(bt_audio_snapshot().generation, BT_AUDIO_HFP, false, false, NULL) == ESP_ERR_INVALID_STATE);
+    security_event(ESP_BT_GAP_CFM_REQ_EVT); bt_audio_service();
+    bt_audio_pairing_close(); bt_audio_service();
+    assert(bt_audio_snapshot().pairing_handshake_pending && bt_audio_snapshot().pairing_busy && !bt_audio_snapshot().discoverable);
+    assert(port.prepare(NULL, AE_ROUTE_HFP_HF, &h.format, 3, 101, &h.token) == AE_BUSY);
+    esp_bt_gap_cb_param_t p = {.auth_cmpl.stat = ESP_BT_STATUS_SUCCESS};
+    memcpy(p.auth_cmpl.bda, peer, 6); gap(ESP_BT_GAP_AUTH_CMPL_EVT, &p); bt_audio_service();
+    assert(!bt_audio_snapshot().pairing_busy && !pairing_claim);
+    h = caps(port, AE_ROUTE_HFP_HF);
+    assert(port.prepare(NULL, AE_ROUTE_HFP_HF, &h.format, 3, 102, &h.token) == AE_OK);
+    assert(bt_audio_pairing_open(1000) == ESP_ERR_INVALID_STATE);
+    assert(port.stop(NULL, AE_ROUTE_HFP_HF, 102, &h.token) == AE_OK);
+    assert(bt_audio_pairing_open(1000) == ESP_OK);
+    bt_audio_pairing_close();
+    assert(bt_audio_snapshot().pairing_busy && bt_audio_pairing_open(1000) == ESP_ERR_INVALID_STATE);
+    bt_audio_service(); assert(!bt_audio_snapshot().pairing_busy && !pairing_claim);
+    bond_count_hook = prepare_during_pairing_capacity;
+    assert(bt_audio_pairing_open(1000) == ESP_ERR_INVALID_STATE);
+    assert(!bond_count_hook && !pairing_claim && !bt_audio_snapshot().pairing_busy);
+}
+
+static void device_name_test(const char *scenario)
+{
+    assert(name_requests == 1 && !bt_audio_snapshot().device_name_known);
+    initialized(); bt_audio_service();
+    if (!strcmp(scenario, "name-submit-failure")) {
+        assert(bt_audio_snapshot().device_name_error == ESP_FAIL);
+        name_error = ESP_OK;
+        assert(bt_audio_pairing_open(100) == ESP_OK && name_requests == 2);
+    } else if (!strcmp(scenario, "name-timeout")) {
+        clock_us += BT_AUDIO_INIT_TIMEOUT_US; deadline(NULL);
+        assert(bt_audio_snapshot().device_name_error == ESP_ERR_TIMEOUT);
+        assert(!bt_audio_snapshot().failed && bt_audio_snapshot().initialized);
+        assert(bt_audio_pairing_open(100) == ESP_OK && name_requests == 1);
+    }
+    char name[BT_AUDIO_DEVICE_NAME_MAX_BYTES + 2U];
+    strcpy(name, "Actual Classic audio name");
+    esp_bt_gap_cb_param_t p = {.get_dev_name_cmpl = {.status = ESP_BT_STATUS_SUCCESS, .name = name}};
+    if (!strcmp(scenario, "name-invalid")) memset(name, 'x', sizeof(name) - 1U), name[sizeof(name) - 1U] = 0;
+    if (!strcmp(scenario, "name-missing")) p.get_dev_name_cmpl.name = NULL;
+    if (!strcmp(scenario, "name-event-failure")) p.get_dev_name_cmpl.status = 1;
+    gap(ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT, &p);
+    bool invalid = !strcmp(scenario, "name-invalid") || !strcmp(scenario, "name-missing") || !strcmp(scenario, "name-event-failure");
+    assert(bt_audio_snapshot().device_name_known == !invalid);
+    if (!invalid) assert(!strcmp(bt_audio_snapshot().device_name, name));
+    else assert(bt_audio_snapshot().device_name_error != ESP_OK);
+    assert(bt_audio_snapshot().initialized && !bt_audio_snapshot().failed);
+    /* Name observation never owns the pairing guard or discovery closure. */
+    bt_audio_pairing_close(); bt_audio_service();
+    assert(!pairing_claim && !bt_audio_snapshot().discoverable);
+}
+
+static void pairing_retry_capacity(void)
+{
+    initialized(); bt_audio_service(); assert(bt_audio_pairing_open(1000) == ESP_OK);
+    security_event(ESP_BT_GAP_CFM_REQ_EVT); bt_audio_service();
+    esp_bt_gap_cb_param_t p = {.auth_cmpl.stat = 1};
+    memcpy(p.auth_cmpl.bda, peer, 6); gap(ESP_BT_GAP_AUTH_CMPL_EVT, &p);
+    bt_audio_pairing_close(); bt_audio_service();
+    assert(bt_audio_snapshot().pairing_error == ESP_FAIL && !bt_audio_snapshot().failed);
+    shared_count = 15;
+    assert(bt_audio_pairing_open(1000) == ESP_ERR_NO_MEM);
+    assert(bt_audio_snapshot().pairing_error == ESP_OK && !bt_audio_snapshot().pairing_busy);
+    security_event(ESP_BT_GAP_CFM_REQ_EVT); security_event(ESP_BT_GAP_CFM_REQ_EVT);
+    assert(bt_audio_snapshot().failed && bt_audio_snapshot().pairing_error == ESP_ERR_NO_MEM);
+    assert(bt_audio_pairing_open(1000) == ESP_ERR_INVALID_STATE);
+    assert(bt_audio_snapshot().pairing_error == ESP_ERR_NO_MEM);
+}
+
 static void pairing_test(const char *scenario)
 {
     initialized(); bt_audio_service();
@@ -352,7 +438,7 @@ static void pairing_test(const char *scenario)
     }
     bt_audio_service(); assert(bt_audio_snapshot().discoverable);
     if (strcmp(scenario, "pairing-expiry") == 0) {
-        clock_us += 100000; deadline(NULL); assert(!bt_audio_snapshot().pairing_requested);
+        clock_us += 100000; deadline(NULL); assert(!bt_audio_snapshot().pairing_requested && bt_audio_snapshot().pairing_expired);
         security_event(ESP_BT_GAP_CFM_REQ_EVT); bt_audio_service();
         assert(!security_accept && !pairing_claim && !bt_audio_snapshot().discoverable);
         return;
@@ -373,6 +459,7 @@ static void pairing_test(const char *scenario)
         memcpy(parameter.auth_cmpl.bda, peer, 6); gap(ESP_BT_GAP_AUTH_CMPL_EVT, &parameter);
         assert(!bt_audio_snapshot().classic_bonds_known);
         bt_audio_service(); assert(!pairing_claim && bt_audio_snapshot().classic_bonds_known);
+        assert(bt_audio_snapshot().pairing_completed && !bt_audio_snapshot().pairing_expired);
     }
 }
 
@@ -394,13 +481,17 @@ int main(int argc, char **argv)
         assert(bt_audio_init() == ESP_ERR_INVALID_STATE && calls == 0);
         stack_enabled = true;
     }
+    if (!strcmp(scenario, "name-submit-failure")) name_error = ESP_FAIL;
     esp_err_t result = bt_audio_init();
     if (no_memory || fail_call) {
         assert(result != ESP_OK && bt_audio_snapshot().failed && !bt_audio_snapshot().initialized);
         assert(bt_audio_init() == ESP_ERR_INVALID_STATE);
     } else {
         assert(result == ESP_OK && !bt_audio_snapshot().initialized && !bt_audio_snapshot().failed);
-        if (strcmp(scenario, "normal") == 0) normal();
+        if (!strcmp(scenario, "retry-capacity")) pairing_retry_capacity();
+        else if (!strcmp(scenario, "audio-exclusion")) pairing_audio_exclusion();
+        else if (!strncmp(scenario, "name-", 5)) device_name_test(scenario);
+        else if (strcmp(scenario, "normal") == 0) normal();
         else if (strcmp(scenario, "playback-binding") == 0) playback_binding_test();
         else if (strncmp(scenario, "pairing", 7) == 0 || strcmp(scenario, "discovery-timeout") == 0) pairing_test(scenario);
         else if (strcmp(scenario, "init-timeout") == 0) {
