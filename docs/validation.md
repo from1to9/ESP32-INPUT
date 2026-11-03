@@ -2228,6 +2228,22 @@ and both saved hosts present. The available observations do not identify
 which local health gate interrupted the required 45 continuous healthy
 seconds. Bluetooth host switching on the candidate remains unqualified.
 
+### USB first-boot diagnosis
+
+The USB loader wrote and verified the 4,730,064-byte `1bab69b` application
+in the inactive slot and selected it for a trial boot. The former confirmed
+application and its selection record remained intact. On the new boot, SPI
+color submission failed twice with `ESP_ERR_NO_MEM`. The first allocation
+failure requested 8,190 bytes of DMA-capable memory. Later heap samples
+reported a largest DMA block of 7,168 bytes.
+
+The renderer error reset the first healthy interval after 18 ms and remained
+present through probation expiry. Two brief IMU freshness failures cleared
+while the renderer error persisted. The device rolled back. A fresh USB boot
+identity and authenticated management read identified confirmed `a92c76a`
+with both saved hosts present. The wheel gesture was not qualified on this
+candidate during the trial.
+
 ## Device evidence template
 
 ```text
