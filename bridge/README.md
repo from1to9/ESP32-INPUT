@@ -90,6 +90,31 @@ Create a publisher key outside the repository, then sign the **application** art
 
 The signed payload binds full SHA-256/size, version/project extracted from the image, chip, board/product, settings schema, layout, release index, artifact URL and a finite expiry of at most seven days. ECDSA uses P-256/SHA-256 and an exact 64-byte `r || s` signature. This publisher signature is separate from optional SDK secure boot signing; no fuse changes occur.
 
+For a bounded development source on the approved LAN, serve the frozen release:
+
+```sh
+python3 bridge/serve_release.py \
+  --catalog '<release-parent>/catalog.json' --image '<release-parent>/esp32_input.bin' \
+  --certificate '<private-parent>/source-cert.pem' --private-key '<private-parent>/source-key.pem' \
+  --bind '<approved-IPv4>:<port>' --seconds 900
+```
+
+The explicit bind must match the signed image origin. The source exposes only
+`/catalog.json` and the signed image path; enroll that exact catalog URL and its
+TLS CA on the device. It verifies image size/SHA-256 before listening and freezes
+both resources in memory. Signature verification remains with the device. Keep
+private keys outside the checkout. No directory listing or arbitrary file access
+is provided. The listener expires after the requested lifetime (at most one hour).
+TLS handshake and request parsing each have a five-second bound; body writes use
+a twenty-second inactivity limit and a ten-minute response deadline capped by
+listener expiry. Start with enough remaining lifetime for the complete job.
+
+Progress counts local socket acceptance, not device receipt or verification.
+Retain both publisher and firmware-state evidence. The authenticated controller
+must remain alive for the admitted update job budget: ending observation early
+can revoke a job that requires its owner. Reconcile terminal state before a new
+attempt; do not replay a mutation after a lost response.
+
 V3 has two six-MiB OTA slots (`0x10000`, `0x610000`), otadata `0xc10000`, model `0xc20000`, control `0xf20000`, recordings `0xf30000`. NVS/PHY keep their original addresses. It has no factory slot: the earlier factory-only layout is rejected and the external original backup remains the recovery artifact. Ordinary OTA only writes an actual inactive OTA slot; staging does not select boot. Activation rechecks the exact policy and maintenance barrier, verifies the slot again, records a release floor, selects boot and restarts. Selection uncertainty is not retried automatically. `CONFIRM_BY_APP` rollback and continuous local health proof prevent early confirmation; boot does not resume downloads/capture/input jobs. Source/host/target tests do not establish physical compatibility or release qualification.
 
 The MCP companion checks canonical wire formats and UTF-8 byte limits before authentication; malformed arguments never become a device command. Device-side validation and current manager authority remain mandatory.

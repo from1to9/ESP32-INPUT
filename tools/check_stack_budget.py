@@ -984,8 +984,21 @@ for _label, _steps in DIAGNOSTIC_PATHS.items():
 
 UPDATE_WORK = [("firmware_update", "worker")]
 UPDATE_FAILURE_PATHS = {
+    "update_download_maintenance_failure": UPDATE_WORK + [("firmware_update", "download_image"),
+        ("firmware_update", "wait_for_maintenance"), ("firmware_update", "check_authority"),
+        ("firmware_update", "failure_locked")],
+    "update_activation_maintenance_failure": UPDATE_WORK + [("firmware_update", "activate"),
+        ("firmware_update", "wait_for_maintenance"), ("firmware_update", "check_authority"),
+        ("firmware_update", "failure_locked")],
+    "update_download_maintenance_timeout": UPDATE_WORK + [("firmware_update", "download_image"),
+        ("firmware_update", "wait_for_maintenance"), ("firmware_update", "check_authority"),
+        ("firmware_update", "failure"), ("firmware_update", "failure_locked")],
+    "update_activation_maintenance_timeout": UPDATE_WORK + [("firmware_update", "activate"),
+        ("firmware_update", "wait_for_maintenance"), ("firmware_update", "check_authority"),
+        ("firmware_update", "failure"), ("firmware_update", "failure_locked")],
     "update_download_authority_failure": UPDATE_WORK + [("firmware_update", "download_image"),
-        ("firmware_update", "authorized_at"), ("firmware_update", "failure_locked")],
+        ("firmware_update", "authorized_at"), ("firmware_update", "check_authority"),
+        ("firmware_update", "failure_locked")],
     "update_download_sdk_failure": UPDATE_WORK + [("firmware_update", "download_image"),
         ("firmware_update", "failure"), ("firmware_update", "failure_locked")],
     "update_worker_failure": UPDATE_WORK + [("firmware_update", "failure"),

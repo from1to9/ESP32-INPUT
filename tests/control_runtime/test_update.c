@@ -21,6 +21,13 @@ static bool signature_valid=true,known_clock=true,fail_read,flip_readback,cancel
 static esp_err_t ota_end_error,floor_error,boot_error;static bool apply_failed_floor,apply_failed_boot;
 static esp_err_t ota_write_error;
 static unsigned maintenance_waits;
+static unsigned maintenance_delays;
+static unsigned maintenance_overshoot_ms;
+static bool maintenance_restore;
+static bool maintenance_late_publish, publish_ready_on_enter;
+static app_update_authority_t authority_make(void);
+static enum { MAINTENANCE_READY, MAINTENANCE_CANCEL, MAINTENANCE_REVOKE,
+    MAINTENANCE_NO_RESTART, MAINTENANCE_LOCK, MAINTENANCE_DIGEST } maintenance_action;
 static bool revoke_on_read;
 static esp_err_t state_query_error,mark_error,floor_read_error,floor_open_error;
 static unsigned state_queries,rollback_calls;
@@ -40,7 +47,13 @@ static esp_partition_t partitions[]={
 static const esp_partition_t *boot=&partitions[0],*next=&partitions[1];
 static esp_app_desc_t running={.project_name="esp32_input",.version="1.0.0"};
 struct esp_http_client {const uint8_t *bytes;size_t length,offset;};static struct esp_http_client http;
-void test_enter(void){++critical;}
+void test_enter(void){
+    if(publish_ready_on_enter){
+        publish_ready_on_enter=false;clock_ms=updater->started+5001;
+        updater->authority.maintenance_ready=true;
+    }
+    ++critical;
+}
 void test_leave(void){
     assert(critical);--critical;
     if(!critical&&cancel_on_staged_publish&&updater&&updater->view.state==APP_UPDATE_STAGED&&updater->active_work==WORK_DOWNLOAD){
@@ -56,10 +69,27 @@ void heap_caps_free(void *p){test_heap_free(p);}
 int xTaskCreate(void (*fn)(void *),const char *name,unsigned stack,void *arg,unsigned priority,void *out){assert(fn==worker&&!strcmp(name,"firmware_update")&&stack==16384&&priority==1&&!arg&&!out);return pdPASS;}
 void vTaskDelay(TickType_t ticks){
     assert(!critical);
-    if(maintenance_waits){
+    if(updater->view.state==APP_UPDATE_WAITING_MAINTENANCE){
         assert(ticks==20&&updater->view.state==APP_UPDATE_WAITING_MAINTENANCE);
         assert(updater->failure.phase==APP_UPDATE_FAILURE_NONE);
-        clock_ms+=ticks;if(!--maintenance_waits)updater->authority.maintenance_ready=true;return;
+        clock_ms+=ticks;++maintenance_delays;
+        if(maintenance_late_publish&&maintenance_delays==249){
+            clock_ms=updater->started+4999;publish_ready_on_enter=true;return;
+        }
+        if(maintenance_restore&&maintenance_delays==2){
+            app_update_authority_t restored=authority_make();app_update_publish_authority(&restored);
+        }
+        if(maintenance_waits&&!--maintenance_waits){
+            clock_ms+=maintenance_overshoot_ms;
+            app_update_authority_t a=updater->authority;a.maintenance_ready=true;
+            if(maintenance_action==MAINTENANCE_REVOKE)a.authorized=false;
+            if(maintenance_action==MAINTENANCE_NO_RESTART)a.restart_authorized=false;
+            if(maintenance_action==MAINTENANCE_LOCK)a.unlocked=false;
+            if(maintenance_action==MAINTENANCE_DIGEST)a.expected_digest[0]='x';
+            app_update_publish_authority(&a);
+            if(maintenance_action==MAINTENANCE_CANCEL)assert(app_update_cancel(updater->view.job_id)==ESP_OK);
+        }
+        return;
     }
     if(ticks==20)longjmp(loop_end,1);clock_ms+=ticks;
 }
@@ -144,7 +174,9 @@ static void regression_boot(const app_update_config_t *config,bool pending,esp_e
     apply_failed_mark=ignore_successful_mark=fail_state_after_mark=fail_state_on_image_open=cancel_on_staged_publish=false;
     signature_valid=known_clock=true;fail_read=flip_readback=cancel_on_read=bad_encoding=false;
     ota_end_error=floor_error=boot_error=ESP_OK;apply_failed_floor=apply_failed_boot=floor_present=false;
-    ota_write_error=ESP_OK;maintenance_waits=0;revoke_on_read=false;
+    ota_write_error=ESP_OK;maintenance_waits=maintenance_delays=0;maintenance_action=MAINTENANCE_READY;revoke_on_read=false;
+    maintenance_overshoot_ms=0;maintenance_restore=false;
+    maintenance_late_publish=publish_ready_on_enter=false;
     begins=writes=ends=aborts=boot_writes=restarts=health_marks=state_queries=rollback_calls=0;
     boot=&partitions[0];next=&partitions[1];status=200;length_delta=0;
     esp_err_t expected=pending||query_error!=ESP_OK?ESP_ERR_NOT_SUPPORTED:ESP_OK;
@@ -155,6 +187,78 @@ static void stage_release(void)
     prepare_release();app_update_authority_t authority=authority_make();
     assert(app_update_download("release-2",&authority)==ESP_OK);step_worker();
     assert(updater->view.state==APP_UPDATE_STAGED&&updater->staged==&partitions[1]);
+}
+static void activation_waits_for_coordinator_maintenance(const app_update_config_t *config)
+{
+    const unsigned waits[]={0,2,250};
+    for(unsigned i=0;i<sizeof(waits)/sizeof(waits[0]);++i){
+        regression_boot(config,false,ESP_OK);stage_release();
+        app_update_authority_t a=authority_make();a.maintenance_ready=waits[i]==0;
+        assert(app_update_activate(updater->view.job_id,&a)==ESP_OK);
+        maintenance_waits=waits[i];
+        if(setjmp(restart_end)==0)step_worker();
+        assert(restarts==1&&boot_writes==1&&updater->view.boot_selected);
+        assert(updater->view.state==APP_UPDATE_RESTART_PENDING&&clock_ms==600+20*waits[i]);
+        assert(maintenance_delays==waits[i]&&updater->failure.phase==APP_UPDATE_FAILURE_NONE);
+    }
+    const uint32_t denied[]={APP_UPDATE_DENIED_MAINTENANCE,APP_UPDATE_DENIED_CANCEL,
+        APP_UPDATE_DENIED_AUTHORIZED,APP_UPDATE_DENIED_RESTART,APP_UPDATE_DENIED_UNLOCKED,
+        APP_UPDATE_DENIED_DIGEST,APP_UPDATE_DENIED_EXPIRED};
+    for(unsigned i=0;i<sizeof(denied)/sizeof(denied[0]);++i){
+        regression_boot(config,false,ESP_OK);stage_release();
+        uint8_t preserved[sizeof(slot)];memcpy(preserved,slot,sizeof(slot));
+        app_update_authority_t a=authority_make();a.maintenance_ready=false;
+        if(i==6)a.authority_expires_ms=clock_ms+20;
+        assert(app_update_activate(updater->view.job_id,&a)==ESP_OK);
+        maintenance_action=i<6?i:MAINTENANCE_READY;
+        maintenance_waits=i==0?251:1;
+        step_worker();
+        assert(!boot_writes&&!floor_present&&!restarts&&!updater->view.boot_selected);
+        assert(!memcmp(preserved,slot,sizeof(slot))&&!app_update_flash_busy());
+        assert(updater->view.state==(i==1?APP_UPDATE_CANCELLED:APP_UPDATE_ERROR));
+        if(i==0){
+            assert(updater->failure.phase==APP_UPDATE_FAILURE_MAINTENANCE_TIMEOUT&&!updater->failure.denied);
+            assert(updater->view.error==ESP_ERR_TIMEOUT);
+        }else assert(updater->failure.phase==APP_UPDATE_FAILURE_MAINTENANCE&&updater->failure.denied==denied[i]);
+        assert(clock_ms==(i==0?5100:120)&&maintenance_delays==(i==0?250:1));
+    }
+}
+static void activation_rejects_late_readiness(const app_update_config_t *config)
+{
+    for(unsigned overshoot=1;overshoot<=20;overshoot+=19){
+        regression_boot(config,false,ESP_OK);stage_release();
+        app_update_authority_t a=authority_make();a.maintenance_ready=false;
+        assert(app_update_activate(updater->view.job_id,&a)==ESP_OK);
+        maintenance_waits=250;maintenance_overshoot_ms=overshoot;
+        if(setjmp(restart_end)==0)step_worker();
+        assert(!boot_writes&&!floor_present&&!restarts&&updater->view.state==APP_UPDATE_ERROR);
+        assert(updater->failure.phase==APP_UPDATE_FAILURE_MAINTENANCE_TIMEOUT&&!updater->failure.denied);
+        assert(updater->view.error==ESP_ERR_TIMEOUT&&updater->failure.observed_ms==5100+overshoot);
+    }
+}
+static void activation_rejects_transient_denial(const app_update_config_t *config)
+{
+    for(unsigned action=MAINTENANCE_REVOKE;action<=MAINTENANCE_DIGEST;++action){
+        regression_boot(config,false,ESP_OK);stage_release();
+        app_update_authority_t a=authority_make();a.maintenance_ready=false;
+        assert(app_update_activate(updater->view.job_id,&a)==ESP_OK);
+        maintenance_waits=1;maintenance_action=action;maintenance_restore=true;
+        if(setjmp(restart_end)==0)step_worker();
+        assert(!boot_writes&&!floor_present&&!restarts&&updater->view.state==APP_UPDATE_ERROR);
+        assert(maintenance_delays==1&&updater->failure.observed_ms==120);
+        failure_t first=updater->failure;a=authority_make();app_update_publish_authority(&a);step_worker();
+        assert(!memcmp(&first,&updater->failure,sizeof(first))&&!boot_writes&&!floor_present&&!restarts);
+    }
+}
+static void activation_dates_the_authority_snapshot_after_lock_acquisition(const app_update_config_t *config)
+{
+    regression_boot(config,false,ESP_OK);stage_release();
+    app_update_authority_t a=authority_make();a.maintenance_ready=false;
+    assert(app_update_activate(updater->view.job_id,&a)==ESP_OK);
+    maintenance_late_publish=true;
+    if(setjmp(restart_end)==0)step_worker();
+    assert(!boot_writes&&!floor_present&&!restarts&&updater->view.state==APP_UPDATE_ERROR);
+    assert(updater->failure.phase==APP_UPDATE_FAILURE_MAINTENANCE_TIMEOUT&&updater->failure.observed_ms==5101);
 }
 static void running_state_must_be_observed_valid_before_any_update_write(const app_update_config_t *config)
 {
@@ -359,6 +463,10 @@ int main(void){
     regression_boot(&c,true,ESP_OK);assert(app_update_confirm_health(true)==ESP_ERR_INVALID_STATE&&!health_marks);
     clock_ms=updater->boot_ms+45001;assert(app_update_confirm_health(false)==ESP_ERR_INVALID_STATE);assert(app_update_confirm_health(true)==ESP_OK);step_worker();assert(health_marks==1&&updater->view.state==APP_UPDATE_CONFIRMED);
     running_state_must_be_observed_valid_before_any_update_write(&c);
+    activation_rejects_transient_denial(&c);
+    activation_dates_the_authority_snapshot_after_lock_acquisition(&c);
+    activation_rejects_late_readiness(&c);
+    activation_waits_for_coordinator_maintenance(&c);
     staged_and_queued_cancellation_revokes_actual_stage_authority(&c);
     confirmation_readback_and_terminal_probation_deadline(&c);
     confirmed_boot_cannot_override_failed_downgrade_floor_validation(&c);

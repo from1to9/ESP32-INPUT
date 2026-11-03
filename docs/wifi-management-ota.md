@@ -159,6 +159,19 @@ Do not advertise independent external-power detection on this board. Show teleme
 
 Use a dedicated HTTPS client plus core OTA APIs for the initial **download without activation** contract. `esp_https_ota_finish()` changes boot selection in this SDK, so the high-level wrapper cannot be used as a supposedly passive download finalizer.
 
+Admission requests maintenance; it is not proof that input/audio owners have
+already released their resources. Both download and activation publish a waiting
+state and allow up to five seconds for the coordinator's actual maintenance
+barrier, checking every twenty milliseconds. Only a pending maintenance barrier
+can wait: cancellation or any observed authority denial stops immediately and
+cannot be revived by a later unlock/refresh. Readiness observed after the absolute
+deadline is rejected, including after a scheduling delay; timeout is distinct
+from a permission denial in retained failure evidence.
+The final check still requires current authority, policy, digest, unlock state
+and, for activation, restart permission. Expired or revoked authority cannot be
+replaced by the mere passage of the wait period. Maintenance timeout is a
+terminal failure with no boot selection.
+
 ```text
 idle -> checking -> release_available
      -> waiting_for_authority -> waiting_for_input_release

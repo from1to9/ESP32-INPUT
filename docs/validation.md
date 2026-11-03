@@ -2103,10 +2103,67 @@ Its receipt retained the initial journal retention gap and source error; it was
 `complete_with_issues`, not a complete usable movement segment. No ongoing
 retention gap or wire-format anomaly was observed in that bounded collection.
 
-At this checkpoint, commissioning, authenticated reads and sensor retrieval are
-device-observed. The new runtime diagnostic firmware and a complete signed OTA
-cycle still require separate deployment evidence. These results do not qualify
-rollback, power-loss recovery, physical HID or audio behavior.
+The clean `a79887c626c872f9373f775b5c4553be2746151e` diagnostic image was then
+installed through the authorized app-only USB fallback. Its 4,719,328 bytes had
+SHA-256 `c14e909e7c0e23be86b4b748df4e8c58aad15c95bbfd1948b5d6ae76a18687de`.
+Chip, flash capacity, security state, installed partition table and confirmed
+boot selection were checked before writing only the selected application slot.
+Independent application verification passed; table and OTA-selection bytes were
+unchanged. No backup, settings-region write or boot-selection mutation occurred.
+The user confirmed normal startup, the main interface and touch navigation.
+
+After reboot, saved-network fallback joined a different LAN. The original
+address therefore timed out even though serial evidence showed a ready TLS
+listener and synchronized clock. A bounded read-only probe used the observed
+new socket destination while retaining the enrolled TLS hostname, CA validation
+and exact certificate pin. Sensor catalog, protocol state, runtime diagnostics,
+firmware state and clock all returned HTTP 200. The device's clean commit,
+ELF SHA-256 and configuration matched the frozen package. Firmware state was
+available/idle, running-image state was known and confirmed, and failure evidence
+was null. This USB installation does not exercise OTA probation or confirmation.
+
+The startup USB capture was deliberately interrupted to inspect its buffered
+evidence; it retained 14 health samples, interruption failures and two SDK
+`gpio_install_isr_service` errors. It is not a passing health qualification.
+After the user rejoined the update-source LAN, all five diagnostic resources
+returned through the ordinary pinned client; the bounded collector completed
+without resource errors. A subsequent download failed at `HTTP_READ` after
+2,277,376 bytes. Its publisher had closed the response after a short socket
+write timeout. This is distinct from the original error 259, whose cause remains
+unidentified. Separating publisher inactivity from total response duration and
+retaining exact progress exposed the host-side failure without changing firmware
+authority checks or transport deadlines.
+
+The next transfer continued past that boundary, but its observer stopped after
+180 seconds and closed the authenticated owner session. The device rejected the
+next read after 4,116,480 bytes with an unauthenticated authority observation.
+This was a test-harness termination, not an unexplained device failure. After
+reconciliation, a new attempt kept observation open for the admitted ten-minute
+job budget. It downloaded and verified all 4,719,328 signed bytes in approximately
+210 seconds and reached `STAGED`, with no failure and no boot selection.
+
+The separate activation request was accepted but failed after approximately
+four milliseconds, still without boot selection. An unchanged-production native
+regression reproduced the missing initial maintenance wait: admission had queued
+the coordinator barrier, while activation immediately required it to be ready.
+The repair shares download's bounded maintenance wait with activation. Tests
+cover immediate readiness, delayed readiness, the five-second boundary, timeout,
+cancellation, revoked authority, lock, restart permission, digest mismatch and
+expiry. Review also exposed transient denial followed by restoration and a
+scheduling overshoot past the deadline; failing regressions preceded their fixes.
+The shared wait now terminates on every observed non-maintenance denial and
+rejects late readiness even if authority is otherwise valid. Denied paths
+preserve staged bytes and do not write the release floor
+or boot selection. Existing post-wait authorization checks remain in place.
+
+The bounded development publisher freezes the exact catalog/image bytes and
+has fake socket/TLS/clock regressions for slow progress, inactivity, total expiry,
+request rejection and private-data-safe failure records. These host tests do not
+qualify its real-network throughput. Full runtime sanitizer tests, 164 coordinator
+cases and the target build passed for the maintenance repair. The repaired
+activation still needs installation and a complete physical OTA cycle, including
+reboot and health confirmation. No rollback, power-loss, HID, audio or endurance
+qualification is inferred from successful staging.
 
 ## Device evidence template
 

@@ -279,15 +279,18 @@ static esp_err_t failure(app_update_failure_phase_t phase, esp_err_t error)
     }
     return error;
 }
-static bool authorized_at(bool activation, app_update_failure_phase_t phase)
+/* A nonzero maintenance deadline permits only the pending barrier to wait.
+ * Every other denied predicate remains terminal, even if later restored. */
+static esp_err_t check_authority(bool activation, app_update_failure_phase_t phase,
+                                 uint64_t maintenance_until, bool *ready)
 {
-    uint64_t now = now_ms();
     portENTER_CRITICAL(&update_lock);
     app_update_authority_t a = updater->authority;
     bool cancel = updater->cancel;
     uint64_t started = updater->started;
+    uint64_t now = now_ms();
     portEXIT_CRITICAL(&update_lock);
-    bool allowed = !cancel && a.authorized && a.unlocked && a.maintenance_ready &&
+    bool allowed = !cancel && a.authorized && a.unlocked && (maintenance_until || a.maintenance_ready) &&
            now < a.authority_expires_ms && now >= started && now - started < UPDATE_JOB_MS &&
            a.policy_revision == updater->view.policy_revision &&
            (!activation || a.restart_authorized) &&
@@ -308,7 +311,17 @@ static bool authorized_at(bool activation, app_update_failure_phase_t phase)
         failure_locked(phase, ESP_ERR_INVALID_STATE, denied, now, &a);
         portEXIT_CRITICAL(&update_lock);
     }
-    return allowed;
+    if (allowed && maintenance_until &&
+        (now > maintenance_until || (now == maintenance_until && !a.maintenance_ready))) {
+        (void)failure(APP_UPDATE_FAILURE_MAINTENANCE_TIMEOUT, ESP_ERR_TIMEOUT);
+        return ESP_ERR_TIMEOUT;
+    }
+    if (ready) *ready = allowed && a.maintenance_ready;
+    return allowed ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+static bool authorized_at(bool activation, app_update_failure_phase_t phase)
+{
+    return check_authority(activation, phase, 0, NULL) == ESP_OK;
 }
 static bool authorized(bool activation) { return authorized_at(activation, APP_UPDATE_FAILURE_NONE); }
 static bool layout_ready(void)
@@ -615,6 +628,18 @@ static esp_err_t partition_hash(const esp_partition_t *p, uint32_t length, uint8
     heap_caps_free(buffer);
     return error != ESP_OK ? error : status == PSA_SUCCESS && n == 32 ? ESP_OK : ESP_FAIL;
 }
+static esp_err_t wait_for_maintenance(bool restart)
+{
+    publish(APP_UPDATE_WAITING_MAINTENANCE, ESP_OK, "waiting_for_actual_maintenance");
+    uint64_t until = now_ms() + 5000;
+    for (;;) {
+        bool ready = false;
+        esp_err_t error = check_authority(restart, APP_UPDATE_FAILURE_MAINTENANCE, until, &ready);
+        if (error != ESP_OK) return error;
+        if (ready) return ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
 static esp_err_t download_image(void)
 {
     esp_err_t running_error = require_confirmed_running_image();
@@ -633,21 +658,8 @@ static esp_err_t download_image(void)
         updater->release.size > target->size) {
         return failure(APP_UPDATE_FAILURE_LAYOUT, ESP_ERR_INVALID_STATE);
     }
-    publish(APP_UPDATE_WAITING_MAINTENANCE, ESP_OK, "waiting_for_actual_maintenance");
-    uint64_t until = now_ms() + 5000;
-    while (!authorized(false) && now_ms() < until) {
-        portENTER_CRITICAL(&update_lock);
-        bool cancel = updater->cancel;
-        portEXIT_CRITICAL(&update_lock);
-        if (cancel) {
-            (void)authorized_at(false, APP_UPDATE_FAILURE_MAINTENANCE);
-            return ESP_ERR_INVALID_STATE;
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    if (!authorized_at(false, APP_UPDATE_FAILURE_MAINTENANCE)) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    esp_err_t maintenance_error = wait_for_maintenance(false);
+    if (maintenance_error != ESP_OK) return maintenance_error;
     esp_http_client_handle_t client = open_source(updater->release.url);
     if (!client) {
         return failure(APP_UPDATE_FAILURE_SOURCE, ESP_FAIL);
@@ -758,9 +770,13 @@ static esp_err_t activate(void)
 {
     esp_err_t running_error = require_confirmed_running_image();
     if (running_error != ESP_OK) return running_error;
-    if (!updater->staged || !authorized(true) || !layout_ready()) {
+    if (!updater->staged || !layout_ready()) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* Admission requests maintenance; the coordinator publishes its actual
+     * barrier on a later turn. Activation must wait just as download does. */
+    esp_err_t maintenance_error = wait_for_maintenance(true);
+    if (maintenance_error != ESP_OK) return maintenance_error;
     uint8_t digest[32], expected[32];
     esp_err_t e = partition_hash(updater->staged, updater->release.size, digest);
     if (e != ESP_OK || !decode(updater->release.digest, expected, 32) ||

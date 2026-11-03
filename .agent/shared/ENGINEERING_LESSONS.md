@@ -775,3 +775,42 @@ rules, cancellation or permission decisions.
 Evidence: [updater regressions](../../tests/control_runtime/test_update.c),
 [coordinator boundary cases](../../tests/coordinator/update_cases.inc), and
 [LAN update contract](../../docs/wifi-management-ota.md).
+
+## 34. Separate publisher backpressure from device update failure
+
+An embedded OTA reader may spend much longer writing flash than a desktop file
+download. A short publisher socket timeout can close a healthy slow transfer.
+Bound inactivity and total response duration separately, retain transfer phase
+and partial-byte evidence, and do not call bytes accepted by a socket a verified
+device download. Keep the signed artifact immutable while serving it.
+
+The observing client also owns the update session. Its observation window must
+cover the admitted job budget; closing that session at an arbitrary shorter
+deadline correctly revokes an update whose policy forbids owner loss. Record
+such a harness termination separately from a spontaneous device failure. A new
+attempt uses fresh current state only after the previous job is reconciled as
+terminal; never replay an unknown mutation or change device permission checks
+to compensate for a test-program limit.
+
+Evidence: [release publisher tests](../../tests/control_protocol/test_release_server.py)
+and the [device investigation](../../docs/validation.md#wi-fi-development-management-and-diagnostics-2026-11-03).
+
+## 35. Activation admission is not a maintenance receipt
+
+A staged image does not keep the input/audio maintenance barrier active. A fresh
+activation requests that barrier from the coordinator; its worker can run before
+the coordinator's next turn. Requiring immediate readiness makes a valid request
+fail according to scheduling order. Use the same bounded initial wait for both
+download and activation, then require current authority at each destructive
+boundary. Wait only on a pending maintenance barrier, never on a revoked or
+locked claim. Keep a single absolute deadline that still applies after scheduler
+overshoot and a late ready observation. Never convert elapsed waiting into
+authorization or retry boot writes after an uncertain outcome.
+
+Reproduce the race on unchanged production code. Cover delayed readiness,
+timeout, cancellation and authority loss through the real updater entry point,
+asserting no release-floor or boot-selection writes on denied paths. Native
+success does not establish a physical reboot or health confirmation.
+
+Evidence: [updater regressions](../../tests/control_runtime/test_update.c) and
+the [stage/activation contract](../../docs/wifi-management-ota.md#7-stage-activate-confirm-and-cancel).
