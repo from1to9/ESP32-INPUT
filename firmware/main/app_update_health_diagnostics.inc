@@ -84,9 +84,11 @@ static void remote_update_health_observe(uint64_t missing, uint64_t previous_sin
     }
 }
 
-/* Leaf names match the unchanged acceptance predicate below. Unknown media
+/* Leaf names match the owning acceptance predicate. Unknown media
  * snapshots/audio are reported at their owning gate; their contents are not
- * treated as observed failures. IMU gates are conditional on board capability. */
+ * treated as observed failures. IMU gates follow presence/successful init, not
+ * transient availability. The stable imu_fault bit means current phase or a
+ * newly observed recovery boundary; historical fault_latched stays diagnostic. */
 #define UPDATE_HEALTH_GATES(X) \
     X(display, capabilities.display) \
     X(touch, capabilities.touch) \
@@ -104,13 +106,13 @@ static void remote_update_health_observe(uint64_t missing, uint64_t previous_sin
     X(settings_pending, !settings.pending) \
     X(settings_error, settings.error == ESP_OK) \
     X(settings_valid, settings_valid) \
-    X(imu_initialized, !capabilities.imu || imu.initialization_succeeded) \
-    X(imu_started, !capabilities.imu || imu.start_succeeded) \
-    X(imu_worker, !capabilities.imu || imu.worker_running) \
-    X(imu_sample_valid, !capabilities.imu || imu.sample_valid) \
-    X(imu_sample_fresh, !capabilities.imu || imu.sample_fresh) \
-    X(imu_fault, !capabilities.imu || !imu.fault_latched) \
-    X(imu_error, !capabilities.imu || imu.error == ESP_OK) \
+    X(imu_initialized, !imu_required || imu.initialization_succeeded) \
+    X(imu_started, !imu_required || imu.start_succeeded) \
+    X(imu_worker, !imu_required || imu.worker_running) \
+    X(imu_sample_valid, !imu_required || imu.sample_valid) \
+    X(imu_sample_fresh, !imu_required || imu.sample_fresh) \
+    X(imu_fault, !imu_required || imu_stable) \
+    X(imu_error, !imu_required || imu.error == ESP_OK) \
     X(ble_initialized, bluetooth.initialized) \
     X(ble_failed, !bluetooth.failed) \
     X(usb_initialized, usb.initialized) \

@@ -2244,6 +2244,15 @@ identity and authenticated management read identified confirmed `a92c76a`
 with both saved hosts present. The wheel gesture was not qualified on this
 candidate during the trial.
 
+The USB trial of `02f5a97` on the same board produced no recorded panel
+allocation failure or renderer-error gate after the smaller SPI chunks were
+installed. This image still rolled back. The IMU consumer reported a cache-age
+timeout during startup. Subsequent samples were fresh, the worker was active,
+the current error was clear and the recovery count stayed at two. The health
+log continued to report `imu_fault` through the end of probation. That gate
+read the board's retained first-fault flag. The management API subsequently
+reported confirmed `a92c76a` and both saved hosts.
+
 ## Device evidence template
 
 ```text

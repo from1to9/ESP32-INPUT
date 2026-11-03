@@ -13,6 +13,7 @@ static struct {
 } s_update_gate;
 static bool s_update_maintenance;
 static uint64_t s_update_health_since;
+static uint64_t s_update_health_imu_recoveries;
 
 static bool remote_update_same_claim(const cp_command_t *a, const cp_command_t *b)
 {
@@ -116,6 +117,7 @@ static void remote_update_health_service(void)
     app_update_snapshot(&update);
     if (update.state != APP_UPDATE_PENDING_HEALTH) {
         s_update_health_since = 0;
+        s_update_health_imu_recoveries = 0;
         remote_update_health_report(update.state);
         return;
     }
@@ -129,10 +131,18 @@ static void remote_update_health_service(void)
     bool media_known = app_media_runtime_snapshot(&media);
     ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
     usb_hid_snapshot_t usb = usb_hid_snapshot();
+    /* Capability is temporarily false during recovery. An initialized IMU stays
+     * required; an absent optional device remains exempt. History
+     * stays latched for diagnostics, while current state owns health. A changed
+     * recovery count also breaks continuity when recovery fell between polls. */
+    bool imu_required = capabilities.imu || imu.initialization_succeeded;
+    bool imu_stable = imu.phase == BOARD_IMU_ACTIVE &&
+                      imu.recovery_count == s_update_health_imu_recoveries;
+    s_update_health_imu_recoveries = imu.recovery_count;
     bool sensors =
-        (!capabilities.imu ||
+        (!imu_required ||
          (imu.initialization_succeeded && imu.start_succeeded && imu.worker_running &&
-          imu.sample_valid && imu.sample_fresh && !imu.fault_latched && imu.error == ESP_OK));
+          imu.sample_valid && imu.sample_fresh && imu_stable && imu.error == ESP_OK));
     /* These two getters are pure local reads/validation. Capture once so the
      * trace describes the same values used by the acceptance predicate. */
     bool display_present = board_display_get() != NULL;

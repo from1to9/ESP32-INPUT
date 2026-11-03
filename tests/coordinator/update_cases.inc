@@ -239,9 +239,12 @@ static void update_test_health_ready(void)
     update_test_quiet_media();
     test_update_snapshot.state = APP_UPDATE_PENDING_HEALTH;
     s_multitouch_available = true;
-    test_update_imu = (board_imu_status_t){.initialization_succeeded = true,
+    test_update_imu = (board_imu_status_t){.initialization_attempted = true,
+                                           .initialization_succeeded = true,
                                            .start_succeeded = true,
                                            .worker_running = true,
+                                           .available = true,
+                                           .phase = BOARD_IMU_ACTIVE,
                                            .sample_valid = true,
                                            .sample_fresh = true};
     test_update_presentation =
@@ -318,6 +321,124 @@ static void update_health_rejects_queued_render_codec_and_clock_regression(void)
     remote_update_health_service();
     assert(!s_update_health_since && !test_update_health_requests);
 }
+static void update_health_imu_recovery_caps_cannot_bypass(void)
+{
+    setup(INPUT_MOUSE);
+    update_test_health_ready();
+    remote_update_health_service();
+    assert(s_update_health_since == 1000);
+    s_now_ms = 5000;
+    test_capabilities.imu = false;
+    test_update_imu.available = false;
+    test_update_imu.phase = BOARD_IMU_RECOVERING;
+    test_update_imu.sample_valid = test_update_imu.sample_fresh = false;
+    test_update_imu.error = ESP_ERR_TIMEOUT;
+    test_update_imu.fault_latched = true;
+    test_update_imu.failure_streak = 1;
+    remote_update_health_service();
+    assert(!s_update_health_since && !test_update_health_requests);
+    assert(s_update_health_trace.missing & (UINT64_C(1) << UPDATE_HEALTH_GATE_imu_fault));
+    s_now_ms = 6000;
+    test_capabilities.imu = test_update_imu.available = true;
+    test_update_imu.phase = BOARD_IMU_ACTIVE;
+    test_update_imu.sample_valid = test_update_imu.sample_fresh = true;
+    test_update_imu.error = ESP_OK;
+    test_update_imu.failure_streak = 0;
+    test_update_imu.recovery_count = 1;
+    remote_update_health_service();
+    assert(!s_update_health_since); /* The recovery boundary discards the old streak. */
+    s_now_ms = 6001;
+    remote_update_health_service();
+    assert(s_update_health_since == 6001 && !s_update_health_trace.missing);
+    s_now_ms = 51000;
+    remote_update_health_service();
+    assert(!test_update_health_requests);
+    s_now_ms = 51001;
+    remote_update_health_service();
+    assert(test_update_health_requests == 1 && test_update_imu.fault_latched);
+}
+
+static void update_health_imu_history_does_not_block_recovered_samples(void)
+{
+    setup(INPUT_MOUSE);
+    update_test_health_ready();
+    test_update_imu.fault_latched = true;
+    test_update_imu.first_fault_stage = "cache_age";
+    test_update_imu.first_fault_error = ESP_ERR_TIMEOUT;
+    test_update_imu.first_fault_us = 100;
+    test_update_imu.recovery_count = 2;
+    const board_imu_status_t recovered = test_update_imu;
+    remote_update_health_service();
+    s_now_ms = 1001;
+    remote_update_health_service();
+    assert(s_update_health_since == 1001 && !s_update_health_trace.missing);
+    s_now_ms = 46000;
+    remote_update_health_service();
+    assert(!test_update_health_requests);
+    s_now_ms = 46001;
+    remote_update_health_service();
+    assert(test_update_health_requests == 1);
+    assert(memcmp(&recovered, &test_update_imu, sizeof recovered) == 0);
+}
+
+static void update_health_imu_unobserved_recovery_breaks_continuity(void)
+{
+    setup(INPUT_MOUSE);
+    update_test_health_ready();
+    remote_update_health_service();
+    s_now_ms = 30000;
+    /* Recovery completes between coordinator polls: all current leaves are
+     * good, but the old 29 seconds cannot cross this hardware boundary. */
+    test_update_imu.recovery_count = 1;
+    test_update_imu.fault_latched = true;
+    remote_update_health_service();
+    assert(!s_update_health_since && !test_update_health_requests);
+    assert(s_update_health_trace.missing == (UINT64_C(1) << UPDATE_HEALTH_GATE_imu_fault));
+    s_now_ms = 30001;
+    remote_update_health_service();
+    assert(s_update_health_since == 30001 && !s_update_health_trace.missing);
+    s_now_ms = 59999;
+    remote_update_health_service();
+    assert(!test_update_health_requests);
+    /* The updater still owns its 60-second deadline. Leaving probation does
+     * not let this incomplete replacement streak make a confirmation call. */
+    test_update_snapshot.state = APP_UPDATE_BOOT_SELECTION_UNCERTAIN;
+    s_now_ms = 60000;
+    remote_update_health_service();
+    assert(!s_update_health_since && !test_update_health_requests);
+}
+
+static void update_health_imu_optional_absence_and_real_failures_stay_distinct(void)
+{
+    /* An absent optional device may be unprobed or have a failed init probe.
+     * Neither has successfully established IMU capability on this boot. */
+    for (unsigned attempted = 0; attempted < 2; ++attempted) {
+        setup(INPUT_MOUSE);
+        update_test_health_ready();
+        test_capabilities.imu = false;
+        test_update_imu = (board_imu_status_t){.initialization_attempted = attempted != 0,
+            .phase = attempted ? BOARD_IMU_FATAL : BOARD_IMU_UNINITIALIZED,
+            .fault_latched = attempted != 0, .error = ESP_ERR_NOT_FOUND};
+        remote_update_health_service();
+        assert(s_update_health_since == 1000 && !s_update_health_trace.missing);
+        s_now_ms = 46000;
+        remote_update_health_service();
+        assert(test_update_health_requests == 1);
+    }
+    /* A formerly initialized device cannot become optional when start, worker
+     * or sampling fails. Inactive phase rejects even stale success-shaped leaves. */
+    const board_imu_phase_t failed[] = {BOARD_IMU_UNINITIALIZED, BOARD_IMU_RECOVERING, BOARD_IMU_FATAL};
+    for (unsigned i = 0; i < sizeof failed / sizeof failed[0]; ++i) {
+        setup(INPUT_MOUSE);
+        update_test_health_ready();
+        test_capabilities.imu = test_update_imu.available = false;
+        test_update_imu.phase = failed[i];
+        remote_update_health_service();
+        assert(!s_update_health_since && !test_update_health_requests);
+        assert(s_update_health_trace.missing == (UINT64_C(1) << UPDATE_HEALTH_GATE_imu_fault));
+    }
+}
+
 static void update_health_trace_retains_subsecond_failures(void)
 {
     setup(INPUT_MOUSE);
@@ -422,7 +543,7 @@ static void update_health_trace_names_each_observed_gate(void)
     FAIL_GATE(imu_worker, test_update_imu.worker_running = false);
     FAIL_GATE(imu_sample_valid, test_update_imu.sample_valid = false);
     FAIL_GATE(imu_sample_fresh, test_update_imu.sample_fresh = false);
-    FAIL_GATE(imu_fault, test_update_imu.fault_latched = true);
+    FAIL_GATE(imu_fault, test_update_imu.phase = BOARD_IMU_RECOVERING);
     FAIL_GATE(imu_error, test_update_imu.error = ESP_FAIL);
     FAIL_GATE(ble_initialized, test_link.initialized = false);
     FAIL_GATE(ble_failed, test_link.failed = true);
@@ -499,6 +620,10 @@ static void update_health_trace_observes_confirmation_without_changing_retries(v
     RUN(update_real_owner_gap_and_clock_regression_stay_rejected);                                 \
     RUN(update_health_requires_continuous_local_proof_and_no_host);                                \
     RUN(update_health_rejects_queued_render_codec_and_clock_regression);                            \
+    RUN(update_health_imu_recovery_caps_cannot_bypass);                                            \
+    RUN(update_health_imu_history_does_not_block_recovered_samples);                               \
+    RUN(update_health_imu_unobserved_recovery_breaks_continuity);                                  \
+    RUN(update_health_imu_optional_absence_and_real_failures_stay_distinct);                        \
     RUN(update_health_trace_retains_subsecond_failures);                                           \
     RUN(update_health_trace_has_bounded_output_and_explicit_loss);                                 \
     RUN(update_health_trace_names_each_observed_gate);                                             \
