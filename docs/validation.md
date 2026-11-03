@@ -2204,6 +2204,30 @@ live requests. The saved list and its revision stayed unchanged. The captures
 do not identify which physical host sent each request or establish loss of
 stored keys.
 
+## Signed Wi-Fi installation and first-boot rollback on Mosaico (2026-11-03)
+
+The device verified the signed catalog for `6cfc83a` while running `a92c76a`.
+With Bluetooth selected for HID, the first download wrote 65,536 bytes before
+the input path failed the maintenance idle check. After switching HID to USB,
+the second download wrote 1,490,944 bytes. The next read was denied because
+the coordinator's observation was 263 ms old against a 250 ms limit. Neither
+attempt changed the boot selection. The record does not show what delayed
+that observation.
+
+With USB HID still selected, a development publisher spaced 4 KiB writes to
+approximately 22 KiB/s. The device received, wrote and verified all 4,725,904
+bytes of the same signed image. Activation selected the new slot. After
+restart, the authenticated device reported the clean candidate commit and
+matching ELF digest. This single transfer does not establish that pacing is
+required or that it prevents stale observations.
+
+The new image entered first-boot probation. The device did not confirm it
+within the 60-second window and subsequently booted the previous `a92c76a`
+image. After rollback, the management API reported the old image confirmed
+and both saved hosts present. The available observations do not identify
+which local health gate interrupted the required 45 continuous healthy
+seconds. Bluetooth host switching on the candidate remains unqualified.
+
 ## Device evidence template
 
 ```text
