@@ -43,6 +43,9 @@ UNITS = {
     "preferences": "components/device_settings/device_settings.c",
     "wifi": "firmware/main/app_wifi.c",
     "control_runtime": "firmware/main/app_control_runtime.c",
+    "runtime_diagnostics": "firmware/main/app_runtime_diagnostics.c",
+    "firmware_update": "firmware/main/app_firmware_update.c",
+    "control_json": "components/control_protocol/control_json.c",
     "board": "firmware/main/board_mosaico.c",
     "interaction": "components/interaction/interaction.c",
     "hid_engine": "components/hid_engine/hid_engine.c",
@@ -939,6 +942,46 @@ for _label, (_owner, _steps) in SENSOR_PATHS.items():
     PATHS[_label] = _steps
     PATH_OWNERS[_label] = _owner
 
+DIAGNOSTIC_READ = HTTP_READ[:-1] + [("runtime_diagnostics", "app_runtime_diagnostics_read")]
+DIAGNOSTIC_PATHS = {
+    "identity_catalog": [("runtime_diagnostics", "identity"), ("sensor_api", "app_sensor_api_read"), ("sensor_api", "catalog")],
+    "encode": [("runtime_diagnostics", "append")],
+    "encode_error": [("runtime_diagnostics", "error_value"), ("runtime_diagnostics", "append")],
+    "encode_scan": [("runtime_diagnostics", "scan_observation"), ("runtime_diagnostics", "append")],
+    "wifi": [("wifi", "app_wifi_get_snapshot")],
+    "scan": [("wifi", "app_wifi_get_scan_snapshot")],
+    "scan_evidence": [("wifi", "app_wifi_get_scan_diagnostics")],
+    "control": [("control_runtime", "app_control_runtime_snapshot")],
+    "usb_hid": [("usb_hid", "usb_hid_snapshot")],
+    "usb_audio": [("usb_audio", "usb_audio_snapshot")],
+    "ble": [("ble", "ble_hid_snapshot")],
+    "ble_failure": [("ble", "ble_hid_failure")],
+    "audio": [("audio_manager", "app_audio_snapshot")],
+    "codec": [("board_audio", "board_audio_mosaico_status")],
+    "update": [("firmware_update", "app_update_snapshot")],
+}
+# cj_parse starts value at depth zero, allows containers through depth four,
+# and can enter a scalar/rejected container at depth five: six active frames.
+# identity canonicalizes only prechecked strings/null, so emit does not recurse.
+JSON_VALUE_DEPTH = [("control_json", "value")] * 6
+for _name, _tail in {
+    "utf8": [("control_json", "cj_utf8")],
+    "scalar": JSON_VALUE_DEPTH,
+    "string": JSON_VALUE_DEPTH + [("control_json", "string"), ("control_json", "unicode"), ("control_json", "hex")],
+    "whitespace": JSON_VALUE_DEPTH + [("control_json", "whitespace")],
+}.items():
+    DIAGNOSTIC_PATHS["identity_parse_" + _name] = [("runtime_diagnostics", "identity"), ("control_json", "cj_parse")] + _tail
+    PATHS["diagnostics_http_response_parse_" + _name] = HTTP_READ[:5] + [("control_json", "cj_parse")] + _tail
+    PATH_OWNERS["diagnostics_http_response_parse_" + _name] = "https"
+DIAGNOSTIC_PATHS["identity_canonical"] = [("runtime_diagnostics", "identity"), ("control_json", "cj_canonical"),
+    ("control_json", "emit"), ("control_json", "quoted"), ("control_json", "put")]
+DIAGNOSTIC_PATHS["identity_get"] = [("runtime_diagnostics", "identity"), ("control_json", "cj_get")]
+DIAGNOSTIC_PATHS["identity_string"] = [("runtime_diagnostics", "identity"), ("control_json", "cj_string")]
+DIAGNOSTIC_PATHS["escape_stage"] = [("control_json", "cj_escape"), ("control_json", "quoted"), ("control_json", "put")]
+for _label, _steps in DIAGNOSTIC_PATHS.items():
+    PATHS["diagnostics_http_" + _label] = DIAGNOSTIC_READ + _steps
+    PATH_OWNERS["diagnostics_http_" + _label] = "https"
+
 # This header function is file-static inline, despite its public-looking name.
 # Missing emission is charged to log_codec/poll; emitted bodies/clones still count.
 INLINABLE_HEADER_HELPERS = {("audio_diagnostics", "board_audio_sdk_operation_name")}
@@ -950,7 +993,7 @@ REQUIRED = set(CORE + [("main", "render_view"), ("main", "report_runtime_diagnos
                        ("interaction", "recenter_reference")]) | {
     step for path in PATHS.values() for step in path
     if step[1].startswith(("app_", "ble_", "bt_", "settings_", "device_settings_", "interaction_",
-                           "board_", "sensor_wire_", "cp_")) and step not in INLINABLE_HEADER_HELPERS
+                           "board_", "sensor_wire_", "cp_", "cj_")) and step not in INLINABLE_HEADER_HELPERS
 }
 # LVGL's lv_ prefix also names file-static helpers. In the pinned optimized
 # object lv_timer_exec is inlined into lv_timer_handler (including its timer

@@ -1540,6 +1540,15 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
                                cp_http_response_t *out)
 {
     cp_identity_t who = identity(c, session);
+    static const char diagnostics[] = "/api/v1/diagnostics/runtime";
+    if (!strncmp(resource, diagnostics, sizeof(diagnostics) - 1U)) {
+        if (strcmp(resource, diagnostics)) return failure(out, CP_INVALID);
+        if (!(who.scopes & CP_SCOPE_DIAGNOSTICS_READ)) return failure(out, CP_FORBIDDEN);
+        cp_error_t error = provider_read(c, session, resource, out->body, sizeof(out->body), &out->length);
+        if (error != CP_OK) return failure(out, error);
+        out->status = 200;
+        return CP_OK;
+    }
     cp_sensor_resource_t sensor = cp_sensor_resource(resource);
     if (sensor != CP_SENSOR_RESOURCE_NONE) {
         if (sensor == CP_SENSOR_RESOURCE_INVALID) return failure(out, CP_INVALID);

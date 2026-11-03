@@ -9,6 +9,9 @@ import json
 from pathlib import Path
 import re
 import sys
+import time
+import threading
+from functools import wraps
 from decimal import Decimal, InvalidOperation
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError, validators
 from secure_transport import BridgeError, Keychain, MacKeychain, PinnedHTTPS, load_profile
@@ -90,6 +93,14 @@ def exact_multiple(validator, divisor, instance, schema):
 TypedValidator = validators.extend(Draft202012Validator, {"multipleOf": exact_multiple,
     "minLength": wire_min_length, "maxLength": wire_max_length})
 
+def serialized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    return call
+
+
 class DeviceSession:
     def __init__(self, profile: dict, transport, keychain: Keychain):
         self.profile, self.transport, self.keychain = profile, transport, keychain
@@ -97,7 +108,10 @@ class DeviceSession:
         self.sequence = 1
         self.pending = None
         self.closed = False
+        self.read_attempts = 0
+        self.lock = threading.RLock()
 
+    @serialized
     def connect(self):
         if self.closed:
             raise BridgeError("Logical controller is closed")
@@ -119,17 +133,30 @@ class DeviceSession:
             self.close()
             raise BridgeError("Device/bridge operation catalog mismatch; update the companion")
 
+    @serialized
     def read(self, resource):
         if self.login is None or self.closed:
             raise BridgeError("No authenticated logical controller")
-        return self.transport.request("GET", resource, token=self.login["session_token"])
+        # The coordinator's bounded read mailbox answers busy on first
+        # admission. Poll only read-only resources, on this same logical
+        # session/verified connection; never replay commands or auth failures.
+        for attempt, delay in enumerate((0, 0.02, 0.04, 0.08), start=1):
+            if delay:
+                time.sleep(delay)
+            self.read_attempts = attempt
+            response = self.transport.request("GET", resource, token=self.login["session_token"])
+            if response.get("http_status") not in (429, 503) or response.get("error") != "busy":
+                return response
+        return response
 
+    @serialized
     def heartbeat(self):
         if self.login and not self.closed:
             result = self.read("/api/v1/sessions/current")
             if result.get("http_status") != 200 or not result.get("authenticated"):
                 raise BridgeError("Logical controller session lost")
 
+    @serialized
     def close(self):
         if self.login and not self.closed:
             try:
@@ -141,6 +168,9 @@ class DeviceSession:
         self.closed = True
         self.login = None
         self.pending = None
+        close = getattr(self.transport, "close", None)
+        if close:
+            close()
 
     def _send_pending(self):
         result = self.transport.request("POST", "/api/v1/commands", self.pending,
@@ -157,6 +187,7 @@ class DeviceSession:
         self.pending = None
         return result
 
+    @serialized
     def invoke(self, name: str, arguments: dict):
         if name == "bridge_retry_pending":
             if arguments != {} or self.pending is None:

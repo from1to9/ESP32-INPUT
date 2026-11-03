@@ -735,3 +735,24 @@ SDK submission alone is not deletion proof.
 Evidence: [BLE regressions](../../tests/ble_hid/README.md),
 [connectivity controls](../../tests/connectivity_controls/README.md), and
 [management validation](../../docs/validation.md#bluetooth-management-without-a-usb-release-dependency-2026-11-03).
+
+## 32. Match asynchronous reads to the verified transport lifecycle
+
+A coordinator-owned read can legitimately return busy on first admission while
+its owner prepares a short-lived snapshot. A client that reconnects TLS for
+every poll can repeatedly miss that freshness window, even with a healthy LAN.
+Do not extend snapshot age or turn busy into success to compensate for transport
+cost. Reuse one verified connection per logical controller and poll only exact
+busy GET results within finite bounds. Check the certificate again whenever a
+new connection is established. Keep mutation delivery and unknown outcomes out
+of automatic retry, and close the transport with the owning session.
+
+Separate Wi-Fi association, configured trust, listener readiness, authenticated
+reads and actual update completion. Missing initial trust explains an absent
+listener but does not prove a failed radio. Preserve incomplete/unsupported
+diagnostic reads in local receipts; status collection is not device-health or
+rollback qualification.
+
+Evidence: [companion tests](../../tests/control_protocol/test_bridge.py),
+[LAN collector tests](../../tests/test_lan_debug.py), and
+[collector contract](../../tools/lan_debug.md).

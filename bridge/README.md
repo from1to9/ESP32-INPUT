@@ -55,6 +55,15 @@ TLS checks the CA path, hostname and exact enrolled leaf fingerprint. Native ses
 
 After an unknown network outcome, `bridge_retry_pending` reuses the identical request/envelope. A fresh request or session is never used to replay it. Device result eviction returns unknown, not success. Separate session loss, input takeover, lock and media grant revocation remain separate boundaries.
 
+One controller reuses its verified HTTPS connection until session closure or a
+transport failure. Exact `busy` responses to GET are polled at most four times
+with 20/40/80 ms backoff so the coordinator can publish its bounded fresh read.
+Commands and failed connections are never automatically replayed. This preserves
+the device's read-cache freshness limit instead of relying on a new TLS handshake
+fitting inside it. Use the [LAN diagnostic collector](../tools/lan_debug.md) for
+bounded status evidence and the [sensor collector](../tools/sensor_capture.md)
+for ordered raw sensor observations.
+
 ## HTTP and media
 
 The station-only HTTPS server has no provisioning-AP route. OpenAPI is generated in [`api/openapi.json`](../api/openapi.json). GET `/api/v1/sessions/current` is an authenticated heartbeat; media operational liveness expires five seconds after authenticated client activity. `/api/v1/capture/grants` returns only the principal's enrolled grants. Clock status stays unknown after boot until a real SNTP callback and exposes unauthenticated SNTP quality separately.

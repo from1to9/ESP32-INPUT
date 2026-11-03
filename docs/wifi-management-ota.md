@@ -27,12 +27,22 @@ the running device's CDC interface and local review as described in the
 [companion instructions](../bridge/README.md#local-enrollment); it does not require
 ROM download mode. Preserve existing network profiles, bonds and preferences.
 
-As of the 2026-10-23 capture image, signed OTA, authenticated status and their
-host-tested workers exist in source, but physical commissioning/update/rollback
-are not qualified. The API catalog's diagnostic operations are not an implemented
-raw-log download provider. The [ordered IMU capture](motion-capture.md) currently
-exports over USB only. Neither catalog presence nor a LAN address establishes
-remote debugging availability.
+The 2026-11-03 diagnostic path adds authenticated
+`GET /api/v1/diagnostics/runtime` with `diagnostics.read`. It copies current
+Wi-Fi/scan, control, USB, Bluetooth, audio and update observations without starting
+work or exporting private credentials, names, PCM or arbitrary serial text.
+Unknown provider state remains explicit. Its identity comes from the sensor
+telemetry boot/image/configuration, which is distinct from the protocol session
+boot. Queries are serialized with bounded scratch storage and return busy on
+contention. See the [LAN collector](../tools/lan_debug.md) for private bounded
+status captures and the [sensor API](sensor-api.md) for ordered USB/HTTPS samples.
+
+The catalog's `diagnostics.snapshot/capture/stop` operations still have no raw-log
+capture provider. The older [ordered Motion capture](motion-capture.md) remains
+a separate USB export. Neither catalog presence nor a LAN address establishes
+remote debugging availability. Actual commissioning, signed OTA and device
+results belong in the [validation record](validation.md); host tests do not
+qualify physical update/rollback or long-run behavior.
 
 The next diagnostic provider must retain a bounded completed capture while a
 separate network owner transfers it. Bind downloads to an authenticated principal,

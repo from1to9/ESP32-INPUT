@@ -781,8 +781,33 @@ static void test_authenticated_sensor_reads(void)
     cp_http_security_t no_tls = native_security(); no_tls.tls = false;
     assert(cp_http(context, "GET", sample, &no_tls, NULL, 0, clock_ms, &response) != CP_OK);
 }
+static void test_authenticated_runtime_diagnostics(void)
+{
+    const char *path = "/api/v1/diagnostics/runtime";
+    reset(CP_SCOPE_DIAGNOSTICS_READ, false);
+    assert(request("GET", path, NULL) == CP_UNAUTHENTICATED && !resource_reads);
+    login_native();
+    assert(request("GET", path, NULL) == CP_OK && resource_reads == 1 && !dispatches);
+    unsigned before = resource_reads;
+    const char *bad[] = {"/api/v1/diagnostics/runtime/", "/api/v1/diagnostics/runtime?x=1", "/api/v1/diagnostics/runtimeX"};
+    for (unsigned i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i)
+        assert(request("GET", bad[i], NULL) == CP_INVALID && resource_reads == before);
+    assert(request("POST", path, "{}") == CP_NOT_IMPLEMENTED && !dispatches);
+    redaction_failure = true;
+    assert(request("GET", path, NULL) == CP_INTERNAL);
+    reset(CP_SCOPE_VIEW, false); login_native(); before = resource_reads;
+    assert(request("GET", path, NULL) == CP_FORBIDDEN && resource_reads == before);
+    reset(CP_SCOPE_DIAGNOSTICS_CONTROL, false); login_native(); before = resource_reads;
+    assert(request("GET", path, NULL) == CP_FORBIDDEN && resource_reads == before);
+    reset(CP_SCOPE_ALL, false); login_native();
+    cp_http_security_t security = native_security(); security.tls = false;
+    before = resource_reads;
+    assert(cp_http(context, "GET", path, &security, NULL, 0, clock_ms, &response) != CP_OK);
+    assert(resource_reads == before && !dispatches);
+}
 int main(void)
 {
+    test_authenticated_runtime_diagnostics();
     test_authenticated_sensor_reads();
     test_context_storage_contract();
     test_explicit_motion_recenter_schema_lease_and_replay();

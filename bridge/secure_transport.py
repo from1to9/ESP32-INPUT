@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import ssl
 import subprocess
+import threading
 from typing import Protocol
 
 MAX_RESPONSE = 4096
@@ -80,8 +81,17 @@ class PinnedHTTPS:
         self.digest = digest
         self.context = ssl.create_default_context(cadata=certificate)
         self.context.minimum_version = ssl.TLSVersion.TLSv1_2
+        self.connection = None
+        self.lock = threading.RLock()
         # CA signature/path and hostname checks remain enabled. The exact leaf
         # fingerprint is an additional check, not a replacement for either.
+
+    def close(self):
+        with self.lock:
+            connection = getattr(self, "connection", None)
+            self.connection = None
+            if connection is not None:
+                connection.close()
 
     def request(self, method: str, path: str, body: dict | None = None, token: str | None = None) -> dict:
         status, raw = self._request_bytes(method, path, body, token)
@@ -99,6 +109,12 @@ class PinnedHTTPS:
         return self._request_bytes("GET", path, None, token)
 
     def _request_bytes(self, method: str, path: str, body: dict | None, token: str | None) -> tuple[int, bytes]:
+        # asyncio cancellation does not stop a to_thread worker. Keep socket
+        # request/response/close ownership serialized in the worker threads.
+        with self.lock:
+            return self._request_bytes_locked(method, path, body, token)
+
+    def _request_bytes_locked(self, method: str, path: str, body: dict | None, token: str | None) -> tuple[int, bytes]:
         if method not in {"GET", "POST", "DELETE"} or not path.startswith("/api/v1/") or "#" in path:
             raise BridgeError("Invalid device resource")
         if "?" in path:
@@ -110,16 +126,22 @@ class PinnedHTTPS:
                                                      allow_nan=False).encode()
         if encoded is not None and len(encoded) > 2048:
             raise BridgeError("Device command exceeds 2048 bytes")
-        headers = {"Accept": "application/json", "Connection": "close"}
+        headers = {"Accept": "application/json", "Connection": "keep-alive"}
         if encoded is not None:
             headers["Content-Type"] = "application/json"
         if token:
             if not re.fullmatch(r"[a-f0-9]{64}", token):
                 raise BridgeError("Invalid session token")
             headers["Authorization"] = "Bearer " + token
-        connection = http.client.HTTPSConnection(self.host, self.port, context=self.context, timeout=4)
         try:
-            connection.connect()
+            connection = getattr(self, "connection", None)
+            if connection is None or connection.sock is None:
+                self.close()
+                connection = http.client.HTTPSConnection(self.host, self.port, context=self.context, timeout=4)
+                self.connection = connection
+                connection.connect()
+            # Check before every send, including after a server-closed socket
+            # has required a new handshake. Failed requests are never replayed.
             actual = connection.sock.getpeercert(binary_form=True)
             if hashlib.sha256(actual).hexdigest() != self.digest:
                 raise BridgeError("Device certificate pin mismatch")
@@ -135,12 +157,16 @@ class PinnedHTTPS:
             declared = response.getheader("Content-Length")
             if declared is not None and (len(declared) > 4 or not re.fullmatch(r"0|[1-9][0-9]*", declared) or int(declared) != len(raw)):
                 raise BridgeError("Incomplete device response")
+            if getattr(response, "will_close", False):
+                self.close()
             return response.status, raw
+        except BridgeError:
+            self.close()
+            raise
         except (OSError, ssl.SSLError, http.client.HTTPException) as error:
+            self.close()
             # SDK/HTTP error strings may contain resource or credential data.
             raise BridgeError("Verified device connection failed") from error
-        finally:
-            connection.close()
 
 def load_profile(path: Path) -> dict:
     if path.stat().st_size > 8192:

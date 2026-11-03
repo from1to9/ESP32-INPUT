@@ -2047,6 +2047,39 @@ radio or flash testing was performed for this repair, as requested. Native
 radio/storage substitutions do not qualify host discovery, pairing or physical
 bond removal.
 
+## Wi-Fi development management and diagnostics: 2026-11-03
+
+The running Mosaico v1.2 image identified itself over USB telemetry as clean
+`9199f64f620fc675bf8359c75f2aff8bf493bd41`. Initial live observations showed a
+connected station, known absent trust and a stopped HTTPS service. The device
+refused the management TCP connection. This was not evidence of a radio fault.
+Explicit USB import and local review then installed a scoped native identity,
+signed-update source and finite update policy while preserving settings. Actual
+authenticated TLS reads succeeded; the clock became known and the update owner
+reported the compatible layout, available configuration and confirmed running
+image. No client secret or private certificate material is tracked.
+
+The original companion repeatedly received busy on five state GETs, with each
+fresh TLS request taking approximately 208..280 ms. Coordinator read receipts
+remain valid for 250 ms. Reusing the pinned connection and polling only exact
+busy GET responses produced seven successful state reads on the same running
+image. No firmware freshness, command deadline or owner checks changed. The
+old image truthfully reported the new runtime diagnostic resource as unsupported.
+
+The source addition provides a scoped, copied runtime diagnostic resource and a
+bounded private LAN collector. Native tests cover scope, unknown/zero, retained
+failures, privacy, contention and a 3306-byte maximum-width fixture. Companion
+tests cover bounded reads, no mutation replay, shared-connection ownership even
+after async cancellation, and session closure. Collector tests preserve partial
+evidence, boot changes, output limits and resource errors. Target compilation
+and declared diagnostic HTTPS stack paths, including JSON parser recursion and
+scalar canonicalization, passed. ISR and endurance qualification remain open.
+
+At this checkpoint, commissioning and authenticated reads are device-observed;
+the new diagnostic firmware and a complete signed OTA cycle still require their
+separate deployment evidence. These read results do not qualify rollback,
+power-loss recovery, physical HID or audio behavior.
+
 ## Device evidence template
 
 ```text

@@ -3,6 +3,7 @@
 #include "control_json.h"
 #include "usb_hid.h"
 #include "app_sensor_api.h"
+#include "app_runtime_diagnostics.h"
 #include "control_sensor_usb.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -220,6 +221,10 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
 {
     (void)unused;
     int n = -1;
+    if (!strcmp(resource, APP_RUNTIME_DIAGNOSTICS_RESOURCE)) {
+        if (!(who->scopes & CP_SCOPE_DIAGNOSTICS_READ)) return CP_FORBIDDEN;
+        return app_runtime_diagnostics_read(json, capacity, length);
+    }
     cp_sensor_resource_t sensor = cp_sensor_resource(resource);
     if (sensor != CP_SENSOR_RESOURCE_NONE) {
         if (!(who->scopes & CP_SCOPE_DIAGNOSTICS_READ)) return CP_FORBIDDEN;

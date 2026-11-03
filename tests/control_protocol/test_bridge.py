@@ -9,6 +9,7 @@ import struct
 import sys
 import tempfile
 import time
+import threading
 import unittest
 from unittest.mock import patch
 from cryptography import x509
@@ -71,6 +72,119 @@ class FakeSerial:
     def readline(self, limit): return self.responses.pop(0)
 
 class CompanionTests(unittest.TestCase):
+    def test_cancelled_async_reader_keeps_worker_session_ownership(self):
+        entered, release, finished, close_attempt = [threading.Event() for _ in range(4)]
+        keychain = FakeKeychain(); keychain.values["test", "1"*32] = "2"*64
+        class BlockingHTTP(FakeHTTP):
+            deleted = False
+            def request(self, method, path, body=None, token=None):
+                if path == "/api/v1/state":
+                    entered.set()
+                    if not release.wait(2): raise AssertionError("Reader was not released")
+                    finished.set()
+                if method == "DELETE": self.deleted = True
+                return super().request(method, path, body, token)
+        http = BlockingHTTP()
+        session = DeviceSession(dict(keychain_service="test", keychain_account="1"*32,
+                                     principal_id="1"*32), http, keychain)
+        session.connect()
+        def close():
+            close_attempt.set()
+            session.close()
+        async def scenario():
+            reader = asyncio.create_task(asyncio.to_thread(session.read, "/api/v1/state"))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            reader.cancel()
+            with self.assertRaises(asyncio.CancelledError): await reader
+            closer = asyncio.create_task(asyncio.to_thread(close))
+            self.assertTrue(await asyncio.to_thread(close_attempt.wait, 1))
+            try:
+                await asyncio.sleep(0.02)
+                self.assertFalse(http.deleted)
+                self.assertFalse(session.closed)
+            finally:
+                release.set()
+            await asyncio.wait_for(closer, 2)
+        asyncio.run(scenario())
+        self.assertTrue(finished.is_set() and http.deleted and session.closed)
+
+    def test_transport_close_waits_for_complete_response(self):
+        entered, release, closing = [threading.Event() for _ in range(3)]
+        transport = PinnedHTTPS.__new__(PinnedHTTPS)
+        transport.lock = threading.RLock()
+        transport.host, transport.port, transport.context = "device.test", 443, object()
+        transport.digest = hashlib.sha256(b"leaf").hexdigest()
+        class Response:
+            status = 200
+            def getheader(self, name, default=None):
+                return {"Content-Type": "application/json", "Content-Length": "2"}.get(name, default)
+            def read(self, maximum):
+                entered.set()
+                if not release.wait(2): raise AssertionError("Socket reader was not released")
+                return b"{}"
+        class Connection:
+            closed = False
+            def __init__(self): self.sock = self
+            def connect(self): pass
+            def getpeercert(self, binary_form): return b"leaf"
+            def request(self, *args): pass
+            def getresponse(self): return Response()
+            def close(self): self.closed = True
+        connection = Connection(); errors = []
+        def read():
+            try: transport.request("GET", "/api/v1/state")
+            except Exception as error: errors.append(error)
+        def close():
+            closing.set(); transport.close()
+        with patch("secure_transport.http.client.HTTPSConnection", return_value=connection):
+            reader = threading.Thread(target=read); reader.start()
+            self.assertTrue(entered.wait(1))
+            closer = threading.Thread(target=close); closer.start()
+            self.assertTrue(closing.wait(1))
+            try:
+                time.sleep(0.02)
+                self.assertFalse(connection.closed)
+            finally:
+                release.set(); reader.join(2); closer.join(2)
+            self.assertFalse(reader.is_alive() or closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(connection.closed)
+
+    def test_pending_read_is_polled_without_replaying_mutations(self):
+        keychain = FakeKeychain(); keychain.values["test", "1"*32] = "2"*64
+        class PendingHTTP(FakeHTTP):
+            state_reads = 0
+            def request(self, method, path, body=None, token=None):
+                if path == "/api/v1/state":
+                    self.state_reads += 1
+                    if self.state_reads == 1:
+                        return dict(http_status=429, error="busy")
+                return super().request(method, path, body, token)
+        http = PendingHTTP()
+        session = DeviceSession(dict(keychain_service="test", keychain_account="1"*32,
+                                     principal_id="1"*32), http, keychain)
+        session.connect()
+        with patch("time.sleep"):
+            result = session.read("/api/v1/state")
+        self.assertEqual(result["http_status"], 200)
+        self.assertEqual(http.state_reads, 2)
+        self.assertEqual(http.commands, [])
+
+    def test_busy_read_has_a_bound_and_other_failures_are_not_retried(self):
+        keychain = FakeKeychain(); keychain.values["test", "1"*32] = "2"*64
+        http = FakeHTTP()
+        session = DeviceSession(dict(keychain_service="test", keychain_account="1"*32,
+                                     principal_id="1"*32), http, keychain)
+        session.connect()
+        for status, error, count in ((429, "busy", 4), (503, "busy", 4),
+                                     (503, "not_implemented", 1), (401, "unauthenticated", 1)):
+            with self.subTest(status=status, error=error), patch("time.sleep"), \
+                 patch.object(http, "request", return_value=dict(http_status=status, error=error)) as send:
+                self.assertEqual(session.read("/api/v1/state")["http_status"], status)
+                self.assertEqual(send.call_count, count)
+                self.assertEqual(session.read_attempts, count)
+                self.assertTrue(all(call.args[0] == "GET" for call in send.call_args_list))
+
     def test_sensor_typed_reads_and_canonical_query(self):
         keychain = FakeKeychain(); keychain.values["test", "1"*32] = "2"*64
         http = FakeHTTP(); profile = dict(keychain_service="test", keychain_account="1"*32, principal_id="1"*32)
@@ -91,6 +205,7 @@ class CompanionTests(unittest.TestCase):
 
     def test_sensor_raw_evidence_uses_existing_verified_tls_boundary(self):
         transport = PinnedHTTPS.__new__(PinnedHTTPS)
+        transport.lock = threading.RLock()
         transport.host, transport.port, transport.context = "device.test", 443, object()
         transport.digest = hashlib.sha256(b"synthetic-leaf").hexdigest()
         class Response:
@@ -102,17 +217,20 @@ class CompanionTests(unittest.TestCase):
         class Socket:
             def getpeercert(self, binary_form=False): assert binary_form; return b"synthetic-leaf"
         class Connection:
-            def __init__(self): self.sock = Socket(); self.response = Response(); self.closed = False; self.calls = []
-            def connect(self): pass
+            def __init__(self): self.sock = Socket(); self.response = Response(); self.closed = False; self.calls = []; self.connects = 0
+            def connect(self): self.connects += 1
             def request(self, *args): self.calls.append(args)
             def getresponse(self): return self.response
             def close(self): self.closed = True
         connection = Connection()
         with patch("secure_transport.http.client.HTTPSConnection", return_value=connection):
             status, raw = transport.sensor_get_raw("/api/v1/sensors/catalog", "1"*64)
-            self.assertEqual((status, raw), (403, Response.raw)); self.assertTrue(connection.closed)
+            self.assertEqual((status, raw), (403, Response.raw)); self.assertFalse(connection.closed)
             self.assertEqual(connection.response.maximum, 4097)
             self.assertEqual(transport.request("GET", "/api/v1/sensors/catalog", token="1"*64)["http_status"], 403)
+            self.assertEqual(connection.connects, 1)
+            self.assertTrue(all(call[3]["Connection"] == "keep-alive" for call in connection.calls))
+            transport.close(); self.assertTrue(connection.closed)
             connection.response.headers = {"Content-Type": "application/json", "Content-Length": "4096"}
             with self.assertRaisesRegex(BridgeError, "Incomplete"):
                 transport.sensor_get_raw("/api/v1/sensors/latest", "1"*64)
