@@ -128,13 +128,14 @@ static bool wifi_idle(void)
         !controls.profiles.operation_pending && !controls.wifi.operation_pending && !controls.wifi.cleanup_pending &&
         !controls.wifi.setup_active && !controls.wifi.storage_uncertain;
 }
-static bool ble_idle(void)
+static bool ble_manageable(void)
 {
     return idle() && controls.preference.loaded && controls.preference.request_status != BLE_HID_TARGET_PENDING &&
         controls.preference.request_status != BLE_HID_TARGET_APPLYING && controls.preference.request_status != BLE_HID_TARGET_UNCERTAIN &&
         controls.bonds.known && !controls.bonds.updating && controls.bluetooth.initialized && !controls.bluetooth.failed &&
-        !controls.bluetooth.connected && !controls.context.transport_switch_pending;
+        !controls.context.transport_switch_pending;
 }
+static bool ble_idle(void) { return ble_manageable() && !controls.bluetooth.connected; }
 static void begin(pending_t operation)
 { controls.pending = operation; controls.started_ms = controls.now_ms; }
 
@@ -276,13 +277,17 @@ static void rebuild(void)
         controls.target.selected = row->is_selected;
         snprintf(controls.target.name, sizeof(controls.target.name), "Saved input host");
         snprintf(controls.target.identity, sizeof(controls.target.identity), "%02X:%02X:%02X:%02X:%02X:%02X (type %u)", row->address[0], row->address[1], row->address[2], row->address[3], row->address[4], row->address[5], row->address_type);
-        controls.target.can_select = ble_idle() && row->selection_supported; controls.target.can_prefer = ble_idle() && found > 0;
+        controls.target.selection_supported = row->selection_supported;
+        controls.target.can_select = ble_manageable() && row->address_type_known && row->bond_id_known; controls.target.can_prefer = ble_idle() && found > 0;
         controls.target.can_forget = idle() && row->bond_id_known && row->address_type_known &&
             controls.preference.loaded && controls.preference.request_status != BLE_HID_TARGET_PENDING &&
             controls.preference.request_status != BLE_HID_TARGET_APPLYING && controls.preference.request_status != BLE_HID_TARGET_UNCERTAIN &&
             controls.bluetooth.initialized && !controls.bluetooth.failed && !controls.context.transport_switch_pending;
-        snprintf(controls.target.reason, sizeof(controls.target.reason), "%s", !row->selection_supported ? "Exact selection is unavailable for this private or unverified identity." :
-            controls.bluetooth.connected ? "Release input and disconnect the current host before changing targets." : controls.message);
+        snprintf(controls.target.reason, sizeof(controls.target.reason), "%s",
+            (row->is_current && controls.bonds.current_match_known && controls.bluetooth.connected && controls.bluetooth.ready) ?
+            "Current host verified; input ready." : !row->bond_id_known ?
+            "Saved identity cannot be verified; reconnect is unavailable. Existing bonds are preserved." : !row->selection_supported ?
+            "Allow reconnect for 30s; exact selection is unavailable. Input waits for verified identity." : controls.message);
     } else snprintf(controls.target.reason, sizeof(controls.target.reason), "%s", controls.message[0] ?
         controls.message : "The saved target is unavailable or changed. Select a fresh row.");
     controls.api = (app_api_view_t){.known = controls.runtime.initialized && controls.runtime.trust.initialized,
@@ -427,6 +432,18 @@ static void handle_bluetooth(const app_bluetooth_target_request_t *request, app_
         controls.confirm_generation = controls.bluetooth.generation; controls.confirm_target = owner_key(&controls.bonds.bonds[found]);
         effect->open_overlay = true; effect->overlay = APP_OVERLAY_CONFIRM;
         effect->confirmation = APP_CONFIRM_BLUETOOTH_FORGET_ONE; return;
+    }
+    if (request->operation == APP_BLUETOOTH_TARGET_SELECT) {
+        if (controls.context.overlay != APP_OVERLAY_BLUETOOTH_TARGET || !ble_manageable() ||
+            !controls.bonds.bonds[found].address_type_known || !controls.bonds.bonds[found].bond_id_known) { say(effect, error_text(ESP_ERR_NOT_SUPPORTED)); return; }
+        ble_hid_target_t target = owner_key(&controls.bonds.bonds[found]);
+        esp_err_t error = app_bluetooth_management_begin(controls.bonds.bonds[found].selection_supported ? APP_BT_MANAGE_SELECT : APP_BT_MANAGE_RECONNECT, controls.bluetooth.generation,
+            controls.bonds.revision, controls.preference.revision, &target, controls.now_ms);
+        if (error == ESP_OK) {
+            begin(P_BLE_MANAGEMENT); effect->release_input = true;
+            say(effect, "Switch accepted. Releasing the current host before saving the selected target.");
+        } else say(effect, error_text(error));
+        return;
     }
     if (controls.context.overlay != APP_OVERLAY_BLUETOOTH_TARGET || !ble_idle() ||
         (request->operation != APP_BLUETOOTH_TARGET_SELECT && request->operation != APP_BLUETOOTH_TARGET_PREFER) ||

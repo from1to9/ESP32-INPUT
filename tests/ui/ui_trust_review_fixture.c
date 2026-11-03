@@ -17,6 +17,16 @@ void ble_hid_copy_bond_list(ble_hid_bond_list_t *out) { assert(out); *out = (ble
 ble_hid_target_snapshot_t ble_hid_target_snapshot(void) { return (ble_hid_target_snapshot_t){0}; }
 bool ble_hid_pairing_open(uint32_t duration) { (void)duration; assert(false); return false; }
 void ble_hid_pairing_close(void) { assert(false); }
+bool ble_hid_management_reserve(uint64_t generation, uint64_t *reservation)
+{ (void)generation; (void)reservation; assert(false); return false; }
+void ble_hid_management_release(uint64_t reservation) { (void)reservation; assert(false); }
+void ble_hid_management_resume(uint64_t reservation) { (void)reservation; assert(false); }
+void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *target)
+{ (void)reservation; (void)target; assert(false); }
+bool ble_hid_management_ready(uint64_t reservation) { (void)reservation; assert(false); return false; }
+bool ble_hid_management_pairing_open(uint64_t reservation, uint32_t duration)
+{ (void)reservation; (void)duration; assert(false); return false; }
+bool ble_hid_disconnect_user_generation(uint64_t generation) { (void)generation; assert(false); return false; }
 bool ble_hid_disconnect_generation(uint64_t generation) { (void)generation; assert(false); return false; }
 bool ble_hid_forget_bonds_without_pairing(uint64_t generation) { (void)generation; assert(false); return false; }
 esp_err_t ble_hid_forget_bond_request(uint64_t generation, uint64_t revision, const ble_hid_target_t *target, uint64_t *id)

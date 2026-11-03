@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_clock.h"
 #include <string.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include "esp_netif_sntp.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -15,19 +17,23 @@ static struct {
     app_clock_snapshot_t view;
     char servers[APP_CLOCK_SERVER_CAPACITY][129];
     unsigned count;
-    uint32_t timeout, refresh, maximum_age, config_generation;
+    uint32_t timeout, refresh, maximum_age, sync_generation, network_generation;
     uint64_t anchor_ms, anchor_seconds;
     bool active, worker_started;
 } state;
 static uint64_t monotonic_ms(void) { return (uint64_t)esp_timer_get_time() / 1000U; }
+static bool anchor_valid_locked(uint64_t now)
+{
+    return state.view.known && now >= state.anchor_ms && now - state.anchor_ms <= state.maximum_age;
+}
 static void synchronized(struct timeval *tv)
 {
     if (!tv || tv->tv_sec < 1577836800LL || tv->tv_sec > 4133980800LL || tv->tv_usec < 0 ||
         tv->tv_usec >= 1000000) {
         return;
     }
-    uint64_t now = monotonic_ms();
     portENTER_CRITICAL(&clock_lock);
+    uint64_t now = monotonic_ms();
     if (state.active && state.view.station_ready) {
         state.anchor_ms = now;
         state.anchor_seconds = (uint64_t)tv->tv_sec;
@@ -38,6 +44,41 @@ static void synchronized(struct timeval *tv)
     }
     portEXIT_CRITICAL(&clock_lock);
 }
+/* Called under clock_lock. DNS/SDK operations never run under this lock. */
+static esp_err_t attempt_status_locked(uint32_t generation, uint32_t network, uint64_t started)
+{
+    if (!state.view.station_ready || state.sync_generation != generation ||
+        state.network_generation != network) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint64_t now = monotonic_ms();
+    return now >= started && now - started < state.timeout ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+static esp_err_t resolve_server(const char *name, char endpoint[INET6_ADDRSTRLEN])
+{
+    struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM}, *answers = NULL;
+    /* The pinned lwIP resolver waits for its own finite DNS retry/completion.
+     * This resident worker owns that request until return; no replacement
+     * SNTP attempt can inherit its callback. Its elapsed time is rechecked. */
+    if (getaddrinfo(name, NULL, &hints, &answers) != 0) {
+        return ESP_FAIL;
+    }
+    bool found = false;
+    for (const struct addrinfo *a = answers; a && !found; a = a->ai_next) {
+        if (a->ai_addr && a->ai_family == AF_INET && a->ai_addrlen >= sizeof(struct sockaddr_in)) {
+            const struct sockaddr_in *address = (const struct sockaddr_in *)a->ai_addr;
+            found = inet_ntop(AF_INET, &address->sin_addr, endpoint, INET6_ADDRSTRLEN) != NULL;
+        } else if (a->ai_addr && a->ai_family == AF_INET6 && a->ai_addrlen >= sizeof(struct sockaddr_in6)) {
+            const struct sockaddr_in6 *address = (const struct sockaddr_in6 *)a->ai_addr;
+            /* SDK numeric strings cannot preserve an interface scope/zone. */
+            if (!address->sin6_scope_id) {
+                found = inet_ntop(AF_INET6, &address->sin6_addr, endpoint, INET6_ADDRSTRLEN) != NULL;
+            }
+        }
+    }
+    if (answers) freeaddrinfo(answers);
+    return found ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
 static void worker(void *unused)
 {
     (void)unused;
@@ -45,11 +86,15 @@ static void worker(void *unused)
     uint32_t generation = 0;
     uint64_t started = 0, next = 0;
     char names[APP_CLOCK_SERVER_CAPACITY][129];
+    /* esp_netif/SNTP retains these pointers. Only this resident worker writes
+     * them, after deinit has drained the previous SDK instance. Numeric v4/v6
+     * strings take lwIP's synchronous parser, never sntp_dns_found(). */
+    char endpoints[APP_CLOCK_SERVER_CAPACITY][INET6_ADDRSTRLEN] = {0};
     for (;;) {
-        uint64_t now = monotonic_ms();
         portENTER_CRITICAL(&clock_lock);
+        uint64_t now = monotonic_ms();
         bool ready = state.view.station_ready;
-        bool changed = generation != state.config_generation;
+        bool changed = generation != state.sync_generation;
         bool synced = state.view.known && state.anchor_ms >= started;
         bool timed_out = initialized && now >= started && now - started >= state.timeout;
         unsigned count = state.count;
@@ -62,14 +107,14 @@ static void worker(void *unused)
             }
         }
         bool stop = initialized && !state.active;
-        if (state.view.known &&
-            (now < state.anchor_ms || now - state.anchor_ms > state.maximum_age)) {
+        if (state.view.known && !anchor_valid_locked(now)) {
             state.view.known = false;
             state.view.error = ESP_ERR_TIMEOUT;
             ++state.view.revision;
         }
         memcpy(names, state.servers, sizeof(names));
-        uint32_t proposed_generation = state.config_generation;
+        uint32_t proposed_generation = state.sync_generation;
+        uint32_t proposed_network = state.network_generation;
         portEXIT_CRITICAL(&clock_lock);
         if (stop) {
             /* SDK stop executes through the TCP/IP owner. Disable admission
@@ -79,38 +124,61 @@ static void worker(void *unused)
             next = changed ? now : now + refresh;
         }
         if (!initialized && ready && count && (changed || now >= next)) {
+            started = now;
+            generation = proposed_generation;
+            memset(endpoints, 0, sizeof(endpoints));
+            unsigned resolved = 0;
+            esp_err_t error = ESP_ERR_NOT_FOUND;
+            for (unsigned i = 0; i < count; ++i) {
+                portENTER_CRITICAL(&clock_lock);
+                esp_err_t current = attempt_status_locked(generation, proposed_network, started);
+                portEXIT_CRITICAL(&clock_lock);
+                if (current != ESP_OK) { error = current; break; }
+                error = resolve_server(names[i], endpoints[resolved]);
+                if (error == ESP_OK) ++resolved;
+            }
+            portENTER_CRITICAL(&clock_lock);
+            esp_err_t current = attempt_status_locked(generation, proposed_network, started);
+            portEXIT_CRITICAL(&clock_lock);
+            if (current != ESP_OK) error = current;
+            else if (resolved) error = ESP_OK;
             esp_sntp_config_t config = {.smooth_sync = false,
                                         .server_from_dhcp = false,
                                         .wait_for_sync = false,
                                         .start = false,
                                         .sync_cb = synchronized,
-                                        .num_of_servers = count};
-            for (unsigned i = 0; i < count && i < CONFIG_LWIP_SNTP_MAX_SERVERS; ++i) {
-                config.servers[i] = names[i];
+                                        .num_of_servers = resolved};
+            for (unsigned i = 0; i < resolved; ++i) {
+                config.servers[i] = endpoints[i];
             }
-            esp_err_t error = esp_netif_sntp_init(&config);
+            if (error == ESP_OK) error = esp_netif_sntp_init(&config);
             if (error == ESP_OK) {
                 initialized = true;
-                started = now;
-                generation = proposed_generation;
                 portENTER_CRITICAL(&clock_lock);
-                state.active = state.view.station_ready && state.config_generation == generation;
+                error = attempt_status_locked(generation, proposed_network, started);
+                state.active = error == ESP_OK;
                 state.view.synchronizing = state.active;
                 portEXIT_CRITICAL(&clock_lock);
-                error = esp_netif_sntp_start();
+                if (error == ESP_OK) error = esp_netif_sntp_start();
             }
             portENTER_CRITICAL(&clock_lock);
-            state.view.error = error;
+            current = attempt_status_locked(generation, proposed_network, started);
+            if (error == ESP_OK && current != ESP_OK) error = current;
+            /* A replacement configuration/network owns its observation. */
+            if (state.sync_generation == generation && state.network_generation == proposed_network) {
+                state.view.error = error;
+                ++state.view.revision;
+            }
             if (error != ESP_OK) {
                 state.active = false;
                 state.view.synchronizing = false;
             }
-            ++state.view.revision;
             portEXIT_CRITICAL(&clock_lock);
-            next = now + refresh;
-            if (error != ESP_OK) {
-                generation = proposed_generation;
+            if (error != ESP_OK && initialized) {
+                esp_netif_sntp_deinit();
+                initialized = false;
             }
+            next = monotonic_ms() + refresh;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -158,7 +226,7 @@ esp_err_t app_clock_init(const app_clock_config_t *config)
     state.timeout = timeout;
     state.refresh = refresh;
     state.maximum_age = age;
-    ++state.config_generation;
+    ++state.sync_generation;
     ++state.view.revision;
     portEXIT_CRITICAL(&clock_lock);
     if (start && app_network_task_create(worker, "network_clock", 4096, NULL, 1, NULL) != pdPASS) {
@@ -176,6 +244,10 @@ void app_clock_station_ready(bool ready)
     portENTER_CRITICAL(&clock_lock);
     if (state.view.station_ready != ready) {
         state.view.station_ready = ready;
+        ++state.network_generation;
+        /* A new LAN may reach the enrolled server after a failed or interrupted
+         * first sync. Keep the regular refresh cadence when an anchor is valid. */
+        if (ready && !anchor_valid_locked(monotonic_ms())) ++state.sync_generation;
         ++state.view.revision;
     }
     if (!ready) {
@@ -188,10 +260,10 @@ void app_clock_snapshot(app_clock_snapshot_t *out)
     if (!out) {
         return;
     }
-    uint64_t now = monotonic_ms();
     portENTER_CRITICAL(&clock_lock);
+    uint64_t now = monotonic_ms();
     *out = state.view;
-    bool valid = out->known && now >= state.anchor_ms && now - state.anchor_ms <= state.maximum_age;
+    bool valid = anchor_valid_locked(now);
     out->known = valid;
     out->unix_seconds = valid ? state.anchor_seconds + (now - state.anchor_ms) / 1000U : 0;
     out->age_ms = valid ? (uint32_t)(now - state.anchor_ms) : UINT32_MAX;

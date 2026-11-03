@@ -21,7 +21,8 @@ static bool signature_valid=true,known_clock=true,fail_read,flip_readback,cancel
 static esp_err_t ota_end_error,floor_error,boot_error;static bool apply_failed_floor,apply_failed_boot;
 static esp_err_t ota_write_error;
 static unsigned maintenance_waits;
-static unsigned maintenance_delays;
+static unsigned maintenance_delays, http_initializations;
+static bool lose_clock_on_catalog_read;
 static unsigned maintenance_overshoot_ms;
 static bool maintenance_restore;
 static bool maintenance_late_publish, publish_ready_on_enter;
@@ -124,6 +125,7 @@ static int test_getaddrinfo(const char *name,const char *service,const struct ad
 }
 static void test_freeaddrinfo(struct addrinfo *answers){assert(answers);}
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *c){
+    ++http_initializations;
     assert(!strcmp(c->host,"8.8.8.8")&&!strcmp(c->common_name,"publisher.example")&&c->disable_auto_redirect&&c->timeout_ms==2000&&c->transport_type==HTTP_TRANSPORT_OVER_SSL);
     http=(struct esp_http_client){0};if(!strcmp(c->path,"/catalog")){http.bytes=(const uint8_t *)catalog;http.length=strlen(catalog);}else{assert(!strcmp(c->path,"/image.bin"));http.bytes=image;http.length=sizeof(image);if(fail_state_on_image_open)state_query_error=ESP_FAIL;}
     if(bad_encoding){esp_http_client_event_t event={.event_id=HTTP_EVENT_ON_HEADER,.header_key="Content-Encoding",.header_value="gzip"};assert(c->event_handler(&event)==ESP_OK);}return &http;
@@ -134,6 +136,7 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c){assert(c==&htt
 int esp_http_client_get_status_code(esp_http_client_handle_t c){assert(c==&http);return status;}
 int64_t esp_http_client_get_content_length(esp_http_client_handle_t c){return(int64_t)c->length+length_delta;}
 int esp_http_client_read(esp_http_client_handle_t c,char *out,int capacity){assert(c==&http&&capacity>0);if(fail_read)return -1;size_t n=c->length-c->offset;if(n>(size_t)capacity)n=(size_t)capacity;memcpy(out,c->bytes+c->offset,n);c->offset+=n;if(cancel_on_read)updater->cancel=true;
+    if(n&&lose_clock_on_catalog_read&&c->bytes==(const uint8_t *)catalog)known_clock=false;
     if(revoke_on_read&&c->bytes==image){
         app_update_authority_t a=updater->authority;a.authorized=false;
         a.observation=(app_update_authority_observation_t){.observed_ms=clock_ms,
@@ -445,7 +448,14 @@ int main(void){
     source_t source;assert(!source_parse("http://publisher.example/image.bin",&source));assert(!source_parse("https://user@publisher.example/image.bin",&source));assert(!source_parse("https://publisher.example/image.bin?token=x",&source));
     assert(!allowed_ip(inet_addr("127.0.0.1"),true)&&!allowed_ip(inet_addr("169.254.1.1"),true)&&!allowed_ip(inet_addr("10.0.0.1"),false)&&allowed_ip(inet_addr("10.0.0.1"),true));
     signature_valid=false;assert(app_update_check()==ESP_OK);step_worker();assert(updater->view.state==APP_UPDATE_ERROR&&!begins&&!boot_writes);signature_valid=true;
-    known_clock=false;assert(app_update_check()==ESP_OK);step_worker();assert(updater->view.state==APP_UPDATE_ERROR&&!begins);known_clock=true;
+    unsigned before_clock_check=http_initializations;
+    known_clock=false;assert(app_update_check()==ESP_OK);step_worker();
+    assert(updater->view.state==APP_UPDATE_ERROR&&!begins&&http_initializations==before_clock_check);
+    assert(!strcmp(updater->view.reason,"time_or_trust_unavailable"));known_clock=true;
+    lose_clock_on_catalog_read=true;assert(app_update_check()==ESP_OK);step_worker();
+    assert(!known_clock&&updater->view.state==APP_UPDATE_ERROR&&!begins&&http_initializations==before_clock_check+1);
+    assert(updater->failure.phase==APP_UPDATE_FAILURE_RELEASE_TIME&&!strcmp(updater->view.reason,"time_or_trust_unavailable"));
+    lose_clock_on_catalog_read=false;known_clock=true;
     status=302;assert(app_update_check()==ESP_OK);step_worker();assert(updater->view.state==APP_UPDATE_ERROR);status=200;
     bad_encoding=true;assert(app_update_check()==ESP_OK);step_worker();assert(updater->view.state==APP_UPDATE_ERROR);bad_encoding=false;
     prepare_release();app_update_authority_t a=authority_make();a.authorized=false;assert(app_update_download("release-2",&a)==ESP_ERR_INVALID_STATE&&!begins);

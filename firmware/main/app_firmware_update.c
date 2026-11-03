@@ -526,8 +526,12 @@ static esp_err_t verify_catalog(const char *json, size_t length, release_t *out)
     }
     uint64_t wall;
     source_t source = {0}, catalog = {0};
+    if (valid && !app_clock_wall_time(&wall)) {
+        result = failure(APP_UPDATE_FAILURE_RELEASE_TIME, ESP_ERR_INVALID_STATE);
+        valid = false;
+    }
     if (valid) {
-        valid = app_clock_wall_time(&wall) && expiry > wall && expiry - wall <= 604800 &&
+        valid = expiry > wall && expiry - wall <= 604800 &&
                 source_parse(out->url, &source) && source_parse(updater->catalog, &catalog) &&
                 !strcmp(source.host, catalog.host) && source.port == catalog.port;
     }
@@ -552,6 +556,9 @@ static esp_err_t verify_catalog(const char *json, size_t length, release_t *out)
 }
 static esp_err_t check_catalog(void)
 {
+    uint64_t wall;
+    if (!app_clock_wall_time(&wall))
+        return failure(APP_UPDATE_FAILURE_RELEASE_TIME, ESP_ERR_INVALID_STATE);
     publish(APP_UPDATE_CHECKING, ESP_OK, "checking_signed_catalog");
     esp_http_client_handle_t client = open_source(updater->catalog);
     if (!client) {
@@ -908,7 +915,8 @@ static void worker(void *unused)
             wipe(&updater->authority, sizeof(updater->authority));
             publish_locked(APP_UPDATE_CANCELLED, error, "cancelled_owner_drained_stage_revoked");
         } else if (error != ESP_OK && !uncertain && updater->view.state != APP_UPDATE_UNAVAILABLE) {
-            publish_locked(APP_UPDATE_ERROR, error, "update_failed_no_success_claim");
+            const bool missing_clock = work == WORK_CHECK && updater->failure.phase == APP_UPDATE_FAILURE_RELEASE_TIME;
+            publish_locked(APP_UPDATE_ERROR, error, missing_clock ? "time_or_trust_unavailable" : "update_failed_no_success_claim");
         }
         portEXIT_CRITICAL(&update_lock);
         vTaskDelay(pdMS_TO_TICKS(20));

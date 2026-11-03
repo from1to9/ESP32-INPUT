@@ -814,3 +814,37 @@ success does not establish a physical reboot or health confirmation.
 
 Evidence: [updater regressions](../../tests/control_runtime/test_update.c) and
 the [stage/activation contract](../../docs/wifi-management-ota.md#7-stage-activate-confirm-and-cancel).
+
+## 36. Separate LAN reachability, clock availability and publisher trust
+
+A host can reach a device on another saved LAN while the device cannot reach
+the approved publisher in the opposite direction. After rejoining, an interrupted
+first time synchronization can also leave the device waiting for its regular
+refresh. Test unknown-clock reconnects before that deadline, fresh-clock
+reconnects, duplicate station-ready notifications and late callbacks. Bind DNS
+results to the network and configuration that requested them. Read monotonic
+time under the same lock as the time anchor so a newly synchronized anchor
+cannot appear to come from the future. Expose the
+missing clock before catalog TLS, preserve certificate checks and require the
+signed release's expiry check after download. Match the publisher's handshake
+or body evidence with the device's state when attributing a failed check.
+
+Evidence: [clock regressions](../../tests/control_runtime/test_clock.c),
+[updater regressions](../../tests/control_runtime/test_update.c) and the
+[device validation record](../../docs/validation.md#wi-fi-development-management-and-diagnostics-2026-11-03).
+
+
+## 37. Keep manual Bluetooth disconnect distinct from radio loss
+
+An active radio link can exist before authentication or a match to a saved
+peer. Preserve those separate observations when diagnosing a flashing control.
+Reserve admission before disconnecting for an explicit host change so the old
+host cannot reclaim the link during policy or pairing setup. Keep a manual
+pause reversible and volatile. Require a matching authenticated bond before
+sending input, including when a private address needs a bounded reconnect
+attempt. An SDK negative encryption-key reply describes that live request and
+does not establish that the stored pairing was erased.
+
+Evidence: [Bluetooth interaction](../../docs/interaction.md),
+[management regressions](../../tests/ble_hid/native_management_cases.inc) and
+[device observations](../../docs/validation.md#manual-bluetooth-host-switching-on-mosaico-2026-11-03).

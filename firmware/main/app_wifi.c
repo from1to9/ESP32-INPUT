@@ -17,6 +17,8 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "lwip/dns.h"
+#include "app_clock.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -78,6 +80,68 @@ static uint16_t s_selection_index;
 static char s_selection_ssid[APP_WIFI_SSID_CAPACITY];
 static uint16_t s_selection_authmode;
 static uint64_t s_selection_until, s_pending_selection_until;
+
+#define NETWORK_ENTRY_RETRY_MS 1000U
+/* Station owner only; s_lock also orders readiness publication with actual
+ * disconnect/lost-IP events. DNS operations execute outside this lock. */
+static struct {
+    bool observed, ready, pending;
+    uint32_t generation;
+    uint64_t retry_at;
+    esp_err_t error;
+} s_network;
+static void station_network_lost_locked(void)
+{
+    ++s_network.generation;
+    s_network.pending = s_network.pending || s_network.observed;
+    s_network.ready = false;
+    s_network.retry_at = 0;
+    app_clock_station_ready(false);
+}
+static esp_err_t station_dns_clear(void *unused)
+{
+    (void)unused;
+    /* Pinned lwIP has no per-name cache eviction. On real network replacement
+     * all old DNS answers/queries are inapplicable: clear positives and notify
+     * pending queries with failure on their TCP/IP owner. This only removes
+     * DNS query UDP sockets, not established application TCP/TLS sockets. */
+    dns_clear_cache();
+    return ESP_OK;
+}
+static esp_err_t station_network_enter(uint32_t observation)
+{
+    portENTER_CRITICAL(&s_lock);
+    uint64_t now = (uint64_t)esp_timer_get_time() / 1000U;
+    if (observation != s_network.generation) {
+        portEXIT_CRITICAL(&s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_network.ready || now < s_network.retry_at) {
+        esp_err_t result = s_network.ready ? ESP_OK : s_network.error;
+        portEXIT_CRITICAL(&s_lock);
+        return result;
+    }
+    bool clear = s_network.pending;
+    s_network.observed = true;
+    portEXIT_CRITICAL(&s_lock);
+    esp_err_t error = clear ? esp_netif_tcpip_exec(station_dns_clear, NULL) : ESP_OK;
+    portENTER_CRITICAL(&s_lock);
+    if (observation != s_network.generation) error = ESP_ERR_INVALID_STATE;
+    s_network.error = error;
+    if (error == ESP_OK) {
+        s_network.pending = false;
+        s_network.ready = true;
+        s_network.retry_at = 0;
+        /* Same station lock as loss events: a stale return cannot reopen the
+         * clock after an event has closed admission. The clock never takes
+         * this station lock, so the bounded lock order is station -> clock. */
+        app_clock_station_ready(true);
+    } else if (observation == s_network.generation) {
+        s_network.retry_at = (uint64_t)esp_timer_get_time() / 1000U + NETWORK_ENTRY_RETRY_MS;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return error;
+}
 
 static bool profile_remembered_locked(const char *ssid);
 static bool profile_capacity_locked(const char *ssid);
@@ -466,12 +530,25 @@ static esp_err_t set_station(const credentials_t *value)
 static void wifi_event(void *context, esp_event_base_t base, int32_t id, void *data)
 {
     (void)context;
+    if (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP) {
+        portENTER_CRITICAL(&s_lock);
+        station_network_lost_locked();
+        s_snapshot.lan_ready = false;
+        s_snapshot.ip[0] = '\0';
+        publish();
+        portEXIT_CRITICAL(&s_lock);
+        return;
+    }
     if (base != WIFI_EVENT || id != WIFI_EVENT_STA_DISCONNECTED) return;
     const wifi_event_sta_disconnected_t *event = data;
     portENTER_CRITICAL(&s_lock);
     s_disconnected = true;
     s_event_generation = s_station_generation;
     s_reason = event ? event->reason : 0;
+    station_network_lost_locked();
+    s_snapshot.lan_ready = false;
+    s_snapshot.ip[0] = '\0';
+    publish();
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -969,20 +1046,45 @@ static void service_step(void)
     portEXIT_CRITICAL(&s_lock);
     if (timeout || cleanup_due) set_error(stop_setup());
     if (configured) {
+        portENTER_CRITICAL(&s_lock);
+        uint32_t network_observation = s_network.generation;
+        portEXIT_CRITICAL(&s_lock);
         wifi_ap_record_t ap = {0};
         esp_netif_ip_info_t ip = {0};
         esp_err_t link = esp_wifi_sta_get_ap_info(&ap);
         bool associated = link == ESP_OK && memcmp(ap.ssid, s_snapshot.ssid, 32) == 0;
-        bool connected = associated && esp_netif_get_ip_info(s_sta, &ip) == ESP_OK && ip.ip.addr != 0;
-        if (connected) {
+        esp_err_t ip_error = associated ? esp_netif_get_ip_info(s_sta, &ip) : ESP_ERR_INVALID_STATE;
+        bool connected = associated && ip_error == ESP_OK && ip.ip.addr != 0;
+        if (!connected) {
+            bool lost = link == ESP_ERR_WIFI_NOT_CONNECT || (link == ESP_OK && !associated) ||
+                        (associated && ip_error == ESP_OK && !ip.ip.addr);
             portENTER_CRITICAL(&s_lock);
+            if (lost && (s_network.ready || (s_network.observed && !s_network.pending))) {
+                station_network_lost_locked();
+            } else if (s_network.ready) {
+                /* An unavailable driver read withdraws admission but is
+                 * not positive evidence that the LAN/cache changed. */
+                s_network.ready = false;
+                app_clock_station_ready(false);
+            }
+            portEXIT_CRITICAL(&s_lock);
+        }
+        if (connected) {
+            esp_err_t entry = station_network_enter(network_observation);
+            portENTER_CRITICAL(&s_lock);
+            if (entry == ESP_OK && !s_network.ready) entry = ESP_ERR_INVALID_STATE;
+            /* Keep the radio's observed state/reconnect policy independent
+             * from LAN admission. A loss event can invalidate these SDK reads. */
             s_snapshot.state = APP_WIFI_CONNECTED;
-            snprintf(s_snapshot.ip, sizeof(s_snapshot.ip), IPSTR, IP2STR(&ip.ip));
-            s_snapshot.rssi_dbm = ap.rssi;
-            s_snapshot.rssi_valid = true;
-            s_snapshot.lan_ready = true;
-            s_snapshot.connection_error = ESP_OK;
-            s_snapshot.disconnect_reason = 0;
+            bool current = network_observation == s_network.generation;
+            if (current) {
+                snprintf(s_snapshot.ip, sizeof(s_snapshot.ip), IPSTR, IP2STR(&ip.ip));
+                s_snapshot.rssi_dbm = ap.rssi;
+            } else s_snapshot.ip[0] = '\0';
+            s_snapshot.rssi_valid = current;
+            s_snapshot.lan_ready = entry == ESP_OK;
+            s_snapshot.connection_error = entry;
+            if (entry == ESP_OK) s_snapshot.disconnect_reason = 0;
             publish();
             portEXIT_CRITICAL(&s_lock);
             s_connect_until = s_retry_at = 0;
@@ -1037,6 +1139,7 @@ static esp_err_t initialize_worker(void)
         clear_secret(&credentials, sizeof(credentials));
     }
     bool driver_initialized = false, handler_registered = false, scan_registered = false;
+    bool lost_ip_registered = false;
     esp_err_t error = esp_netif_init();
     if (error == ESP_OK) {
         error = esp_event_loop_create_default();
@@ -1060,6 +1163,10 @@ static esp_err_t initialize_worker(void)
         error = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, scan_event, NULL);
         scan_registered = error == ESP_OK;
     }
+    if (error == ESP_OK) {
+        error = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_LOST_IP, wifi_event, NULL);
+        lost_ip_registered = error == ESP_OK;
+    }
     if (error == ESP_OK) error = esp_wifi_set_mode(WIFI_MODE_STA);
     if (error == ESP_OK) error = set_station(stored == ESP_OK ? &credentials : NULL);
     if (error == ESP_OK) error = esp_wifi_start();
@@ -1080,6 +1187,8 @@ static esp_err_t initialize_worker(void)
     portEXIT_CRITICAL(&s_lock);
     clear_secret(&credentials, sizeof(credentials));
     if (error != ESP_OK) {
+        if (lost_ip_registered)
+            (void)esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_LOST_IP, wifi_event);
         if (scan_registered)
             (void)esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, scan_event);
         if (handler_registered)

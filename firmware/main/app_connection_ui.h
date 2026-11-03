@@ -62,7 +62,7 @@ typedef struct {
     app_bluetooth_target_key_t target;
 } app_bluetooth_target_request_t;
 typedef struct {
-    bool known, pending, uncertain, selected, can_select, can_prefer, can_forget;
+    bool known, pending, uncertain, selected, selection_supported, can_select, can_prefer, can_forget;
     uint64_t bond_revision, preferences_revision;
     app_bluetooth_target_key_t target;
     char name[49], identity[49], reason[97];

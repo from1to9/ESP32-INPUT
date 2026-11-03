@@ -47,6 +47,35 @@ static size_t free_dma = 12911, largest_dma = 11776;
 static bool ip_assigned = true;
 static bool fail_ap_netif;
 static unsigned ap_creates;
+static unsigned dns_clears, tcpip_calls, clock_ready_calls;
+static bool tcpip_owner, clock_ready;
+static esp_err_t tcpip_error;
+static void (*tcpip_hook)(void);
+static void (*ip_read_hook)(void);
+static esp_err_t ip_read_error;
+
+void app_clock_station_ready(bool ready)
+{
+    assert(manager_lock_depth == 1);
+    clock_ready = ready;
+    ++clock_ready_calls;
+}
+esp_err_t esp_netif_tcpip_exec(esp_netif_callback_fn fn, void *context)
+{
+    assert(!manager_lock_depth && !tcpip_owner);
+    ++tcpip_calls;
+    if (tcpip_error != ESP_OK) return tcpip_error;
+    tcpip_owner = true;
+    if (tcpip_hook) { void (*hook)(void) = tcpip_hook; tcpip_hook = NULL; hook(); }
+    esp_err_t result = fn(context);
+    tcpip_owner = false;
+    return result;
+}
+void dns_clear_cache(void)
+{
+    assert(tcpip_owner && !manager_lock_depth);
+    ++dns_clears;
+}
 
 size_t heap_caps_get_free_size(unsigned caps) {
     assert(caps == 3U || caps == 5U); return caps == 3U ? free_heap : free_dma;
@@ -88,14 +117,16 @@ void vTaskDelete(void *task) { (void)task; }
 esp_err_t esp_event_loop_create_default(void) { return ESP_ERR_INVALID_STATE; }
 esp_err_t esp_event_handler_register(esp_event_base_t base, int32_t id,
     void (*handler)(void *, esp_event_base_t, int32_t, void *), void *arg) {
-    (void)arg; assert(base == WIFI_EVENT && ((id == WIFI_EVENT_STA_DISCONNECTED && handler == wifi_event) ||
-        (id == WIFI_EVENT_SCAN_DONE && handler == scan_event)));
+    (void)arg; assert((base == WIFI_EVENT && ((id == WIFI_EVENT_STA_DISCONNECTED && handler == wifi_event) ||
+        (id == WIFI_EVENT_SCAN_DONE && handler == scan_event))) ||
+        (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP && handler == wifi_event));
     return ESP_OK;
 }
 esp_err_t esp_event_handler_unregister(esp_event_base_t base, int32_t id,
     void (*handler)(void *, esp_event_base_t, int32_t, void *)) {
-    assert(base == WIFI_EVENT && ((id == WIFI_EVENT_STA_DISCONNECTED && handler == wifi_event) ||
-        (id == WIFI_EVENT_SCAN_DONE && handler == scan_event)));
+    assert((base == WIFI_EVENT && ((id == WIFI_EVENT_STA_DISCONNECTED && handler == wifi_event) ||
+        (id == WIFI_EVENT_SCAN_DONE && handler == scan_event))) ||
+        (base == IP_EVENT && id == IP_EVENT_STA_LOST_IP && handler == wifi_event));
     return ESP_OK;
 }
 esp_err_t esp_netif_init(void) { return ESP_OK; }
@@ -104,7 +135,11 @@ esp_netif_t *esp_netif_create_default_wifi_ap(void) {
     ++ap_creates; return fail_ap_netif ? NULL : &ap_netif;
 }
 esp_err_t esp_netif_get_ip_info(esp_netif_t *netif, esp_netif_ip_info_t *info) {
+    if (netif == &sta_netif && ip_read_error != ESP_OK) return ip_read_error;
     info->ip.addr = netif == &ap_netif ? 0x0104a8c0U : linked && ip_assigned ? 0x1401a8c0U : 0;
+    if (netif == &sta_netif && ip_read_hook) {
+        void (*hook)(void) = ip_read_hook; ip_read_hook = NULL; hook();
+    }
     return ESP_OK;
 }
 esp_err_t esp_netif_get_netif_impl_name(esp_netif_t *netif, char *name) {
@@ -211,6 +246,10 @@ static app_wifi_snapshot_t snapshot(void) {
     app_wifi_snapshot_t value; app_wifi_get_snapshot(&value); return value;
 }
 static void reset(bool preserve) {
+    memset(&s_network, 0, sizeof(s_network));
+    dns_clears = tcpip_calls = clock_ready_calls = 0;
+    tcpip_owner = clock_ready = false; tcpip_error = ip_read_error = ESP_OK;
+    tcpip_hook = ip_read_hook = NULL;
     memset(&s_snapshot, 0, sizeof(s_snapshot)); memset(&s_setup, 0, sizeof(s_setup));
     memset(&s_pending, 0, sizeof(s_pending)); memset(s_token, 0, sizeof(s_token));
     s_profile_request_counter=s_profile_active_request=s_profile_completed_request=0;s_profile_operation_error=0;memset(s_profile_results,0,sizeof(s_profile_results));s_profile_result_cursor=0;
@@ -958,6 +997,79 @@ static void test_profile_radio_failure_preserves_durable_evidence(void) {
     assert(snapshot().storage_error==ESP_OK&&!snapshot().storage_uncertain&&snapshot().connection_error==ESP_FAIL);
     station_config_error=ESP_OK;
 }
+static void lost_ip(void) { wifi_event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL); }
+static void entry_is_closed(void) { assert(!snapshot().lan_ready && !clock_ready); }
+static void lose_after_entry_commit(void) { manager_unlock_hook = lost_ip; }
+static void disconnect_during_entry(void)
+{
+    linked = false;
+    wifi_event_sta_disconnected_t event = {.reason = WIFI_REASON_ASSOC_LEAVE};
+    wifi_event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event);
+}
+static void test_network_entry_dns_barrier(void)
+{
+    seed_network();
+    assert(snapshot().lan_ready && clock_ready && !dns_clears && !tcpip_calls);
+    unsigned clock_publications = clock_ready_calls, before_connects = connects;
+    for (unsigned i = 0; i < 20; ++i) { clock_ms += 100; service_step(); }
+    assert(app_wifi_verify_storage() == ESP_OK); service_step();
+    app_wifi_profile_save_t save = {.expected_revision = s_profiles.revision, .enabled = true};
+    strcpy(save.ssid, "Other profile"); strcpy(save.password, "test-passphrase");
+    assert(app_wifi_profile_save(&save) == ESP_OK); service_step();
+    assert(!dns_clears && !tcpip_calls && clock_ready_calls == clock_publications);
+    uint32_t network_generation = s_network.generation;
+    ip_read_error = ESP_FAIL; service_step();
+    assert(!clock_ready && !s_network.pending && s_network.generation == network_generation);
+    ip_read_error = ESP_OK; linked = true; service_step();
+    assert(snapshot().lan_ready && clock_ready && !dns_clears && !tcpip_calls);
+
+    /* A real lost-IP event is visible even if IP returns between worker polls,
+     * with the same SSID and address. Only the owner can reopen admission. */
+    lost_ip(); entry_is_closed(); tcpip_hook = entry_is_closed; service_step();
+    assert(snapshot().lan_ready && clock_ready && dns_clears == 1 && tcpip_calls == 1);
+    for (unsigned i = 0; i < 20; ++i) { clock_ms += 100; service_step(); }
+    assert(dns_clears == 1 && connects == before_connects);
+    wifi_event_sta_disconnected_t event = {.reason = WIFI_REASON_ASSOC_LEAVE};
+    wifi_event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event);
+    entry_is_closed(); service_step();
+    assert(snapshot().lan_ready && clock_ready && dns_clears == 2);
+
+    /* Failure stays closed without repeated core submissions on every poll. */
+    lost_ip(); tcpip_error = ESP_ERR_NO_MEM; service_step();
+    unsigned calls = tcpip_calls;
+    assert(!snapshot().lan_ready && !clock_ready && snapshot().connection_error == ESP_ERR_NO_MEM);
+    clock_ms += NETWORK_ENTRY_RETRY_MS - 1; service_step(); assert(tcpip_calls == calls);
+    tcpip_error = ESP_OK; ++clock_ms; service_step();
+    assert(snapshot().lan_ready && clock_ready && tcpip_calls == calls + 1 && dns_clears == 3);
+
+    /* A loss between SDK observations and admission invalidates that observation. */
+    ip_read_hook = lost_ip; service_step();
+    assert(!snapshot().lan_ready && !clock_ready && dns_clears == 3 && !snapshot().ip[0]);
+    service_step(); assert(snapshot().lan_ready && clock_ready && dns_clears == 4);
+
+    /* A second real loss during the owner callback cannot be published ready. */
+    lost_ip(); tcpip_hook = lost_ip; service_step();
+    assert(!snapshot().lan_ready && !clock_ready && dns_clears == 5);
+    service_step(); assert(snapshot().lan_ready && clock_ready && dns_clears == 6);
+
+    /* Nor can the short window after clock admission but before Wi-Fi publish. */
+    lost_ip(); tcpip_hook = lose_after_entry_commit; service_step();
+    assert(!snapshot().lan_ready && !clock_ready && dns_clears == 7);
+    service_step(); assert(snapshot().lan_ready && clock_ready && dns_clears == 8);
+    assert(connects == before_connects);
+
+    /* A late entry return must also preserve the ordinary radio retry path. */
+    lost_ip(); tcpip_hook = disconnect_during_entry; service_step();
+    assert(!snapshot().lan_ready && !clock_ready && !snapshot().ip[0]);
+    service_step(); assert(snapshot().state == APP_WIFI_BACKOFF && snapshot().retry_in_ms > 0);
+    linked = true; service_step(); assert(snapshot().lan_ready && clock_ready && dns_clears == 10);
+    ip_read_error = ESP_FAIL; service_step();
+    assert(!clock_ready && !s_network.pending && dns_clears == 10);
+    ip_read_error = ESP_OK; linked = true; ip_assigned = false; service_step();
+    assert(s_network.pending && !clock_ready && dns_clears == 10);
+    linked = ip_assigned = true; service_step();
+    assert(snapshot().lan_ready && clock_ready && dns_clears == 11);
+}
 int main(void) {
     test_setup_and_reconnect(); test_security_and_limits(); test_failures();
     test_cleanup_recovery(); test_storage_uncertainty(); test_unreadable_recovery();
@@ -966,6 +1078,7 @@ int main(void) {
     test_device_station_provisioning(); test_scan_bounds_and_identity();
     test_scan_cancel_cleanup_and_pressure(); test_station_storage_and_scan_reconnect();
     test_scan_diagnostics_preserve_failed_generation();
+    test_network_entry_dns_barrier();
     test_selected_editor_reservations();test_multiple_profiles();test_profile_radio_failure_preserves_durable_evidence();
     reset(false);start();app_wifi_set_maintenance(true);assert(!s_accept_form);service_step();assert(!snapshot().setup_active);
     assert(app_wifi_start_setup()==ESP_ERR_INVALID_STATE&&app_wifi_forget_network()==ESP_ERR_INVALID_STATE&&app_wifi_scan_start()==ESP_ERR_INVALID_STATE);

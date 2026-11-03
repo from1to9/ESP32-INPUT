@@ -755,6 +755,7 @@ static void apply_connectivity_effect(const app_connectivity_controls_effect_t *
         (void)snprintf(s_connectivity_message, sizeof(s_connectivity_message), "%s", effect->message);
         s_message = s_connectivity_message;
     }
+    if (effect->release_input) cancel_input();
     if (effect->open_overlay) {
         s_confirmation = effect->confirmation;
         open_overlay(effect->overlay);
@@ -1196,12 +1197,13 @@ static void service_pair_operation(const ble_hid_snapshot_t *link)
     }
     if (link->connected) {
         if (!bluetooth_release_pending() && !link->congested && !s_pair_disconnect_requested)
-            s_pair_disconnect_requested = ble_hid_disconnect_generation(link->generation);
+            s_pair_disconnect_requested = s_pair_operation == APP_CONFIRM_DISCONNECT ?
+                ble_hid_disconnect_user_generation(link->generation) : ble_hid_disconnect_generation(link->generation);
         return;
     }
     if (s_pair_operation == APP_CONFIRM_DISCONNECT) {
         s_pair_operation = APP_CONFIRM_NONE;
-        s_message = "Bluetooth disconnected; saved pairing retained.";
+        s_message = "Bluetooth disconnected; automatic reconnect paused. Select a host or Resume.";
         return;
     }
     bool accepted = s_pair_operation == APP_CONFIRM_PAIR_FORGET_ALL ?
@@ -1719,7 +1721,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         return;
     }
     case APP_PAIRING_REQUEST:
-        if (intent->x < APP_PAIR_OPEN || intent->x > APP_PAIR_DISCONNECT ||
+        if (intent->x < APP_PAIR_OPEN || intent->x > APP_PAIR_RESUME ||
             s_pair_operation != APP_CONFIRM_NONE) return;
         if (s_overlay != APP_OVERLAY_TARGET && s_overlay != APP_OVERLAY_BLUETOOTH_PAIRING &&
             !(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH)) return;
@@ -1728,6 +1730,10 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
             app_connectivity_controls_bluetooth_stop(&effect); apply_connectivity_effect(&effect); return;
         }
         if (app_connectivity_controls_bluetooth_busy()) { s_message = "A Bluetooth change is still pending."; return; }
+        if (intent->x == APP_PAIR_RESUME) {
+            s_message = ble_hid_resume_reconnect() ? "Automatic reconnect resumed; waiting for a host." : "Reconnect cannot resume in the current state.";
+            ++s_ui_revision; return;
+        }
         if (intent->x == APP_PAIR_DISCONNECT && !link->connected) return;
         if (intent->x == APP_PAIR_OPEN && link->bond_count_known &&
             link->bond_capacity && link->bond_count >= link->bond_capacity) {
@@ -2658,6 +2664,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
     view.transport_switch_pending = s_transport_switch_pending;
     view.bluetooth_available = link->initialized && !link->failed;
     view.bluetooth_connected = link->connected;
+    view.bluetooth_reconnect_paused = link->reconnect_paused;
     view.bluetooth_ready = link->ready;
     (void)snprintf(view.bluetooth_target_name, sizeof(view.bluetooth_target_name), "%s", bluetooth_target);
     view.usb_available = usb.initialized && !usb.failed;

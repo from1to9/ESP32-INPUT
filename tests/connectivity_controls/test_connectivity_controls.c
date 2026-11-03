@@ -22,9 +22,18 @@ static uint64_t submitted_revision;
 static ble_hid_target_preferences_request_t submitted_target;
 static ble_hid_bond_forget_snapshot_t single_forget;
 static unsigned pairing_opens, pairing_closes, disconnects, all_forgets, single_forgets;
+bool ble_hid_management_reserve(uint64_t generation, uint64_t *reservation)
+{ assert(generation == bluetooth.generation); *reservation = 1; return true; }
+void ble_hid_management_release(uint64_t reservation) { (void)reservation; }
+void ble_hid_management_resume(uint64_t reservation) { (void)reservation; }
+void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *target) { (void)reservation; (void)target; }
+bool ble_hid_management_ready(uint64_t reservation) { return reservation && !bluetooth.connected && !bluetooth.advertising; }
+bool ble_hid_management_pairing_open(uint64_t reservation, uint32_t milliseconds)
+{ assert(reservation); return ble_hid_pairing_open(milliseconds); }
 bool ble_hid_pairing_open(uint32_t milliseconds)
 { assert(milliseconds == BLE_HID_PAIRING_DEFAULT_MS); ++pairing_opens; return false; }
 void ble_hid_pairing_close(void) { ++pairing_closes; bluetooth.pairing_open = false; }
+bool ble_hid_disconnect_user_generation(uint64_t generation) { return ble_hid_disconnect_generation(generation); }
 bool ble_hid_disconnect_generation(uint64_t generation)
 { assert(generation == bluetooth.generation); ++disconnects; return false; }
 bool ble_hid_forget_bonds_without_pairing(uint64_t generation)
@@ -162,12 +171,19 @@ static void bluetooth_targets(void)
     setup(); context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH; poll_at(1010);
     app_connectivity_controls_effect_t effect = handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, 1)); apply_overlay(effect);
     assert(view.bluetooth_target.known && view.bluetooth_target.can_select && !view.bluetooth_hosts[0].name[0]);
-    bluetooth.connected = true; poll_at(1020); handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 1)); assert(!target_requests);
-    bluetooth.connected = false; poll_at(1030); handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 1));
+    app_connectivity_controls_effect_t selected = handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 1));
+    assert(selected.release_input && controls.pending == P_BLE_MANAGEMENT && !target_requests);
+    poll_at(1020);
     assert(target_requests == 1 && submitted_target.selected && submitted_target.count == 2 && submitted_target.target.address[0] == 0xc3);
     assert(submitted_target.expected_bond_revision == 13 && submitted_target.expected_revision == 17);
-    preference.request_id = controls.ble_request_id; preference.request_status = BLE_HID_TARGET_PENDING; poll_at(1040); assert(controls.pending == P_BLE);
-    preference.request_status = BLE_HID_TARGET_APPLIED; ++preference.revision; poll_at(1050); assert(controls.pending == P_NONE && strstr(controls.message, "saved"));
+    app_bluetooth_management_snapshot_t manager; app_bluetooth_management_snapshot(&manager);
+    preference.request_id = manager.policy_request_id; preference.request_status = BLE_HID_TARGET_PENDING;
+    poll_at(1030); assert(controls.pending == P_BLE_MANAGEMENT);
+    preference.request_status = BLE_HID_TARGET_APPLIED; ++preference.revision;
+    preference.selected = true; preference.target = submitted_target.target;
+    poll_at(1040); assert(controls.pending == P_BLE_MANAGEMENT);
+    bluetooth.advertising = true; poll_at(1050);
+    assert(controls.pending == P_NONE && strstr(controls.message, "Connect from that host"));
     handle(bluetooth_intent(APP_BLUETOOTH_TARGET_PREFER, 1)); assert(target_requests == 2 && submitted_target.order[0].address[0] == 0xc3 && submitted_target.order[1].address[0] == 0xc2);
     preference.request_id = controls.ble_request_id; preference.request_status = BLE_HID_TARGET_UNCERTAIN; poll_at(1060);
     assert(controls.pending == P_NONE && view.bluetooth_target.uncertain && !view.bluetooth_target.can_select);
@@ -191,11 +207,50 @@ static void bluetooth_request_reuse(void)
     }
     bonds.count = 1; ++bonds.revision; poll_at(1020);
     apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, 0)));
-    submit_error = ESP_OK; handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 0));
+    submit_error = ESP_OK; handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 0)); poll_at(1030);
     assert(target_requests == 2 && submitted_target.count == 1 && submitted_target.selected);
     assert(!memcmp(submitted_target.target.bond_id, bonds.bonds[0].bond_id, BLE_HID_BOND_ID_BYTES));
     const unsigned char *tail = (const unsigned char *)&submitted_target.order[1];
     for (size_t i = 0; i < sizeof(submitted_target.order) - sizeof(submitted_target.order[0]); ++i) assert(tail[i] == 0);
+}
+static void bluetooth_connected_target_selection(void)
+{
+    setup(); bluetooth.connected = bluetooth.ready = bluetooth.encrypted = true;
+    context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH; poll_at(1010);
+    apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, 1)));
+    assert(view.bluetooth_target.can_select);
+    context.release_pending = true;
+    app_connectivity_controls_effect_t effect = handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 1));
+    assert(effect.release_input && app_connectivity_controls_bluetooth_busy());
+    poll_at(1020); assert(!disconnects && !target_requests);
+    context.release_pending = false; poll_at(1030);
+    assert(disconnects == 1 && !app_connectivity_controls_bluetooth_busy()); /* Rejected SDK close is not success. */
+}
+static void bluetooth_private_target_reconnect(void)
+{
+    setup(); bluetooth.connected = bluetooth.ready = bluetooth.encrypted = true;
+    bonds.bonds[1].selection_supported = false;
+    context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH; poll_at(1010);
+    apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, 1)));
+    assert(view.bluetooth_target.can_select && !view.bluetooth_target.selection_supported && view.bluetooth_target.can_forget);
+    assert(strstr(view.bluetooth_target.reason, "verified identity"));
+    bonds.current_match_known = true; bonds.bonds[1].is_current = true; poll_at(1015);
+    assert(strstr(view.bluetooth_target.reason, "input ready"));
+    bluetooth.ready = false; poll_at(1017); assert(!strstr(view.bluetooth_target.reason, "input ready"));
+    app_connectivity_controls_effect_t effect = handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 1));
+    app_bluetooth_management_snapshot_t manager; app_bluetooth_management_snapshot(&manager);
+    assert(effect.release_input && manager.operation == APP_BT_MANAGE_RECONNECT && manager.active && !target_requests);
+}
+static void bluetooth_missing_fingerprint_rejects_before_release(void)
+{
+    setup(); bluetooth.connected = bluetooth.ready = bluetooth.encrypted = true;
+    bonds.bonds[1].selection_supported = bonds.bonds[1].bond_id_known = false;
+    memset(bonds.bonds[1].bond_id, 0, sizeof(bonds.bonds[1].bond_id));
+    context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH; poll_at(1010);
+    apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, 1)));
+    assert(!view.bluetooth_target.can_select && strstr(view.bluetooth_target.reason, "cannot be verified"));
+    app_connectivity_controls_effect_t effect = handle(bluetooth_intent(APP_BLUETOOTH_TARGET_SELECT, 1));
+    assert(!effect.release_input && !app_connectivity_controls_bluetooth_busy() && !disconnects && !target_requests && bluetooth.ready);
 }
 static void bluetooth_current_evidence(void)
 {
@@ -417,6 +472,7 @@ int main(int argc, char **argv)
 {
     assert(argc == 2);
     static const struct { const char *name; void (*run)(void); } cases[] = {
+        {"bluetooth-unverified-reject", bluetooth_missing_fingerprint_rejects_before_release}, {"bluetooth-private-reconnect", bluetooth_private_target_reconnect}, {"bluetooth-connected-select", bluetooth_connected_target_selection},
         {"routing", routing}, {"wifi-order", wifi_order}, {"wifi-join", wifi_join}, {"wifi-forget", wifi_forget},
         {"bluetooth", bluetooth_targets}, {"bluetooth-current", bluetooth_current_evidence}, {"api-window", api_window}, {"api-review", api_review}, {"clock-timeout", clock_and_timeout},
         {"api-review-authority", api_review_authority}, {"api-review-missing", api_review_missing}, {"api-review-capacity", api_review_capacity},

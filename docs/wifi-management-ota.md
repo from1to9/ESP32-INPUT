@@ -147,6 +147,19 @@ Configure one approved HTTPS catalog origin/channel initially. The device fetche
 
 Require verified server identity/name and a supported trust/time policy. If certificate validity cannot be evaluated, expose `time_or_trust_unavailable`; do not disable verification. Trusted-time provisioning and certificate rotation need an explicit tested deployment path. HTTPS alone does not authorize a release.
 
+When a station reconnects without a valid time sample, start synchronization on
+the new LAN. Resolve the enrolled servers on the clock worker and pass numeric
+addresses to SNTP. Discard a result if its LAN, configuration or time budget
+changed during resolution. On a station that previously had an IP address,
+link or IP loss closes clock admission. Before publishing the next usable IP,
+the station owner clears the old DNS cache on the TCP/IP thread. Pending DNS
+lookups can return a failure at this boundary. Repeated ready observations
+and a normal clock refresh keep the cache. Preserve the normal refresh schedule
+while a sample is valid. Check
+clock availability before opening catalog HTTPS and check expiry again against
+the signed payload. A successful HTTP read of the clock resource can still
+report `known: false`.
+
 The implemented catalog is a bounded JSON envelope with `v:1`, fixed `alg:ES256`, enrolled key ID, exact UTF-8 JSON payload string and a detached 64-byte hexadecimal `r || s` ECDSA-P256/SHA256 signature. Verify the exact bytes before parsing the signed payload, then reject duplicates/unknown keys and invalid bounds. The [offline signer](../bridge/sign_release.py) uses real cryptography; firmware calls the pinned SDK PSA crypto boundary. No `none`, caller-selected key/algorithm, unsigned digest-only release or disabled TLS verification is accepted.
 
 V1 binds product, board, chip `esp32s31`, project, display version, monotonic release index, complete application-image size/SHA-256, exact same-origin HTTPS object, layout `esp32s31-16m-ota6-v3`, settings schema and expiry (at most seven days ahead). The worker checks the actual partition table, full stream/readback digest and SDK image/app descriptor. Secure-boot image signing and hardware anti-rollback remain separate configurations; no eFuse change is performed. Additional revision/updater compatibility fields require a versioned implemented manifest extension rather than being silently assumed.

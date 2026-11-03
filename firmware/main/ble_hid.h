@@ -282,6 +282,7 @@ typedef struct {
     bool initialized;
     bool failed;
     bool connected;
+    bool reconnect_paused;
     /* Both input CCCDs enabled on this encrypted, active connection, either by
      * actual writes or restoration of this verified bond's saved subscriptions.
      * A successful encryption event alone never enables subscriptions.
@@ -404,6 +405,21 @@ esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_re
  * pairing. A physical link awaiting that check has no pairing authorization.
  * closing the window stops new admission, not an already admitted handshake.
  * Use disconnect_generation to cancel that handshake. No host name is inferred. */
+/* Local management owns a bounded admission reservation while releasing the old
+ * host and saving policy. It does not revoke that live host's report generation.
+ * Matching release is idempotent; stale/zero tokens cannot release a new owner.
+ * Add atomically consumes its token into a window for not-yet-saved identities;
+ * known saved hosts cannot occupy it. Bonds and generic pairing stay unchanged. */
+bool ble_hid_management_reserve(uint64_t generation, uint64_t *reservation);
+void ble_hid_management_release(uint64_t reservation);
+bool ble_hid_management_ready(uint64_t reservation);
+void ble_hid_management_resume(uint64_t reservation);
+/* Consumes the reservation into a 30-second encryption-only reconnect probe.
+ * Unknown callback addresses may reach pre-auth only; SMP grant stays denied.
+ * No HID readiness until existing exact durable fingerprint verification.
+ * Unresolvable/legacy identities remain unavailable; no new bond is authorized. */
+void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *target);
+bool ble_hid_management_pairing_open(uint64_t reservation, uint32_t duration_ms);
 bool ble_hid_pairing_open(uint32_t duration_ms);
 void ble_hid_pairing_close(void);
 /* Shared Classic pairing owner only. Claim after closing the LE window; fails
@@ -465,6 +481,14 @@ bool ble_hid_send_generation(uint64_t generation, uint8_t report_id,
  * false for an obsolete generation or absent link. Immediately revokes the
  * input generation; the control worker closes the connection. */
 bool ble_hid_disconnect_generation(uint64_t generation);
+/* Explicit Disconnect pauses automatic admission of up to MAX_BONDS observed
+ * former identities, without modifying bonds. Resolved exported keys are used
+ * only with matching callback identity; unresolved rotating addresses remain
+ * unqualified. Other peers may connect. A live peer always keeps Disconnect.
+ * Resume is rejected while connected; successful local Select/Add or explicit
+ * Resume clears the RAM-only pause. Cancellation preserves the prior pause. */
+bool ble_hid_disconnect_user_generation(uint64_t generation);
+bool ble_hid_resume_reconnect(void);
 
 #ifdef __cplusplus
 }

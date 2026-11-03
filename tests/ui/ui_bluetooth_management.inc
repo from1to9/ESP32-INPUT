@@ -67,6 +67,28 @@ static void bluetooth_management_checks(void)
     assert(has_visible_label(lv_screen_active(), "Disconnect and add host?"));
     clear_intents(); tap_control("Disconnect and add");
     assert(action_count(APP_CONFIRM) == 1 && last_action(APP_CONFIRM)->x == 1);
+    ui_fixture_connections(&s_state);
+    s_state.overlay = APP_OVERLAY_BLUETOOTH_TARGET; s_state.bluetooth_target.selection_supported = false;
+    s_state.bluetooth_target.can_forget = true;
+    strcpy(s_state.bluetooth_target.reason, "Allow reconnect for 30s; exact selection is unavailable. Input waits for verified identity.");
+    ++s_state.ui_revision; screenshot("bluetooth-private-reconnect");
+    clear_intents(); tap_control("Allow reconnect");
+    assert(action_count(APP_BLUETOOTH_TARGET_CONTROL) == 1 &&
+        last_action(APP_BLUETOOTH_TARGET_CONTROL)->bluetooth_target.operation == APP_BLUETOOTH_TARGET_SELECT);
+    s_state.overlay = APP_OVERLAY_SETTINGS; s_state.settings_page = APP_SETTINGS_BLUETOOTH;
+    s_state.bluetooth_connected = false; s_state.bluetooth_reconnect_paused = true;
+    ++s_state.ui_revision; screenshot("bluetooth-disconnected-resume");
+    assert(!has_visible_label(lv_screen_active(), "Connected"));
+    clear_intents(); tap_control("Resume");
+    assert(action_count(APP_PAIRING_REQUEST) == 1 && last_action(APP_PAIRING_REQUEST)->x == APP_PAIR_RESUME);
+    lv_area_t resume; lv_obj_get_coords(control("Resume"), &resume);
+    clear_intents(); pointer((resume.x1 + resume.x2) / 2, (resume.y1 + resume.y2) / 2, true);
+    s_state.bluetooth_connected = true; render();
+    pointer((resume.x1 + resume.x2) / 2, (resume.y1 + resume.y2) / 2, false);
+    assert(action_count(APP_PAIRING_REQUEST) == 0); /* A press cannot flip Resume into Disconnect. */
+    ++s_state.ui_revision; screenshot("bluetooth-other-peer-connected-paused");
+    clear_intents(); tap_control("Disconnect");
+    assert(action_count(APP_PAIRING_REQUEST) == 1 && last_action(APP_PAIRING_REQUEST)->x == APP_PAIR_DISCONNECT);
     s_state = original; render(); clear_intents();
     puts("PASS: native Bluetooth preparation/open/failure, exact Forget identity and explicit connected Add pointer paths");
 }

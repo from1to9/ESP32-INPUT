@@ -1072,7 +1072,8 @@ static void worker(void *unused)
     for (;;) {
         app_wifi_snapshot_t wifi;
         app_wifi_get_snapshot(&wifi);
-        app_clock_station_ready(wifi.lan_ready);
+        /* The station owner publishes clock readiness after its network-entry
+         * DNS barrier. A polled copy must not reopen a superseded LAN. */
         app_control_trust_snapshot_t trust_view;
         app_control_trust_snapshot(&trust_view);
         if (trust_view.known && trust_view.present &&

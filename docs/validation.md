@@ -2161,9 +2161,48 @@ has fake socket/TLS/clock regressions for slow progress, inactivity, total expir
 request rejection and private-data-safe failure records. These host tests do not
 qualify its real-network throughput. Full runtime sanitizer tests, 164 coordinator
 cases and the target build passed for the maintenance repair. The repaired
-activation still needs installation and a complete physical OTA cycle, including
-reboot and health confirmation. No rollback, power-loss, HID, audio or endurance
-qualification is inferred from successful staging.
+activation required installation and a complete physical OTA cycle, including
+reboot and health confirmation.
+
+Clean `a92c76aae53b894c9f9759856c74af6cd2a0b3a7` was installed and read back
+through USB. The application SHA-256 was
+`e444f42859570c88bd1b84149660adff2fd2a493972148838b344f78d668735f`.
+The partition table and boot selection were preserved. After restart, five
+authenticated diagnostic resources returned HTTP 200 on another saved LAN, but
+the device timed out connecting to the enrolled publisher. Back on the publisher
+LAN, the source received a TLS handshake. USB reported peer-certificate
+verification failure and the clock resource reported an unknown time. No image
+bytes were sent in either attempt. The device subsequently synchronized on the
+same LAN. With the same running firmware, trust settings, catalog and publisher,
+a fresh check verified the signed release with zero image bytes written.
+
+Native regressions reproduced a pending first synchronization being delayed by
+the normal refresh interval after reconnect, and a catalog check opening TLS
+with an unknown clock. A new LAN-ready edge now starts a synchronization when
+the clock has no valid anchor. Repeated ready notifications and reconnects with
+a valid anchor preserve the refresh cadence. Catalog checks report
+`time_or_trust_unavailable` before opening a source connection when the clock
+is unknown. The device still checks signed release expiry after reading the
+catalog. Only a real synchronization callback establishes time. A split-DNS
+regression kept a positive answer from the old LAN across a station transition.
+Clearing the cache at the network-entry boundary before publishing readiness
+prevented reuse of that address. Native station and clock tests cover delayed
+lookups, duplicate notifications, cache-clear failure and a second link loss
+during entry.
+
+## Manual Bluetooth host switching on Mosaico (2026-11-03)
+
+With two saved hosts on the clean `a92c76a` build, the other host's selection
+button was disabled. The peer resource reported one host eligible for exact
+selection and one ineligible across all 78 observations. After manual Disconnect,
+the device repeatedly accepted a radio link that never became ready for input.
+The same capture included 28 connected samples with no matched saved row, 49
+disconnected samples and one initially ready connection. USB recorded 176
+not-ready connections with a median interval of 731 ms, and 257 negative
+long-term-key replies. The SDK had no local encryption key for those
+live requests. The saved list and its revision stayed unchanged. The captures
+do not identify which physical host sent each request or establish loss of
+stored keys.
 
 ## Device evidence template
 

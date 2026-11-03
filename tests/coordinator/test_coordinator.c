@@ -737,6 +737,10 @@ void ble_hid_copy_admission_diagnostics(ble_hid_admission_diagnostics_t *out)
 { if (out) *out = test_admission_trace; }
 const char *ble_hid_admission_event_name(ble_hid_admission_event_t event)
 { (void)event; return "unknown"; }
+bool ble_hid_resume_reconnect(void)
+{ if (test_link.connected || !test_link.reconnect_paused) return false; test_link.reconnect_paused = false; return true; }
+bool ble_hid_disconnect_user_generation(uint64_t generation)
+{ bool accepted = ble_hid_disconnect_generation(generation); if (accepted) test_link.reconnect_paused = true; return accepted; }
 bool ble_hid_disconnect_generation(uint64_t generation)
 {
     ++test_disconnects;
@@ -5798,6 +5802,21 @@ static void remote_device_routes_and_state_survive_missing_media(void)
     assert(command_read(NULL, &command.identity, "/api/v1/state", json, sizeof(json), &length) == CP_FORBIDDEN);
 }
 
+static void native_bluetooth_resume_and_selection_release_effect(void)
+{
+    setup(INPUT_MOUSE); settings_page(APP_SETTINGS_BLUETOOTH);
+    test_link.connected = false; test_link.ready = false; test_link.reconnect_paused = true;
+    action(APP_PAIRING_REQUEST, APP_PAIR_RESUME);
+    assert(!test_link.reconnect_paused && !test_disconnects);
+    test_link.connected = true; test_link.reconnect_paused = true;
+    action(APP_PAIRING_REQUEST, APP_PAIR_RESUME);
+    assert(test_link.reconnect_paused && test_link.connected && !test_disconnects);
+    setup(INPUT_MOUSE); cancel_input(); release_barrier(); assert(!s_engine.state.release_pending);
+    app_connectivity_controls_effect_t effect = {.handled = true, .release_input = true};
+    apply_connectivity_effect(&effect);
+    assert(s_engine.state.release_pending); /* Accepted local selection cancels input, never acknowledges it. */
+}
+
 static void native_connection_review_and_back_navigation_reach_owner(void)
 {
     setup(INPUT_MOUSE); settings_page(APP_SETTINGS_WIFI);
@@ -5955,6 +5974,7 @@ int main(int argc, char **argv)
     RUN(applied_remote_receipt_survives_later_local_selection);
     RUN(cancelled_remote_receipt_cannot_hold_a_new_local_switch);
     REMOTE_DEVICE_CASES(RUN);
+    RUN(native_bluetooth_resume_and_selection_release_effect);
     RUN(native_connection_review_and_back_navigation_reach_owner);
     RUN(remote_transport_rechecks_authority_at_effect_boundary);
     RUN(remote_device_routes_and_state_survive_missing_media);

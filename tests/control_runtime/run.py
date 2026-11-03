@@ -12,7 +12,7 @@ SUITE = Path(__file__).resolve().parent
 HEADERS = ["esp_err.h", "esp_heap_caps.h", "esp_random.h", "esp_timer.h", "esp_partition.h",
            "freertos/FreeRTOS.h", "freertos/semphr.h", "freertos/task.h", "freertos/idf_additions.h", "mbedtls/pk.h",
            "mbedtls/x509_crt.h", "nvs.h", "nvs_flash.h", "esp_app_desc.h", "esp_http_client.h",
-           "esp_ota_ops.h", "esp_system.h", "psa/crypto.h", "sdkconfig.h", "esp_netif_sntp.h"]
+           "esp_ota_ops.h", "esp_system.h", "psa/crypto.h", "sdkconfig.h", "esp_netif_sntp.h", "esp_netif.h", "lwip/dns.h"]
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -28,6 +28,11 @@ def main():
         for name in ("trust", "update", "clock", "server"):
             if selected and selected!=name:
                 continue
+            if name == "clock":
+                source = (ROOT / "firmware/main/app_wifi.c").read_text()
+                first = source.index("#define NETWORK_ENTRY_RETRY_MS")
+                after = source.index("static bool profile_remembered_locked", first)
+                (temporary / "clock_network_fixture.inc").write_text(source[first:after])
             if name == "update":
                 source = (ROOT / "firmware/main/app_control_runtime.c").read_text()
                 branch = source.index('!strcmp(resource, "/api/v1/firmware/state")')

@@ -19,6 +19,9 @@
 #define CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE 1
 #define CONFIG_LWIP_SNTP_MAX_SERVERS 2
 typedef int esp_err_t;
+typedef esp_err_t (*esp_netif_callback_fn)(void *);
+esp_err_t esp_netif_tcpip_exec(esp_netif_callback_fn, void *);
+void dns_clear_cache(void);
 typedef unsigned nvs_handle_t;
 #define NVS_READONLY 0
 #define NVS_READWRITE 1

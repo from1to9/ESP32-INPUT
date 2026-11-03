@@ -13,7 +13,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import check_stack_budget as stack  # noqa: E402
 
-CONFIG = "#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192\n#define CONFIG_ESP_TIMER_TASK_STACK_SIZE 3584\n#define CONFIG_BT_BTC_TASK_STACK_SIZE 3072\n#define CONFIG_FREERTOS_ISR_STACKSIZE 1536\n"
+CONFIG = (
+    "#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192\n"
+    "#define CONFIG_ESP_TIMER_TASK_STACK_SIZE 3584\n"
+    "#define CONFIG_BT_BTC_TASK_STACK_SIZE 3072\n"
+    "#define CONFIG_FREERTOS_ISR_STACKSIZE 1536\n"
+    "#define CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE 2304\n"
+    "#define CONFIG_LWIP_TCPIP_TASK_STACK_SIZE 3072\n"
+)
 
 
 class StackBudgets(unittest.TestCase):
@@ -70,7 +77,7 @@ class StackBudgets(unittest.TestCase):
         self.assertEqual({key: value["budget_bytes"] for key, value in budgets.items()}, {
             "main": 8192, "esp_timer": 3584, "sensor": 4096, "power": 3072,
             "control_runtime": 12288, "firmware_update": 16384, "media_control": 6144, "board_audio": 6144,
-            "audio_manager": 8192,
+            "audio_manager": 8192, "network_clock": 4096, "wifi_worker": 16384, "system_event": 2304, "tcpip": 3072,
             "ble_control": 6144, "btc": 3072, "usb_audio": 3072, "tinyusb": 4096, "https": 12288, "lvgl": 8192})
         self.assertEqual(budgets["main"]["allocated_bytes"], 8704)
         self.assertEqual(budgets["esp_timer"]["allocated_bytes"], 4096)

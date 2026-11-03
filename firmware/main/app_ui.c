@@ -90,6 +90,7 @@ static size_t s_core_bindings, s_core_colors;
 static app_overlay_t s_built_overlay;
 static app_settings_page_t s_built_settings;
 static uint32_t s_gesture;
+static bool s_touch_bluetooth_connected, s_touch_bluetooth_paused;
 static uint64_t s_touch_epoch, s_touch_revision;
 static uint64_t s_touch_settings_revision;
 static uint64_t s_touch_recording_storage_generation, s_touch_recording_storage_revision;
@@ -561,6 +562,12 @@ static void on_action(lv_event_t *event)
         return;
     }
     int value = binding->value;
+    if (binding->object == s_bond_disconnect) {
+        if (s_touch_local_blocked || s_touch_epoch != s_view.epoch || s_touch_revision != s_view.ui_revision ||
+            s_touch_bluetooth_connected != s_view.bluetooth_connected ||
+            s_touch_bluetooth_paused != s_view.bluetooth_reconnect_paused) return;
+        value = s_touch_bluetooth_connected ? APP_PAIR_DISCONNECT : APP_PAIR_RESUME;
+    }
     if (binding->action == APP_RECORDING_STORAGE_PREPARE_REQUEST ||
         (binding->action == APP_CONFIRM && value == 1 && s_view.confirmation == APP_CONFIRM_RECORDING_STORAGE_PREPARE)) {
         if (!recording_storage_can_prepare(&s_view) || s_touch_local_blocked ||
@@ -701,6 +708,8 @@ static void on_touch(lv_event_t *event)
     if (code == LV_EVENT_PRESSED) {
         ++s_gesture;
         if (!s_gesture) ++s_gesture;
+        s_touch_bluetooth_connected = s_view.bluetooth_connected;
+        s_touch_bluetooth_paused = s_view.bluetooth_reconnect_paused;
         s_touch_epoch = s_view.epoch;
         s_touch_revision = s_view.ui_revision;
         s_touch_settings_revision = s_view.motion_settings.revision;
@@ -1983,7 +1992,8 @@ static void render_device(const app_view_t *view, const char *link)
          pairings_full ? "Pairings full" : "Add host");
     enabled(s_bond_add, view->bluetooth_management.known && view->bluetooth_management.can_add &&
         pairing_available && pairing_room && view->pairing_state != APP_PAIRING_OPEN);
-    enabled(s_bond_disconnect, view->bluetooth_connected);
+    text(s_bond_disconnect, view->bluetooth_connected ? "Disconnect" : view->bluetooth_reconnect_paused ? "Resume" : "Disconnect");
+    enabled(s_bond_disconnect, view->bluetooth_connected || view->bluetooth_reconnect_paused);
     size_t host_count = view->bluetooth_host_count > APP_UI_BOND_CAPACITY ? APP_UI_BOND_CAPACITY : view->bluetooth_host_count;
     unsigned page_count = (unsigned)((host_count + APP_UI_BONDS_PER_PAGE - 1) / APP_UI_BONDS_PER_PAGE);
     if (!page_count) page_count = 1;
@@ -2005,8 +2015,8 @@ static void render_device(const app_view_t *view, const char *link)
                  length ? host->identity : "(identity unavailable)");
         label_text(s_bond_names[i], *host->name ? host->name : name);
         label_text(s_bond_ids[i], *host->identity ? host->identity : "Identity unavailable");
-        label_text(s_bond_states[i], host->connected ? "Connected" : "Saved");
-        foreground(s_bond_states[i], host->connected ? ACCENT : MUTED, 0);
+        label_text(s_bond_states[i], (view->bluetooth_connected && host->connected) ? "Connected" : "Saved");
+        foreground(s_bond_states[i], (view->bluetooth_connected && host->connected) ? ACCENT : MUTED, 0);
         bind_bluetooth_row(s_bond_rows[i], host);
     }
     char capacity[32];

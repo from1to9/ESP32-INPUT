@@ -100,7 +100,7 @@ static inline void ui_fixture_connections(app_view_t *state)
         snprintf(row->label, sizeof(row->label), "Synthetic network %u", (unsigned)i + 1);
         row->enabled = row->can_join = row->can_prefer = row->can_forget = true; row->priority = (unsigned)i + 1;
     }
-    state->bluetooth_target = (app_bluetooth_target_view_t){.known = true, .can_select = true, .can_prefer = true,
+    state->bluetooth_target = (app_bluetooth_target_view_t){.known = true, .selection_supported = true, .can_select = true, .can_prefer = true,
         .bond_revision = 719, .preferences_revision = 727, .name = "Synthetic saved peer", .identity = "AA:BB:CC:DD:EE:01"};
     state->bluetooth_target.target.address[0] = 0xaa;
     state->bluetooth_target.target.bond_id_known = true; state->bluetooth_target.target.bond_id[31] = 0x75;

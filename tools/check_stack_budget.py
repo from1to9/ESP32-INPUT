@@ -45,6 +45,11 @@ UNITS = {
     "control_runtime": "firmware/main/app_control_runtime.c",
     "runtime_diagnostics": "firmware/main/app_runtime_diagnostics.c",
     "firmware_update": "firmware/main/app_firmware_update.c",
+    "network_clock": "firmware/main/app_clock.c",
+    "sdk_event": ".tools/esp-idf/components/esp_event/esp_event.c",
+    "sdk_tcpip": ".tools/esp-idf/components/lwip/lwip/src/api/tcpip.c",
+    "sdk_dns": ".tools/esp-idf/components/lwip/lwip/src/core/dns.c",
+    "sdk_netif": ".tools/esp-idf/components/esp_netif/lwip/esp_netif_lwip.c",
     "control_json": "components/control_protocol/control_json.c",
     "board": "firmware/main/board_mosaico.c",
     "interaction": "components/interaction/interaction.c",
@@ -309,8 +314,8 @@ MANAGEMENT_PATHS = {
     "bluetooth_policy_request_blocked": BT_POLICY + [("ble", "target_blocked_locked")],
     "bluetooth_policy_request_name": BT_POLICY + [("ble", "target_editable_locked"), ("ble", "name_busy_locked")],
     "bluetooth_policy_request_match": BT_POLICY + [("ble", "target_key_matches")],
-    "bluetooth_service_disconnect": BT_SERVICE + [("ble", "ble_hid_disconnect_generation"), ("ble", "refresh_locked")],
-    "bluetooth_service_disconnect_generation": BT_SERVICE + [("ble", "ble_hid_disconnect_generation"), ("ble", "advance_generation_locked")],
+    "bluetooth_service_disconnect": BT_SERVICE + [("ble", "ble_hid_disconnect_generation"), ("ble", "disconnect_request"), ("ble", "refresh_locked")],
+    "bluetooth_service_disconnect_generation": BT_SERVICE + [("ble", "ble_hid_disconnect_generation"), ("ble", "disconnect_request"), ("ble", "advance_generation_locked")],
     "bluetooth_service_forget_all": BT_SERVICE + [("ble", "ble_hid_forget_bonds_without_pairing"),
         ("ble", "request_forget_bonds"), ("ble", "bond_list_status_locked")],
     "bluetooth_service_forget_all_refresh": BT_SERVICE + [("ble", "ble_hid_forget_bonds_without_pairing"),
@@ -323,9 +328,9 @@ MANAGEMENT_PATHS = {
     "bluetooth_service_forget_one_receipt": BT_SERVICE + [("ble", "ble_hid_bond_forget_snapshot")],
     "bluetooth_service_manifest_bonds": BT_SERVICE + [("bluetooth_management", "manifest_matches"), ("bluetooth_management", "same_bond")],
     "bluetooth_service_manifest_target": BT_SERVICE + [("bluetooth_management", "manifest_matches"), ("bluetooth_management", "target_matches")],
-    "bluetooth_service_pairing_open": BT_SERVICE + [("ble", "ble_hid_pairing_open"), ("ble", "open_pairing_locked")],
-    "bluetooth_service_pairing_guard": BT_SERVICE + [("ble", "ble_hid_pairing_open"), ("ble", "target_blocked_locked")],
-    "bluetooth_service_pairing_delete_guard": BT_SERVICE + [("ble", "ble_hid_pairing_open"), ("ble", "single_forget_busy_locked")],
+    "bluetooth_service_pairing_open": BT_SERVICE + [("ble", "ble_hid_management_pairing_open"), ("ble", "pairing_open_request"), ("ble", "open_pairing_locked")],
+    "bluetooth_service_pairing_guard": BT_SERVICE + [("ble", "ble_hid_management_pairing_open"), ("ble", "pairing_open_request"), ("ble", "target_blocked_locked")],
+    "bluetooth_service_pairing_delete_guard": BT_SERVICE + [("ble", "ble_hid_management_pairing_open"), ("ble", "pairing_open_request"), ("ble", "single_forget_busy_locked")],
     "bluetooth_service_finish_message": BT_SERVICE + [("bluetooth_management", "finish"), ("bluetooth_management", "message")],
     "bluetooth_service_finish_close": BT_SERVICE + [("bluetooth_management", "finish"), ("ble", "ble_hid_pairing_close")],
     "bluetooth_poll_snapshot": CORE + [("main", "service_connectivity"),
@@ -353,6 +358,24 @@ for _name, _prefix in (("begin", BT_BEGIN), ("exact_begin", BT_EXACT_BEGIN)):
         "message": [("bluetooth_management", "message")],
     }.items():
         MANAGEMENT_PATHS[f"bluetooth_{_name}_{_leaf}"] = _prefix + _tail
+BT_SELECT_BEGIN = BT_EXACT_BEGIN[:-1] + [("connectivity", "handle_bluetooth"), BT_EXACT_BEGIN[-1]]
+for _name, _prefix in (("begin", BT_BEGIN), ("exact_begin", BT_EXACT_BEGIN), ("select_begin", BT_SELECT_BEGIN)):
+    for _leaf in ("name_busy_locked", "target_blocked_locked", "single_forget_busy_locked"):
+        MANAGEMENT_PATHS[f"bluetooth_{_name}_reserve_{_leaf}"] = _prefix + [
+            ("ble", "ble_hid_management_reserve"), ("ble", _leaf)]
+    MANAGEMENT_PATHS[f"bluetooth_{_name}_release"] = _prefix + [("ble", "ble_hid_management_release")]
+for _leaf in ("ready", "resume", "reconnect"):
+    MANAGEMENT_PATHS["bluetooth_service_" + _leaf] = BT_SERVICE + [("ble", "ble_hid_management_" + _leaf)]
+for _leaf in ("release", "resume"):
+    MANAGEMENT_PATHS["bluetooth_finish_" + _leaf] = BT_SERVICE + [
+        ("bluetooth_management", "finish"), ("ble", "ble_hid_management_" + _leaf)]
+for _label, _prefix in (("user", CORE + [("main", "service_pair_operation")]), ("management", BT_SERVICE)):
+    for _leaf in ("manual_pause_matches_locked", "advance_generation_locked", "refresh_locked"):
+        _chain = [("ble", "ble_hid_disconnect_user_generation"), ("ble", "disconnect_request"), ("ble", _leaf)]
+        if _leaf == "manual_pause_matches_locked":
+            _chain.append(("ble", "target_key_matches"))
+        MANAGEMENT_PATHS[f"bluetooth_{_label}_disconnect_{_leaf}"] = _prefix + _chain
+MANAGEMENT_PATHS["bluetooth_click_resume"] = LOCAL_INTENT + [("ble", "ble_hid_resume_reconnect")]
 for _leaf in ("name_busy_locked", "target_blocked_locked", "single_forget_busy_locked", "advance_generation_locked"):
     MANAGEMENT_PATHS[f"bluetooth_forget_all_{_leaf}"] = BT_SERVICE + [
         ("ble", "ble_hid_forget_bonds_without_pairing"), ("ble", "request_forget_bonds"), ("ble", _leaf)]
@@ -711,7 +734,7 @@ BLE_ADMISSION_PRODUCERS = {
 _admission_prefixes = set()
 for _label, _steps in MANAGEMENT_PATHS.items():
     for _index, _step in enumerate(_steps):
-        if _step not in (("ble", "ble_hid_pairing_open"), ("ble", "ble_hid_pairing_close")):
+        if _step not in (("ble", "pairing_open_request"), ("ble", "ble_hid_pairing_close")):
             continue
         _prefix = _steps[:_index + 1]
         if tuple(_prefix) not in _admission_prefixes:
@@ -729,6 +752,9 @@ for _name, _prefix, _api in (
         ("connectivity", "app_connectivity_controls_context")], "ble_hid_pairing_close"),
 ):
     BLE_ADMISSION_PRODUCERS[_name] = ("main", _prefix + [("ble", _api)])
+for _label, (_owner, _steps) in BLE_ADMISSION_PRODUCERS.items():
+    if _steps[-1] == ("ble", "ble_hid_pairing_open"):
+        BLE_ADMISSION_PRODUCERS[_label] = (_owner, _steps + [("ble", "pairing_open_request")])
 _remote_submit = CORE + [("main", "remote_control_service")] + DEVICE_SUBMIT[len(CORE):]
 # Keep owning adapters even when the current optimized build inlines them.
 _remote_submit.insert(_remote_submit.index(("device", "app_remote_device_execute")), ("main", "remote_device_execute"))
@@ -740,10 +766,10 @@ for _name, _prefix in (("remote_submit", _remote_submit), ("remote_ui", _remote_
                          ("remote_approval", _remote_approval)):
     BLE_ADMISSION_PRODUCERS[f"{_name}_close"] = ("main", _prefix + [("ble", "ble_hid_pairing_close")])
     BLE_ADMISSION_PRODUCERS[f"{_name}_open"] = ("main", _prefix + [
-        ("main", "remote_device_bluetooth_progress"), ("ble", "ble_hid_pairing_open")])
+        ("main", "remote_device_bluetooth_progress"), ("ble", "ble_hid_pairing_open"), ("ble", "pairing_open_request")])
 BLE_ADMISSION_PRODUCERS["remote_poll_open"] = ("main", CORE + [("main", "remote_control_service"),
     ("main", "remote_device_service"), ("device", "app_remote_device_service"), ("main", "remote_device_poll"),
-    ("main", "remote_device_bluetooth_progress"), ("ble", "ble_hid_pairing_open")])
+    ("main", "remote_device_bluetooth_progress"), ("ble", "ble_hid_pairing_open"), ("ble", "pairing_open_request")])
 for _name, (_owner, _prefix) in BLE_ADMISSION_PRODUCERS.items():
     for _leaf, _tail in {
         "flags": [("ble", "admission_trace_locked"), ("ble", "admission_flags_locked")],
@@ -982,7 +1008,62 @@ for _label, _steps in DIAGNOSTIC_PATHS.items():
     PATHS["diagnostics_http_" + _label] = DIAGNOSTIC_READ + _steps
     PATH_OWNERS["diagnostics_http_" + _label] = "https"
 
+_probe = [("ble", name) for name in ("control_worker", "process_subscription_jobs", "resolve_subscriptions", "reject_reconnect_probe")]
+for _leaf in ("command_current_locked", "advance_generation_locked", "refresh_locked"):
+    PATHS["ble_reconnect_mismatch_" + _leaf] = _probe + [("ble", _leaf)]
+    PATH_OWNERS["ble_reconnect_mismatch_" + _leaf] = "ble_control"
+PATHS["ble_connect_paused_identity"] = BLE_ADMISSION_PRODUCERS["gatts_callback"][1] + [
+    ("ble", "manual_pause_matches_locked"), ("ble", "target_key_matches")]
+PATH_OWNERS["ble_connect_paused_identity"] = "btc"
+for _label, _owner, _prefix in (
+    ("worker", "ble_control", [("ble", "control_worker")]),
+    ("connect", "btc", BLE_ADMISSION_PRODUCERS["gatts_callback"][1]),
+):
+    PATHS["ble_reconnect_expiry_" + _label] = _prefix + [("ble", "reconnect_probe_allowed_locked")]
+    PATH_OWNERS["ble_reconnect_expiry_" + _label] = _owner
+
 UPDATE_WORK = [("firmware_update", "worker")]
+# The SDK resolver and socket functions are outside the measured project frames.
+for _label, _tail in {
+    "anchor": ["anchor_valid_locked"],
+    "resolve": ["resolve_server"],
+    "attempt": ["attempt_status_locked", "monotonic_ms"],
+    "time": ["monotonic_ms"],
+}.items():
+    PATHS["clock_worker_" + _label] = [("network_clock", name) for name in ["worker", *_tail]]
+    PATH_OWNERS["clock_worker_" + _label] = "network_clock"
+# Station events revoke clock admission; the Wi-Fi worker owns new-LAN entry.
+# The TCP/IP callback clears shared DNS. SDK callback targets beyond dns_call_found
+# and the RTOS functions remain part of the unmeasured reserve.
+WIFI_STEP = [("wifi", "worker"), ("wifi", "service_step")]
+WIFI_EVENT = [("sdk_event", "esp_event_loop_run_task"), ("sdk_event", "esp_event_loop_run"),
+    ("sdk_event", "handler_execute"), ("wifi", "wifi_event")]
+CLOCK_READY = [("network_clock", "app_clock_station_ready"), ("network_clock", "monotonic_ms")]
+DNS_IPC = [("sdk_netif", "esp_netif_tcpip_exec"), ("sdk_netif", "esp_netif_lwip_ipc_call_fn"),
+    ("sdk_netif", "esp_netif_lwip_ipc_call_msg"), ("sdk_tcpip", "tcpip_send_msg_wait_sem")]
+DNS_CLEAR = [("sdk_netif", "esp_netif_api_cb"), ("sdk_netif", "tcpip_exec_api"),
+    ("wifi", "station_dns_clear"), ("sdk_dns", "dns_clear_cache"), ("sdk_dns", "dns_call_found")]
+for _label, _owner, _steps in (
+    ("wifi_event_clock_loss", "system_event", WIFI_EVENT + [("wifi", "station_network_lost_locked")] + CLOCK_READY),
+    ("wifi_event_loss_status", "system_event", WIFI_EVENT + [("wifi", "publish")]),
+    ("wifi_worker_clock_loss", "wifi_worker", WIFI_STEP + [("wifi", "station_network_lost_locked")] + CLOCK_READY),
+    ("wifi_worker_clock_entry", "wifi_worker", WIFI_STEP + [("wifi", "station_network_enter")] + CLOCK_READY),
+    ("wifi_worker_anchor_entry", "wifi_worker", WIFI_STEP + [("wifi", "station_network_enter"),
+        ("network_clock", "app_clock_station_ready"), ("network_clock", "anchor_valid_locked")]),
+    ("wifi_worker_dns_submit", "wifi_worker", WIFI_STEP + [("wifi", "station_network_enter")] + DNS_IPC),
+    ("tcpip_clear_station_dns", "tcpip", [("sdk_tcpip", "tcpip_thread"), ("sdk_tcpip", "tcpip_thread_handle_msg")] + DNS_CLEAR),
+    # A core-locking SDK may call directly on the submitting task.
+    ("wifi_worker_dns_inline", "wifi_worker", WIFI_STEP + [("wifi", "station_network_enter")] + DNS_IPC + DNS_CLEAR),
+):
+    PATHS[_label] = _steps
+    PATH_OWNERS[_label] = _owner
+for _steps, _label in (([], "preflight"), ([("firmware_update", "verify_catalog")], "signed_expiry")):
+    _catalog = UPDATE_WORK + [("firmware_update", "check_catalog")] + _steps
+    PATHS["update_catalog_clock_" + _label] = _catalog + [("network_clock", "app_clock_wall_time"),
+        ("network_clock", "app_clock_snapshot"), ("network_clock", "anchor_valid_locked")]
+    PATHS["update_catalog_clock_failure_" + _label] = _catalog + [("firmware_update", "failure"), ("firmware_update", "failure_locked")]
+    PATH_OWNERS["update_catalog_clock_" + _label] = "firmware_update"
+    PATH_OWNERS["update_catalog_clock_failure_" + _label] = "firmware_update"
 UPDATE_FAILURE_PATHS = {
     "update_download_maintenance_failure": UPDATE_WORK + [("firmware_update", "download_image"),
         ("firmware_update", "wait_for_maintenance"), ("firmware_update", "check_authority"),
@@ -1061,6 +1142,9 @@ REQUIRED.update({("main", "send_report"), ("main", "remote_changed"), ("main", "
     ("usb_hid", "usb_hid_send_generation"), ("usb_hid", "usb_hid_snapshot")})
 REQUIRED.add(("board_audio", "worker"))
 REQUIRED.add(("firmware_update", "worker"))
+REQUIRED.update({("network_clock", "worker"), ("wifi", "worker"), ("wifi", "wifi_event"),
+    ("wifi", "station_dns_clear"), ("sdk_dns", "dns_clear_cache"), ("sdk_netif", "esp_netif_api_cb"),
+    ("sdk_tcpip", "tcpip_thread"), ("sdk_event", "esp_event_loop_run_task")})
 REQUIRED.update({("audio_manager", "worker"), ("audio_engine", "ae_playback_capacity"),
     ("audio_engine", "ae_job_active")})
 REQUIRED.update({("ble", "control_worker"), ("ble", "gap_callback"), ("ble", "gatts_callback"),
@@ -1095,6 +1179,14 @@ BUDGET_FILES = {
     "main": "firmware/main/main.c",
     "runtime": "firmware/main/app_control_runtime.c",
     "firmware_update": UNITS["firmware_update"],
+    "network_clock": UNITS["network_clock"],
+    "network_task": "firmware/main/app_network_task.h",
+    "wifi": UNITS["wifi"],
+    "sdk_event": UNITS["sdk_event"],
+    "sdk_event_default": ".tools/esp-idf/components/esp_event/default_event_loop.c",
+    "sdk_tcpip": UNITS["sdk_tcpip"],
+    "lwip_options": ".tools/esp-idf/components/lwip/port/include/lwipopts.h",
+    "lwip_port": ".tools/esp-idf/components/lwip/port/freertos/sys_arch.c",
     "media_runtime": "firmware/main/app_media_runtime.c",
     "audio_manager": UNITS["audio_manager"],
     "board_audio": UNITS["board_audio"],
@@ -1204,6 +1296,19 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
     match("sdk_timer", r"&?timer_task\s*,\s*\"esp_timer\"\s*,\s*ESP_TASK_TIMER_STACK\s*,")
     main, timer = configured("CONFIG_ESP_MAIN_TASK_STACK_SIZE"), configured("CONFIG_ESP_TIMER_TASK_STACK_SIZE")
 
+    wifi_stack = integer_expression(single("wifi", r'xTaskCreate\s*\(\s*worker\s*,\s*"app_wifi"\s*,\s*(\d+)\s*,')[1])
+    system_event = configured("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE")
+    tcpip = configured("CONFIG_LWIP_TCPIP_TASK_STACK_SIZE")
+    single("sdk_tasks", r"#if CONFIG_LWIP_TCPIP_CORE_LOCKING\s*#define ESP_TASKD_EVENT_STACK\s+\(CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE\s*\+ TASK_EXTRA_STACK_SIZE \+ 2048\)\s*#else\s*#define ESP_TASKD_EVENT_STACK\s+\(CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE\s*\+ TASK_EXTRA_STACK_SIZE\)")
+    event_extra = extra + (2048 if re.search(r"^#define CONFIG_LWIP_TCPIP_CORE_LOCKING 1$", config, re.M) else 0)
+    single("sdk_event_default", r"\.task_stack_size\s*=\s*ESP_TASKD_EVENT_STACK")
+    single("sdk_event", r"xTaskCreatePinnedToCoreWithCaps\(esp_event_loop_run_task,\s*event_loop_args->task_name,\s*event_loop_args->task_stack_size,")
+    single("sdk_event", r"xTaskCreatePinnedToCore\(esp_event_loop_run_task,\s*event_loop_args->task_name,\s*event_loop_args->task_stack_size,")
+    single("sdk_tasks", r"#define ESP_TASK_TCPIP_STACK\s+\(CONFIG_LWIP_TCPIP_TASK_STACK_SIZE\s*\+\s*TASK_EXTRA_STACK_SIZE\)")
+    single("lwip_options", r"#define TCPIP_THREAD_STACKSIZE\s+ESP_TASK_TCPIP_STACK")
+    single("sdk_tcpip", r"sys_thread_new\(TCPIP_THREAD_NAME, tcpip_thread, NULL, TCPIP_THREAD_STACKSIZE,")
+    single("lwip_port", r"xTaskCreatePinnedToCore\(thread, name, stacksize, arg,")
+
     board = {}
     for owner, symbol, entry, name in (("sensor", "SENSOR_STACK_BYTES", "sensor_worker", "board_sensor"),
                                        ("power", "POWER_STACK_BYTES", "power_worker", "board_power")):
@@ -1212,6 +1317,9 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         board[owner] = (size, symbol)
     runtime = integer_expression(single("runtime", r"xTaskCreate\s*\(\s*worker\s*,\s*\"control_runtime\"\s*,\s*(\d+)\s*,")[1])
     update_stack = integer_expression(single("firmware_update", r"xTaskCreate\s*\(\s*worker\s*,\s*\"firmware_update\"\s*,\s*(\d+)\s*,")[1])
+    clock_stack = integer_expression(single("network_clock", r"app_network_task_create\s*\(\s*worker\s*,\s*\"network_clock\"\s*,\s*(\d+)\s*,")[1])
+    for allocator in ("xTaskCreateWithCaps", "xTaskCreate"):
+        match("network_task", allocator + r"\s*\(\s*entry\s*,\s*name\s*,\s*stack_bytes\s*,")
     def conditional_worker_stack(key, task):
         sizes = re.findall(r"xTaskCreate(?:WithCaps)?\s*\(\s*worker\s*,\s*\"" + re.escape(task) + r"\"\s*,\s*(\d+)\s*,", text[key])
         if not sizes or len(set(sizes)) != 1:
@@ -1282,6 +1390,13 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         "control_runtime": budget("control_runtime", runtime, ["runtime"], ["xTaskCreate(worker, control_runtime)"]),
         "firmware_update": budget("firmware_update", update_stack, ["firmware_update"],
             ["xTaskCreate(worker, firmware_update)"]),
+        "wifi_worker": budget("app_wifi", wifi_stack, ["wifi"], ["xTaskCreate(worker, app_wifi)"]),
+        "system_event": budget("sys_evt", system_event, ["sdk_tasks", "sdk_event_default", "sdk_event"],
+            ["CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE", "ESP_TASKD_EVENT_STACK"], event_extra),
+        "tcpip": budget("tcpip_thread", tcpip, ["sdk_tasks", "lwip_options", "sdk_tcpip", "lwip_port"],
+            ["CONFIG_LWIP_TCPIP_TASK_STACK_SIZE", "TCPIP_THREAD_STACKSIZE"], extra),
+        "network_clock": budget("network_clock", clock_stack, ["network_clock", "network_task"],
+            ["app_network_task_create(worker, network_clock)", "xTaskCreate[WithCaps](entry, name, stack_bytes)"]),
         "media_control": budget("media_control", media_stack, ["media_runtime"],
             ["xTaskCreate[WithCaps](worker, media_control)"]),
         "board_audio": budget("board_audio", audio_stack, ["board_audio"],

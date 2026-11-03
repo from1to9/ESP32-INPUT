@@ -273,10 +273,11 @@ static void render_connection_panel(void)
         const app_bluetooth_target_view_t *target = &s_view.bluetooth_target;
         label_text(s_connection_state, target->known ? target->name : "Saved target unavailable");
         label_format(s_connection_detail, "%.48s\n%s", target->identity, target->uncertain ? "Preference outcome uncertain" :
-            target->pending ? "Saving preference..." : target->selected ? "Selected target" : "Saved host");
+            target->pending ? "Change pending..." : target->selected ? "Selected target" : "Saved host");
         label_format(s_connection_reason, "Connect from this host's Bluetooth settings.\nThis device cannot dial or detect nearby hosts.\n%.96s", target->reason);
         connection_request_t request = {.bluetooth = {.operation = APP_BLUETOOTH_TARGET_SELECT,
             .bond_revision = target->bond_revision, .preferences_revision = target->preferences_revision, .target = target->target}};
+        text(s_connection_actions[0], target->selection_supported ? "Select target" : "Allow reconnect");
         connection_bind(s_connection_actions[0], APP_BLUETOOTH_TARGET_CONTROL, request,
             target->known && !target->pending && !target->uncertain && target->can_select);
         request.bluetooth.operation = APP_BLUETOOTH_TARGET_PREFER;

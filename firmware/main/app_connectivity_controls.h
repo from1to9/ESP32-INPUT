@@ -16,7 +16,7 @@ typedef struct {
     bool locked, screen_off, release_pending, transport_switch_pending;
 } app_connectivity_controls_context_t;
 typedef struct {
-    bool handled, open_overlay, invalidate_ui;
+    bool handled, open_overlay, invalidate_ui, release_input;
     app_overlay_t overlay;
     app_confirmation_t confirmation;
     char message[97];

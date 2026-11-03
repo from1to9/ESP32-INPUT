@@ -144,6 +144,21 @@ Pending releases on a separately selected USB transport do not gate Bluetooth
 management. Connected Bluetooth congestion/release and transport-switch guards
 still apply. These rules are the same in Mouse, Keyboard and Audio modes.
 
+Manual **Disconnect** retains the pairing and pauses automatic return of the
+observed former peer. **Resume** restores normal reconnect eligibility while
+disconnected. If a different host is connected, the same button disconnects that
+host. An unexpected radio loss keeps the normal reconnect policy. Reboot clears
+the temporary pause.
+
+**Select target** releases the old host's input and applies the saved target
+policy before accepting its connection. For a private saved host that cannot be
+identified at connection time, **Allow reconnect** gives that host 30 seconds to
+connect from its system Bluetooth settings. It must authenticate and match the
+saved pairing before receiving input. When the saved identity cannot be
+verified, the action stays disabled and the current connection is preserved.
+**Add host** opens a separate pairing
+window for a new host. The previous host cannot claim that window by reconnecting.
+
 Connectivity selects Bluetooth or USB for all primary modes and opens separate
 Bluetooth-host and Wi-Fi detail pages. Selection cancels pending input, waits
 for old-host release completion, and starts a fresh release barrier on the new

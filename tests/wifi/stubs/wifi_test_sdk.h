@@ -38,6 +38,8 @@ int64_t esp_timer_get_time(void);
 void esp_fill_random(void *, size_t);
 typedef const char *esp_event_base_t;
 #define WIFI_EVENT ((esp_event_base_t)1)
+#define IP_EVENT ((esp_event_base_t)2)
+#define IP_EVENT_STA_LOST_IP 5
 #define WIFI_EVENT_STA_DISCONNECTED 4
 #define WIFI_EVENT_SCAN_DONE 1
 #define WIFI_REASON_ASSOC_LEAVE 8
@@ -55,6 +57,9 @@ typedef struct { ip4_addr_t ip; } esp_netif_ip_info_t;
 #define IP2STR(p) (unsigned)((p)->addr & 255U), (unsigned)(((p)->addr >> 8) & 255U), \
     (unsigned)(((p)->addr >> 16) & 255U), (unsigned)(((p)->addr >> 24) & 255U)
 esp_err_t esp_netif_init(void);
+typedef esp_err_t (*esp_netif_callback_fn)(void *);
+esp_err_t esp_netif_tcpip_exec(esp_netif_callback_fn, void *);
+void dns_clear_cache(void);
 esp_netif_t *esp_netif_create_default_wifi_sta(void);
 esp_netif_t *esp_netif_create_default_wifi_ap(void);
 esp_err_t esp_netif_get_ip_info(esp_netif_t *, esp_netif_ip_info_t *);

@@ -56,7 +56,7 @@ typedef enum {
     APP_SETTINGS_MOTION, APP_SETTINGS_MOTION_ADVANCED, APP_SETTINGS_GESTURES
 } app_settings_page_t;
 typedef enum {
-    APP_PAIR_OPEN, APP_PAIR_CLOSE, APP_PAIR_FORGET_ALL, APP_PAIR_DISCONNECT
+    APP_PAIR_OPEN, APP_PAIR_CLOSE, APP_PAIR_FORGET_ALL, APP_PAIR_DISCONNECT, APP_PAIR_RESUME
 } app_pairing_operation_t;
 typedef enum {
     APP_CONFIRM_NONE, APP_CONFIRM_PAIR_OPEN, APP_CONFIRM_PAIR_CLOSE,
@@ -378,6 +378,7 @@ typedef struct {
     bool transport_switch_pending;
     bool bluetooth_available;
     bool bluetooth_connected;
+    bool bluetooth_reconnect_paused;
     bool bluetooth_ready;
     char bluetooth_target_name[48]; /* Actual reported name/identity, optional. */
     bool usb_available; /* Provider capability, never inferred from a cable. */

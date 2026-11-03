@@ -64,8 +64,99 @@ static void native_finish(void)
             (unsigned)receipt.phase, receipt.active, receipt.error, receipt.message);
     assert(!receipt.active && receipt.phase == APP_BT_MANAGE_COMPLETE && receipt.error == ESP_OK);
 }
+static void native_review_former_unbonded_add(void)
+{
+    native_setup(false); assert(ble_hid_target_select(ble_hid_bond_list().revision, NULL) == ESP_OK); worker_cycle();
+    assert(ble_hid_pairing_open(BLE_HID_PAIRING_DEFAULT_MS));
+    active_peer = 0xd4; connect_peer(); drain(); authorize_peer(false); subscribe();
+    assert(state.public.ready && !state.peer_saved && fake_bond_count == 2);
+    native_begin(APP_BT_MANAGE_ADD, NULL); native_step(false); disconnect_peer(); native_finish();
+    connect_peer(); assert(!state.public.connected && state.rejected_pending);
+    worker_cycle(); disconnect_peer();
+    active_peer = 0xd5; connect_peer(); drain(); worker_cycle();
+    assert(state.public.connected && state.pairing_admitted && fake_bond_count == 2 && !remove_calls);
+    disconnect_peer(); ble_hid_pairing_close(); native_begin(APP_BT_MANAGE_ADD, NULL); native_finish();
+    active_peer = 0xd4; connect_peer(); drain(); worker_cycle();
+    assert(state.public.connected && state.pairing_admitted); /* A fresh offline Add displaces no former link. */
+
+    native_setup(true); ble_hid_target_t removed = native_target(0xc3);
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe(); disconnect_peer();
+    native_begin(APP_BT_MANAGE_FORGET_ONE, &removed); native_finish();
+    assert(fake_bond_count == 1); native_begin(APP_BT_MANAGE_ADD, NULL); native_finish();
+    connect_peer(); drain(); worker_cycle();
+    assert(state.public.connected && state.pairing_admitted && fake_bond_count == 1 && remove_calls == 1);
+}
+
+static void native_review_unverifiable_target_admission(void)
+{
+    native_setup(true); esp_ble_bond_dev_t complete = fake_bonds[0];
+    fake_bonds[0].bond_key.key_mask = ESP_BLE_ID_KEY_MASK; /* Real SDK export lacks verifiable encryption material. */
+    assert(refresh_known_bonds() == ESP_OK); ble_hid_target_t target = native_target(0xc2);
+    assert(!target.bond_id_known);
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
+    const uint64_t generation = state.public.generation, policy = state.target.revision;
+    assert(app_bluetooth_management_begin(APP_BT_MANAGE_RECONNECT, generation, ble_hid_bond_list().revision,
+        policy, &target, native_now) == ESP_ERR_NOT_SUPPORTED);
+    assert(state.public.ready && !state.management_reservation && !close_calls && !remove_calls &&
+        state.public.generation == generation && state.target.revision == policy);
+    fake_bonds[0] = complete; assert(refresh_known_bonds() == ESP_OK);
+    target = native_target(0xc2); target.bond_id[0] ^= 1U;
+    assert(app_bluetooth_management_begin(APP_BT_MANAGE_RECONNECT, generation, ble_hid_bond_list().revision,
+        policy, &target, native_now) == ESP_ERR_NOT_FOUND);
+    assert(state.public.ready && !state.management_reservation && !close_calls);
+}
+
+static void native_review_probe_expiry_wrap(void)
+{
+    reset(); make_bond(0, 0x42, 0x11); ble_hid_pairing_close();
+    ble_hid_target_t target = native_target(0x42); uint64_t reservation = 0;
+    assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    ble_hid_management_reconnect(reservation, &target);
+    fake_tick = PAIRING_HANDSHAKE_TIMEOUT_MS; worker_cycle();
+    fake_tick = UINT32_MAX; worker_cycle(); fake_tick = 1; active_peer = 0x77; connect_peer();
+    assert(!state.public.connected && state.rejected_pending && !state.reconnect_probe);
+    worker_cycle(); disconnect_peer();
+    fake_tick = 0; fake_uptime_us = 0;
+    assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    ble_hid_management_reconnect(reservation, &target);
+    /* No worker/callback observed the first deadline: monotonic uptime still
+     * expires the grant even though the low32 tick appears only one tick old. */
+    fake_tick = 1; fake_uptime_us = (INT64_C(1) << 32) * INT64_C(1000) + 1000;
+    connect_peer(); assert(!state.public.connected && state.rejected_pending && !state.reconnect_probe);
+    worker_cycle(); disconnect_peer();
+    assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    ble_hid_management_reconnect(reservation, &target); connect_peer();
+    assert(state.public.connected && state.reconnect_probe_link && !state.pairing_admission_pending);
+}
+
+static void native_review_blocker_cases(void)
+{
+    const char *selected = getenv("BLE_REVIEW_CASE");
+    if (!selected || !strcmp(selected, "B1")) native_review_former_unbonded_add();
+    if (!selected || !strcmp(selected, "B2")) native_review_unverifiable_target_admission();
+    if (!selected || !strcmp(selected, "B3")) native_review_probe_expiry_wrap();
+}
+
 static void native_management_selected_add_and_reconnect(void)
 {
+    native_review_blocker_cases();
+    native_setup(true); active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
+    native_begin(APP_BT_MANAGE_ADD, NULL); native_step(false); assert(close_calls == 1);
+    disconnect_peer(); connect_peer();
+    assert(!state.public.connected && state.rejected_pending); /* Old host cannot overtake the approved Add. */
+    worker_cycle(); disconnect_peer(); native_finish();
+    connect_peer(); assert(!state.public.connected && state.rejected_pending);
+    worker_cycle(); disconnect_peer();
+    active_peer = 0xd4; connect_peer(); assert(state.public.connected && state.pairing_admission_pending);
+
+    native_setup(false); native_begin(APP_BT_MANAGE_ADD, NULL);
+    for (unsigned poll = 0; poll < 32 && (native_receipt().phase != APP_BT_MANAGE_POLICY ||
+            ble_hid_target_snapshot().request_status != BLE_HID_TARGET_APPLIED); ++poll) native_step(false);
+    assert(native_receipt().phase == APP_BT_MANAGE_POLICY);
+    active_peer = 0xc3; connect_peer(); assert(state.rejected_pending && !state.public.connected);
+    native_step(false); assert(native_receipt().active && native_receipt().phase == APP_BT_MANAGE_POLICY && !state.public.pairing_open);
+    disconnect_peer(); native_finish(); assert(state.public.pairing_open && fake_bond_count == 2);
+
     native_setup(false);
     uint64_t previous = ble_hid_target_snapshot().revision;
     assert(!ble_hid_pairing_open(1000)); /* The actual selected-policy gate, before the native repair. */
@@ -79,6 +170,7 @@ static void native_management_selected_add_and_reconnect(void)
     assert(!ble_hid_target_snapshot().selected && ble_hid_target_snapshot().durable &&
         ble_hid_target_snapshot().revision == previous + 1U && state.public.pairing_open && state.public.advertising);
     assert(fake_bond_count == 2 && remove_calls == 0);
+    ble_hid_pairing_close(); /* Add is for new identities; close it before saved reconnect. */
     active_peer = 0xc2; connect_peer(); drain(); authorize_peer(true); subscribe();
     assert(ble_hid_snapshot().ready); uint64_t generation = ble_hid_snapshot().generation;
     assert(ble_hid_disconnect_generation(generation)); worker_cycle(); assert(close_calls);
@@ -167,8 +259,69 @@ static void native_management_disconnected_release_pending(void)
     puts("Native Bluetooth management: disconnected pending releases preserved across Add, Forget all and selected/unselected Forget one; live release/congestion guards retained");
 }
 
+static void native_management_manual_disconnect_and_private_reconnect(void)
+{
+    native_setup(true);
+    assert(ble_hid_target_select(ble_hid_bond_list().revision, NULL) == ESP_OK); worker_cycle();
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
+    assert(ble_hid_disconnect_user_generation(state.public.generation)); worker_cycle(); disconnect_peer();
+    assert(ble_hid_snapshot().reconnect_paused && state.manual_pause_count == 1);
+    connect_peer(); assert(!state.public.connected && state.rejected_pending);
+    uint64_t reservation = 0; assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    assert(!ble_hid_management_ready(reservation));
+    ble_hid_management_release(reservation); /* Cancellation keeps the user's earlier pause. */
+    assert(state.manual_pause_count == 1); worker_cycle(); disconnect_peer();
+    active_peer = 0xc2; connect_peer(); drain(); authorize_peer(true); subscribe();
+    assert(state.public.ready && !ble_hid_resume_reconnect() && state.manual_pause_count == 1);
+    assert(ble_hid_disconnect_user_generation(state.public.generation)); worker_cycle(); disconnect_peer();
+    assert(state.manual_pause_count == 2); connect_peer(); assert(!state.public.connected && state.rejected_pending);
+    worker_cycle(); disconnect_peer(); assert(ble_hid_resume_reconnect() && !state.manual_pause_count);
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); assert(state.public.ready);
+    assert(fake_bond_count == 2 && subscriptions.count == 2 && !remove_calls);
+    disconnect_peer(); connect_peer(); drain(); authorize_peer(true); assert(state.public.ready); /* Spontaneous loss is normal. */
+
+    native_setup(false); save_sdk_bond(0, 0x42, 0x11); assert(refresh_known_bonds() == ESP_OK);
+    ble_hid_target_t target = native_target(0x42);
+    assert(!ble_hid_bond_list().bonds[1].selection_supported || !ble_hid_bond_list().bonds[0].selection_supported);
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
+    native_begin(APP_BT_MANAGE_RECONNECT, &target); native_step(false); disconnect_peer(); native_finish();
+    assert(!ble_hid_target_snapshot().selected && state.manual_pause_count == 1 && !state.public.pairing_open && state.reconnect_probe);
+    active_peer = 0x42; connect_peer(); drain(); assert(state.public.connected && !state.public.ready && !state.pairing_admission_pending);
+    security_request(); assert(!last_security_accept); authorize_peer(true); subscribe();
+    assert(state.public.ready && fake_bond_count == 2 && !remove_calls);
+
+    disconnect_peer(); assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    ble_hid_management_reconnect(reservation, &target);
+    active_peer = 0x66; connect_peer(); drain(); assert(state.public.connected && !state.public.ready && !state.pairing_admission_pending);
+    security_request(); assert(!last_security_accept); authentication_event(false, true); worker_cycle();
+    assert(!state.public.ready && !state.public.failed && state.link_fault);
+    assert(fake_bond_count == 2 && !remove_calls); /* Mismatch fails closed without deleting any bond. */
+    reset(); make_bond(0, 0x42, 0x11); target = native_target(0x42); ble_hid_pairing_close();
+    assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    ble_hid_management_reconnect(reservation, &target);
+    fake_tick = PAIRING_HANDSHAKE_TIMEOUT_MS; active_peer = 0x67; connect_peer();
+    assert(!state.public.connected && state.rejected_pending); /* Probe expiry cannot authorize unknown peers. */
+    reset(); connect_peer(); drain(); assert(ble_hid_disconnect_user_generation(state.public.generation));
+    worker_cycle(); disconnect_peer(); connect_peer(); assert(!state.public.connected && state.rejected_pending);
+    worker_cycle(); disconnect_peer(); assert(ble_hid_resume_reconnect()); /* Unbonded/unresolved observed tuple can be resumed. */
+    reset();
+    for (unsigned i = 0; i < BLE_HID_MAX_BONDS; ++i) {
+        active_peer = (uint8_t)(0x10U + i); connect_peer(); drain(); assert(state.public.connected);
+        assert(ble_hid_disconnect_user_generation(state.public.generation)); worker_cycle(); disconnect_peer();
+    }
+    active_peer = 0x70; connect_peer(); drain(); uint64_t generation = state.public.generation;
+    assert(state.public.connected && state.manual_pause_count == BLE_HID_MAX_BONDS &&
+        !ble_hid_disconnect_user_generation(generation) && state.public.generation == generation);
+    assert(ble_hid_disconnect_generation(generation)); worker_cycle(); disconnect_peer();
+    assert(ble_hid_resume_reconnect() && !state.manual_pause_count);
+    puts("Manual Disconnect: former identities paused, other peer remains actionable, explicit Resume/cancel, private-key fallback pre-auth only, mismatch denial and expiry passed");
+}
+
+static void native_management_select_and_reconnect(void);
 static void native_management_all_and_single_removal(void)
 {
+    native_management_manual_disconnect_and_private_reconnect();
+    native_management_select_and_reconnect();
     native_management_disconnected_release_pending();
     native_setup(true); native_begin(APP_BT_MANAGE_FORGET_ALL, NULL);
     native_finish();
@@ -193,56 +346,80 @@ static void native_management_generation_and_replacement(void)
 {
     const app_bluetooth_management_operation_t operations[] = {APP_BT_MANAGE_ADD, APP_BT_MANAGE_FORGET_ALL};
     for (unsigned op = 0; op < sizeof(operations) / sizeof(operations[0]); ++op) {
-        /* A real disconnected/reconnected callback before acceptance cannot
-         * authorize disconnecting even the same saved host's new link. */
         native_setup(false); active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
         native_begin(operations[op], NULL);
-        disconnect_peer(); connect_peer(); drain(); authorize_peer(true); subscribe();
+        disconnect_peer(); connect_peer(); assert(!state.public.connected && state.rejected_pending);
         const uint64_t unchanged_policy = ble_hid_target_snapshot().revision;
-        native_step(false);
-        assert(native_receipt().phase == APP_BT_MANAGE_FAILED && !close_calls && !remove_calls &&
-            ble_hid_target_snapshot().revision == unchanged_policy && !state.public.pairing_open);
+        native_step(false); disconnect_peer(); native_step(false);
+        assert(native_receipt().phase == APP_BT_MANAGE_FAILED && !remove_calls &&
+            ble_hid_target_snapshot().revision == unchanged_policy && !state.public.pairing_open && !state.management_reservation);
+        disconnect_peer();
 
         for (unsigned replacement = 0; replacement < 3; ++replacement) {
-            native_setup(false);
-            /* Admit either saved identity so the replacement is a different
-             * actual peer, rather than editing a cached generation in a test. */
-            ble_hid_target_preferences_request_t policy = target_request();
-            policy.selected = false; memset(&policy.target, 0, sizeof(policy.target));
-            assert(ble_hid_target_preferences_request(&policy, NULL) == ESP_OK); worker_cycle();
-            assert(!ble_hid_target_snapshot().selected && ble_hid_target_snapshot().durable);
-            active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
+            native_setup(false); active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
             native_begin(operations[op], NULL);
             uint64_t generation = ble_hid_snapshot().generation;
             uint64_t policy_revision = ble_hid_target_snapshot().revision;
             native_step(false);
             assert(native_receipt().phase == APP_BT_MANAGE_DISCONNECT && close_calls == 1 &&
                 state.public.connected && state.public.generation == generation + 1U && !state.public.ready);
-            if (replacement) {
-                disconnect_peer(); active_peer = 0xc2; connect_peer(); drain(); authorize_peer(true); subscribe();
-                assert(state.public.connected && state.public.ready && state.public.generation > generation + 1U);
-            }
-            for (unsigned poll = 0; poll < 50; ++poll) {
-                native_step(false);
-                assert(native_receipt().phase == APP_BT_MANAGE_DISCONNECT && close_calls == 1 && !remove_calls &&
-                    ble_hid_target_snapshot().revision == policy_revision && !state.public.pairing_open);
-            }
+            for (unsigned poll = 0; poll < 20; ++poll) native_step(false);
+            assert(native_receipt().phase == APP_BT_MANAGE_DISCONNECT && close_calls == 1 && !remove_calls);
             if (replacement == 2) {
                 app_bluetooth_management_service(&native_context, 31000);
                 assert(native_receipt().phase == APP_BT_MANAGE_FAILED && native_receipt().error == ESP_ERR_TIMEOUT &&
-                    close_calls == 1 && !remove_calls && !state.public.pairing_open);
-                disconnect_peer(); native_step(true);
-                assert(native_receipt().phase == APP_BT_MANAGE_FAILED && fake_bond_count == 2 &&
-                    ble_hid_target_snapshot().revision == policy_revision && !state.public.pairing_open);
+                    !state.management_reservation && !remove_calls && ble_hid_target_snapshot().revision == policy_revision);
+                disconnect_peer(); native_step(true); assert(fake_bond_count == 2 && !state.public.pairing_open);
             } else {
-                disconnect_peer(); native_finish();
-                assert(close_calls == 1 && state.public.pairing_open == (operations[op] == APP_BT_MANAGE_ADD));
+                disconnect_peer();
+                if (replacement) {
+                    active_peer = 0xc2; connect_peer(); assert(!state.public.connected && state.rejected_pending);
+                    worker_cycle(); disconnect_peer();
+                }
+                native_finish();
+                assert(!state.management_reservation && state.public.pairing_open == (operations[op] == APP_BT_MANAGE_ADD));
                 assert(fake_bond_count == (operations[op] == APP_BT_MANAGE_ADD ? 2 : 0));
-                native_step(true); assert(close_calls == 1);
             }
         }
     }
 }
+
+static void native_management_select_and_reconnect(void)
+{
+    for (unsigned connected = 0; connected < 2; ++connected) {
+        native_setup(true); ble_hid_target_t target = native_target(0xc2);
+        if (connected) { active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe(); }
+        native_begin(APP_BT_MANAGE_SELECT, &target);
+        if (connected) {
+            native_context.release_pending = true; native_step(false); assert(!close_calls);
+            native_context.release_pending = false; native_step(false); assert(close_calls == 1);
+            disconnect_peer();
+            active_peer = 0xc3; connect_peer(); assert(!state.public.connected && state.rejected_pending);
+            worker_cycle(); disconnect_peer();
+        }
+        native_finish();
+        ble_hid_target_snapshot_t policy = ble_hid_target_snapshot();
+        assert(policy.selected && policy.durable && !state.management_reservation && !state.public.connected &&
+            !memcmp(policy.target.bond_id, target.bond_id, BLE_HID_BOND_ID_BYTES) && !state.public.pairing_open &&
+            fake_bond_count == 2 && subscriptions.count == 2 && !remove_calls && strstr(native_receipt().message, "not ready"));
+        active_peer = 0xc3; connect_peer(); assert(!state.public.connected && state.rejected_pending);
+        worker_cycle(); disconnect_peer();
+        active_peer = 0xc2; connect_peer(); drain(); assert(state.public.connected && !state.public.ready);
+        authorize_peer(true); assert(state.public.ready); /* Stored per-host subscriptions restore only after real auth. */
+        assert(ble_hid_disconnect_generation(state.public.generation)); worker_cycle(); disconnect_peer();
+        connect_peer(); drain(); assert(state.public.connected && !state.public.ready);
+        authorize_peer(true); assert(state.public.ready && fake_bond_count == 2 && !remove_calls);
+    }
+    reset(); uint64_t first = 0, second = 0;
+    assert(ble_hid_management_reserve(state.public.generation, &first));
+    ble_hid_management_release(first); assert(ble_hid_management_reserve(state.public.generation, &second));
+    ble_hid_management_release(first); assert(state.management_reservation == second);
+    ble_hid_management_release(second); assert(!state.management_reservation);
+    state.management_sequence = UINT64_MAX;
+    assert(!ble_hid_management_reserve(state.public.generation, &second) && !state.public.failed);
+    puts("Native saved-host selection: live release, overtaking rejection, durable exact policy, pending versus authenticated readiness, ordinary reconnect and reservation ownership passed");
+}
+
 static void native_management_cancellation_failure_and_stale(void)
 {
     native_setup(false); ble_hid_target_t target = native_target(0xc3);
