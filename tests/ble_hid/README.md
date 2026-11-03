@@ -92,6 +92,25 @@ Timeout and cancellation cannot reopen pairing through a late callback. The
 SDK/NVS boundary remains substituted; target radio and host interoperability
 still require device qualification.
 
+`manual_disconnect_cases.inc` reproduces scoped pause failures on Add, Select,
+Forget and authenticated private-identity resolution. It covers last-host
+Resume, Forget A followed by Select/Allow reconnect B while another pause stays
+intact, provisional-link management with a pending neutral release, and repeated
+failed authentication at zero bonds followed by a successfully paired new host.
+Provisional links never become user-manageable hosts or input-ready. The tests
+do not establish which physical host retried or why a radio timeout occurred.
+Integrated-review regressions also cover provisional ACL loss during Add/Select,
+both BLE/Classic reservation orders, cancellation/failure release, and rejection
+of actual admitted-host or saved-identity changes before mutation.
+
+`management_edges_cases.inc` injects link-down after the UI observation, at the
+management reservation lock and at disconnect submission. It also replaces an
+admitted host, changes the catalogue/policy and injects a real transport failure.
+Use `BLE_MANAGEMENT_EDGES=all python3 tests/ble_hid/run.py` for these focused
+cases across the three native configurations. Management authority is the
+approved admitted-host generation (zero for none), plus catalogue/policy
+revisions; SDK teardown still uses the actual physical generation.
+
 ## Internal RSSI diagnostics
 
 The worker optionally requests actual asynchronous RSSI at two-second intervals for an active link. Samples are in dBm, valid only for SDK success with values -127 through 20, and expire after five seconds. Sentinel 127, failures and disconnect invalidate them. There is no percentage conversion or inferred quality. RSSI completion is scoped to its captured connection generation and address. A two-second timeout quarantines the pending request until its callback drains, including across reconnect to the same address; RSSI failure does not fault HID. These fields are diagnostic only and do not add a signal indicator to product UI.

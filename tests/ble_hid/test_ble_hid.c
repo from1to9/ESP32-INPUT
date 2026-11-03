@@ -95,7 +95,16 @@ static esp_bd_addr_t model_acl_address, last_gap_disconnect_address;
 static void model_logical_disconnect(void);
 static unsigned model_lock_depth, model_reservation_hooks;
 static void (*model_after_close_reservation)(void);
-void test_port_enter_critical(portMUX_TYPE *lock) { (void)lock; ++model_lock_depth; }
+static unsigned model_before_state_lock_count;
+static void (*model_before_state_lock)(void);
+void test_port_enter_critical(portMUX_TYPE *lock) {
+    if (lock == &state_lock && !model_lock_depth && model_before_state_lock_count &&
+        !--model_before_state_lock_count) {
+        void (*hook)(void) = model_before_state_lock;
+        model_before_state_lock = NULL; assert(hook); hook();
+    }
+    ++model_lock_depth;
+}
 void test_port_exit_critical(portMUX_TYPE *lock) {
     (void)lock; assert(model_lock_depth); --model_lock_depth;
     if (!model_lock_depth && model_after_close_reservation && state.closing && state.public.connected) {
@@ -399,6 +408,7 @@ static void reset(void) {
     gatts_close_calls = gap_disconnect_calls = premature_advertising_calls = 0;
     model_gap_disconnect_result = ESP_OK;
     model_lock_depth = model_reservation_hooks = 0; model_after_close_reservation = NULL;
+    model_before_state_lock_count = 0; model_before_state_lock = NULL;
     memset(model_acl_address,0,sizeof model_acl_address);
     memset(last_gap_disconnect_address,0,sizeof last_gap_disconnect_address);
     memset(&subscriptions, 0, sizeof(subscriptions));
@@ -2731,8 +2741,14 @@ static void test_quiet_forget_all_and_empty_durable_preferences(void) {
 #include "advertising_diagnostics_cases.inc"
 #include "physical_disconnect_cases.inc"
 #include "admission_diagnostics_cases.inc"
+#include "manual_disconnect_cases.inc"
+#include "management_edges_cases.inc"
 
 int main(void) {
+    if (getenv("BLE_MANAGEMENT_EDGES")) { management_edges_cases(); return 0; }
+    management_edges_cases();
+    if (getenv("BLE_MANUAL_CASE")) { manual_disconnect_cases(); return 0; }
+    manual_disconnect_cases();
     test_admission_saved_denial_and_explicit_add();
     test_admission_worker_predicates_and_stale_commands();
     test_admission_anchors_overflow_freeze_and_copy();

@@ -289,6 +289,7 @@ static void refresh_locked(void)
     state.public.rssi_pending = state.rssi_inflight && !state.rssi_timed_out &&
         state.public.connected && state.rssi_generation == state.connection_generation;
     state.public.ready = state.public.connected && state.service_started &&
+        state.public.connection_admitted &&
         !state.public.failed && !state.link_fault && state.public.encrypted &&
         state.public.bond_forget_state != BLE_HID_FORGET_RUNNING &&
         state.bond_resolved && state.cccd_pending == 0 &&
@@ -379,6 +380,25 @@ static bool manual_pause_matches_locked(const esp_bd_addr_t address, unsigned in
         }
     }
     return false;
+}
+
+static bool pause_target_matches(const ble_hid_target_t *pause, const ble_hid_target_t *target)
+{
+    if (pause->bond_id_known && target->bond_id_known)
+        return !memcmp(pause->bond_id, target->bond_id, BLE_HID_BOND_ID_BYTES);
+    return !memcmp(pause->address, target->address, ESP_BD_ADDR_LEN) &&
+        (pause->address_type == UINT8_MAX || pause->address_type == target->address_type);
+}
+
+static void resume_target_locked(const ble_hid_target_t *target)
+{
+    for (size_t i = 0; target && i < state.manual_pause_count;) {
+        if (pause_target_matches(&state.manual_pauses[i], target)) {
+            --state.manual_pause_count;
+            memmove(&state.manual_pauses[i], &state.manual_pauses[i + 1],
+                (state.manual_pause_count - i) * sizeof(state.manual_pauses[0]));
+        } else ++i;
+    }
 }
 
 static void order_bonds_locked(void)
@@ -827,6 +847,7 @@ static void post_control(const control_command_t *command)
 static void reset_link_locked(void)
 {
     state.public.connected = false;
+    state.public.connection_admitted = false;
     state.public.encrypted = false;
     state.public.suspended = false;
     state.public.keyboard_leds = 0;
@@ -1055,6 +1076,13 @@ static void service_bond_forget(void)
             !state.public.failed && !state.public.connected && !state.rejected_pending;
         bool empty = state.bond_list.count == 0;
         if (current && empty) {
+            for (size_t i = 0; i < state.manual_pause_count;) {
+                if (state.manual_pauses[i].bond_id_known) {
+                    --state.manual_pause_count;
+                    memmove(&state.manual_pauses[i], &state.manual_pauses[i + 1],
+                        (state.manual_pause_count - i) * sizeof(state.manual_pauses[0]));
+                } else ++i;
+            }
             state.public.bond_forget_state = BLE_HID_FORGET_DONE;
             state.public.bond_forget_error = ESP_OK;
             bond_list_status_locked(true, false, ESP_OK);
@@ -1169,6 +1197,7 @@ static void service_single_bond_forget(void)
     portENTER_CRITICAL(&state_lock);
     if (state.single_forget.request_id == id && state.single_forget.status == BLE_HID_BOND_FORGET_VERIFYING) {
         if (verified_mutation != state.bond_mutation_revision && error == ESP_OK) error = ESP_ERR_INVALID_STATE;
+        if (error == ESP_OK) resume_target_locked(&state.single_forget.target);
         finish_single_forget_locked(error == ESP_OK ? BLE_HID_BOND_FORGET_SUCCEEDED : BLE_HID_BOND_FORGET_UNCERTAIN, error);
     }
     portEXIT_CRITICAL(&state_lock);
@@ -1692,7 +1721,7 @@ static void resolve_subscriptions(void)
 {
     portENTER_CRITICAL(&state_lock);
     bool resolve = state.public.connected && state.auth_complete &&
-        !state.bond_resolved && !state.public.failed;
+        !state.bond_resolved && !state.public.failed && !state.link_fault && !state.management_reservation;
     bool bonded = state.bonded;
     bool cache_pending = state.bond_refresh_pending;
     bool cache_known = state.bond_list.known;
@@ -1727,6 +1756,18 @@ static void resolve_subscriptions(void)
         return;
     }
     portENTER_CRITICAL(&state_lock);
+    bool paused = false;
+    for (size_t i = 0; bonded && i < state.manual_pause_count; ++i)
+        paused |= state.manual_pauses[i].bond_id_known &&
+            !memcmp(state.manual_pauses[i].bond_id, fingerprint, BLE_HID_BOND_ID_BYTES);
+    if (paused) {
+        if (state.public.connected && state.connection_generation == generation && state.auth_revision == revision &&
+            !memcmp(state.address, address, sizeof(address)) && !state.link_fault) {
+            state.link_fault = true;
+            advance_generation_locked(); refresh_locked();
+        }
+        portEXIT_CRITICAL(&state_lock); return;
+    }
     bool selected_mismatch = (state.target.selected && (!state.target.target.bond_id_known ||
         memcmp(state.target.target.bond_id, fingerprint, BLE_HID_BOND_ID_BYTES) != 0)) ||
         (state.reconnect_probe_link && (!bonded || !state.reconnect_probe_target.bond_id_known ||
@@ -1743,9 +1784,10 @@ static void resolve_subscriptions(void)
     portENTER_CRITICAL(&state_lock);
     if (state.public.connected && state.connection_generation == generation &&
         state.auth_revision == revision && memcmp(state.address, address, sizeof(address)) == 0 &&
-        !state.public.failed) {
+        !state.public.failed && !state.link_fault && !state.management_reservation) {
         memcpy(state.bond_fingerprint, fingerprint, sizeof(fingerprint));
         state.bond_resolved = true;
+        state.public.connection_admitted = true;
         if (bonded) {
             bool newly_saved = !state.peer_saved;
             state.peer_saved = true;
@@ -2935,7 +2977,6 @@ static bool pairing_open_request(uint32_t duration_ms, uint64_t reservation)
             memcpy(state.pairing_excluded_address, state.management_peer_address, ESP_BD_ADDR_LEN);
             state.pairing_excluded_type = state.management_peer_type;
         }
-        state.manual_pause_count = 0;
         if (reservation) { state.management_reservation = 0; state.management_peer_known = false; }
         state.pairing_user_controlled = true;
         open_pairing_locked(now, duration_ms);
@@ -2947,19 +2988,21 @@ static bool pairing_open_request(uint32_t duration_ms, uint64_t reservation)
     return accepted;
 }
 
-bool ble_hid_management_reserve(uint64_t generation, uint64_t *reservation)
+bool ble_hid_management_reserve(uint64_t host_generation, uint64_t bond_revision,
+    uint64_t preference_revision, uint64_t *reservation)
 {
     portENTER_CRITICAL(&state_lock);
     bool accepted = reservation && state.public.initialized && !state.public.failed &&
-        generation == state.public.generation && !state.management_reservation &&
+        host_generation == (state.public.connection_admitted ? state.public.generation : 0) && !state.management_reservation &&
         state.management_sequence != UINT64_MAX && !target_blocked_locked() &&
         !single_forget_busy_locked() && !state.classic_pairing_reserved &&
         !device_name.blocked && !name_busy_locked() &&
         state.bond_list.known && !state.bond_list.updating &&
+        state.bond_list.revision == bond_revision && state.target.revision == preference_revision &&
         state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
     if (accepted) {
         state.management_reservation = ++state.management_sequence;
-        state.management_peer_known = state.public.connected;
+        state.management_peer_known = state.public.connection_admitted;
         if (state.management_peer_known) {
             memcpy(state.management_peer_address, state.address, ESP_BD_ADDR_LEN);
             state.management_peer_type = state.peer_address_type_known ? state.peer_address_type : UINT8_MAX;
@@ -2994,12 +3037,12 @@ bool ble_hid_management_ready(uint64_t reservation)
     return ready;
 }
 
-void ble_hid_management_resume(uint64_t reservation)
+void ble_hid_management_resume(uint64_t reservation, const ble_hid_target_t *target)
 {
     portENTER_CRITICAL(&state_lock);
     if (reservation && state.management_reservation == reservation) {
         state.reconnect_probe = false;
-        state.manual_pause_count = 0;
+        resume_target_locked(target);
         state.management_peer_known = false;
         state.management_reservation = 0;
     }
@@ -3010,16 +3053,7 @@ void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *
 {
     portENTER_CRITICAL(&state_lock);
     if (reservation && state.management_reservation == reservation && target) {
-        for (size_t i = 0; i < state.manual_pause_count;) {
-            const ble_hid_target_t *paused = &state.manual_pauses[i];
-            bool same = !memcmp(paused->address, target->address, ESP_BD_ADDR_LEN) &&
-                (paused->address_type == UINT8_MAX || paused->address_type == target->address_type);
-            if (same) {
-                --state.manual_pause_count;
-                memmove(&state.manual_pauses[i], &state.manual_pauses[i + 1],
-                    (state.manual_pause_count - i) * sizeof(*paused));
-            } else ++i;
-        }
+        resume_target_locked(target);
         int64_t now = esp_timer_get_time();
         const int64_t window_us = INT64_C(1000) * PAIRING_HANDSHAKE_TIMEOUT_MS;
         state.reconnect_probe = now >= 0 && now <= INT64_MAX - window_us;
@@ -3035,9 +3069,9 @@ void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *
 bool ble_hid_resume_reconnect(void)
 {
     portENTER_CRITICAL(&state_lock);
-    bool accepted = state.public.initialized && !state.public.failed && !state.public.connected &&
+    bool accepted = state.public.initialized && !state.public.failed && !state.public.connection_admitted &&
         !state.management_reservation && state.manual_pause_count != 0;
-    if (accepted) { state.manual_pause_count = 0; state.reconnect_probe = false; }
+    if (accepted) { --state.manual_pause_count; state.reconnect_probe = false; }
     portEXIT_CRITICAL(&state_lock);
     return accepted;
 }
@@ -3064,7 +3098,7 @@ bool ble_hid_pairing_claim_classic(void)
 {
     portENTER_CRITICAL(&state_lock);
     bool accepted = state.public.initialized && !state.public.failed && !state.classic_pairing_reserved && !target_blocked_locked() && !single_forget_busy_locked() &&
-        !state.public.pairing_open && !state.pairing_admitted && !state.pairing_admission_pending &&
+        !state.management_reservation && !state.public.pairing_open && !state.pairing_admitted && !state.pairing_admission_pending &&
         (!state.public.connected || (state.auth_complete && state.bond_resolved)) &&
         state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
     if (accepted) state.classic_pairing_reserved = true;
@@ -3173,7 +3207,8 @@ bool ble_hid_send(uint8_t report_id, const uint8_t *data, size_t length)
 static bool disconnect_request(uint64_t generation, bool pause)
 {
     portENTER_CRITICAL(&state_lock);
-    if (!state.public.connected || state.public.generation != generation) {
+    if (!state.public.connected || state.public.generation != generation ||
+        (pause && (!state.public.connection_admitted || state.link_fault))) {
         portEXIT_CRITICAL(&state_lock);
         return false;
     }
@@ -3184,11 +3219,10 @@ static bool disconnect_request(uint64_t generation, bool pause)
         memset(record, 0, sizeof(*record));
         memcpy(record->address, state.address, ESP_BD_ADDR_LEN);
         record->address_type = state.peer_address_type_known ? state.peer_address_type : UINT8_MAX;
-        if (state.bond_resolved && state.bonded && state.peer_address_type_known) {
+        if (state.bond_resolved && state.bonded) {
             for (unsigned j = 0; j < state.bond_list.count; ++j) {
                 const ble_hid_bond_t *row = &state.bond_list.bonds[j];
-                if (row->bond_id_known && row->address_type_known && row->address_type == state.peer_address_type &&
-                    !memcmp(row->address, state.address, ESP_BD_ADDR_LEN) &&
+                if (row->bond_id_known && row->address_type_known &&
                     !memcmp(row->bond_id, state.bond_fingerprint, BLE_HID_BOND_ID_BYTES)) *record = key_for_bond(row);
             }
         }

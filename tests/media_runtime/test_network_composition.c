@@ -132,11 +132,11 @@ esp_err_t bt_audio_init(void) { return ESP_OK; }
 void bt_audio_service(void) { }
 bt_audio_snapshot_t bt_audio_snapshot(void) { return (bt_audio_snapshot_t){0}; }
 void bt_audio_copy_bond_list(bt_audio_bond_list_t *out) { assert(out); memset(out,0,sizeof(*out)); }
-uint64_t bt_audio_cancel(void) { return 1; }
-esp_err_t bt_audio_request(uint64_t generation,bt_audio_command_t command,const uint8_t peer[6],uint64_t *id)
-{ (void)generation; (void)command; (void)peer; (void)id; return ESP_ERR_NOT_SUPPORTED; }
-esp_err_t bt_audio_saved_request(uint64_t generation,uint64_t revision,bt_audio_command_t command,const uint8_t peer[6],uint64_t *id)
-{ (void)revision; return bt_audio_request(generation,command,peer,id); }
+void bt_audio_cancel_request(uint64_t id) { (void)id; }
+esp_err_t bt_audio_request(uint64_t generation,uint64_t link_generation,bt_audio_command_t command,const uint8_t peer[6],uint64_t *id)
+{ (void)generation; (void)link_generation; (void)command; (void)peer; (void)id; return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t bt_audio_saved_request(uint64_t generation,uint64_t link_generation,uint64_t revision,bt_audio_command_t command,const uint8_t peer[6],uint64_t *id)
+{ (void)revision; return bt_audio_request(generation,link_generation,command,peer,id); }
 ae_route_port_t usb_audio_route_port(void) { return (ae_route_port_t){0}; }
 ae_route_port_t bt_audio_route_port(void) { return (ae_route_port_t){0}; }
 ae_result_t usb_audio_receive(ae_frame_t *frame) { (void)frame; return AE_AGAIN; }

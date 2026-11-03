@@ -383,6 +383,9 @@ for _name, _prefix in (("begin", BT_BEGIN), ("exact_begin", BT_EXACT_BEGIN), ("s
     MANAGEMENT_PATHS[f"bluetooth_{_name}_release"] = _prefix + [("ble", "ble_hid_management_release")]
 for _leaf in ("ready", "resume", "reconnect"):
     MANAGEMENT_PATHS["bluetooth_service_" + _leaf] = BT_SERVICE + [("ble", "ble_hid_management_" + _leaf)]
+for _leaf in ("resume", "reconnect"):
+    MANAGEMENT_PATHS["bluetooth_service_" + _leaf + "_target"] = BT_SERVICE + [
+        ("ble", "ble_hid_management_" + _leaf), ("ble", "resume_target_locked"), ("ble", "pause_target_matches")]
 for _leaf in ("release", "resume"):
     MANAGEMENT_PATHS["bluetooth_finish_" + _leaf] = BT_SERVICE + [
         ("bluetooth_management", "finish"), ("ble", "ble_hid_management_" + _leaf)]
@@ -1053,6 +1056,12 @@ for _leaf in ("command_current_locked", "advance_generation_locked", "refresh_lo
 PATHS["ble_connect_paused_identity"] = BLE_ADMISSION_PRODUCERS["gatts_callback"][1] + [
     ("ble", "manual_pause_matches_locked"), ("ble", "target_key_matches")]
 PATH_OWNERS["ble_connect_paused_identity"] = "btc"
+PATHS["ble_forget_one_pause_cleanup"] = [("ble", "control_worker"),
+    ("ble", "service_single_bond_forget"), ("ble", "resume_target_locked"), ("ble", "pause_target_matches")]
+PATH_OWNERS["ble_forget_one_pause_cleanup"] = "ble_control"
+for _leaf in ("advance_generation_locked", "refresh_locked"):
+    PATHS["ble_authenticated_pause_" + _leaf] = _probe[:-1] + [("ble", _leaf)]
+    PATH_OWNERS["ble_authenticated_pause_" + _leaf] = "ble_control"
 for _label, _owner, _prefix in (
     ("worker", "ble_control", [("ble", "control_worker")]),
     ("connect", "btc", BLE_ADMISSION_PRODUCERS["gatts_callback"][1]),

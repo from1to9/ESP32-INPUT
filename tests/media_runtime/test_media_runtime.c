@@ -73,17 +73,19 @@ void bt_audio_copy_bond_list(bt_audio_bond_list_t *out)
         bond_reentrant_result=app_media_runtime_submit_remote(nested);
     }
 }
-uint64_t bt_audio_cancel(void) { ++bluetooth_cancels; return ++bluetooth.generation; }
-esp_err_t bt_audio_request(uint64_t generation, bt_audio_command_t command, const uint8_t peer[6], uint64_t *id)
+void bt_audio_cancel_request(uint64_t id) { assert(id && id == bluetooth.request_id); ++bluetooth_cancels; }
+esp_err_t bt_audio_request(uint64_t generation, uint64_t link_generation, bt_audio_command_t command, const uint8_t peer[6], uint64_t *id)
 {
-    (void)command; (void)peer;
+    bool a2dp = command == BT_AUDIO_CONNECT_A2DP || command == BT_AUDIO_DISCONNECT_A2DP;
+    if (link_generation != (a2dp ? bluetooth.a2dp_link_generation : bluetooth.hfp_link_generation)) return ESP_ERR_NOT_FOUND;
+    (void)peer;
     if (generation != bluetooth.generation) return ESP_ERR_INVALID_STATE;
     ++bluetooth_requests; *id = ++bluetooth.request_id; bluetooth.request_status = BT_AUDIO_JOB_PENDING;
     return ESP_OK;
 }
-esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t revision, bt_audio_command_t command,
+esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t link_generation, uint64_t revision, bt_audio_command_t command,
     const uint8_t peer[6], uint64_t *id)
-{ assert(revision == 9); return bt_audio_request(generation, command, peer, id); }
+{ assert(revision == 9); return bt_audio_request(generation, link_generation, command, peer, id); }
 
 static ae_result_t caps(void *context, ae_route_t route, ae_route_capabilities_t *out)
 { (void)context; assert(route==AE_ROUTE_USB_UAC || route==AE_ROUTE_HFP_HF || route==AE_ROUTE_A2DP_SINK);
@@ -311,6 +313,31 @@ static void remote_link_admission(void)
     assert(app_media_runtime_poll_remote(link.token,&result) && result.result==AE_OK);
     app_media_runtime_release_remote_result(link.token);
     assert(app_media_runtime_submit_remote(&nested)==AE_OK && !media->remote_bonds_busy);
+    link.value=false; link.operation=CP_OP_AUDIO_LINK_DISCONNECT;
+    for (unsigned i=0;i<2;++i) {
+        remote_setup();
+        bool hfp=i==0;
+        link.route=hfp ? AE_ROUTE_HFP_HF : AE_ROUTE_A2DP_SINK;
+        bluetooth.hfp_peer_known=bluetooth.a2dp_peer_known=true;
+        bluetooth.hfp_link_generation=8; bluetooth.a2dp_link_generation=3;
+        memcpy(bluetooth.hfp_peer, bluetooth_bonds.bonds[0].address, 6);
+        memcpy(bluetooth.a2dp_peer, bluetooth_bonds.bonds[0].address, 6);
+        strcpy(link.peer_id, "06:05:04:03:02:01");
+        assert(app_media_runtime_submit_remote(&link)==AE_STALE && !media->pending);
+        link.peer_id[0]=0; assert(app_media_runtime_submit_remote(&link)==AE_OK);
+        assert(!memcmp(media->command.bluetooth_peer,bluetooth_bonds.bonds[0].address,6));
+        /* Same address, replacement link between remote admission and worker submission. */
+        if (hfp) ++bluetooth.hfp_link_generation; else ++bluetooth.a2dp_link_generation;
+        media_step(media);
+        assert(app_media_runtime_poll_remote(link.token,&result) && result.result==AE_STALE && !bluetooth_requests);
+        app_media_runtime_release_remote_result(link.token);
+        ++link.token; ++link.command_key;
+        assert(app_media_runtime_submit_remote(&link)==AE_OK);
+        media_step(media); assert(bluetooth_requests==1);
+        bluetooth.request_status=BT_AUDIO_JOB_SUCCEEDED; media_step(media);
+        assert(app_media_runtime_poll_remote(link.token,&result) && result.result==AE_OK);
+        app_media_runtime_release_remote_result(link.token);
+    }
     puts("PASS: remote saved-peer validation, copy-out lock order, reentrant admission and scratch release after rejection");
 }
 static void remote_and_queries(void)

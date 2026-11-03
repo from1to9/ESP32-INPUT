@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "bt_audio.h"
+#include "btc_av.h"
+#include "btc_hf_client.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_hf_client_api.h"
@@ -51,6 +53,8 @@ static void (*deadline)(TimerHandle_t);
 static void *allocation;
 static const uint8_t peer[6] = {2, 3, 4, 5, 6, 7};
 
+static const uint8_t other[6] = {8, 9, 10, 11, 12, 13};
+
 int64_t esp_timer_get_time(void) { if (clock_hook) { void (*hook)(void) = clock_hook; clock_hook = NULL; hook(); } return (int64_t)clock_us; }
 void esp_fill_random(void *buffer, size_t bytes) { memset(buffer, 0xa5, bytes); }
 esp_bt_controller_status_t esp_bt_controller_get_status(void)
@@ -73,7 +77,7 @@ int esp_bt_gap_get_bond_device_num(void) { return bond_count; }
 int btc_storage_get_num_all_bond_devices(void)
 { if (bond_count_hook) { void (*hook)(void) = bond_count_hook; bond_count_hook = NULL; hook(); } return shared_count; }
 esp_err_t esp_bt_gap_get_bond_device_list(int *count, esp_bd_addr_t *list)
-{ assert(*count >= bond_count); *count = bond_count; if (bond_count == 1) memcpy(list[0], peer, 6); return bond_list_error; }
+{ assert(*count >= bond_count); *count = bond_count; if (bond_count >= 1) memcpy(list[0], peer, 6); if (bond_count == 2) memcpy(list[1], other, 6); return bond_list_error; }
 esp_err_t esp_bt_gap_set_scan_mode(esp_bt_connection_mode_t connection, esp_bt_discovery_mode_t discovery)
 { if (!drop_scan) gap_status = (esp_bt_gap_profile_status_t){.conn_mode = connection, .disc_mode = discovery}; return ESP_OK; }
 esp_err_t esp_bt_gap_get_profile_status(esp_bt_gap_profile_status_t *status) { *status = gap_status; return ESP_OK; }
@@ -95,13 +99,41 @@ esp_err_t esp_a2d_register_callback(esp_a2d_cb_t callback) { a2 = callback; retu
 esp_err_t esp_a2d_sink_register_data_callback(void (*rx)(const uint8_t *, uint32_t))
 { a2_rx = rx; return submit(); }
 esp_err_t esp_a2d_sink_init(void) { return submit(); }
-static esp_err_t control(const uint8_t *address) { assert(memcmp(address, peer, 6) == 0); ++calls; return command_error; }
-esp_err_t esp_hf_client_connect(const uint8_t *address) { return control(address); }
-esp_err_t esp_hf_client_disconnect(const uint8_t *address) { return control(address); }
-esp_err_t esp_hf_client_connect_audio(const uint8_t *address) { return control(address); }
-esp_err_t esp_hf_client_disconnect_audio(const uint8_t *address) { return control(address); }
-esp_err_t esp_a2d_sink_connect(const uint8_t *address) { return control(address); }
-esp_err_t esp_a2d_sink_disconnect(const uint8_t *address) { return control(address); }
+static bool audio_locked, on_btc, defer_btc;
+static void (*queued_btc)(void *), (*before_post)(void), (*inside_handler)(void);
+static unsigned dispatch_calls;
+static uint8_t last_pid, last_action;
+struct osi_thread { int queue; };
+static osi_thread_t btc;
+bool g_a2dp_on_deinit, g_a2dp_sink_ongoing_deinit;
+void test_bt_lock(portMUX_TYPE *lock) { (void)lock; assert(!audio_locked); audio_locked = true; }
+void test_bt_unlock(portMUX_TYPE *lock) { (void)lock; assert(audio_locked); audio_locked = false; }
+osi_thread_t *btc_get_current_thread(void) { return &btc; }
+static void run_btc(void)
+{
+    assert(queued_btc && !on_btc);
+    void (*run)(void *) = queued_btc; queued_btc = NULL;
+    on_btc = true; run(NULL); on_btc = false;
+}
+bool osi_thread_post(osi_thread_t *owner, void (*run)(void *), void *context, int queue, uint32_t timeout)
+{
+    assert(!audio_locked && owner == &btc && !context && queue == 0 && timeout == 0);
+    if (before_post) { void (*hook)(void) = before_post; before_post = NULL; hook(); }
+    if (queued_btc || command_error) return false;
+    queued_btc = run;
+    if (!defer_btc) run_btc();
+    return true;
+}
+int btc_inter_profile_call(btc_msg_t *message)
+{
+    assert(on_btc && !audio_locked && message->sig == BTC_SIG_API_CALL);
+    assert(message->pid == BTC_PID_HF_CLIENT || message->pid == BTC_PID_A2DP);
+    assert(!memcmp(message->arg, peer, sizeof(peer)));
+    ++calls; ++dispatch_calls;
+    last_pid = message->pid; last_action = message->act;
+    if (inside_handler) { void (*hook)(void) = inside_handler; inside_handler = NULL; hook(); }
+    return BT_STATUS_SUCCESS;
+}
 void esp_hf_client_outgoing_data_ready(void) { ++kicks; }
 
 static void initialized(void)
@@ -160,14 +192,16 @@ static void normal(void)
     assert(saved.known && saved.count == 1 && !saved.bonds[0].name_known && saved.bonds[0].name[0] == 0 &&
         memcmp(saved.bonds[0].address, peer, 6) == 0);
     uint64_t request;
-    assert(bt_audio_saved_request(bt_audio_snapshot().generation, saved.revision + 1, BT_AUDIO_CONNECT_HFP, peer, NULL) == ESP_ERR_INVALID_STATE);
+    bt_audio_snapshot_t target = bt_audio_snapshot();
+    assert(bt_audio_saved_request(target.generation, target.hfp_link_generation, saved.revision + 1, BT_AUDIO_CONNECT_HFP, peer, NULL) == ESP_ERR_INVALID_STATE);
     uint8_t absent[6] = {9};
-    assert(bt_audio_saved_request(bt_audio_snapshot().generation, saved.revision, BT_AUDIO_CONNECT_HFP, absent, NULL) == ESP_ERR_NOT_FOUND);
-    assert(bt_audio_saved_request(bt_audio_snapshot().generation, saved.revision, BT_AUDIO_CONNECT_HFP, peer, &request) == ESP_OK);
+    assert(bt_audio_saved_request(target.generation, target.hfp_link_generation, saved.revision, BT_AUDIO_CONNECT_HFP, absent, NULL) == ESP_ERR_NOT_FOUND);
+    assert(bt_audio_saved_request(target.generation, target.hfp_link_generation, saved.revision, BT_AUDIO_CONNECT_HFP, peer, &request) == ESP_OK);
     assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_PENDING);
     bt_audio_service(); assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_WAITING);
     bt_audio_cancel(); assert(bt_audio_snapshot().control_inflight);
-    assert(bt_audio_request(bt_audio_snapshot().generation, BT_AUDIO_CONNECT_HFP, peer, NULL) == ESP_ERR_INVALID_STATE);
+    target = bt_audio_snapshot();
+    assert(bt_audio_request(target.generation, target.hfp_link_generation, BT_AUDIO_CONNECT_HFP, peer, NULL) == ESP_ERR_INVALID_STATE);
     hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
     assert(observed_bonds().bonds[0].hfp_current && !observed_bonds().bonds[0].a2dp_current);
     assert(!bt_audio_snapshot().control_inflight && bt_audio_snapshot().request_status == BT_AUDIO_JOB_CANCELLED);
@@ -264,14 +298,16 @@ static void normal(void)
     music_format(3, ESP_A2D_SBC_CIE_CH_MODE_MONO, 43);
     assert(!bt_audio_snapshot().a2dp_format_known);
     assert(bt_audio_refresh_bonds() == ESP_OK && observed_bonds().refreshing);
-    assert(bt_audio_saved_request(bt_audio_snapshot().generation, observed_bonds().revision,
+    target = bt_audio_snapshot();
+    assert(bt_audio_saved_request(target.generation, target.a2dp_link_generation, observed_bonds().revision,
         BT_AUDIO_DISCONNECT_A2DP, peer, NULL) == ESP_ERR_INVALID_STATE);
     bond_list_error = ESP_FAIL; bt_audio_service();
     saved = observed_bonds(); assert(!saved.known && saved.error == ESP_FAIL && saved.count == 1);
     bond_list_error = ESP_OK; assert(bt_audio_refresh_bonds() == ESP_OK); bt_audio_service();
     saved = observed_bonds(); assert(saved.known && saved.bonds[0].a2dp_current);
     unsigned prior_calls = calls;
-    assert(bt_audio_saved_request(bt_audio_snapshot().generation, saved.revision,
+    target = bt_audio_snapshot();
+    assert(bt_audio_saved_request(target.generation, target.a2dp_link_generation, saved.revision,
         BT_AUDIO_DISCONNECT_A2DP, peer, NULL) == ESP_OK);
     assert(bt_audio_refresh_bonds() == ESP_OK); bt_audio_service();
     assert(calls == prior_calls + 1 && bt_audio_snapshot().request_status == BT_AUDIO_JOB_WAITING);
@@ -279,7 +315,8 @@ static void normal(void)
     assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED);
     music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 44);
     saved = observed_bonds(); prior_calls = calls;
-    assert(bt_audio_saved_request(bt_audio_snapshot().generation, saved.revision,
+    target = bt_audio_snapshot();
+    assert(bt_audio_saved_request(target.generation, target.a2dp_link_generation, saved.revision,
         BT_AUDIO_DISCONNECT_A2DP, peer, NULL) == ESP_OK);
     esp_bt_gap_cb_param_t mutation = {.auth_cmpl.stat = 1};
     memcpy(mutation.auth_cmpl.bda, peer, 6); gap(ESP_BT_GAP_AUTH_CMPL_EVT, &mutation);
@@ -336,6 +373,322 @@ static void security_event(esp_bt_gap_cb_event_t event)
     esp_bt_gap_cb_param_t parameter = {0};
     memcpy(parameter.cfm_req.bda, peer, 6);
     gap(event, &parameter);
+}
+
+static void auth_result(const uint8_t address[6], bool success)
+{
+    esp_bt_gap_cb_param_t p = {.auth_cmpl.stat = success ? ESP_BT_STATUS_SUCCESS : 1U};
+    memcpy(p.auth_cmpl.bda, address, 6);
+    gap(ESP_BT_GAP_AUTH_CMPL_EVT, &p);
+}
+
+static void remove_result(const uint8_t address[6])
+{
+    esp_bt_gap_cb_param_t p = {.remove_bond_dev_cmpl.status = ESP_BT_STATUS_SUCCESS};
+    memcpy(p.remove_bond_dev_cmpl.bda, address, 6);
+    gap(ESP_BT_GAP_REMOVE_BOND_DEV_COMPLETE_EVT, &p);
+}
+
+static void auth_during_capacity_read(void) { auth_result(peer, false); }
+
+static void pairing_lifecycle(const char *scenario)
+{
+    initialized(); bt_audio_service();
+    if (!strcmp(scenario, "pair-prewindow")) {
+        security_event(ESP_BT_GAP_CFM_REQ_EVT);
+        esp_err_t opened = bt_audio_pairing_open(1000);
+        bt_audio_service();
+        assert(!security_accept && !bt_audio_snapshot().pairing_handshake_pending);
+        if (opened != ESP_OK) assert(bt_audio_pairing_open(1000) == ESP_OK);
+        return;
+    }
+    assert(bt_audio_pairing_open(1000) == ESP_OK); bt_audio_service();
+    security_event(ESP_BT_GAP_CFM_REQ_EVT);
+    if (!strcmp(scenario, "pair-terminal")) {
+        bond_count_hook = auth_during_capacity_read; bt_audio_service();
+        assert(!bt_audio_snapshot().pairing_handshake_pending && !security_replies);
+        return;
+    }
+    bt_audio_service(); assert(security_accept);
+    if (!strcmp(scenario, "pair-foreign")) {
+        auth_result(other, true); bt_audio_service();
+        assert(pairing_claim && bt_audio_snapshot().pairing_requested && bt_audio_snapshot().pairing_handshake_pending);
+    } else if (!strncmp(scenario, "pair-late", 9)) {
+        clock_us += 30000000; deadline(NULL); bt_audio_service();
+        auth_result(other, false); bt_audio_service();
+        assert(pairing_claim && !bt_audio_snapshot().pairing_requested && bt_audio_snapshot().pairing_handshake_pending);
+        assert(bt_audio_pairing_open(1000) != ESP_OK);
+    }
+    bool success = !strstr(scenario, "failure");
+    if (!strcmp(scenario, "pair-unsaved")) bond_count = 0;
+    auth_result(peer, success); bt_audio_service();
+    assert(!pairing_claim && !bt_audio_snapshot().failed && !bt_audio_snapshot().pairing_requested);
+    assert(bt_audio_snapshot().pairing_completed == (success && bond_count > 0));
+    assert(bt_audio_pairing_open(1000) == ESP_OK);
+}
+
+static void profile_lifecycle(const char *scenario)
+{
+    bond_count = 2;
+    initialized(); bt_audio_service();
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+    voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+    uint64_t generation = policy(BT_AUDIO_HFP, false, false);
+    bt_audio_pcm_t packet = {.generation = generation, .timestamp_us = clock_us,
+        .source = BT_AUDIO_HFP, .sample_rate = 16000, .frames = 160};
+    packet.samples[0] = 42;
+    assert(bt_audio_write_microphone(&packet) == ESP_OK);
+    if (!strcmp(scenario, "foreign-bonds")) {
+        auth_result(other, false); remove_result(other);
+    } else {
+        esp_a2d_cb_param_t a = {.conn_stat = {.state = ESP_A2D_CONNECTION_STATE_CONNECTED, .conn_hdl = 7}};
+        memcpy(a.conn_stat.remote_bda, other, 6); a2(ESP_A2D_CONNECTION_STATE_EVT, &a);
+        a.conn_stat.state = ESP_A2D_CONNECTION_STATE_DISCONNECTED; a2(ESP_A2D_CONNECTION_STATE_EVT, &a);
+    }
+    uint8_t wire[320];
+    assert(hf_tx(wire, sizeof(wire)) == sizeof(wire) && wire[0] == 42);
+    bt_audio_service(); assert(bt_audio_snapshot().generation == generation);
+    assert(bt_audio_write_microphone(&packet) == ESP_OK);
+    remove_result(peer); bond_count = 0;
+    assert(hf_tx(wire, sizeof(wire)) == 0);
+    bt_audio_service(); assert(!bt_audio_snapshot().classic_hfp_peer_bonded && bt_audio_snapshot().microphone_muted);
+    assert(bt_audio_write_microphone(&packet) != ESP_OK);
+}
+
+static void profile_peer_switch(void)
+{
+    initialized(); bt_audio_service();
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED); voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+    uint64_t generation = policy(BT_AUDIO_HFP, false, false);
+    bt_audio_pcm_t packet = {.generation = generation, .source = BT_AUDIO_HFP, .sample_rate = 16000,
+        .timestamp_us = clock_us, .frames = 160};
+    assert(bt_audio_write_microphone(&packet) == ESP_OK);
+    esp_hf_client_cb_param_t h = {.conn_stat.state = ESP_HF_CLIENT_CONNECTION_STATE_CONNECTED};
+    memcpy(h.conn_stat.remote_bda, other, 6); hf(ESP_HF_CLIENT_CONNECTION_STATE_EVT, &h);
+    uint8_t pcm[320]; assert(hf_tx(pcm, sizeof(pcm)) == 0 && bt_audio_snapshot().microphone_muted);
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED);
+    h.conn_stat.state = ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED; hf(ESP_HF_CLIENT_CONNECTION_STATE_EVT, &h);
+    assert(!memcmp(bt_audio_snapshot().hfp_peer, other, 6) && !bt_audio_snapshot().hfp_audio_connected);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 1);
+    music_format(ESP_A2D_SBC_CIE_SF_48K, ESP_A2D_SBC_CIE_CH_MODE_MONO, 1);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 1); generation = policy(BT_AUDIO_A2DP, true, false);
+    esp_a2d_cb_param_t a = {.conn_stat = {.state = ESP_A2D_CONNECTION_STATE_CONNECTING, .conn_hdl = 1}};
+    memcpy(a.conn_stat.remote_bda, other, 6); a2(ESP_A2D_CONNECTION_STATE_EVT, &a);
+    music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 1); /* Old address, reused handle. */
+    a.conn_stat.state = ESP_A2D_CONNECTION_STATE_CONNECTED; a2(ESP_A2D_CONNECTION_STATE_EVT, &a);
+    assert(!memcmp(bt_audio_snapshot().a2dp_peer, other, 6) && !bt_audio_snapshot().a2dp_format_known);
+    a2_rx(pcm, sizeof(pcm)); assert(!bt_audio_read_speaker(generation, &packet));
+}
+
+static void connect_race(void)
+{
+    initialized(); bt_audio_service();
+    uint64_t token;
+    bt_audio_snapshot_t target = bt_audio_snapshot();
+    assert(bt_audio_request(target.generation, target.a2dp_link_generation, BT_AUDIO_CONNECT_A2DP, peer, &token) == ESP_OK);
+    bt_audio_service();
+    esp_a2d_cb_param_t a = {.conn_stat = {.state = ESP_A2D_CONNECTION_STATE_CONNECTED, .conn_hdl = 4}};
+    memcpy(a.conn_stat.remote_bda, other, 6); a2(ESP_A2D_CONNECTION_STATE_EVT, &a);
+    /* The SDK emits this disconnected event for the rejected outgoing peer. */
+    music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 0);
+    assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_FAILED && !bt_audio_snapshot().control_inflight);
+    assert(bt_audio_snapshot().a2dp_connected && !memcmp(bt_audio_snapshot().a2dp_peer, other, 6));
+    uint64_t current;
+    target = bt_audio_snapshot();
+    assert(bt_audio_request(target.generation, target.hfp_link_generation, BT_AUDIO_CONNECT_HFP, peer, &current) == ESP_OK);
+    bt_audio_cancel_request(token);
+    assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_PENDING && current != token);
+    bt_audio_cancel_request(current); bt_audio_service();
+    assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_CANCELLED && !bt_audio_snapshot().control_inflight);
+}
+
+static void observed_disconnect(void)
+{
+    initialized(); bt_audio_service();
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+    voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    uint64_t generation = policy(BT_AUDIO_HFP, false, true);
+    bt_audio_snapshot_t target = bt_audio_snapshot();
+    music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 3);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 4);
+    /* The same peer reconnects between media admission and BT queue admission. */
+    assert(bt_audio_snapshot().generation == generation);
+    unsigned before = calls;
+    esp_err_t stale = bt_audio_request(target.generation, target.a2dp_link_generation, BT_AUDIO_DISCONNECT_A2DP, target.a2dp_peer, NULL);
+    bt_audio_service();
+    assert(calls == before && !bt_audio_snapshot().control_inflight && stale != ESP_OK);
+
+    target = bt_audio_snapshot();
+    assert(bt_audio_request(target.generation, target.a2dp_link_generation, BT_AUDIO_DISCONNECT_A2DP, target.a2dp_peer, NULL) == ESP_OK);
+    /* A replacement after queue admission must also survive the service step. */
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 5);
+    bt_audio_service();
+    assert(calls == before && bt_audio_snapshot().request_status == BT_AUDIO_JOB_FAILED);
+    target = bt_audio_snapshot();
+    assert(bt_audio_request(target.generation, target.a2dp_link_generation, BT_AUDIO_DISCONNECT_A2DP, target.a2dp_peer, NULL) == ESP_OK);
+    bt_audio_service();
+    assert(calls == before + 1 && bt_audio_snapshot().control_inflight);
+    music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 5);
+    assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED && !bt_audio_snapshot().a2dp_connected);
+    assert(bt_audio_snapshot().generation == generation && bt_audio_snapshot().microphone_write_ready);
+}
+
+static uint64_t request_music_disconnect(void)
+{
+    bt_audio_snapshot_t target = bt_audio_snapshot();
+    uint64_t token = 0;
+    assert(bt_audio_request(target.generation, target.a2dp_link_generation, BT_AUDIO_DISCONNECT_A2DP,
+        target.a2dp_peer, &token) == ESP_OK);
+    return token;
+}
+static void replace_before_post(void)
+{
+    assert(!dispatch_calls && !bt_audio_snapshot().control_inflight);
+    music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 3);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 4);
+    assert(!dispatch_calls && bt_audio_snapshot().request_status == BT_AUDIO_JOB_PENDING);
+}
+static void disconnected_in_handler(void)
+{
+    assert(dispatch_calls == 1 && bt_audio_snapshot().control_inflight);
+    assert(last_pid == BTC_PID_A2DP && last_action == BTC_AV_SINK_API_DISCONNECT_EVT);
+    music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 3);
+    assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED);
+}
+static void unrelated_work(void *context) { assert(on_btc && !context); }
+static void dispatch_order(const char *scenario)
+{
+    initialized(); bt_audio_service();
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED); voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    uint64_t generation = policy(BT_AUDIO_HFP, false, true);
+    uint64_t token = request_music_disconnect();
+    defer_btc = true;
+    if (!strcmp(scenario, "dispatch-replace")) before_post = replace_before_post;
+    bool full = !strcmp(scenario, "dispatch-post-failure");
+    if (full) queued_btc = unrelated_work;
+    bt_audio_service();
+    assert(!dispatch_calls && !bt_audio_snapshot().control_inflight);
+    if (full) {
+        bt_audio_snapshot_t failed = bt_audio_snapshot();
+        assert(queued_btc == unrelated_work && failed.request_id == token &&
+            failed.request_status == BT_AUDIO_JOB_FAILED && failed.request_error == ESP_FAIL);
+        run_btc(); bt_audio_service();
+        assert(!queued_btc && !dispatch_calls); /* Free space alone cannot replay the old disconnect. */
+        assert(request_music_disconnect() != token);
+        bt_audio_service(); run_btc();
+        music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 3);
+        assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED && !bt_audio_snapshot().control_inflight);
+    } else if (!strcmp(scenario, "dispatch-cancel")) {
+        bt_audio_cancel_request(token);
+        assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_CANCELLED);
+        uint64_t next = request_music_disconnect();
+        bt_audio_service(); run_btc(); /* Drain the cancelled ticket after its replacement was admitted. */
+        assert(!dispatch_calls && bt_audio_snapshot().request_id == next && bt_audio_snapshot().request_status == BT_AUDIO_JOB_PENDING);
+        bt_audio_service(); run_btc();
+    } else if (!strcmp(scenario, "dispatch-reentrant")) {
+        inside_handler = disconnected_in_handler; run_btc();
+        assert(!bt_audio_snapshot().control_inflight && bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED);
+    } else {
+        if (!strcmp(scenario, "dispatch-down")) music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 3);
+        assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_PENDING);
+        run_btc();
+        assert(!dispatch_calls && !bt_audio_snapshot().control_inflight &&
+            bt_audio_snapshot().request_status == BT_AUDIO_JOB_FAILED && bt_audio_snapshot().request_error == ESP_ERR_NOT_FOUND);
+        if (!bt_audio_snapshot().a2dp_connected) music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 4);
+        request_music_disconnect(); bt_audio_service(); run_btc();
+    }
+    assert(dispatch_calls == 1 && last_pid == BTC_PID_A2DP && last_action == BTC_AV_SINK_API_DISCONNECT_EVT);
+    assert(bt_audio_snapshot().generation == generation && bt_audio_snapshot().microphone_write_ready);
+}
+
+static void expect_profile_dispatch(bt_audio_command_t command, uint8_t pid, uint8_t action)
+{
+    bt_audio_snapshot_t target = bt_audio_snapshot();
+    uint64_t link = pid == BTC_PID_A2DP ? target.a2dp_link_generation : target.hfp_link_generation;
+    unsigned before = dispatch_calls;
+    assert(bt_audio_request(target.generation, link, command, peer, NULL) == ESP_OK);
+    bt_audio_service();
+    assert(dispatch_calls == before + 1 && last_pid == pid && last_action == action &&
+        bt_audio_snapshot().request_status == BT_AUDIO_JOB_WAITING);
+}
+static void profile_actions(void)
+{
+    initialized(); bt_audio_service();
+    expect_profile_dispatch(BT_AUDIO_CONNECT_HFP, BTC_PID_HF_CLIENT, BTC_HF_CLIENT_CONNECT_EVT);
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+    expect_profile_dispatch(BT_AUDIO_OPEN_VOICE, BTC_PID_HF_CLIENT, BTC_HF_CLIENT_CONNECT_AUDIO_EVT);
+    voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+    expect_profile_dispatch(BT_AUDIO_CLOSE_VOICE, BTC_PID_HF_CLIENT, BTC_HF_CLIENT_DISCONNECT_AUDIO_EVT);
+    voice(ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED);
+    expect_profile_dispatch(BT_AUDIO_DISCONNECT_HFP, BTC_PID_HF_CLIENT, BTC_HF_CLIENT_DISCONNECT_EVT);
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED);
+    expect_profile_dispatch(BT_AUDIO_CONNECT_A2DP, BTC_PID_A2DP, BTC_AV_SINK_API_CONNECT_EVT);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    /* The SDK deinit barrier still applies at consumption of an already posted item. */
+    defer_btc = true;
+    request_music_disconnect(); bt_audio_service(); g_a2dp_sink_ongoing_deinit = true; run_btc();
+    assert(dispatch_calls == 5 && !bt_audio_snapshot().control_inflight && bt_audio_snapshot().request_status == BT_AUDIO_JOB_FAILED);
+    defer_btc = g_a2dp_sink_ongoing_deinit = false;
+    expect_profile_dispatch(BT_AUDIO_DISCONNECT_A2DP, BTC_PID_A2DP, BTC_AV_SINK_API_DISCONNECT_EVT);
+    music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 3);
+    assert(dispatch_calls == 6 && bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED);
+}
+
+static void timeout_profile(bool connect_hfp)
+{
+    initialized(); bt_audio_service();
+    ae_route_port_t port = bt_audio_route_port();
+    ae_route_t blocked = connect_hfp ? AE_ROUTE_HFP_HF : AE_ROUTE_A2DP_SINK;
+    ae_route_t ready = connect_hfp ? AE_ROUTE_A2DP_SINK : AE_ROUTE_HFP_HF;
+    if (connect_hfp) {
+        music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+        music_format(ESP_A2D_SBC_CIE_SF_48K, ESP_A2D_SBC_CIE_CH_MODE_MONO, 3);
+        music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    } else {
+        hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+        voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+    }
+    bt_audio_snapshot_t target = bt_audio_snapshot();
+    assert(bt_audio_request(target.generation, connect_hfp ? target.hfp_link_generation : target.a2dp_link_generation,
+        connect_hfp ? BT_AUDIO_CONNECT_HFP : BT_AUDIO_CONNECT_A2DP, peer, NULL) == ESP_OK);
+    assert(caps(port, blocked).reason == AE_BUSY && caps(port, ready).reason == AE_OK);
+    bt_audio_service(); clock_us += BT_AUDIO_COMMAND_TIMEOUT_US; deadline(NULL);
+    assert(bt_audio_snapshot().control_inflight && bt_audio_snapshot().request_status == BT_AUDIO_JOB_UNCERTAIN);
+    ae_route_capabilities_t waiting = caps(port, blocked), usable = caps(port, ready);
+    assert(waiting.reason == AE_BUSY && usable.reason == AE_OK);
+    assert(port.prepare(NULL, blocked, &waiting.format, AE_SPEAKER, 12, &waiting.token) == AE_BUSY);
+    assert(port.prepare(NULL, ready, &usable.format, connect_hfp ? AE_SPEAKER : AE_MICROPHONE, 13, &usable.token) == AE_OK);
+    if (connect_hfp) hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+    else music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 4);
+    assert(!bt_audio_snapshot().control_inflight && bt_audio_snapshot().request_status == BT_AUDIO_JOB_UNCERTAIN);
+    /* Late profile connection does not authorize a voice or media stream. */
+    assert(caps(port, blocked).reason == AE_UNAVAILABLE && caps(port, ready).reason == AE_OK);
+    assert(bt_audio_snapshot().route == (connect_hfp ? BT_AUDIO_A2DP : BT_AUDIO_HFP));
+}
+
+static void a2dp_reconnect(void)
+{
+    initialized(); bt_audio_service();
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    music_format(ESP_A2D_SBC_CIE_SF_48K, ESP_A2D_SBC_CIE_CH_MODE_STEREO, 3);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    ae_route_port_t port = bt_audio_route_port();
+    assert(caps(port, AE_ROUTE_A2DP_SINK).connected);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 4);
+    assert(!caps(port, AE_ROUTE_A2DP_SINK).connected);
+    music_connection(ESP_A2D_CONNECTION_STATE_DISCONNECTED, 3);
+    assert(bt_audio_snapshot().a2dp_connected);
+    music_format(ESP_A2D_SBC_CIE_SF_48K, ESP_A2D_SBC_CIE_CH_MODE_STEREO, 4);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 4);
+    uint64_t generation = policy(BT_AUDIO_A2DP, true, false);
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+    voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED);
+    uint8_t pcm[4] = {42, 0, 42, 0};
+    a2_rx(pcm, sizeof(pcm)); bt_audio_pcm_t packet;
+    assert(bt_audio_read_speaker(generation, &packet) && packet.samples[0] == 42);
 }
 
 static void prepare_during_pairing_capacity(void)
@@ -453,7 +806,8 @@ static void pairing_test(const char *scenario)
     assert(pairing_claim && !bt_audio_snapshot().discoverable);
     if (strcmp(scenario, "pairing-timeout") == 0) {
         clock_us += 30000000; deadline(NULL); bt_audio_service();
-        assert(bt_audio_snapshot().failed && pairing_claim && bt_audio_snapshot().pairing_handshake_pending);
+        assert(!bt_audio_snapshot().failed && pairing_claim && bt_audio_snapshot().pairing_handshake_pending &&
+            bt_audio_snapshot().pairing_error == ESP_ERR_TIMEOUT);
     } else {
         esp_bt_gap_cb_param_t parameter = {.auth_cmpl.stat = ESP_BT_STATUS_SUCCESS};
         memcpy(parameter.auth_cmpl.bda, peer, 6); gap(ESP_BT_GAP_AUTH_CMPL_EVT, &parameter);
@@ -488,7 +842,16 @@ int main(int argc, char **argv)
         assert(bt_audio_init() == ESP_ERR_INVALID_STATE);
     } else {
         assert(result == ESP_OK && !bt_audio_snapshot().initialized && !bt_audio_snapshot().failed);
-        if (!strcmp(scenario, "retry-capacity")) pairing_retry_capacity();
+        if (!strncmp(scenario, "pair-", 5)) pairing_lifecycle(scenario);
+        else if (!strcmp(scenario, "foreign-bonds") || !strcmp(scenario, "other-profile")) profile_lifecycle(scenario);
+        else if (!strcmp(scenario, "peer-switch")) profile_peer_switch();
+        else if (!strcmp(scenario, "connect-race")) connect_race();
+        else if (!strcmp(scenario, "timeout-hfp") || !strcmp(scenario, "timeout-a2dp")) timeout_profile(!strcmp(scenario, "timeout-hfp"));
+        else if (!strcmp(scenario, "profile-actions")) profile_actions();
+        else if (!strncmp(scenario, "dispatch-", 9)) dispatch_order(scenario);
+        else if (!strcmp(scenario, "observed-disconnect")) observed_disconnect();
+        else if (!strcmp(scenario, "a2dp-reconnect")) a2dp_reconnect();
+        else if (!strcmp(scenario, "retry-capacity")) pairing_retry_capacity();
         else if (!strcmp(scenario, "audio-exclusion")) pairing_audio_exclusion();
         else if (!strncmp(scenario, "name-", 5)) device_name_test(scenario);
         else if (strcmp(scenario, "normal") == 0) normal();
@@ -503,12 +866,19 @@ int main(int argc, char **argv)
         } else {
             initialized();
             if (strcmp(scenario, "command-failure") == 0) command_error = ESP_FAIL;
-            assert(bt_audio_request(bt_audio_snapshot().generation, BT_AUDIO_CONNECT_HFP, peer, NULL) == ESP_OK);
+            bt_audio_snapshot_t target = bt_audio_snapshot();
+            assert(bt_audio_request(target.generation, target.hfp_link_generation, BT_AUDIO_CONNECT_HFP, peer, NULL) == ESP_OK);
             bt_audio_service();
             if (command_error) assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_FAILED && !bt_audio_snapshot().control_inflight);
             else if (strcmp(scenario, "command-timeout") == 0) {
                 bt_audio_cancel(); clock_us += BT_AUDIO_COMMAND_TIMEOUT_US; deadline(NULL);
-                assert(bt_audio_snapshot().failed && bt_audio_snapshot().request_status == BT_AUDIO_JOB_UNCERTAIN);
+                assert(!bt_audio_snapshot().failed && bt_audio_snapshot().control_inflight &&
+                    bt_audio_snapshot().request_status == BT_AUDIO_JOB_UNCERTAIN);
+                assert(bt_audio_pairing_open(1000) == ESP_ERR_INVALID_STATE);
+                hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED);
+                assert(!bt_audio_snapshot().control_inflight && bt_audio_snapshot().request_status == BT_AUDIO_JOB_UNCERTAIN);
+                target = bt_audio_snapshot();
+                assert(bt_audio_request(target.generation, target.hfp_link_generation, BT_AUDIO_CONNECT_HFP, peer, NULL) == ESP_OK);
             }
         }
     }

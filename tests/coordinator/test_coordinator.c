@@ -755,9 +755,9 @@ void ble_hid_copy_admission_diagnostics(ble_hid_admission_diagnostics_t *out)
 const char *ble_hid_admission_event_name(ble_hid_admission_event_t event)
 { (void)event; return "unknown"; }
 bool ble_hid_resume_reconnect(void)
-{ if (test_link.connected || !test_link.reconnect_paused) return false; test_link.reconnect_paused = false; return true; }
+{ if (test_link.connection_admitted || !test_link.reconnect_paused) return false; test_link.reconnect_paused = false; return true; }
 bool ble_hid_disconnect_user_generation(uint64_t generation)
-{ bool accepted = ble_hid_disconnect_generation(generation); if (accepted) test_link.reconnect_paused = true; return accepted; }
+{ bool accepted = test_link.connection_admitted && ble_hid_disconnect_generation(generation); if (accepted) test_link.reconnect_paused = true; return accepted; }
 bool ble_hid_disconnect_generation(uint64_t generation)
 {
     ++test_disconnects;
@@ -1072,7 +1072,7 @@ static void setup(input_mode_t mode)
     interaction_reference_diagnostics_bind(&s_interaction, &s_reference_diagnostics);
     assert(configure_motion_preferences(&s_settings));
     test_link = (ble_hid_snapshot_t){
-        .initialized = true, .connected = true, .ready = true,
+        .initialized = true, .connected = true, .connection_admitted = true, .ready = true,
         .encrypted = true, .generation = 17
     };
     test_haptics_enabled = true;
@@ -1542,13 +1542,13 @@ static void touch_precision_and_drag_boundaries(void)
             /* Invoke production cancellation and link setters at the real
              * transport boundary; full polling-loop scheduling is separate. */
             cancel_input();
-            test_link.connected = false;
+            test_link.connection_admitted = test_link.connected = false;
             test_link.ready = false;
             ++test_link.generation;
             hid_engine_set_link(&s_engine, false, false);
             sync_interaction();
             assert(step() == HID_ENGINE_STEP_BLOCKED);
-            test_link.connected = test_link.ready = true;
+            test_link.connection_admitted = test_link.connected = test_link.ready = true;
             hid_engine_set_link(&s_engine, true, true);
         } else action(APP_DRAG, 0);
         assert(!s_drag_requested && s_engine.state.release_pending);
@@ -1736,7 +1736,7 @@ static void rendered_state_is_truthful(void)
     memcpy(test_link.peer_address, peer, sizeof peer);
     render_view(&test_link, ESP_OK);
     assert(strcmp(test_target, "Host 02:03:04:05:06:07") == 0);
-    test_link.connected = false;
+    test_link.connection_admitted = test_link.connected = false;
     test_link.ready = false;
     hid_engine_set_link(&s_engine, false, false);
     sync_interaction();
@@ -1998,13 +1998,13 @@ static void preview_survives_mode_modal_and_link_cancellation(void)
         else if (boundary == 1) action(APP_MENU, APP_OVERLAY_SETTINGS);
         else {
             cancel_input();
-            test_link.ready = test_link.connected = false;
+            test_link.ready = test_link.connection_admitted = test_link.connected = false;
             ++test_link.generation;
             hid_engine_set_link(&s_engine, false, false);
             sync_interaction();
             update_send(false);
             assert(step() == HID_ENGINE_STEP_BLOCKED);
-            test_link.ready = test_link.connected = true;
+            test_link.ready = test_link.connection_admitted = test_link.connected = true;
             hid_engine_set_link(&s_engine, true, true);
         }
         assert(!s_send_token && !s_interaction.view.sending);
@@ -2641,11 +2641,11 @@ static void pairing_confirmation_releases_before_disconnect_and_forget(void)
         }
     }
     setup(INPUT_MOUSE); settings_page(APP_SETTINGS_BLUETOOTH);
-    test_link.connected = test_link.ready = false; hid_engine_set_link(&s_engine, false, false);
+    test_link.connection_admitted = test_link.connected = test_link.ready = false; hid_engine_set_link(&s_engine, false, false);
     test_bonds = (ble_hid_bond_list_t){.known = true, .count = 2, .revision = 71};
     test_update_target = (ble_hid_target_snapshot_t){.loaded = true, .revision = 81};
     action(APP_PAIRING_REQUEST, APP_PAIR_OPEN);
-    assert(s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING && test_native_management_starts == 1 && s_confirmation != APP_CONFIRM_PAIR_OPEN);
+    assert(s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING && test_native_management_starts == 1 && test_native_generation == 0 && s_confirmation != APP_CONFIRM_PAIR_OPEN);
 }
 
 static void pairing_stale_generation_failure_and_lock_cancel(void)
@@ -2713,7 +2713,7 @@ static void extended_status_views_do_not_invent_evidence_or_writes(void)
     /* Board read failures publish an invalidated cache, never an invented 0% battery. */
     test_power_error = ESP_FAIL;
     test_power = (board_power_status_t){.error = ESP_FAIL};
-    test_link.connected = false;
+    test_link.connection_admitted = test_link.connected = false;
     test_wifi.state = APP_WIFI_BACKOFF;
     test_wifi.retry_in_ms = 1001;
     test_storage.pending = false;
@@ -2929,7 +2929,7 @@ static void bluetooth_bond_views_preserve_unknown_and_verified_identity(void)
     test_bonds.current_match_known = true;
     render_view(&test_link, ESP_OK);
     assert(test_view.bluetooth_hosts[0].connected && !test_view.bluetooth_hosts[1].connected);
-    test_link.connected = false;
+    test_link.connection_admitted = test_link.connected = false;
     render_view(&test_link, ESP_OK);
     assert(!test_view.bluetooth_hosts[0].connected);
     test_bonds.known = false;
@@ -2994,11 +2994,12 @@ static void disconnect_current_host_preserves_saved_pairings(void)
     assert(test_disconnects == 1 && test_pair_opens == 0 && test_pair_forgets == 0);
     service_pair_operation(&test_link);
     assert(test_disconnects == 1);
-    test_link.connected = test_link.ready = false;
+    test_link.connection_admitted = test_link.connected = test_link.ready = false;
     ++test_link.generation;
     hid_engine_set_link(&s_engine, false, false);
     service_pair_operation(&test_link);
     assert(s_pair_operation == APP_CONFIRM_NONE && test_pair_opens == 0 && test_pair_forgets == 0);
+    assert(test_link.reconnect_paused && strstr(s_message, "automatic reconnect paused"));
     assert(test_storage_requests == 0 && test_wifi_forgets == 0);
     assert(strcmp(s_interaction.view.preview, "AB") == 0);
     render_view(&test_link, ESP_OK);
@@ -3360,7 +3361,7 @@ static void disconnected_old_transport_allows_explicit_offline_selection(void)
         const app_input_transport_t to = from == APP_INPUT_USB ? APP_INPUT_BLUETOOTH : APP_INPUT_USB;
         transport_setup(INPUT_KEYBOARD, from);
         fill_preview(2);
-        test_link.connected = test_link.ready = false;
+        test_link.connection_admitted = test_link.connected = test_link.ready = false;
         hid_engine_set_link(&s_engine, false, false);
         test_usb.mounted = test_usb.ready = false;
         action(APP_SETTINGS_PAGE, APP_SETTINGS_CONNECTIVITY);
@@ -3390,7 +3391,7 @@ static void inactive_bluetooth_events_do_not_retarget_selected_usb(void)
     const uint64_t epoch = s_engine.state.epoch;
     action(APP_KEY, 4);
     test_link.generation += 10;
-    test_link.connected = test_link.ready = false;
+    test_link.connection_admitted = test_link.connected = test_link.ready = false;
     test_link.failed = test_link.congested = test_link.suspended = true;
     test_link.keyboard_leds = 7;
     test_usb.keyboard_leds = 2;
@@ -3775,7 +3776,7 @@ static void origin_disconnect_allows_explicit_switch_without_release_claim(void)
             test_usb.mounted = test_usb.ready = false;
             ++test_usb.generation;
         } else {
-            test_link.connected = test_link.ready = false;
+            test_link.connection_admitted = test_link.connected = test_link.ready = false;
             ++test_link.generation;
         }
         service_transport_switch();
@@ -3832,7 +3833,7 @@ static void pairing_admission_generation_change_waits_for_actual_link_down(void)
             assert(test_pair_opens == 0 && test_pair_forgets == 0);
         }
         assert(trace_count == reports);
-        test_link.connected = false;
+        test_link.connection_admitted = test_link.connected = false;
         ++test_link.generation;
         active = input_link_snapshot(&test_link);
         observe_input_link(&active, &test_previous_link);
@@ -3854,7 +3855,7 @@ static void pairing_disconnect_replacement_before_acceptance_aborts(void)
         service_pair_operation(&original);
         assert(s_pair_operation == APP_CONFIRM_NONE && !s_pair_disconnect_requested);
         assert(test_disconnects == 0 && test_pair_opens == 0 && test_pair_forgets == 0);
-        test_link.connected = test_link.ready = false;
+        test_link.connection_admitted = test_link.connected = test_link.ready = false;
         ++test_link.generation;
         service_pair_operation(&original);
         assert(test_disconnects == 0 && test_pair_opens == 0 && test_pair_forgets == 0);
@@ -3869,11 +3870,10 @@ static void pairing_disconnect_replacement_after_acceptance_never_issues_another
         for (unsigned link_down = 0; link_down < 2; ++link_down) {
             start_confirmed_pair_change(operations[i]);
             const ble_hid_snapshot_t original = test_link;
-            const app_confirmation_t pending = s_pair_operation;
             service_pair_operation(&original);
             assert(s_pair_disconnect_requested && test_disconnects == 1);
             ++test_link.generation; /* Replacement beyond our own admission-induced increment. */
-            test_link.ready = true;
+            test_link.connection_admitted = test_link.ready = link_down != 0;
             test_link.peer_known = true;
             test_link.peer_address[0] = 2;
             test_link.peer_address[5] = 99;
@@ -3881,20 +3881,20 @@ static void pairing_disconnect_replacement_after_acceptance_never_issues_another
             observe_input_link(&active, &test_previous_link);
             s_now_ms = 5999;
             service_pair_operation(&original);
-            assert(s_pair_operation == pending && test_disconnects == 1);
+            assert(s_pair_operation == APP_CONFIRM_NONE && test_disconnects == 1);
             assert(test_pair_opens == 0 && test_pair_forgets == 0);
             if (link_down) {
-                test_link.connected = test_link.ready = false;
+                test_link.connection_admitted = test_link.connected = test_link.ready = false;
                 ++test_link.generation;
             } else {
                 s_now_ms = 6000;
             }
             service_pair_operation(&original);
-            assert_pair_change_completion(operations[i], link_down != 0);
-            test_link.connected = test_link.ready = false;
+            assert_pair_change_completion(operations[i], true);
+            test_link.connection_admitted = test_link.connected = test_link.ready = false;
             ++test_link.generation;
             service_pair_operation(&original);
-            assert_pair_change_completion(operations[i], link_down != 0);
+            assert_pair_change_completion(operations[i], true);
         }
     }
 }
@@ -4840,7 +4840,7 @@ static void touch_drag_boundaries_and_contact_deadman_release(void)
         if (boundary == 2) action(APP_MENU, APP_OVERLAY_MODES);
         if (boundary == 3) action(APP_MODE, INPUT_KEYBOARD);
         if (boundary == 4) {
-            test_link.connected = test_link.ready = false;
+            test_link.connection_admitted = test_link.connected = test_link.ready = false;
             hid_engine_set_link(&s_engine, false, false);
         }
         if (boundary == 5) s_now_ms = 2100; /* Exact last-contact +1000 ms. */
@@ -4848,7 +4848,7 @@ static void touch_drag_boundaries_and_contact_deadman_release(void)
         (void)apply_touch_result(interaction_touch_tick(&s_interaction, s_now_ms, s_ui_revision));
         assert(!interaction_touch_holding(&s_interaction) && s_engine.state.release_pending);
         if (boundary == 4) {
-            test_link.connected = test_link.ready = true;
+            test_link.connection_admitted = test_link.connected = test_link.ready = true;
             ++test_link.generation;
             hid_engine_set_link(&s_engine, true, true);
         }
@@ -5859,16 +5859,86 @@ static void remote_device_routes_and_state_survive_missing_media(void)
 static void native_bluetooth_resume_and_selection_release_effect(void)
 {
     setup(INPUT_MOUSE); settings_page(APP_SETTINGS_BLUETOOTH);
-    test_link.connected = false; test_link.ready = false; test_link.reconnect_paused = true;
+    test_link.connection_admitted = test_link.connected = false; test_link.ready = false; test_link.reconnect_paused = true;
     action(APP_PAIRING_REQUEST, APP_PAIR_RESUME);
     assert(!test_link.reconnect_paused && !test_disconnects);
-    test_link.connected = true; test_link.reconnect_paused = true;
+    test_link.connection_admitted = test_link.connected = true; test_link.reconnect_paused = true;
     action(APP_PAIRING_REQUEST, APP_PAIR_RESUME);
     assert(test_link.reconnect_paused && test_link.connected && !test_disconnects);
     setup(INPUT_MOUSE); cancel_input(); release_barrier(); assert(!s_engine.state.release_pending);
     app_connectivity_controls_effect_t effect = {.handled = true, .release_input = true};
     apply_connectivity_effect(&effect);
     assert(s_engine.state.release_pending); /* Accepted local selection cancels input, never acknowledges it. */
+}
+
+static void review_forget_all_survives_provisional_churn(void)
+{
+    for (unsigned changed = 0; changed < 3; ++changed) {
+        setup(INPUT_MOUSE); settings_page(APP_SETTINGS_BLUETOOTH);
+        test_bonds = (ble_hid_bond_list_t){.known = true, .count = 2, .revision = 51};
+        test_update_target = (ble_hid_target_snapshot_t){.loaded = true, .durable = true, .revision = 61};
+        test_link.connection_admitted = test_link.ready = false;
+        hid_engine_set_link(&s_engine, false, false); sync_interaction();
+        action(APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL);
+        assert(s_confirmation == APP_CONFIRM_PAIR_FORGET_ALL && !test_native_management_starts);
+        test_link.connected = false; ++test_link.generation;
+        if (changed == 1) test_link.connection_admitted = test_link.connected = test_link.ready = true;
+        if (changed == 2) ++test_bonds.revision;
+        action(APP_CONFIRM, 1);
+        if (changed == 1) assert(!test_native_management_starts); /* An admitted replacement revokes review. */
+        else {
+            assert(test_native_management_starts == 1 && test_native_management_active == (changed == 0));
+            assert(test_native_operation == APP_PAIR_FORGET_ALL && test_native_generation == 0);
+            assert(test_native_bond_revision == 51 && test_native_preference_revision == 61);
+        }
+        assert(!test_pair_forgets && test_bonds.count == 2);
+    }
+}
+
+static void review_disconnect_host_leaves_before_pause(void)
+{
+    start_confirmed_pair_change(APP_PAIR_DISCONNECT);
+    const ble_hid_snapshot_t original = test_link;
+    test_link.connection_admitted = test_link.connected = test_link.ready = false;
+    ++test_link.generation;
+    service_pair_operation(&original);
+    assert(!test_disconnects && !test_link.reconnect_paused && s_pair_operation == APP_CONFIRM_NONE);
+    fprintf(stderr, "Unaccepted pause result: %s\n", s_message);
+    assert(!strstr(s_message, "automatic reconnect paused") && !strstr(s_message, "Resume"));
+    render_view(&test_link, ESP_OK);
+    assert(!test_view.bluetooth_reconnect_paused && strstr(test_view.message, "reconnect policy is unchanged"));
+}
+
+static void provisional_bluetooth_retries_preserve_local_intents(void)
+{
+    setup(INPUT_MOUSE); settings_page(APP_SETTINGS_BLUETOOTH);
+    test_link.connection_admitted = test_link.connected = test_link.ready = false;
+    input_link_t projected = input_link_snapshot(&test_link);
+    observe_input_link(&projected, &test_previous_link);
+    const uint64_t epoch = s_engine.state.epoch;
+    test_link.reconnect_paused = true;
+    app_intent_t resume = make_intent(APP_PAIRING_REQUEST, APP_PAIR_RESUME, 0, NULL);
+    assert(submit_intent(&resume));
+    for (unsigned i = 0; i < 200; ++i) {
+        test_link.connected = (i & 1) != 0; /* A raw candidate has no admitted-host authority. */
+        ++test_link.generation;
+        projected = input_link_snapshot(&test_link);
+        observe_input_link(&projected, &test_previous_link);
+        assert(!projected.connected && !projected.ready && projected.generation == 0);
+        assert(s_engine.state.epoch == epoch && uxQueueMessagesWaiting(s_intents) == 1);
+        render_view(&test_link, ESP_OK);
+        assert(!test_view.bluetooth_connected && test_view.bluetooth_reconnect_paused);
+    }
+    consume_one();
+    assert(!test_link.reconnect_paused && !test_disconnects && !s_pair_operation);
+    test_link.connected = true;
+    action(APP_PAIRING_REQUEST, APP_PAIR_DISCONNECT);
+    assert(!s_pair_operation && s_overlay == APP_OVERLAY_SETTINGS && !test_disconnects);
+    test_link.connection_admitted = test_link.ready = true;
+    projected = input_link_snapshot(&test_link);
+    observe_input_link(&projected, &test_previous_link);
+    assert(projected.connected && projected.ready && projected.generation == test_link.generation);
+    assert(s_engine.state.epoch != epoch);
 }
 
 static void native_connection_review_and_back_navigation_reach_owner(void)
@@ -5966,7 +6036,7 @@ static void build_identity_is_independent_of_link_and_artifact_version(void)
     transport_setup(INPUT_MOUSE, APP_INPUT_USB);
     strcpy(s_firmware_version, "fixture-version");
     strcpy(s_build_id, "012345abcdef");
-    test_link.connected = test_link.ready = false;
+    test_link.connection_admitted = test_link.connected = test_link.ready = false;
     test_usb.mounted = test_usb.ready = false;
     hid_engine_set_link(&s_engine, false, false);
     render_view(&test_link, ESP_OK);
@@ -6031,6 +6101,9 @@ int main(int argc, char **argv)
     RUN(cancelled_remote_receipt_cannot_hold_a_new_local_switch);
     REMOTE_DEVICE_CASES(RUN);
     RUN(native_bluetooth_resume_and_selection_release_effect);
+    RUN(provisional_bluetooth_retries_preserve_local_intents);
+    RUN(review_forget_all_survives_provisional_churn);
+    RUN(review_disconnect_host_leaves_before_pause);
     RUN(native_connection_review_and_back_navigation_reach_owner);
     RUN(remote_transport_rechecks_authority_at_effect_boundary);
     RUN(remote_device_routes_and_state_survive_missing_media);

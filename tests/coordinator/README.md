@@ -17,6 +17,12 @@ The tests invoke production `submit_intent`, `process_priority`, `physical_butto
 
 Display, settings and connectivity cases additionally invoke production `service_display`, `route_touch`, `allowed_in_overlay`, `service_pair_operation`, `input_link_snapshot`, `service_transport_switch`, `service_usb_selection` and `observe_input_link`. Configurable service doubles expose board power and brightness acknowledgements, settings save status, Wi-Fi snapshots and synthetic local setup credentials. They record accepted requests separately from eventual status: a brightness request never illuminates the mocked display automatically, an accepted disconnect immediately advances the mocked BLE generation and revokes readiness while leaving link-down asynchronous, and enabling USB never fabricates a mounted/ready/completed acknowledgement. Each HID trace records which transport received it. Real NVS coalescing, faults and durability are tested separately in the [settings-store harness](../settings_store/README.md).
 
+Provisional BLE retries preserve the input epoch and queued local Resume intent
+through 200 physical-link/generation changes. Only an admitted host enters the
+input projection; its real replacement still cancels stale work. Disconnect
+waits for the original admitted host to go down without retargeting a later
+provisional or admitted connection.
+
 The executable cases cover these required behaviors; their latest pass/failure evidence belongs in the [coverage record](../../docs/test-coverage.md):
 
 - Emergency lock/release under queue saturation through both trusted internal and real touch paths, overflow cancellation, stale HID epochs and UI revisions, simultaneous safety priority, physical-only unlock and zero reports before later work. Bounded emergency slots preserve a valid Lock, reject a consumed wake gesture and wait for a queued BEGIN before deciding admission.

@@ -24,8 +24,10 @@ typedef struct {
 /* Sole coordinator only. Local confirmation/physical-origin checks belong to
  * the caller. These functions never read sensors, allocate or send HID. */
 void app_bluetooth_management_init(void);
+/* Bind the caller-approved admitted host generation, or zero when none.
+ * Raw physical generations are used only for the eventual SDK commands. */
 esp_err_t app_bluetooth_management_begin(app_bluetooth_management_operation_t,
-    uint64_t generation, uint64_t bond_revision, uint64_t preference_revision,
+    uint64_t host_generation, uint64_t bond_revision, uint64_t preference_revision,
     const ble_hid_target_t *exact_target, uint64_t now_ms);
 void app_bluetooth_management_service(const app_bluetooth_management_context_t *, uint64_t now_ms);
 /* Cancels future steps, never an SDK/NVS write already submitted. Receipts and

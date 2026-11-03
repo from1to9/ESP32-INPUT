@@ -177,6 +177,7 @@ static bool s_confirmation_storage_uncertain;
 static app_confirmation_t s_pair_operation;
 static uint64_t s_pair_deadline_ms;
 static uint64_t s_pair_origin_generation;
+static uint8_t s_pair_origin_peer[6];
 static bool s_pair_disconnect_requested;
 static bool s_screen_accepts_input = true;
 static int s_brightness_requested = -1;
@@ -561,10 +562,10 @@ static input_link_t input_link_snapshot(const ble_hid_snapshot_t *bluetooth)
             .keyboard_leds = usb.keyboard_leds, .generation = usb.generation};
     }
     return (input_link_t){.kind = APP_INPUT_BLUETOOTH, .initialized = bluetooth->initialized,
-        .connected = bluetooth->connected, .ready = bluetooth->ready,
+        .connected = bluetooth->connection_admitted, .ready = bluetooth->ready,
         .congested = bluetooth->congested, .failed = bluetooth->failed,
         .suspended = bluetooth->suspended, .keyboard_leds = bluetooth->keyboard_leds,
-        .generation = bluetooth->generation};
+        .generation = bluetooth->connection_admitted ? bluetooth->generation : 0};
 }
 
 static void service_usb_selection(void)
@@ -1204,6 +1205,12 @@ static void service_pair_operation(const ble_hid_snapshot_t *link)
     /* This runs after the HID step, which may have just admitted a release. */
     ble_hid_snapshot_t current = ble_hid_snapshot();
     link = &current;
+    if (s_pair_operation == APP_CONFIRM_DISCONNECT && s_pair_disconnect_requested &&
+        (!link->connection_admitted || memcmp(link->peer_address, s_pair_origin_peer, sizeof(s_pair_origin_peer)))) {
+        s_pair_operation = APP_CONFIRM_NONE;
+        s_message = "Bluetooth disconnected; automatic reconnect paused. Select a host or Resume.";
+        return;
+    }
     /* Our accepted disconnect revokes the adapter generation immediately,
      * before its asynchronous link-down event. Do not retarget another peer:
      * once submitted, wait for link-down or the operation deadline. */
@@ -1226,7 +1233,9 @@ static void service_pair_operation(const ble_hid_snapshot_t *link)
     }
     if (s_pair_operation == APP_CONFIRM_DISCONNECT) {
         s_pair_operation = APP_CONFIRM_NONE;
-        s_message = "Bluetooth disconnected; automatic reconnect paused. Select a host or Resume.";
+        s_message = s_pair_disconnect_requested ?
+            "Bluetooth disconnected; automatic reconnect paused. Select a host or Resume." :
+            "Host disconnected before pause; reconnect policy is unchanged.";
         return;
     }
     bool accepted = s_pair_operation == APP_CONFIRM_PAIR_FORGET_ALL ?
@@ -1764,10 +1773,10 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         }
         if (app_connectivity_controls_bluetooth_busy()) { s_message = "A Bluetooth change is still pending."; return; }
         if (intent->x == APP_PAIR_RESUME) {
-            s_message = ble_hid_resume_reconnect() ? "Automatic reconnect resumed; waiting for a host." : "Reconnect cannot resume in the current state.";
+            s_message = ble_hid_resume_reconnect() ? "Reconnect resumed for the last paused host." : "Reconnect cannot resume in the current state.";
             ++s_ui_revision; return;
         }
-        if (intent->x == APP_PAIR_DISCONNECT && !link->connected) return;
+        if (intent->x == APP_PAIR_DISCONNECT && !link->connection_admitted) return;
         if (intent->x == APP_PAIR_OPEN && link->bond_count_known &&
             link->bond_capacity && link->bond_count >= link->bond_capacity) {
             s_message = "Bluetooth pairings full; existing hosts are preserved.";
@@ -1777,16 +1786,16 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
             !app_connectivity_controls_bluetooth_revisions(&s_confirmation_bond_revision, &s_confirmation_preference_revision)) {
             s_message = "Saved Bluetooth hosts or target policy are unavailable."; return;
         }
-        if (intent->x == APP_PAIR_OPEN && !link->connected) {
+        if (intent->x == APP_PAIR_OPEN && !link->connection_admitted) {
             app_connectivity_controls_effect_t effect = {0};
-            (void)app_connectivity_controls_bluetooth_start(APP_PAIR_OPEN, link->generation,
+            (void)app_connectivity_controls_bluetooth_start(APP_PAIR_OPEN, 0,
                 s_confirmation_bond_revision, s_confirmation_preference_revision, &effect);
             apply_connectivity_effect(&effect); open_overlay(APP_OVERLAY_BLUETOOTH_PAIRING); return;
         }
         s_confirmation = intent->x == APP_PAIR_OPEN ? APP_CONFIRM_PAIR_OPEN :
             intent->x == APP_PAIR_CLOSE ? APP_CONFIRM_PAIR_CLOSE :
             intent->x == APP_PAIR_DISCONNECT ? APP_CONFIRM_DISCONNECT : APP_CONFIRM_PAIR_FORGET_ALL;
-        s_confirmation_generation = link->generation;
+        s_confirmation_generation = link->connection_admitted ? link->generation : 0;
         open_overlay(APP_OVERLAY_CONFIRM);
         return;
     case APP_WIFI_FORGET_REQUEST: {
@@ -1808,7 +1817,8 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         app_confirmation_t confirmation = s_confirmation;
         s_confirmation = APP_CONFIRM_NONE;
         s_settings_page = confirmation == APP_CONFIRM_WIFI_FORGET ? APP_SETTINGS_WIFI : APP_SETTINGS_BLUETOOTH;
-        open_overlay(confirmation == APP_CONFIRM_PAIR_OPEN && intent->x == 1 && link->generation == s_confirmation_generation ?
+        open_overlay(confirmation == APP_CONFIRM_PAIR_OPEN && intent->x == 1 &&
+            (link->connection_admitted ? link->generation : 0) == s_confirmation_generation ?
             APP_OVERLAY_BLUETOOTH_PAIRING : APP_OVERLAY_SETTINGS);
         if (!intent->x) return;
         if (confirmation == APP_CONFIRM_WIFI_FORGET) {
@@ -1826,7 +1836,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
             s_message = app_wifi_forget_network() == ESP_OK ?
                 "Forgetting Wi-Fi network." : "Wi-Fi request rejected; check status.";
         } else if (confirmation != APP_CONFIRM_NONE) {
-            if (link->generation != s_confirmation_generation) {
+            if ((link->connection_admitted ? link->generation : 0) != s_confirmation_generation) {
                 s_message = "Bluetooth changed; review it before confirming.";
                 return;
             }
@@ -1838,12 +1848,13 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
             if (confirmation == APP_CONFIRM_PAIR_OPEN || confirmation == APP_CONFIRM_PAIR_FORGET_ALL) {
                 app_connectivity_controls_effect_t effect = {0};
                 (void)app_connectivity_controls_bluetooth_start(confirmation == APP_CONFIRM_PAIR_OPEN ? APP_PAIR_OPEN : APP_PAIR_FORGET_ALL,
-                    link->generation, s_confirmation_bond_revision, s_confirmation_preference_revision, &effect);
+                    s_confirmation_generation, s_confirmation_bond_revision, s_confirmation_preference_revision, &effect);
                 apply_connectivity_effect(&effect); return;
             }
             ble_hid_pairing_close();
             s_pair_operation = confirmation;
             s_pair_origin_generation = link->generation;
+            memcpy(s_pair_origin_peer, link->peer_address, sizeof(s_pair_origin_peer));
             s_pair_disconnect_requested = false;
             s_pair_deadline_ms = s_now_ms > UINT64_MAX - 5000U ? UINT64_MAX : s_now_ms + 5000U;
             s_message = "Releasing input before changing Bluetooth pairing.";
@@ -2704,7 +2715,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
     view.requested_transport = s_requested_transport;
     view.transport_switch_pending = s_transport_switch_pending;
     view.bluetooth_available = link->initialized && !link->failed;
-    view.bluetooth_connected = link->connected;
+    view.bluetooth_connected = link->connection_admitted;
     view.bluetooth_reconnect_paused = link->reconnect_paused;
     view.bluetooth_ready = link->ready;
     (void)snprintf(view.bluetooth_target_name, sizeof(view.bluetooth_target_name), "%s", bluetooth_target);

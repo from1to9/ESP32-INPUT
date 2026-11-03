@@ -164,7 +164,7 @@ static void update_lock_and_transport_ack_are_independent_gates(void)
            !authority.maintenance_ready);
     assert(authority.observation.owner_rejected & APP_UPDATE_OWNER_LOCKED);
     s_engine.state.locked = false;
-    test_link.connected = false;
+    test_link.connection_admitted = test_link.connected = false;
     test_link.ready = false;
     hid_engine_set_link(&s_engine, false, false);
     remote_update_service();
@@ -254,7 +254,7 @@ static void update_test_health_ready(void)
     test_boot_display = (lv_display_t *)(uintptr_t)1;
     test_link.initialized = true;
     test_link.failed = false;
-    test_link.connected = false;
+    test_link.connection_admitted = test_link.connected = false;
     test_link.ready = false;
     test_usb.initialized = true;
     test_usb.failed = false;

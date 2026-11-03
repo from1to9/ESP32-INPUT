@@ -19,10 +19,10 @@ static void bluetooth_management_checks(void)
     s_state.bluetooth_management.pending = false;
     s_state.bluetooth_management.window_open = s_state.bluetooth_management.advertising = true;
     s_state.bluetooth_management.remaining_known = true; s_state.bluetooth_management.remaining_seconds = 119;
-    strcpy(s_state.bluetooth_management.status, "Ready to pair");
+    strcpy(s_state.bluetooth_management.status, "Pairing open");
     strcpy(s_state.bluetooth_management.reason, "Choose this device in your host's Bluetooth settings.");
     ++s_state.ui_revision; screenshot("bluetooth-add-open");
-    assert(has_visible_label(lv_screen_active(), "Ready to pair\n119s remaining"));
+    assert(has_visible_label(lv_screen_active(), "Pairing open\n119s remaining"));
     clear_intents(); tap_control("Try again"); assert(!action_count(APP_PAIRING_REQUEST));
     s_state.bluetooth_management.connected = true;
     s_state.bluetooth_management.can_stop = false;
@@ -30,7 +30,7 @@ static void bluetooth_management_checks(void)
     strcpy(s_state.bluetooth_management.reason, "Bluetooth input is ready. Manage saved hosts to change or disconnect.");
     ++s_state.ui_revision; screenshot("bluetooth-add-connected");
     assert(has_visible_label(lv_screen_active(), "Connected"));
-    assert(!has_visible_label(lv_screen_active(), "Ready to pair\n119s remaining"));
+    assert(!has_visible_label(lv_screen_active(), "Pairing open\n119s remaining"));
     assert(!has_visible_label(lv_screen_active(), "Choose this device in your host's Bluetooth settings."));
     clear_intents(); tap_control("Stop pairing"); assert(!action_count(APP_PAIRING_REQUEST));
     s_state.bluetooth_management.connected = false;
@@ -62,6 +62,11 @@ static void bluetooth_management_checks(void)
     assert(has_visible_label(lv_screen_active(), "Forget this saved device?"));
     clear_intents(); tap_control("Forget this device");
     assert(action_count(APP_CONFIRM) == 1 && last_action(APP_CONFIRM)->x == 1);
+    s_state.confirmation = APP_CONFIRM_DISCONNECT;
+    ++s_state.ui_revision; screenshot("bluetooth-disconnect-confirm");
+    assert(has_visible_label(lv_screen_active(), "Disconnect Bluetooth host?"));
+    clear_intents(); tap_control("Disconnect");
+    assert(action_count(APP_CONFIRM) == 1 && last_action(APP_CONFIRM)->x == 1);
     s_state.confirmation = APP_CONFIRM_PAIR_OPEN;
     ++s_state.ui_revision; screenshot("bluetooth-add-connected-confirm");
     assert(has_visible_label(lv_screen_active(), "Disconnect and add host?"));
@@ -82,6 +87,16 @@ static void bluetooth_management_checks(void)
     clear_intents(); tap_control("Resume");
     assert(action_count(APP_PAIRING_REQUEST) == 1 && last_action(APP_PAIRING_REQUEST)->x == APP_PAIR_RESUME);
     lv_area_t resume; lv_obj_get_coords(control("Resume"), &resume);
+    clear_intents(); pointer((resume.x1 + resume.x2) / 2, (resume.y1 + resume.y2) / 2, true);
+    for (unsigned i = 0; i < 50; ++i) {
+        /* Owner projections keep provisional retries out of host authority.
+         * Advertising/countdown observations cannot revoke this held action. */
+        s_state.bluetooth_management.advertising = (i & 1) != 0;
+        s_state.bluetooth_management.remaining_seconds = 119 - i;
+        render();
+    }
+    pointer((resume.x1 + resume.x2) / 2, (resume.y1 + resume.y2) / 2, false);
+    assert(action_count(APP_PAIRING_REQUEST) == 1 && last_action(APP_PAIRING_REQUEST)->x == APP_PAIR_RESUME);
     clear_intents(); pointer((resume.x1 + resume.x2) / 2, (resume.y1 + resume.y2) / 2, true);
     s_state.bluetooth_connected = true; render();
     pointer((resume.x1 + resume.x2) / 2, (resume.y1 + resume.y2) / 2, false);

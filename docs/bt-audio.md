@@ -55,8 +55,11 @@ No existing bond is deleted or evicted by the adapter.
 Classic discovery starts closed. The service task applies bounded discovery
 and checks the SDK GAP cache; `discovery_known` explicitly does not mean radio
 readback. Missing verification fails closed. An admitted handshake keeps the
-shared guard until actual authentication completion; a missing completion
-retains an uncertain fault until reset. Classic bond count/peer matches are
+shared guard until its peer's authentication completion. After a timeout the
+window closes and the guard remains held. A matching late completion can
+resolve it. A failed attempt is retryable after confirmed closure. An
+unresolved handshake, unverified discovery closure or ambiguous concurrent
+security prompts cannot admit another pairing. Classic bond count/peer matches are
 refreshed from the actual Classic SDK list, independently of HID identity.
 Unverified/unbonded peers cannot receive microphone PCM or supply playback.
 Legacy PIN/passkey-entry requests are rejected. SSP Just Works has no MITM
@@ -66,8 +69,9 @@ Audio → Bluetooth exposes **Pair audio** and **Close pairing**, each with a lo
 confirmation. Pair audio closes LE admission, then requests the existing 120-second
 Classic window; it preserves all saved bonds. The page distinguishes preparing,
 SDK-confirmed discoverability with a countdown, finishing authentication,
-authentication completed, expiry and failure. Authentication completed does not
-mean a profile or PCM stream is ready. Lock, screen-off, leaving Audio mode or
+authentication completed, expiry and failure. The paired indication requires
+the admitted peer in a fresh Classic bond list. HFP needs negotiated voice
+audio and A2DP needs a configured running stream. Lock, screen-off, leaving Audio mode or
 selecting USB closes a window opened by this coordinator; an already admitted
 handshake still follows the transport's existing completion rule.
 Closing denies new admission immediately, but remains visible as closing and
@@ -176,10 +180,13 @@ physical output. The legacy SDK PCM callbacks carry no peer/handle; their
 association and internal flush behavior depend on this pinned SDK. A change
 of that SDK requires re-review and hardware qualification of these boundaries.
 
-One profile command can be pending/in flight. Acceptance mutes and flushes;
-actual profile events determine completion. Cancelled in-flight operations
-remain quarantined until their matching completion or the 15-second timeout.
-A timeout leaves an uncertain failure, never an invented disconnect. Snapshot
+One profile command can be pending or in flight. Acceptance mutes and flushes
+the affected route. A change on the other profile preserves active PCM.
+An SDK-reported replacement peer or stream invalidates the old token and
+queued PCM before the new peer can negotiate audio. An SDK-submitted command
+continues to reserve its slot after cancellation or the 15-second timeout.
+Only its matching terminal callback releases the slot. A timeout reports an
+uncertain result and cannot establish disconnection. Snapshot
 `error` and its stage/time preserve the first historical transport failure;
 current readiness and the current request error are separate fields.
 
@@ -191,19 +198,61 @@ are separate from BLE HID host identity. The SDK list has no saved host names;
 every name remains explicitly unknown. Old rows retained after a read failure
 remain marked unknown rather than becoming zero hosts.
 
-`bt_audio_refresh_bonds()` queues a task-side refresh. UI connect/disconnect and
-voice operations use `bt_audio_saved_request()` with both the current transport
-generation and exact Classic list revision. Unknown/stale lists and addresses
-absent from that list reject before queueing. A queued saved-host command is
-rejected if an actual bond mutation/removal or an unavailable refreshed list
-overtakes it before SDK submission. An observational refresh of the same saved
-peer preserves the accepted intent.
-Acceptance, actual profile completion and current media readiness remain
-separate observations; selecting a saved host does not unmute capture.
+`bt_audio_refresh_bonds()` queues a task-side refresh. Local and remote link
+requests carry the shared transport generation and the target profile's link
+generation observed at admission. Disconnect also binds the observed peer.
+An explicit remote peer must match that address. The worker posts one work
+item to Bluedroid's BTC queue 0 and retains its request ID until BTC takes it.
+The queued request can be cancelled. A remote disconnect that arrives first
+cannot complete it. BTC serializes the HFP and A2DP
+connection events on this same task. When BTC takes the item, the firmware
+checks the ID, profile generation and saved-peer requirement under its lock.
+A peer that already disconnected or reconnected invalidates the old request.
+
+After that check, the BTC task marks the request in flight, releases the lock
+and invokes the pinned SDK's profile handler synchronously through
+`btc_inter_profile_call()`. The handler can report an event during the call.
+There is no second address-only command waiting in the BTC queue. The handler
+owns subsequent lower-stack dispatch, and a matching terminal callback still
+determines the result.
+
+Saved-host connect and voice requests also require the observed Classic list
+revision and a saved address. The owner rechecks the bond before dispatch.
+Refreshing the list while retaining the same saved peer preserves the request.
+
+After an SDK command times out, its profile remains busy until a matching
+terminal callback. Mic and Speaker can start on a separately negotiated
+profile subject to the usual shared resource, pairing and privacy checks.
+A late connection callback alone cannot establish voice or media readiness.
+
+### Explicit forget across BLE and Classic
+
+In the pinned Bluedroid source, the GAP removal APIs pass the selected address
+and either LE or BR/EDR to `BTA_DmRemoveDevice`. An active ACL is disconnected
+on that transport first. `BTM_SecDeleteDevice` and `btm_sec_free_dev` clear
+the corresponding transport's security material. The BTC unpaired handlers
+remove LE keys and LE metadata or Classic link-key fields in the addressed
+storage section. Distinct addresses have distinct sections. A single section
+can retain the other transport's keys at the same address. Shared in-memory
+bond type and some flags can also change, and the idle removal path can cancel
+a background GATT open for that address. A successful forget therefore does
+not establish continued HID or audio usability. Classic authentication failure
+or a missing remote key can independently remove the local Classic key.
+Inventory and actual profile state must be checked separately.
+
+For device qualification, cover same-address and different-address hosts,
+one or zero remaining bonds, and stale keys on one side. Exercise
+host-initiated and device-initiated disconnect/reconnect for each profile.
+Check HID input on its retained pairing, host-received HFP microphone PCM and
+audible A2DP speaker output separately. Confirm stale streams stay silent
+until a new explicit start. The target permits one BR/EDR ACL and one SCO
+link. Native interleaving tests do not qualify two simultaneous Classic hosts.
 
 ## Evidence
 
 Run `python3 tests/bt_audio/run.py` for sanitized native state/PCM regressions.
+The command regressions cover cancellation and replacement before BTC dispatch,
+a terminal callback inside the profile handler, and all six profile operations.
 The real module was also compiled against the pinned ESP32-S31 SDK headers
 with Classic/HFP/A2DP enabled and compiler warnings treated as errors. This
 isolated object check does not prove the combined image links or runs.

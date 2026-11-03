@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "audio_io.h"
+#include "bt_audio_btc.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,11 +40,6 @@ typedef struct {
 } bt_audio_bond_list_t;
 
 typedef enum { BT_AUDIO_OFF, BT_AUDIO_HFP, BT_AUDIO_A2DP } bt_audio_route_t;
-typedef enum {
-    BT_AUDIO_CONNECT_HFP, BT_AUDIO_CONNECT_A2DP,
-    BT_AUDIO_DISCONNECT_HFP, BT_AUDIO_DISCONNECT_A2DP,
-    BT_AUDIO_OPEN_VOICE, BT_AUDIO_CLOSE_VOICE
-} bt_audio_command_t;
 typedef enum {
     BT_AUDIO_JOB_IDLE, BT_AUDIO_JOB_PENDING, BT_AUDIO_JOB_WAITING,
     BT_AUDIO_JOB_SUCCEEDED, BT_AUDIO_JOB_FAILED, BT_AUDIO_JOB_CANCELLED,
@@ -91,6 +87,7 @@ typedef struct {
     bool microphone_write_ready;
     bool speaker_read_ready;
     uint64_t generation;
+    uint64_t hfp_link_generation, a2dp_link_generation; /* Version of each profile, including while disconnected. */
     uint64_t request_id;
     bt_audio_job_status_t request_status;
     esp_err_t request_error;
@@ -103,7 +100,7 @@ typedef struct {
     bool device_name_known;       /* Actual Classic GAP cache readback, not the HID name. */
     char device_name[BT_AUDIO_DEVICE_NAME_MAX_BYTES + 1U];
     esp_err_t device_name_error;
-    bool pairing_completed;      /* Matching authentication, not a profile or PCM stream. */
+    bool pairing_completed;      /* Admitted authentication and verified saved peer. */
     bool pairing_expired;
     bool pairing_busy;           /* Held until Classic releases shared admission after closure/auth. */
     bool pairing_requested;
@@ -139,8 +136,8 @@ typedef struct {
  * invalidate queued PCM; reconnection never authorizes microphone egress. */
 esp_err_t bt_audio_init(void);
 
-/* One manager/control task calls at least every 10 ms. Submits at most one
- * pending SDK control request and a bounded microphone-ready notification.
+/* One manager/control task calls at least every 10 ms. Posts at most one
+ * control item to the BTC owner and a bounded microphone-ready notification.
  * SDK calls are outside state locks and can wait on the SDK's own queue;
  * never call from audio, Bluetooth, UI or interrupt callbacks. */
 void bt_audio_service(void);
@@ -156,22 +153,26 @@ esp_err_t bt_audio_set_policy(uint64_t generation, bt_audio_route_t route,
 
 /* Immediate local gate/cancellation, no Bluetooth or codec call. Cancels queued
  * control intent; an already submitted request remains quarantined until its
- * actual completion/timeout. Previously copied SDK radio frames cannot be
+ * actual completion, including after a timeout. Previously copied SDK frames cannot be
  * recalled. Does not claim physical microphone-off or peer disconnection. */
 uint64_t bt_audio_cancel(void);
+/* Cancel only this queued/in-flight profile command. A submitted SDK request
+ * stays reserved until its matching terminal callback. */
+void bt_audio_cancel_request(uint64_t request_id);
 
 /* Explicit profile/voice operation on a manager-authorized Classic peer.
  * One bounded request; ESP_OK is submission acceptance, not connection success.
  * Does not grant pairing, dial/answer a call or unmute capture. peer may be NULL
  * only for voice/disconnect operations, which use the verified current peer.
- * Expected generation is checked atomically; acceptance cancels prior PCM and
- * mutes routes. Poll request_id/status and actual connection fields. */
-esp_err_t bt_audio_request(uint64_t generation, bt_audio_command_t command,
+ * Pass the shared and target profile generations from the same observation.
+ * Both are checked atomically; acceptance mutes and flushes PCM
+ * on the affected route. Poll request_id/status and actual connection fields. */
+esp_err_t bt_audio_request(uint64_t generation, uint64_t link_generation, bt_audio_command_t command,
                            const uint8_t peer[6], uint64_t *request_id);
 /* UI/control saved-peer operations additionally require this exact fresh
  * Classic bond-list revision and an address still present in that list.
  * Same bounded command queue/result semantics as bt_audio_request. */
-esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t bond_revision,
+esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t link_generation, uint64_t bond_revision,
                                  bt_audio_command_t command, const uint8_t peer[6], uint64_t *request_id);
 /* Cached bounded copy, no SDK calls. Unknown/read failure retains old rows
  * labelled unknown. Names stay explicitly unavailable; no identity inference. */

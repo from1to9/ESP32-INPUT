@@ -471,7 +471,6 @@ static void render_media_panel(void)
             if (media->pairing.state == APP_MEDIA_PAIR_CLOSED || media->pairing.state == APP_MEDIA_PAIR_COMPLETED) {
                 if (*media->reason) reason = media->reason;
                 else if (media->command_pending) reason = "Updating audio connection...";
-                else if (route && route->connected) reason = "Link connected. Open Mic or play audio on the host.";
             }
             if (media->pairing.state == APP_MEDIA_PAIR_PREPARING || media->pairing.state == APP_MEDIA_PAIR_DISCOVERABLE)
                 snprintf(caption, sizeof(caption), "%s / %lus\n%s", state, (unsigned long)media->pairing.remaining_seconds, reason);

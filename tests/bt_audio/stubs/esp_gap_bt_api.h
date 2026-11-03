@@ -18,6 +18,7 @@ typedef enum { ESP_BT_GAP_AUTH_CMPL_EVT, ESP_BT_GAP_REMOVE_BOND_DEV_COMPLETE_EVT
 typedef union {
     struct { unsigned int status; char *name; } get_dev_name_cmpl;
     struct { uint8_t bda[6]; unsigned int stat; } auth_cmpl;
+    struct { uint8_t bda[6]; unsigned int status; } remove_bond_dev_cmpl;
     struct { uint8_t bda[6]; } cfm_req;
     struct { uint8_t bda[6]; } pin_req;
     struct { uint8_t bda[6]; } key_req;

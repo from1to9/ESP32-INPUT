@@ -17,25 +17,28 @@ def main():
     with tempfile.TemporaryDirectory(prefix="esp32-bt-audio-") as temporary:
         binary = Path(temporary) / "test_bt_audio"
         command = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                   "-Wconversion", "-Wno-sign-conversion", "-g",
+                   "-Wconversion", "-Wno-sign-conversion", "-g", "-DTEST_BT_AUDIO_LOCKS",
                    "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                    "-I", str(SUITE / "stubs"), "-I", str(ROOT / "firmware/main"),
                    "-I", str(ROOT / "components/audio_engine/include"),
                    "-I", str(ROOT / "components/device_settings/include"),
                    str(SUITE / "test_bt_audio.c"), str(ROOT / "firmware/main/bt_audio.c"),
+                   str(ROOT / "firmware/main/bt_audio_btc.c"),
                    "-o", str(binary)]
         subprocess.run(command, check=True)
         for scenario in ("normal", "init-timeout", "init-event-failure", "command-timeout",
                          "command-failure", "allocation-failure", "registration-failure", "stack-unready",
                          "audio-exclusion", "retry-capacity", "name-normal", "name-invalid", "name-missing", "name-event-failure", "name-submit-failure", "name-timeout",
-                         "pairing", "pairing-expiry", "pairing-timeout", "discovery-timeout", "playback-binding"):
+                         "pair-failure", "pair-late", "pair-late-failure", "pair-terminal", "connect-race", "peer-switch", "pair-foreign", "pair-prewindow", "pair-unsaved",
+                         "other-profile", "foreign-bonds", "a2dp-reconnect", "observed-disconnect", "dispatch-replace", "dispatch-down", "dispatch-cancel",
+                         "dispatch-post-failure", "dispatch-reentrant", "profile-actions", "timeout-hfp", "timeout-a2dp", "pairing", "pairing-expiry", "pairing-timeout", "discovery-timeout", "playback-binding"):
             subprocess.run([str(binary), scenario], check=True)
         composition = [part for part in command if part != str(SUITE / "test_bt_audio.c")]
         composition += [str(SUITE / "engine_pairing_transport.c"), str(SUITE / "test_engine_pairing.c")]
         composition += [str(ROOT / "components/audio_engine" / name) for name in
                         ("audio_engine.c", "audio_media.c", "audio_recording.c")]
         subprocess.run(composition, check=True)
-        for scenario in ("before-start", "before-prepare", "owner-loss", "privacy"):
+        for scenario in ("before-start", "before-prepare", "owner-loss", "privacy", "duplex-reconnect", "duplex-privacy"):
             subprocess.run([str(binary), scenario], check=True)
         subprocess.run(command + ["-DCONFIG_BT_CLASSIC_ENABLED=0"], check=True)
         subprocess.run([str(binary), "unsupported"], check=True)

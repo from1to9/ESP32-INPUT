@@ -17,10 +17,11 @@ void ble_hid_copy_bond_list(ble_hid_bond_list_t *out) { assert(out); *out = (ble
 ble_hid_target_snapshot_t ble_hid_target_snapshot(void) { return (ble_hid_target_snapshot_t){0}; }
 bool ble_hid_pairing_open(uint32_t duration) { (void)duration; assert(false); return false; }
 void ble_hid_pairing_close(void) { assert(false); }
-bool ble_hid_management_reserve(uint64_t generation, uint64_t *reservation)
-{ (void)generation; (void)reservation; assert(false); return false; }
+bool ble_hid_management_reserve(uint64_t generation, uint64_t bond_revision,
+    uint64_t preference_revision, uint64_t *reservation)
+{ (void)generation; (void)bond_revision; (void)preference_revision; (void)reservation; assert(false); return false; }
 void ble_hid_management_release(uint64_t reservation) { (void)reservation; assert(false); }
-void ble_hid_management_resume(uint64_t reservation) { (void)reservation; assert(false); }
+void ble_hid_management_resume(uint64_t reservation, const ble_hid_target_t *target) { (void)reservation; (void)target; assert(false); }
 void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *target)
 { (void)reservation; (void)target; assert(false); }
 bool ble_hid_management_ready(uint64_t reservation) { (void)reservation; assert(false); return false; }

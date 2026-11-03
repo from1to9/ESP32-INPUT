@@ -2227,7 +2227,7 @@ static void render_device(const app_view_t *view, const char *link)
         break;
     case APP_CONFIRM_DISCONNECT:
         title = "Disconnect Bluetooth host?";
-        detail = "The Bluetooth host will disconnect.\nIts saved pairing stays available.\nReconnect from that host's Bluetooth settings.";
+        detail = "The Bluetooth host will disconnect.\nIts saved pairing stays available; automatic return pauses.\nUse Resume or select this saved host to reconnect.";
         accept = "Disconnect";
         break;
     case APP_CONFIRM_WIFI_FORGET:

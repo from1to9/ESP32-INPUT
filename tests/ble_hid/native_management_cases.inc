@@ -31,9 +31,19 @@ static void native_setup(bool subscriptions_required)
     }
     app_bluetooth_management_init(); native_now = 1000; native_context = (app_bluetooth_management_context_t){0};
 }
+static uint64_t native_host_generation(void)
+{
+    const ble_hid_snapshot_t snapshot = ble_hid_snapshot();
+    return snapshot.connection_admitted ? snapshot.generation : 0;
+}
+static bool native_reserve(uint64_t host_generation, uint64_t *reservation)
+{
+    return ble_hid_management_reserve(host_generation, ble_hid_bond_list().revision,
+        ble_hid_target_snapshot().revision, reservation);
+}
 static void native_begin(app_bluetooth_management_operation_t operation, const ble_hid_target_t *target)
 {
-    assert(app_bluetooth_management_begin(operation, ble_hid_snapshot().generation, ble_hid_bond_list().revision,
+    assert(app_bluetooth_management_begin(operation, native_host_generation(), ble_hid_bond_list().revision,
         ble_hid_target_snapshot().revision, target, native_now) == ESP_OK);
 }
 static void native_step(bool complete_removal)
@@ -110,21 +120,21 @@ static void native_review_probe_expiry_wrap(void)
 {
     reset(); make_bond(0, 0x42, 0x11); ble_hid_pairing_close();
     ble_hid_target_t target = native_target(0x42); uint64_t reservation = 0;
-    assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    assert(native_reserve(native_host_generation(), &reservation));
     ble_hid_management_reconnect(reservation, &target);
     fake_tick = PAIRING_HANDSHAKE_TIMEOUT_MS; worker_cycle();
     fake_tick = UINT32_MAX; worker_cycle(); fake_tick = 1; active_peer = 0x77; connect_peer();
     assert(!state.public.connected && state.rejected_pending && !state.reconnect_probe);
     worker_cycle(); disconnect_peer();
     fake_tick = 0; fake_uptime_us = 0;
-    assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    assert(native_reserve(native_host_generation(), &reservation));
     ble_hid_management_reconnect(reservation, &target);
     /* No worker/callback observed the first deadline: monotonic uptime still
      * expires the grant even though the low32 tick appears only one tick old. */
     fake_tick = 1; fake_uptime_us = (INT64_C(1) << 32) * INT64_C(1000) + 1000;
     connect_peer(); assert(!state.public.connected && state.rejected_pending && !state.reconnect_probe);
     worker_cycle(); disconnect_peer();
-    assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    assert(native_reserve(native_host_generation(), &reservation));
     ble_hid_management_reconnect(reservation, &target); connect_peer();
     assert(state.public.connected && state.reconnect_probe_link && !state.pairing_admission_pending);
 }
@@ -267,7 +277,7 @@ static void native_management_manual_disconnect_and_private_reconnect(void)
     assert(ble_hid_disconnect_user_generation(state.public.generation)); worker_cycle(); disconnect_peer();
     assert(ble_hid_snapshot().reconnect_paused && state.manual_pause_count == 1);
     connect_peer(); assert(!state.public.connected && state.rejected_pending);
-    uint64_t reservation = 0; assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    uint64_t reservation = 0; assert(native_reserve(native_host_generation(), &reservation));
     assert(!ble_hid_management_ready(reservation));
     ble_hid_management_release(reservation); /* Cancellation keeps the user's earlier pause. */
     assert(state.manual_pause_count == 1); worker_cycle(); disconnect_peer();
@@ -275,10 +285,13 @@ static void native_management_manual_disconnect_and_private_reconnect(void)
     assert(state.public.ready && !ble_hid_resume_reconnect() && state.manual_pause_count == 1);
     assert(ble_hid_disconnect_user_generation(state.public.generation)); worker_cycle(); disconnect_peer();
     assert(state.manual_pause_count == 2); connect_peer(); assert(!state.public.connected && state.rejected_pending);
-    worker_cycle(); disconnect_peer(); assert(ble_hid_resume_reconnect() && !state.manual_pause_count);
-    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); assert(state.public.ready);
+    worker_cycle(); disconnect_peer(); assert(ble_hid_resume_reconnect() && state.manual_pause_count == 1);
+    active_peer = 0xc2; connect_peer(); drain(); authorize_peer(true); assert(state.public.ready);
     assert(fake_bond_count == 2 && subscriptions.count == 2 && !remove_calls);
     disconnect_peer(); connect_peer(); drain(); authorize_peer(true); assert(state.public.ready); /* Spontaneous loss is normal. */
+
+    disconnect_peer(); assert(ble_hid_resume_reconnect() && !state.manual_pause_count);
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); assert(state.public.ready);
 
     native_setup(false); save_sdk_bond(0, 0x42, 0x11); assert(refresh_known_bonds() == ESP_OK);
     ble_hid_target_t target = native_target(0x42);
@@ -290,30 +303,30 @@ static void native_management_manual_disconnect_and_private_reconnect(void)
     security_request(); assert(!last_security_accept); authorize_peer(true); subscribe();
     assert(state.public.ready && fake_bond_count == 2 && !remove_calls);
 
-    disconnect_peer(); assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    disconnect_peer(); assert(native_reserve(native_host_generation(), &reservation));
     ble_hid_management_reconnect(reservation, &target);
     active_peer = 0x66; connect_peer(); drain(); assert(state.public.connected && !state.public.ready && !state.pairing_admission_pending);
     security_request(); assert(!last_security_accept); authentication_event(false, true); worker_cycle();
     assert(!state.public.ready && !state.public.failed && state.link_fault);
     assert(fake_bond_count == 2 && !remove_calls); /* Mismatch fails closed without deleting any bond. */
     reset(); make_bond(0, 0x42, 0x11); target = native_target(0x42); ble_hid_pairing_close();
-    assert(ble_hid_management_reserve(state.public.generation, &reservation));
+    assert(native_reserve(native_host_generation(), &reservation));
     ble_hid_management_reconnect(reservation, &target);
     fake_tick = PAIRING_HANDSHAKE_TIMEOUT_MS; active_peer = 0x67; connect_peer();
     assert(!state.public.connected && state.rejected_pending); /* Probe expiry cannot authorize unknown peers. */
-    reset(); connect_peer(); drain(); assert(ble_hid_disconnect_user_generation(state.public.generation));
+    reset(); connect_peer(); drain(); authorize_peer(false); assert(ble_hid_disconnect_user_generation(state.public.generation));
     worker_cycle(); disconnect_peer(); connect_peer(); assert(!state.public.connected && state.rejected_pending);
     worker_cycle(); disconnect_peer(); assert(ble_hid_resume_reconnect()); /* Unbonded/unresolved observed tuple can be resumed. */
     reset();
     for (unsigned i = 0; i < BLE_HID_MAX_BONDS; ++i) {
-        active_peer = (uint8_t)(0x10U + i); connect_peer(); drain(); assert(state.public.connected);
+        active_peer = (uint8_t)(0x10U + i); connect_peer(); drain(); authorize_peer(false); assert(state.public.connection_admitted);
         assert(ble_hid_disconnect_user_generation(state.public.generation)); worker_cycle(); disconnect_peer();
     }
-    active_peer = 0x70; connect_peer(); drain(); uint64_t generation = state.public.generation;
+    active_peer = 0x70; connect_peer(); drain(); authorize_peer(false); uint64_t generation = state.public.generation;
     assert(state.public.connected && state.manual_pause_count == BLE_HID_MAX_BONDS &&
         !ble_hid_disconnect_user_generation(generation) && state.public.generation == generation);
     assert(ble_hid_disconnect_generation(generation)); worker_cycle(); disconnect_peer();
-    assert(ble_hid_resume_reconnect() && !state.manual_pause_count);
+    assert(ble_hid_resume_reconnect() && state.manual_pause_count == BLE_HID_MAX_BONDS - 1U);
     puts("Manual Disconnect: former identities paused, other peer remains actionable, explicit Resume/cancel, private-key fallback pre-auth only, mismatch denial and expiry passed");
 }
 
@@ -411,22 +424,22 @@ static void native_management_select_and_reconnect(void)
         authorize_peer(true); assert(state.public.ready && fake_bond_count == 2 && !remove_calls);
     }
     reset(); uint64_t first = 0, second = 0;
-    assert(ble_hid_management_reserve(state.public.generation, &first));
-    ble_hid_management_release(first); assert(ble_hid_management_reserve(state.public.generation, &second));
+    assert(native_reserve(native_host_generation(), &first));
+    ble_hid_management_release(first); assert(native_reserve(native_host_generation(), &second));
     ble_hid_management_release(first); assert(state.management_reservation == second);
     ble_hid_management_release(second); assert(!state.management_reservation);
     state.management_sequence = UINT64_MAX;
-    assert(!ble_hid_management_reserve(state.public.generation, &second) && !state.public.failed);
+    assert(!native_reserve(native_host_generation(), &second) && !state.public.failed);
     puts("Native saved-host selection: live release, overtaking rejection, durable exact policy, pending versus authenticated readiness, ordinary reconnect and reservation ownership passed");
 }
 
 static void native_management_cancellation_failure_and_stale(void)
 {
     native_setup(false); ble_hid_target_t target = native_target(0xc3);
-    assert(app_bluetooth_management_begin(APP_BT_MANAGE_FORGET_ONE, state.public.generation,
+    assert(app_bluetooth_management_begin(APP_BT_MANAGE_FORGET_ONE, native_host_generation(),
         ble_hid_bond_list().revision + 1U, ble_hid_target_snapshot().revision, &target, native_now) == ESP_ERR_INVALID_STATE);
     target.bond_id[0] ^= 1U;
-    assert(app_bluetooth_management_begin(APP_BT_MANAGE_FORGET_ONE, state.public.generation,
+    assert(app_bluetooth_management_begin(APP_BT_MANAGE_FORGET_ONE, native_host_generation(),
         ble_hid_bond_list().revision, ble_hid_target_snapshot().revision, &target, native_now) == ESP_ERR_NOT_FOUND);
     native_setup(false); native_begin(APP_BT_MANAGE_ADD, NULL);
     target_commit_error = ESP_FAIL; target_commit_persists_on_error = true;

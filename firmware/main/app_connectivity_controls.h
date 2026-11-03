@@ -29,7 +29,8 @@ void app_connectivity_controls_poll(uint64_t now_ms, app_connectivity_controls_e
 /* Called only after the parent's fresh physical Add/Forget-all confirmation.
  * Revision capture and start remain separate to reject changed review data. */
 bool app_connectivity_controls_bluetooth_revisions(uint64_t *bond_revision, uint64_t *preferences_revision);
-bool app_connectivity_controls_bluetooth_start(app_pairing_operation_t, uint64_t generation,
+/* Carry the caller's admitted-host generation, or zero for no admitted host. */
+bool app_connectivity_controls_bluetooth_start(app_pairing_operation_t, uint64_t host_generation,
     uint64_t bond_revision, uint64_t preferences_revision, app_connectivity_controls_effect_t *);
 bool app_connectivity_controls_bluetooth_busy(void);
 void app_connectivity_controls_bluetooth_stop(app_connectivity_controls_effect_t *);

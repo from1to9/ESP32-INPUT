@@ -89,7 +89,7 @@ static void remote_device_sleep_preserves_capture_warning_until_off(void)
 }
 static void remote_device_review_is_inert_immutable_and_physically_confirmed(void)
 {
-    remote_device_case_setup(); remote_device_case_off(); test_link.connected = false;
+    remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
     cp_result_t result = remote_device_case_execute(CP_OP_SYSTEM_RESTART, 400, "{}");
     assert(result.state == CP_RESULT_ACCEPTED && result.object_id[0] && !test_restart_requests && !test_media_stops);
     app_remote_review_view_t view; remote_device_review_view(&view);
@@ -109,7 +109,7 @@ static void remote_device_review_is_inert_immutable_and_physically_confirmed(voi
 }
 static void remote_device_factory_reset_sequence(bool orphan_at_admission)
 {
-    remote_device_case_setup(); remote_device_case_off(); test_link.connected = false;
+    remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
     s_settings.navigation = true;
     test_bonds.count = 1; test_wifi_profiles.count = 1;
     test_update_target.selected = true;
@@ -152,7 +152,7 @@ static void remote_device_factory_reset_admits_already_orphaned_target(void)
 static void remote_device_factory_admission_rejects_unknown_store_and_preserves_reviewed_revision(void)
 {
     for (unsigned scenario = 0; scenario < 7; ++scenario) {
-        remote_device_case_setup(); remote_device_case_off(); test_link.connected = false;
+        remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
         test_update_target.selected = true; test_update_target.available = false; test_update_target.error = ESP_ERR_NOT_FOUND;
         if (scenario == 0) test_update_target.loaded = false;
         else if (scenario == 1) test_update_target.durable = false;
@@ -178,7 +178,7 @@ static void remote_device_factory_admission_rejects_unknown_store_and_preserves_
 static void remote_device_factory_target_clear_rejects_unknown_or_unreviewed_store(void)
 {
     for (unsigned scenario = 0; scenario < 7; ++scenario) {
-        remote_device_case_setup(); remote_device_case_off(); test_link.connected = false;
+        remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
         test_bonds.count = 1; test_wifi_profiles.count = 1; test_update_target.selected = true;
         if (scenario == 6) {
             test_update_target.selected = false; test_update_target.durable = false; test_update_target.revision = 0;
@@ -206,7 +206,7 @@ static void remote_device_factory_target_clear_rejects_unknown_or_unreviewed_sto
 }
 static void remote_device_factory_failure_never_advances_to_unreviewed_deletion(void)
 {
-    remote_device_case_setup(); remote_device_case_off(); test_link.connected = false;
+    remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
     char digest[65], args[128]; remote_device_manifest_digest(digest);
     (void)snprintf(args,sizeof(args),"{\"retained_manifest_digest\":\"%s\"}",digest);
     (void)remote_device_case_execute(CP_OP_DEVICE_FACTORY_RESET_REQUEST, 600, args);

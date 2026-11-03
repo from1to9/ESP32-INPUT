@@ -16,6 +16,37 @@ static ae_result_t prepare_then_revoke(void *context, ae_route_t route, const ae
     if (revoke_after_prepare == 2) model.cancel = true;
     return result;
 }
+void test_transport_foreign_event(void);
+void test_transport_replace_voice(void);
+bool test_transport_microphone_frame(void);
+ae_result_t test_transport_playback_frame(ae_frame_t *frame);
+
+static void running_duplex(const ae_route_token_t *token, bool privacy)
+{
+    model.duplex = true;
+    ae_start_request_t capture = request(AE_CAPTURE_LIVE); capture.route_token = *token;
+    ae_job_snapshot_t job;
+    assert(ae_start(engine, &capture, model.now, &job) == AE_OK); step(8);
+    assert(snapshot().capture[AE_CAPTURE_LIVE].state == AE_JOB_RUNNING && test_transport_microphone_frame());
+    ae_start_request_t playback = request(AE_PLAYBACK_STREAM); playback.route_token = *token;
+    assert(ae_start(engine, &playback, model.now, &job) == AE_OK);
+    ae_frame_t frame;
+    for (unsigned i = 0; i < 8 && !snapshot().playback_gate_open; ++i) step(1);
+    test_transport_foreign_event();
+    assert(test_transport_playback_frame(&frame) == AE_OK && frame.data[0] == 42);
+    assert(ae_submit_playback(engine, &frame, model.now) == AE_OK); step(2);
+    assert(model.writes && model.mic && model.speaker && test_transport_microphone_frame());
+    if (privacy) ae_safety_stop(engine, AE_STOP_PRIVACY, model.now);
+    else test_transport_replace_voice();
+    step(8);
+    ae_snapshot_t view = snapshot();
+    assert(!view.capture_gate_open && !view.playback_gate_open && view.hardware_off_confirmed && !view.quarantined);
+    assert(!test_transport_microphone_frame() && test_transport_playback_frame(&frame) != AE_OK);
+    assert(view.capture[AE_CAPTURE_LIVE].stop_reason == (privacy ? AE_STOP_PRIVACY : AE_STOP_OWNER_LOST));
+    assert(view.playback.stop_reason == view.capture[AE_CAPTURE_LIVE].stop_reason);
+    assert(bt_audio_pairing_open(1000) == ESP_OK); bt_audio_pairing_close(); bt_audio_service();
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2); test_transport_setup();
@@ -25,6 +56,10 @@ int main(int argc, char **argv)
     setup_with_route(&port, &caps.format);
     ae_snapshot_t view = snapshot();
     assert(ae_route_select(engine, AE_ROUTE_HFP_HF, view.audio_generation, view.revision, model.now) == AE_OK);
+    if (!strncmp(argv[1], "duplex-", 7)) {
+        running_duplex(&caps.token, !strcmp(argv[1], "duplex-privacy"));
+        free(memory); test_transport_teardown(); printf("PASS: running HFP Mic/Speaker %s\n", argv[1]); return 0;
+    }
     size_t initial_stops = model.stops;
     bool before_start = strcmp(argv[1], "before-prepare") != 0;
     revoke_after_prepare = !strcmp(argv[1], "owner-loss") ? 1U : !strcmp(argv[1], "privacy") ? 2U : 0U;

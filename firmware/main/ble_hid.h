@@ -282,6 +282,9 @@ typedef struct {
     bool initialized;
     bool failed;
     bool connected;
+    /* A physical link becomes a user-manageable host only after encrypted
+     * authentication and saved-identity/admission checks. Latched until down. */
+    bool connection_admitted;
     bool reconnect_paused;
     /* Both input CCCDs enabled on this encrypted, active connection, either by
      * actual writes or restoration of this verified bond's saved subscriptions.
@@ -410,10 +413,16 @@ esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_re
  * Matching release is idempotent; stale/zero tokens cannot release a new owner.
  * Add atomically consumes its token into a window for not-yet-saved identities;
  * known saved hosts cannot occupy it. Bonds and generic pairing stay unchanged. */
-bool ble_hid_management_reserve(uint64_t generation, uint64_t *reservation);
+/* host_generation is the caller-approved admitted host, or zero for none.
+ * Host, catalogue and policy revisions are rechecked under the owner lock;
+ * provisional ACL churn conveys no authority. */
+bool ble_hid_management_reserve(uint64_t host_generation, uint64_t bond_revision,
+    uint64_t preference_revision, uint64_t *reservation);
 void ble_hid_management_release(uint64_t reservation);
 bool ble_hid_management_ready(uint64_t reservation);
-void ble_hid_management_resume(uint64_t reservation);
+/* Consumes only this reservation. A non-null target resumes only its manual
+ * pause; NULL preserves all pauses. Add never clears unrelated pauses. */
+void ble_hid_management_resume(uint64_t reservation, const ble_hid_target_t *target);
 /* Consumes the reservation into a 30-second encryption-only reconnect probe.
  * Unknown callback addresses may reach pre-auth only; SMP grant stays denied.
  * No HID readiness until existing exact durable fingerprint verification.
@@ -423,8 +432,9 @@ bool ble_hid_management_pairing_open(uint64_t reservation, uint32_t duration_ms)
 bool ble_hid_pairing_open(uint32_t duration_ms);
 void ble_hid_pairing_close(void);
 /* Shared Classic pairing owner only. Claim after closing the LE window; fails
- * while an LE handshake is admitted/pending. Prevents simultaneous writes into
- * the SDK's shared eviction domain. Retain through actual Classic auth result;
+ * while LE management owns a reservation or an LE handshake is admitted/pending.
+ * Prevents simultaneous writes into the SDK's shared eviction domain. Retain
+ * through actual Classic auth result;
  * uncertain/missing auth completion retains the claim until stack reset. */
 bool ble_hid_pairing_claim_classic(void);
 void ble_hid_pairing_release_classic(void);
@@ -482,11 +492,12 @@ bool ble_hid_send_generation(uint64_t generation, uint8_t report_id,
  * input generation; the control worker closes the connection. */
 bool ble_hid_disconnect_generation(uint64_t generation);
 /* Explicit Disconnect pauses automatic admission of up to MAX_BONDS observed
- * former identities, without modifying bonds. Resolved exported keys are used
- * only with matching callback identity; unresolved rotating addresses remain
- * unqualified. Other peers may connect. A live peer always keeps Disconnect.
- * Resume is rejected while connected; successful local Select/Add or explicit
- * Resume clears the RAM-only pause. Cancellation preserves the prior pause. */
+ * former identities, without modifying bonds. Only an admitted host may be
+ * disconnected by this action. Its authenticated fingerprint resolves saved
+ * identity; unresolved rotating addresses remain unqualified. Other peers may
+ * connect. Resume is rejected while an admitted host is connected and clears
+ * only the most recently paused remaining host. Select/Allow reconnect clears
+ * only its target, Add preserves pauses, and cancellation preserves them all. */
 bool ble_hid_disconnect_user_generation(uint64_t generation);
 bool ble_hid_resume_reconnect(void);
 

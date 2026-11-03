@@ -11,6 +11,13 @@ set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../components/input_core"
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(esp32_input)
 
+# The bounded Classic command adapter uses the pinned BTC task and profile
+# message ABI. Keep its private includes inside the SDK's component.
+if(CONFIG_BT_CLASSIC_ENABLED AND CONFIG_BT_A2DP_ENABLE AND CONFIG_BT_HFP_CLIENT_ENABLE)
+    idf_component_get_property(input_classic_bt bt COMPONENT_LIB)
+    target_sources(${input_classic_bt} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main/bt_audio_btc.c")
+endif()
+
 # Enable UAC2 consistently in the one managed TinyUSB stack without editing
 # managed dependency files. PUBLIC propagates the same class configuration to
 # esp_tinyusb and application consumers, preventing descriptor/driver mismatch.

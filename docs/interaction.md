@@ -177,18 +177,23 @@ are stored only after explicit edits, not on render/status polling.
 Bluetooth actions open a local confirmation before changing pairing admission or
 forgetting saved hosts. Pairing is time-limited and displays a countdown. Forget
 waits for input cancellation, current Bluetooth host release recovery and
-disconnection; changing the connection while confirmation is open invalidates
-that confirmation. After confirmed link-down, the next-host neutral-report
+disconnection; changing the admitted host while confirmation is open invalidates
+that confirmation. A physical link awaiting authentication and identity checks
+has no input or user-host authority. Its retries do not invalidate local gestures
+or an exact saved-host confirmation. After confirmed link-down, the next-host neutral-report
 barrier remains armed but does not block pairing or saved-host management.
 Pending releases on a separately selected USB transport do not gate Bluetooth
 management. Connected Bluetooth congestion/release and transport-switch guards
 still apply. These rules are the same in Mouse, Keyboard and Audio modes.
 
 Manual **Disconnect** retains the pairing and pauses automatic return of the
-observed former peer. **Resume** restores normal reconnect eligibility while
-disconnected. If a different host is connected, the same button disconnects that
-host. An unexpected radio loss keeps the normal reconnect policy. Reboot clears
-the temporary pause.
+observed former peer. **Resume** restores normal reconnect eligibility for the
+most recently paused remaining host while no admitted host is connected. Other
+hosts' pauses remain in place. If a different admitted host is connected, the
+same button disconnects that host. An unexpected radio loss keeps the normal
+reconnect policy. Reboot clears the temporary pauses.
+If the host leaves before its pause is accepted, report that reconnect policy
+is unchanged; do not promise a pause or ask the user to Resume.
 
 **Select target** releases the old host's input and applies the saved target
 policy before accepting its connection. For a private saved host that cannot be
@@ -196,8 +201,12 @@ identified at connection time, **Allow reconnect** gives that host 30 seconds to
 connect from its system Bluetooth settings. It must authenticate and match the
 saved pairing before receiving input. When the saved identity cannot be
 verified, the action stays disabled and the current connection is preserved.
-**Add host** opens a separate pairing
-window for a new host. The previous host cannot claim that window by reconnecting.
+Select/Allow reconnect resumes only that saved host. Forget removes only that
+host's pause after verified deletion. **Add host** opens a separate pairing
+window for a new host and preserves other pauses. The previous host cannot claim
+that window by reconnecting. The open window displays **Pairing open** and its
+countdown through provisional retries; visibility and authentication remain
+separate observations and never imply input readiness.
 
 Connectivity selects Bluetooth or USB for all primary modes and opens separate
 Bluetooth-host and Wi-Fi detail pages. Selection cancels pending input, waits

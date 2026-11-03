@@ -60,6 +60,10 @@ static void audio_pairing_checks(void)
     screenshot("audio-pair-closing");
     clear_intents(); tap_control("Pair audio"); assert(action_count(APP_MEDIA_CONTROL) == 0);
     s_state.media.pairing.state = APP_MEDIA_PAIR_ERROR;
+    strcpy(s_state.media.pairing.reason, "Timed out. Waiting for the host's pairing result.");
+    screenshot("audio-pair-timeout-pending");
+    audio_assert_text_fits("Pairing error\nTimed out. Waiting for the host's pairing result.");
+    clear_intents(); tap_control("Pair audio"); assert(action_count(APP_MEDIA_CONTROL) == 0);
     s_state.media.routes[APP_MEDIA_ROUTE_HFP].can_connect = true;
     strcpy(s_state.media.pairing.reason, "Bluetooth pairings are full; existing hosts are preserved.");
     screenshot("audio-pair-capacity");

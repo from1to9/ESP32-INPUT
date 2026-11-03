@@ -230,9 +230,10 @@ static ae_result_t submit_voice_phase(bool opening_voice)
 {
     if (controls.now_ms > UINT64_MAX - BT_AUDIO_COMMAND_TIMEOUT_US / 1000U) return AE_EXHAUSTED;
     uint64_t token = 0;
-    esp_err_t error = bt_audio_saved_request(controls.bluetooth.generation, controls.voice_link.bond_revision,
-        opening_voice ? BT_AUDIO_OPEN_VOICE : BT_AUDIO_CONNECT_HFP, controls.voice_link.peer, &token);
-    if (error != ESP_OK) return error == ESP_ERR_INVALID_STATE ? AE_STALE : AE_UNAVAILABLE;
+    esp_err_t error = bt_audio_saved_request(controls.bluetooth.generation, controls.bluetooth.hfp_link_generation,
+        controls.voice_link.bond_revision, opening_voice ? BT_AUDIO_OPEN_VOICE : BT_AUDIO_CONNECT_HFP,
+        controls.voice_link.peer, &token);
+    if (error != ESP_OK) return error == ESP_ERR_INVALID_STATE || error == ESP_ERR_NOT_FOUND ? AE_STALE : AE_UNAVAILABLE;
     if (!token || token == controls.voice_link.token) return AE_UNCERTAIN;
     controls.voice_link.token = token;
     controls.voice_link.opening_voice = opening_voice;
@@ -266,13 +267,16 @@ static void poll_voice_link(app_media_controls_effect_t *effect)
     }
     if (controls.runtime.audio.route != AE_ROUTE_HFP_HF || controls.runtime.audio.quarantined ||
         controls.runtime.busy || controls.runtime.result_ready || any_jobs() ||
-        !bt->initialized || bt->failed || controls.bonds.revision != controls.voice_link.bond_revision ||
-        saved_bond(controls.voice_link.peer) < 0 || bt->request_id != controls.voice_link.token ||
+        !bt->initialized || bt->failed || bt->request_id != controls.voice_link.token ||
         (bt->hfp_peer_known && memcmp(bt->hfp_peer, controls.voice_link.peer, 6)) ||
         (controls.voice_link.opening_voice && (!bt->hfp_connected || !bt->hfp_peer_known))) {
         finish_voice_link(effect, AE_STALE); return;
     }
     if (controls.now_ms >= controls.voice_link.deadline_ms) { finish_voice_link(effect, AE_TIMEOUT); return; }
+    if (controls.bonds.refreshing) return;
+    if (controls.bonds.revision != controls.voice_link.bond_revision || saved_bond(controls.voice_link.peer) < 0) {
+        finish_voice_link(effect, AE_STALE); return;
+    }
     if (bt->request_status == BT_AUDIO_JOB_PENDING || bt->request_status == BT_AUDIO_JOB_WAITING) return;
     if (bt->request_status != BT_AUDIO_JOB_SUCCEEDED) {
         finish_voice_link(effect, bt->request_status == BT_AUDIO_JOB_FAILED ? AE_IO_ERROR :
@@ -362,12 +366,15 @@ static app_media_start_block_t live_start_block(ae_role_t role)
         return APP_MEDIA_START_PENDING;
     if (controls.runtime.audio.quarantined) return APP_MEDIA_START_QUARANTINED;
     if ((controls.runtime.audio.route == AE_ROUTE_HFP_HF || controls.runtime.audio.route == AE_ROUTE_A2DP_SINK) &&
-        (controls.bluetooth.pairing_busy || controls.bluetooth.pairing_requested || controls.bluetooth.pairing_handshake_pending)) return APP_MEDIA_START_PENDING;
+        (controls.bluetooth.pairing_busy || controls.bluetooth.pairing_requested || controls.bluetooth.pairing_handshake_pending))
+        return APP_MEDIA_START_PENDING;
     ae_route_t selected = live_route(role);
     if (selected <= AE_ROUTE_LOCAL || selected >= AE_ROUTE_COUNT) return APP_MEDIA_START_CONNECTION_REQUIRED;
     const ae_route_capabilities_t *next = &controls.routes[selected];
     if (!next->implemented || next->reason == AE_NOT_SUPPORTED) return APP_MEDIA_START_UNSUPPORTED;
     if (!next->available) return APP_MEDIA_START_ROUTE_UNAVAILABLE;
+    if ((selected == AE_ROUTE_HFP_HF || selected == AE_ROUTE_A2DP_SINK) && next->reason == AE_BUSY)
+        return APP_MEDIA_START_PENDING;
     if (!next->connected) return APP_MEDIA_START_HOST_UNAVAILABLE;
     if (!(role == AE_MICROPHONE ? next->capture : next->playback))
         return selected == AE_ROUTE_USB_UAC ? APP_MEDIA_START_HOST_STREAM_REQUIRED : APP_MEDIA_START_UNSUPPORTED;
@@ -629,14 +636,42 @@ static void rebuild_audio_pairing(void)
     esp_err_t error = current_failure ? (bt->pairing_error != ESP_OK ? bt->pairing_error : bt->error) : controls.audio_pairing_request_error;
     const char *reason;
     if (!bt->supported) { view->state = APP_MEDIA_PAIR_UNAVAILABLE; reason = "Bluetooth audio is unavailable."; }
-    else if (bt->failed || error != ESP_OK) { view->state = APP_MEDIA_PAIR_ERROR; reason = !current_failure && controls.audio_pairing_request_error == ESP_ERR_NO_MEM ? "Bluetooth pairings are full; existing hosts are preserved." : error == ESP_ERR_INVALID_STATE ? "Bluetooth pairing is busy. Wait for the current change." : error == ESP_ERR_TIMEOUT ? "Audio pairing timed out. Try again." : "Audio pairing failed. Try again."; }
+    else if (bt->failed) { view->state = APP_MEDIA_PAIR_ERROR; reason = "Bluetooth audio stopped. Restart the device to recover."; }
+    else if (bt->pairing_handshake_pending && bt->pairing_error == ESP_ERR_TIMEOUT) {
+        view->state = APP_MEDIA_PAIR_ERROR; reason = "Timed out. Waiting for the host's pairing result.";
+    }
+    else if (error != ESP_OK) {
+        view->state = APP_MEDIA_PAIR_ERROR;
+        if (!current_failure && error == ESP_ERR_NO_MEM) reason = "Bluetooth pairings are full; existing hosts are preserved.";
+        else if (bt->pairing_busy) reason = "Pairing failed. Waiting for discovery to close.";
+        else if (!bt->classic_bonds_known) reason = "Saved audio devices are unavailable.";
+        else if (error == ESP_ERR_INVALID_STATE) reason = "Pairing is busy. Wait for the current change.";
+        else reason = view->can_open ? "Audio pairing failed. Try again." : "Audio pairing failed.";
+    }
     else if (!bt->initialized) { view->state = APP_MEDIA_PAIR_UNAVAILABLE; reason = "Bluetooth audio is starting."; }
     else if (bt->pairing_handshake_pending) { view->state = APP_MEDIA_PAIR_AUTHENTICATING; reason = "Finishing audio pairing; audio has not started."; }
     else if (bt->pairing_requested) { view->state = bt->discovery_known && bt->discoverable ? APP_MEDIA_PAIR_DISCOVERABLE : APP_MEDIA_PAIR_PREPARING; reason = view->state == APP_MEDIA_PAIR_DISCOVERABLE ? "Choose this device in your host's Bluetooth settings." : "Preparing audio discoverability..."; }
     else if (bt->pairing_busy) { view->state = APP_MEDIA_PAIR_CLOSING; reason = "Closing audio discoverability. Wait before pairing again."; }
-    else if (bt->pairing_completed) { view->state = APP_MEDIA_PAIR_COMPLETED; reason = "Paired. Open Mic or play audio on the host."; }
-    else if (bt->pairing_expired) { view->state = APP_MEDIA_PAIR_EXPIRED; reason = "Audio pairing expired. Open a new window to retry."; }
-    else { view->state = APP_MEDIA_PAIR_CLOSED; reason = "Pair audio first; input pairing is separate."; }
+    else if (!bt->classic_bonds_known) { view->state = APP_MEDIA_PAIR_UNAVAILABLE; reason = "Checking saved audio devices."; }
+    else if (bt->control_inflight && bt->request_status == BT_AUDIO_JOB_UNCERTAIN) {
+        view->state = APP_MEDIA_PAIR_UNAVAILABLE; reason = "Waiting for the host to finish the last audio link request.";
+    }
+    else if (bt->pairing_expired) { view->state = APP_MEDIA_PAIR_EXPIRED; reason = "Audio pairing expired."; }
+    else {
+        view->state = bt->pairing_completed ? APP_MEDIA_PAIR_COMPLETED : APP_MEDIA_PAIR_CLOSED;
+        bool hfp = controls.view.route == APP_MEDIA_ROUTE_HFP;
+        if (hfp && bt->hfp_connected) {
+            if (!bt->classic_hfp_peer_bonded) reason = "Voice link is not paired. Disconnect before pairing.";
+            else if (voice_ready(bt)) reason = "Voice audio is ready. Choose Mic or Speaker.";
+            else if (bt->hfp_audio_connected) reason = "Voice format unavailable. Disconnect and reconnect.";
+            else reason = "Voice link connected. Choose Connect to open voice audio.";
+        } else if (!hfp && bt->a2dp_connected) {
+            if (!bt->classic_a2dp_peer_bonded) reason = "Media link is not paired. Disconnect before pairing.";
+            else if (bt->a2dp_streaming && bt->a2dp_format_known) reason = "Host audio is ready. Choose Speaker.";
+            else reason = "Media link connected. Start playback on the host.";
+        } else if (hfp ? bt->hfp_peer_known : bt->a2dp_peer_known) reason = "Waiting for the audio link to finish connecting or closing.";
+        else reason = bt->classic_bond_count ? "Choose a saved audio device and connect." : "Pair audio first; input pairing is separate.";
+    }
     snprintf(view->reason, sizeof(view->reason), "%s", reason);
 }
 
@@ -725,15 +760,15 @@ static void rebuild(void)
         bool link_idle = idle_controls() && !any_jobs() && bt->initialized && !bt->failed && !bt->control_inflight &&
             !bt->pairing_busy && !bt->pairing_requested && !bt->pairing_handshake_pending &&
             bt->request_status != BT_AUDIO_JOB_PENDING && bt->request_status != BT_AUDIO_JOB_WAITING;
-        route->can_connect = link_idle && (hfp && connected ? current_known && saved_bond(peer) >= 0 && !voice_ready(bt) :
-            selected >= 0 && !connected && (!hfp || !bt->hfp_peer_known));
+        route->can_connect = link_idle && (hfp && connected ? current_known && saved_bond(peer) >= 0 && !bt->hfp_audio_connected :
+            selected >= 0 && !current_known && !connected);
         route->can_disconnect = link_idle && connected && known_peer;
         bool catalog = controls.bonds.known && !controls.bonds.refreshing && controls.bonds.error == ESP_OK &&
             controls.bonds.count > 0 && controls.bonds.count <= BT_AUDIO_CLASSIC_BONDS_MAX;
         if (catalog) {
             unsigned next = selected < 0 ? 0U : ((unsigned)selected + 1U) % controls.bonds.count;
             view->next_peer_id = peer_id(controls.bonds.bonds[next].address);
-            view->can_select_peer = idle_controls() && !any_jobs() && !connected && !bt->control_inflight &&
+            view->can_select_peer = link_idle && !current_known && !connected &&
                 (selected < 0 || controls.bonds.count > 1);
         }
     }
@@ -1051,6 +1086,8 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
             if (connect && route == APP_MEDIA_ROUTE_HFP) { result = connect_voice(); break; }
             app_media_local_request_t command = {.action = APP_MEDIA_LINK_CONTROL, .route = (ae_route_t)route,
                 .value = connect, .bluetooth_generation = controls.bluetooth.generation,
+                .bluetooth_link_generation = route == APP_MEDIA_ROUTE_HFP ?
+                    controls.bluetooth.hfp_link_generation : controls.bluetooth.a2dp_link_generation,
                 .bluetooth_bond_revision = connect ? controls.bonds.revision : 0};
             memcpy(command.bluetooth_peer, connect ? controls.selected_peer :
                 route == APP_MEDIA_ROUTE_HFP ? controls.bluetooth.hfp_peer : controls.bluetooth.a2dp_peer, 6);
@@ -1219,7 +1256,10 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
     board_audio_capture_snapshot(&poll_scratch.capture_level);
     update_microphone_level(&poll_scratch.capture_level);
     bt_audio_snapshot_t bluetooth = bt_audio_snapshot();
-    if (bluetooth.generation != controls.bluetooth.generation || bluetooth.control_inflight != controls.bluetooth.control_inflight ||
+    if (bluetooth.generation != controls.bluetooth.generation ||
+        bluetooth.hfp_link_generation != controls.bluetooth.hfp_link_generation ||
+        bluetooth.a2dp_link_generation != controls.bluetooth.a2dp_link_generation ||
+        bluetooth.control_inflight != controls.bluetooth.control_inflight ||
         bluetooth.request_status != controls.bluetooth.request_status) increase(&controls.revision);
     controls.bluetooth = bluetooth;
     bt_audio_bond_list_t *bonds = &poll_scratch.bonds;

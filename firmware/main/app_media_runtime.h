@@ -35,7 +35,7 @@ typedef struct {
     ae_stop_reason_t stop_reason;
     ae_role_t role;
     bool value;
-    uint64_t bluetooth_generation, bluetooth_bond_revision;
+    uint64_t bluetooth_generation, bluetooth_link_generation, bluetooth_bond_revision;
     uint8_t bluetooth_peer[6];
     uint64_t object_revision, offset, quota_bytes;
     uint32_t cursor;

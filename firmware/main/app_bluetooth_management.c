@@ -11,7 +11,7 @@
 #define MANAGEMENT_TIMEOUT_MS UINT64_C(30000)
 typedef struct {
     app_bluetooth_management_snapshot_t view;
-    uint64_t started_ms, deadline_ms, generation, preference_revision, admission_reservation;
+    uint64_t started_ms, deadline_ms, host_generation, preference_revision, admission_reservation;
     bool disconnect_requested;
     ble_hid_target_t target;
     ble_hid_target_snapshot_t original_policy;
@@ -32,7 +32,7 @@ static void message(app_bluetooth_management_phase_t phase, const char *text)
 static void finish(esp_err_t error, bool uncertain, const char *text)
 {
     if (error != ESP_OK && management.view.operation == APP_BT_MANAGE_ADD) ble_hid_pairing_close();
-    if (error == ESP_OK) ble_hid_management_resume(management.admission_reservation);
+    if (error == ESP_OK) ble_hid_management_resume(management.admission_reservation, NULL);
     else ble_hid_management_release(management.admission_reservation);
     management.view.active = false;
     management.view.error = error;
@@ -88,7 +88,7 @@ static bool policy_stable(const ble_hid_target_snapshot_t *policy)
 }
 void app_bluetooth_management_init(void) { memset(&management, 0, sizeof(management)); }
 esp_err_t app_bluetooth_management_begin(app_bluetooth_management_operation_t operation,
-    uint64_t generation, uint64_t bond_revision, uint64_t preference_revision,
+    uint64_t host_generation, uint64_t bond_revision, uint64_t preference_revision,
     const ble_hid_target_t *target, uint64_t now)
 {
     if (operation < APP_BT_MANAGE_ADD || operation > APP_BT_MANAGE_RECONNECT ||
@@ -97,7 +97,8 @@ esp_err_t app_bluetooth_management_begin(app_bluetooth_management_operation_t op
     ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
     ble_hid_target_snapshot_t policy = ble_hid_target_snapshot();
     ble_hid_copy_bond_list(&observed);
-    if (!bluetooth.initialized || bluetooth.failed || bluetooth.generation != generation ||
+    if (!bluetooth.initialized || bluetooth.failed ||
+        (bluetooth.connection_admitted ? bluetooth.generation : 0) != host_generation ||
         !observed.known || observed.updating || observed.count > BLE_HID_MAX_BONDS ||
         observed.revision != bond_revision || !policy_stable(&policy) || policy.revision != preference_revision)
         return ESP_ERR_INVALID_STATE;
@@ -110,14 +111,15 @@ esp_err_t app_bluetooth_management_begin(app_bluetooth_management_operation_t op
         if (matches != 1) return ESP_ERR_NOT_FOUND;
     }
     uint64_t reservation = 0;
-    if (!ble_hid_management_reserve(generation, &reservation)) return ESP_ERR_INVALID_STATE;
+    if (!ble_hid_management_reserve(host_generation, bond_revision, preference_revision, &reservation)) return ESP_ERR_INVALID_STATE;
     uint64_t revision = management.view.revision;
     if (revision == UINT64_MAX) { ble_hid_management_release(reservation); return ESP_ERR_INVALID_STATE; }
     memset(&management, 0, sizeof(management));
     management.view.revision = revision;
     management.view.operation = operation; management.view.active = true;
     management.admission_reservation = reservation;
-    management.generation = generation; management.preference_revision = preference_revision;
+    management.host_generation = host_generation;
+    management.preference_revision = preference_revision;
     management.started_ms = now; management.deadline_ms = now + MANAGEMENT_TIMEOUT_MS;
     management.original = observed; management.original_policy = policy;
     if (target) management.target = *target;
@@ -166,13 +168,22 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
         finish(ESP_ERR_INVALID_STATE, management.view.irreversible, "Bluetooth is unavailable or its saved policy is uncertain."); return;
     }
     if (management.view.phase == APP_BT_MANAGE_RELEASE || management.view.phase == APP_BT_MANAGE_DISCONNECT) {
+        if (!management.disconnect_requested && management.host_generation !=
+            (bluetooth.connection_admitted ? bluetooth.generation : 0)) {
+            finish(ESP_ERR_INVALID_STATE, false, "Bluetooth host changed. Review the new connection."); return;
+        }
         if (bluetooth.connected) {
-            if (!management.disconnect_requested && bluetooth.generation != management.generation) {
-                finish(ESP_ERR_INVALID_STATE, false, "Bluetooth host changed. Review the new connection."); return;
-            }
-            if (!management.disconnect_requested && !context->release_pending && !bluetooth.congested) {
-                if (!(management.view.operation == APP_BT_MANAGE_RECONNECT ?
-                    ble_hid_disconnect_user_generation(management.generation) : ble_hid_disconnect_generation(management.generation))) {
+            if (!management.disconnect_requested && (!bluetooth.connection_admitted ||
+                (!context->release_pending && !bluetooth.congested))) {
+                const uint64_t generation = bluetooth.generation;
+                if (!(management.view.operation == APP_BT_MANAGE_RECONNECT && bluetooth.connection_admitted ?
+                    ble_hid_disconnect_user_generation(generation) : ble_hid_disconnect_generation(generation))) {
+                    bluetooth = ble_hid_snapshot();
+                    /* A refused stale request did not disconnect anything.
+                     * Reconcile a departed provisional ACL on the next poll;
+                     * never retry against a replacement in this iteration. */
+                    if (!management.host_generation && bluetooth.initialized && !bluetooth.failed &&
+                        !bluetooth.connection_admitted && !bluetooth.connected && bluetooth.generation != generation) return;
                     finish(ESP_ERR_INVALID_STATE, false, "The current host could not be disconnected."); return;
                 }
                 management.disconnect_requested = true;
@@ -184,11 +195,9 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
          * deliberately retains a neutral-report barrier for the next host;
          * waiting for that disconnected barrier would prevent pairing it. */
         if (bluetooth.congested || !ble_hid_management_ready(management.admission_reservation)) return;
-        if ((!management.disconnect_requested && bluetooth.generation != management.generation) ||
-            !manifest_matches(false) || !policy_stable(&policy) || policy.revision != management.preference_revision) {
+        if (!manifest_matches(false) || !policy_stable(&policy) || policy.revision != management.preference_revision) {
             finish(ESP_ERR_INVALID_STATE, false, "Saved hosts or target policy changed. Review before retrying."); return;
         }
-        management.generation = bluetooth.generation;
         if (management.view.operation == APP_BT_MANAGE_RECONNECT && !policy.selected) {
             ble_hid_management_reconnect(management.admission_reservation, &management.target);
             message(APP_BT_MANAGE_ADVERTISING, "Reconnect allowed for 30 seconds. Exact pre-connection selection unavailable; connect from that host.");
@@ -265,7 +274,7 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
         }
         if (selecting || management.view.operation == APP_BT_MANAGE_RECONNECT) {
             if (!manifest_matches(false)) { finish(ESP_ERR_INVALID_STATE, true, "Saved hosts changed during selection."); return; }
-            if (selecting) ble_hid_management_resume(management.admission_reservation);
+            if (selecting) ble_hid_management_resume(management.admission_reservation, &management.target);
             else ble_hid_management_reconnect(management.admission_reservation, &management.target);
             message(APP_BT_MANAGE_ADVERTISING, selecting ? "Selected host saved. Waiting for advertising; connection is not ready." :
                 "Reconnect allowed for 30 seconds. Exact pre-connection selection unavailable; connect from that host.");
