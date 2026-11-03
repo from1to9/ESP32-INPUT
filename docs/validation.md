@@ -2007,6 +2007,46 @@ USB regressions and the pinned ESP32-S31 target build pass. These establish
 local regression and compilation evidence only. The repair has not been
 flashed or physically tested under the latest user instruction.
 
+### Bluetooth management without a USB release dependency: 2026-11-03
+
+The user reported that saved Bluetooth hosts could not be removed in any mode
+and new pairing succeeded only with USB input connected. Source tracing found
+the native management workflow waiting for the HID engine's retained
+`release_pending` even after Bluetooth link-down. That flag deliberately remains
+set until a connected input host accepts neutral reports. The same flag also
+disabled disconnected saved-target selection. It must not be cleared merely to
+permit management.
+
+The repair removes those waits only after observed Bluetooth disconnection and
+scopes connected release checks to the selected Bluetooth input transport.
+Local and remote disconnect paths share that scope. Current-host release and
+congestion checks, generation/identity validation, policy durability and
+transport-switch cancellation remain in place. The BLE adapter's bond-removal
+and storage implementation are unchanged.
+
+The original manager stalls in the actual native BLE workflow with the future
+release barrier set. The repaired workflow completes Add, Forget all, selected
+single-host removal and unselected single-host removal, both from initially
+disconnected state and after a confirmed disconnect, while retaining that
+barrier. Removal still verifies the requested identity, unchanged remaining
+identities and durable reconciled target policy. Connected pending release and
+congestion still prevent premature disconnect. Controls tests cover all three
+product modes and preserve cancellation after accepted policy work. Coordinator
+tests cover USB-disconnected release isolation in every mode without sending
+HID or clearing the future barrier.
+
+The final native BLE suite passed all three capacity/profile configurations,
+each with 100,000 lifecycle cycles under ASan/UBSan. Connectivity controls and
+all 164 production coordinator cases passed. The pinned ESP32-S31 target build,
+task stack-budget gates and repository hygiene checks passed. Interrupt stack
+safety remains unqualified; these checks do not establish device endurance.
+
+This is source/native evidence for a reproducible management dependency, not
+physical proof for every reported pairing/deletion failure. No device, serial,
+radio or flash testing was performed for this repair, as requested. Native
+radio/storage substitutions do not qualify host discovery, pairing or physical
+bond removal.
+
 ## Device evidence template
 
 ```text

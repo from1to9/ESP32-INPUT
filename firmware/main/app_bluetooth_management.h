@@ -8,6 +8,8 @@ typedef enum { APP_BT_MANAGE_IDLE, APP_BT_MANAGE_RELEASE, APP_BT_MANAGE_DISCONNE
     APP_BT_MANAGE_DELETE, APP_BT_MANAGE_POLICY, APP_BT_MANAGE_ADVERTISING,
     APP_BT_MANAGE_COMPLETE, APP_BT_MANAGE_FAILED, APP_BT_MANAGE_CANCELLED } app_bluetooth_management_phase_t;
 typedef struct {
+    /* release_pending gates disconnect only while a Bluetooth host remains
+     * connected; the next-host neutral barrier survives link-down. */
     bool locked, screen_off, release_pending, transport_switch_pending;
 } app_bluetooth_management_context_t;
 typedef struct {

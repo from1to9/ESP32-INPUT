@@ -136,8 +136,13 @@ are stored only after explicit edits, not on render/status polling.
 
 Bluetooth actions open a local confirmation before changing pairing admission or
 forgetting saved hosts. Pairing is time-limited and displays a countdown. Forget
-waits for input cancellation, release recovery and disconnection; changing the
-connection while confirmation is open invalidates that confirmation.
+waits for input cancellation, current Bluetooth host release recovery and
+disconnection; changing the connection while confirmation is open invalidates
+that confirmation. After confirmed link-down, the next-host neutral-report
+barrier remains armed but does not block pairing or saved-host management.
+Pending releases on a separately selected USB transport do not gate Bluetooth
+management. Connected Bluetooth congestion/release and transport-switch guards
+still apply. These rules are the same in Mouse, Keyboard and Audio modes.
 
 Connectivity selects Bluetooth or USB for all primary modes and opens separate
 Bluetooth-host and Wi-Fi detail pages. Selection cancels pending input, waits

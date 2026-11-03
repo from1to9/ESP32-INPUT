@@ -281,7 +281,7 @@ static void remote_device_bluetooth_progress(remote_device_binding_job_t *job)
     if (!job->action_started) {
         if (bluetooth.connected) {
             if (!job->disconnect_requested && bluetooth.generation != request->bluetooth_generation) { remote_device_failed(job, CP_STALE, false); return; }
-            if (!job->disconnect_requested && !s_engine.state.release_pending && !bluetooth.congested) {
+            if (!job->disconnect_requested && !bluetooth_release_pending() && !bluetooth.congested) {
                 if (!ble_hid_disconnect_generation(bluetooth.generation)) { remote_device_failed(job, CP_STALE, false); return; }
                 job->disconnect_requested = true;
             }

@@ -91,8 +91,85 @@ static void native_management_selected_add_and_reconnect(void)
     connect_peer(); drain(); authorize_peer(true); worker_cycle();
     assert(ble_hid_snapshot().connected && ble_hid_snapshot().ready && fake_bond_count == 2);
 }
+static void native_management_disconnected_release_pending(void)
+{
+    const app_bluetooth_management_operation_t operations[] = {
+        APP_BT_MANAGE_ADD, APP_BT_MANAGE_FORGET_ALL,
+        APP_BT_MANAGE_FORGET_ONE, APP_BT_MANAGE_FORGET_ONE};
+    for (unsigned op = 0; op < sizeof(operations) / sizeof(operations[0]); ++op) {
+        for (unsigned connected = 0; connected < 2; ++connected) {
+            native_setup(true);
+            input_state_t input; input_init(&input);
+            ble_hid_target_t target = native_target(op == 3 ? 0xc2 : 0xc3);
+            const ble_hid_target_snapshot_t original_policy = ble_hid_target_snapshot();
+            if (connected) {
+                active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
+                assert(state.public.connected && state.public.ready);
+                input_set_connected(&input, true);
+            }
+            native_begin(operations[op], operations[op] == APP_BT_MANAGE_FORGET_ONE ? &target : NULL);
+            native_context.release_pending = input.release_pending;
+            if (connected) {
+                const uint64_t policy_revision = ble_hid_target_snapshot().revision;
+                for (unsigned poll = 0; poll < 3; ++poll) native_step(false);
+                assert(!close_calls && !remove_calls && !state.public.pairing_open &&
+                    ble_hid_target_snapshot().revision == policy_revision);
+                assert(input_ack_release(&input, input.epoch)); /* Model the live host's accepted zero reports. */
+                native_context.release_pending = input.release_pending;
+                state.link_congested = true; refresh_locked(); native_step(false);
+                assert(!close_calls && !remove_calls); /* A live congested host still blocks. */
+                state.link_congested = false; refresh_locked(); native_step(false);
+                assert(close_calls == 1 && native_receipt().phase == APP_BT_MANAGE_DISCONNECT);
+                disconnect_peer();
+                input_set_connected(&input, false);
+                native_context.release_pending = input.release_pending;
+            }
+            const uint64_t disconnected_epoch = input.epoch;
+            assert(!input_ack_release(&input, disconnected_epoch));
+            if (operations[op] != APP_BT_MANAGE_ADD) {
+                bool removed = false;
+                for (unsigned poll = 0; poll < 64 && !removed; ++poll) {
+                    native_step(true);
+                    removed = operations[op] == APP_BT_MANAGE_FORGET_ALL ?
+                        state.public.bond_forget_state == BLE_HID_FORGET_DONE :
+                        state.single_forget.status == BLE_HID_BOND_FORGET_SUCCEEDED;
+                }
+                const ble_hid_target_snapshot_t policy = ble_hid_target_snapshot();
+                assert(removed && native_receipt().phase == APP_BT_MANAGE_DELETE &&
+                    policy.revision == original_policy.revision && policy.selected == original_policy.selected &&
+                    !memcmp(policy.target.address, original_policy.target.address, sizeof(policy.target.address)) &&
+                    !memcmp(policy.target.bond_id, original_policy.target.bond_id, BLE_HID_BOND_ID_BYTES));
+                assert(policy.available == (op == 3)); /* A removed selected key stays blocked until reconciliation. */
+            }
+            native_finish();
+            assert(native_context.release_pending && input.release_pending && input.epoch == disconnected_epoch &&
+                !input.connected && !input_can_emit(&input, input.epoch, INPUT_LOCAL, INPUT_MOUSE));
+            assert(close_calls == connected && !state.public.connected);
+            if (operations[op] == APP_BT_MANAGE_ADD) {
+                assert(state.public.pairing_open && state.public.advertising && fake_bond_count == 2 &&
+                    subscriptions.count == 2 && !remove_calls && !ble_hid_target_snapshot().selected);
+            } else if (operations[op] == APP_BT_MANAGE_FORGET_ALL) {
+                assert(!state.public.pairing_open && !fake_bond_count && !subscriptions.count &&
+                    remove_calls == 2 && !ble_hid_target_snapshot().selected);
+            } else {
+                ble_hid_bond_list_t list = ble_hid_bond_list();
+                const uint8_t retained = op == 3 ? 0xc3 : 0xc2;
+                assert(!state.public.pairing_open && fake_bond_count == 1 && subscriptions.count == 1 &&
+                    list.count == 1 && list.bonds[0].address[0] == retained && remove_calls == 1 &&
+                    ble_hid_target_snapshot().selected == (op == 3));
+            }
+            assert(ble_hid_target_snapshot().durable);
+            input_set_connected(&input, true);
+            assert(input.release_pending && !input_ack_release(&input, disconnected_epoch) &&
+                !input_can_emit(&input, input.epoch, INPUT_LOCAL, INPUT_MOUSE));
+        }
+    }
+    puts("Native Bluetooth management: disconnected pending releases preserved across Add, Forget all and selected/unselected Forget one; live release/congestion guards retained");
+}
+
 static void native_management_all_and_single_removal(void)
 {
+    native_management_disconnected_release_pending();
     native_setup(true); native_begin(APP_BT_MANAGE_FORGET_ALL, NULL);
     native_finish();
     assert(!fake_bond_count && !subscriptions.count && !state.public.pairing_open &&

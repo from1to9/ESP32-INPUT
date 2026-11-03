@@ -543,6 +543,13 @@ static bool send_report(void *context, uint8_t report_id,
     return accepted;
 }
 
+static bool bluetooth_release_pending(void)
+{
+    /* USB releases belong to that transport. Switching away from Bluetooth
+     * already requires its old-link release/recovery boundary. */
+    return s_input_transport == APP_INPUT_BLUETOOTH && s_engine.state.release_pending;
+}
+
 static input_link_t input_link_snapshot(const ble_hid_snapshot_t *bluetooth)
 {
     if (s_input_transport == APP_INPUT_USB) {
@@ -736,7 +743,7 @@ static void refresh_connectivity_context(void)
         .ui_revision = s_ui_revision, .mode = s_engine.state.mode, .overlay = s_overlay,
         .settings_page = s_settings_page, .confirmation = s_confirmation,
         .locked = s_engine.state.locked, .screen_off = s_idle.asleep || s_idle.wake_capture,
-        .release_pending = s_engine.state.release_pending,
+        .release_pending = bluetooth_release_pending(),
         .transport_switch_pending = s_transport_switch_pending};
     app_connectivity_controls_context(&context);
 }
@@ -1188,7 +1195,7 @@ static void service_pair_operation(const ble_hid_snapshot_t *link)
         return;
     }
     if (link->connected) {
-        if (!s_engine.state.release_pending && !link->congested && !s_pair_disconnect_requested)
+        if (!bluetooth_release_pending() && !link->congested && !s_pair_disconnect_requested)
             s_pair_disconnect_requested = ble_hid_disconnect_generation(link->generation);
         return;
     }

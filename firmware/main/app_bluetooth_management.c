@@ -170,7 +170,10 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
             }
             return;
         }
-        if (context->release_pending || bluetooth.congested) return;
+        /* Link-down ends the old host's release obligation. The HID engine
+         * deliberately retains a neutral-report barrier for the next host;
+         * waiting for that disconnected barrier would prevent pairing it. */
+        if (bluetooth.congested) return;
         if ((!management.disconnect_requested && bluetooth.generation != management.generation) ||
             !manifest_matches(false) || !policy_stable(&policy) || policy.revision != management.preference_revision) {
             finish(ESP_ERR_INVALID_STATE, false, "Saved hosts or target policy changed. Review before retrying."); return;
@@ -221,7 +224,7 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
             if (deletion.status != BLE_HID_BOND_FORGET_SUCCEEDED) return;
             if (!manifest_matches(true)) { finish(ESP_ERR_INVALID_STATE, true, "Removal did not preserve the other saved hosts."); return; }
         }
-        if (!policy_stable(&policy) || policy.revision != management.preference_revision || context->release_pending) {
+        if (!policy_stable(&policy) || policy.revision != management.preference_revision) {
             finish(ESP_ERR_INVALID_STATE, true, "Removal finished but target policy needs reconciliation."); return;
         }
         esp_err_t error = submit_policy(&policy);
@@ -251,7 +254,7 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
                 "All saved input hosts removed. Use Add host to pair." :
                 "This saved host was removed. Other saved hosts remain."); return;
         }
-        if (!manifest_matches(false) || context->release_pending || !ble_hid_pairing_open(BLE_HID_PAIRING_DEFAULT_MS)) {
+        if (!manifest_matches(false) || !ble_hid_pairing_open(BLE_HID_PAIRING_DEFAULT_MS)) {
             finish(ESP_ERR_INVALID_STATE, false, "Pairing could not open. Inspect Bluetooth readiness and saved hosts."); return;
         }
         message(APP_BT_MANAGE_ADVERTISING, "Waiting for Bluetooth to become visible.");

@@ -126,6 +126,15 @@ Regressions cover bounded/shared UTF-8 validation, caller-buffer ownership, pre-
 
 ## Evidence and qualification
 
+The production native manager/worker composition also keeps the next-host
+`release_pending` barrier set throughout Add, Forget all, selected single-host
+removal and unselected single-host removal. Each runs from an initially
+disconnected state and after confirmed disconnect. The original manager stalls
+in RELEASE; the repair completes without clearing the barrier. Connected
+pending release/congestion still blocks disconnect, and removal verifies the
+exact remaining bonds, subscription cleanup and durable target policy. These
+SDK/storage substitutes do not establish physical pairing or deletion.
+
 Regressions cover both CCCD gates, missed unsubscribe/resubscribe and suspend/resume edges, stale generations, malformed/prepared writes, LED padding, backpressure, disconnect during submission, asynchronous notification failure, bounded queue overflow, coordinator disconnect, missing completion, tick rollover, stale ATT transactions and 100000 connection lifecycles. Persistence cases include reconnect and simulated reboot without CCCD rewrites, disabled values, different peers, changed LTK with the same IRK, unchanged-write wear avoidance, pending initial bonding, restore/write/disconnect races, corruption/full/open/commit failure, explicit PSA initialization and BAD_STATE failures, stale lookup/commit failures after peer replacement, legacy bond rejection, missing key/list evidence, and bounded record capacity/reuse.
 
 Management regressions cover first-boot zero-bond admission, expiry without reopening, manual open/close, saved reconnect outside the window, rejection and handshake deadlines, old rejection jobs, asynchronous RSSI validity/age/failure/timeout and same-address stale samples, confirmed forgetting with pending notifications/advertising/rejected peers, sequential removal of 32 bonds, partial failure and late callbacks. Three independently paired hosts preserve separate keyboard/mouse subscriptions across repeated reconnects without erasing other hosts. Cached-list tests include no SDK/storage calls during repeated copies, actual refresh after pairing, type/identity mismatch, duplicate and private/unmapped addresses, read errors, count races, known-empty clearing and capacity bounds. The complete adapter suite runs with both 15- and 32-bond SDK configurations, including full-capacity new-host rejection without deletion and saved-host reconnect. Native substitutes establish state and failure behavior, not radio interoperability.

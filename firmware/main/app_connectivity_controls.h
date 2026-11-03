@@ -11,6 +11,8 @@ typedef struct {
     app_overlay_t overlay;
     app_settings_page_t settings_page;
     app_confirmation_t confirmation;
+    /* release_pending belongs to the selected Bluetooth input transport;
+     * it is not a pending release on an independently selected USB link. */
     bool locked, screen_off, release_pending, transport_switch_pending;
 } app_connectivity_controls_context_t;
 typedef struct {

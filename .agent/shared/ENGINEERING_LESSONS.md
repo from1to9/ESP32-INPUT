@@ -711,3 +711,27 @@ Do not change the engine's legitimate sequence reset to satisfy the adapter.
 
 Evidence: [USB audio regressions](../../tests/usb_audio/README.md) and
 [Mic restart device failure](../../docs/validation.md#usb-mic-restart-failure-during-continuous-speaker-playback-2026-10-26).
+
+## 31. Separate current-host release from the next-host neutral barrier
+
+An input engine can deliberately retain `release_pending` after disconnect so
+the next host receives neutral reports before fresh input. No disconnected host
+can acknowledge those reports. Waiting for that flag before pairing, editing a
+saved target or deleting bonds creates a circular dependency that an unrelated
+USB connection can appear to resolve.
+
+Wait for release and transport completion while the affected Bluetooth host is
+connected. After observed link-down, continue the approved management operation
+without clearing the next-host barrier or claiming release delivery. Pending
+USB input releases belong to USB. Keep generation checks, exact reviewed bond
+identity, durable policy receipts, cancellation and transport-switch exclusion.
+
+Exercise both initially disconnected and connected-then-disconnected cases with
+the barrier still set, including Add, Forget all and selected/unselected single
+host deletion. Keep connected-release/congestion negative cases. Use the real
+BLE worker and storage boundary to verify removal and policy reconciliation;
+SDK submission alone is not deletion proof.
+
+Evidence: [BLE regressions](../../tests/ble_hid/README.md),
+[connectivity controls](../../tests/connectivity_controls/README.md), and
+[management validation](../../docs/validation.md#bluetooth-management-without-a-usb-release-dependency-2026-11-03).

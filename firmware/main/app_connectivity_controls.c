@@ -133,7 +133,7 @@ static bool ble_idle(void)
     return idle() && controls.preference.loaded && controls.preference.request_status != BLE_HID_TARGET_PENDING &&
         controls.preference.request_status != BLE_HID_TARGET_APPLYING && controls.preference.request_status != BLE_HID_TARGET_UNCERTAIN &&
         controls.bonds.known && !controls.bonds.updating && controls.bluetooth.initialized && !controls.bluetooth.failed &&
-        !controls.bluetooth.connected && !controls.context.release_pending && !controls.context.transport_switch_pending;
+        !controls.bluetooth.connected && !controls.context.transport_switch_pending;
 }
 static void begin(pending_t operation)
 { controls.pending = operation; controls.started_ms = controls.now_ms; }

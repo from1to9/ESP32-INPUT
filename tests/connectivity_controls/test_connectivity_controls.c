@@ -217,25 +217,43 @@ static void bluetooth_exact_forget_confirmation(void)
     ++bonds.bonds[1].bond_id[0]; /* Even a faulty unchanged revision cannot retarget the captured fingerprint. */
     handle(approve); assert(!single_forgets && !app_connectivity_controls_bluetooth_busy());
 }
-static void bluetooth_forget_waits_for_release_and_reports_rejection(void)
+static void bluetooth_disconnected_release_does_not_block_management(void)
 {
-    setup(); context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH; poll_at(1010);
+    setup(); context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH;
+    context.release_pending = true; poll_at(1010);
+    apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, 0)));
+    assert(view.bluetooth_target.can_select && view.bluetooth_target.can_forget);
+    for (input_mode_t mode = INPUT_MOUSE; mode <= INPUT_AUDIO; ++mode) {
+        context.mode = mode; poll_at(1020 + (uint64_t)mode * 20);
+        apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_FORGET_REQUEST, 0)));
+        app_intent_t approve = {.action = APP_CONFIRM, .x = 1, .epoch = context.epoch, .ui_revision = context.ui_revision};
+        apply_overlay(handle(approve)); assert(app_connectivity_controls_bluetooth_busy());
+        poll_at(1030 + (uint64_t)mode * 20);
+        assert(single_forgets == (unsigned)mode + 1 && !app_connectivity_controls_bluetooth_busy());
+        assert(strstr(controls.message, "rejected") && context.release_pending);
+    }
+    assert(!pairing_opens && !all_forgets && !target_requests && !disconnects);
+}
+static void bluetooth_connected_release_still_blocks_disconnect(void)
+{
+    setup(); context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH;
+    bluetooth.connected = true; context.release_pending = true; poll_at(1010);
     apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS, 0)));
     apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_FORGET_REQUEST, 0)));
     app_intent_t approve = {.action = APP_CONFIRM, .x = 1, .epoch = context.epoch, .ui_revision = context.ui_revision};
-    apply_overlay(handle(approve)); assert(app_connectivity_controls_bluetooth_busy() && !single_forgets);
-    context.release_pending = true; poll_at(1020); assert(!single_forgets && view.bluetooth_target.pending);
+    apply_overlay(handle(approve)); poll_at(1020);
+    assert(app_connectivity_controls_bluetooth_busy() && !disconnects && !single_forgets);
     context.release_pending = false; poll_at(1030);
-    assert(single_forgets == 1 && !app_connectivity_controls_bluetooth_busy() && strstr(controls.message, "rejected"));
-    assert(!pairing_opens && !all_forgets && !target_requests);
+    assert(disconnects == 1 && !app_connectivity_controls_bluetooth_busy() && !single_forgets);
+    assert(strstr(controls.message, "could not be disconnected"));
 }
 static void bluetooth_back_cancels_future_pairing(void)
 {
     setup(); context.overlay = APP_OVERLAY_BLUETOOTH_PAIRING; poll_at(1010);
     app_connectivity_controls_effect_t effect;
     assert(app_connectivity_controls_bluetooth_start(APP_PAIR_OPEN, bluetooth.generation, bonds.revision, preference.revision, &effect));
-    context.release_pending = true; poll_at(1020); assert(!target_requests && !pairing_opens);
-    context.release_pending = false; poll_at(1030); assert(target_requests == 1 && !submitted_target.selected);
+    context.release_pending = true; poll_at(1020); assert(target_requests == 1 && !pairing_opens);
+    assert(!submitted_target.selected && context.release_pending);
     app_bluetooth_management_snapshot_t receipt; app_bluetooth_management_snapshot(&receipt);
     preference.request_id = receipt.policy_request_id; preference.request_status = BLE_HID_TARGET_PENDING;
     context.overlay = APP_OVERLAY_SETTINGS; context.settings_page = APP_SETTINGS_BLUETOOTH; poll_at(1040);
@@ -404,7 +422,8 @@ int main(int argc, char **argv)
         {"api-review-authority", api_review_authority}, {"api-review-missing", api_review_missing}, {"api-review-capacity", api_review_capacity},
         {"api-review-package", api_review_package}, {"bluetooth-request-reuse", bluetooth_request_reuse},
         {"bluetooth-forget-confirmation", bluetooth_exact_forget_confirmation},
-        {"bluetooth-forget-release", bluetooth_forget_waits_for_release_and_reports_rejection},
+        {"bluetooth-offline-release", bluetooth_disconnected_release_does_not_block_management},
+        {"bluetooth-connected-release", bluetooth_connected_release_still_blocks_disconnect},
         {"bluetooth-back-cancel", bluetooth_back_cancels_future_pairing},
         {"bluetooth-pairing-status", bluetooth_pairing_status_requires_owner_evidence}};
     if (!strcmp(argv[1], "--list")) { for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) puts(cases[i].name); return 0; }

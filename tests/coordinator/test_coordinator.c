@@ -342,7 +342,8 @@ void app_media_controls_poll(uint64_t now, app_media_controls_effect_t *effect)
 { (void)now; (void)effect; }
 void app_media_controls_fill(app_view_t *view) { (void)view; }
 bool app_connectivity_controls_init(void) { return true; }
-void app_connectivity_controls_context(const app_connectivity_controls_context_t *context) { (void)context; }
+static app_connectivity_controls_context_t test_connectivity_context;
+void app_connectivity_controls_context(const app_connectivity_controls_context_t *context) { test_connectivity_context = *context; }
 bool app_connectivity_controls_handle(const app_intent_t *intent, app_connectivity_controls_effect_t *effect)
 { (void)intent; (void)effect; return false; }
 void app_connectivity_controls_poll(uint64_t now, app_connectivity_controls_effect_t *effect)
@@ -3113,6 +3114,31 @@ static void transport_setup(input_mode_t mode, app_input_transport_t selected)
     trace_count = 0;
     test_ble_send_attempts = test_usb_send_attempts = 0;
     test_previous_link = input_link_snapshot(&test_link);
+}
+
+static void bluetooth_management_ignores_unrelated_usb_release(void)
+{
+    for (int mode = INPUT_MOUSE; mode <= INPUT_AUDIO; ++mode) {
+        for (int transport = APP_INPUT_BLUETOOTH; transport <= APP_INPUT_USB; ++transport) {
+            transport_setup((input_mode_t)mode, (app_input_transport_t)transport);
+            if (transport == APP_INPUT_USB) {
+                test_usb.mounted = test_usb.ready = false;
+                input_link_t active = input_link_snapshot(&test_link);
+                observe_input_link(&active, &test_previous_link);
+            }
+            hid_engine_cancel(&s_engine);
+            assert(s_engine.state.release_pending && test_link.connected);
+            refresh_connectivity_context();
+            assert(test_connectivity_context.release_pending == (transport == APP_INPUT_BLUETOOTH));
+            s_pair_operation = APP_CONFIRM_DISCONNECT;
+            s_pair_origin_generation = test_link.generation;
+            s_pair_deadline_ms = s_now_ms + 5000;
+            test_disconnect_accept = true;
+            service_pair_operation(&test_link);
+            assert(test_disconnects == (transport == APP_INPUT_USB ? 1U : 0U));
+            assert(s_engine.state.release_pending && !test_ble_send_attempts && !test_usb_send_attempts);
+        }
+    }
 }
 
 static void acknowledge_selected_transport(void)
@@ -6016,6 +6042,7 @@ int main(int argc, char **argv)
     RUN(final_release_admission_refreshes_transport_completion_evidence);
     RUN(ble_target_failure_after_final_usb_release_aborts_selection);
     RUN(pairing_disconnect_waits_for_fresh_final_release_completion);
+    RUN(bluetooth_management_ignores_unrelated_usb_release);
     RUN(confirmed_disconnect_cannot_retarget_a_replacement_peer);
     RUN(origin_disconnect_allows_explicit_switch_without_release_claim);
     RUN(pairing_admission_generation_change_waits_for_actual_link_down);

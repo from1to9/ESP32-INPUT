@@ -56,3 +56,9 @@ observations together; saved-host advertising alone cannot produce Ready to
 pair. These cached-port tests do not claim successful radio/storage execution;
 `tests/ble_hid/native_management_cases.inc` composes the same workflow with the
 production BLE worker for those positive and failure paths.
+
+Disconnected saved-target management remains available with the next-host
+neutral-report barrier set in Mouse, Keyboard and Audio modes. Owner rejection
+still reports failure rather than assuming deletion. A connected Bluetooth host
+with pending release must wait before disconnect; Back after accepted policy
+work still preserves its receipt and prevents late pairing activation.
