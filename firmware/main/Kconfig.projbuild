@@ -30,10 +30,11 @@ menu "Input device board resources"
         help
             Limit queued transactions for the Mosaico CO5300 panel only.
             The pinned BSP uses PSRAM draw buffers with internal DMA bounce
-            buffers. Each queued chunk retains up to 8190 payload bytes with
-            the pinned S31 bus configuration, plus allocation metadata.
-            A ceiling of one limits that payload to 8190 bytes; two permits
-            16380 bytes. The SDK recycles chunks while sending the entire
+            buffers. The board caps the bus transfer request at 4092 bytes,
+            which yields a 4095-byte chunk on the tested S31 configuration.
+            With 16-byte DMA alignment the SDK may report 8160 bytes.
+            Each queued chunk needs a contiguous DMA allocation.
+            The SDK reports the actual bus limit and sends the entire
             viewport and retains the existing TE and final completion path.
             Increasing this ceiling requires a complete internal/DMA memory
             budget and device throughput qualification.

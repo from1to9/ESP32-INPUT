@@ -5,6 +5,12 @@
 #include "esp_err.h"
 #include "hal/gpio_types.h"
 typedef enum { SPI1_HOST, SPI2_HOST, SPI3_HOST } spi_host_device_t;
+typedef enum { SPI_DMA_DISABLED, SPI_DMA_CH_AUTO = 3 } spi_dma_chan_t;
+typedef struct {
+    int mosi_io_num, miso_io_num, sclk_io_num, quadwp_io_num, quadhd_io_num, max_transfer_sz;
+    unsigned int flags;
+    int intr_flags;
+} spi_bus_config_t;
 typedef struct spi_transaction_t {
     unsigned int flags;
     size_t length, rxlength;

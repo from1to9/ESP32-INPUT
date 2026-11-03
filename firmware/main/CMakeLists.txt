@@ -36,5 +36,7 @@ add_dependencies(${COMPONENT_LIB} input_build_identity)
 # Force extraction of the otherwise unreferenced wrapper from libmain even
 # when the BSP factory reference is encountered later in the archive scan.
 target_link_options(${COMPONENT_LIB} INTERFACE
+    "-Wl,--wrap=spi_bus_initialize"
+    "-Wl,--undefined=__wrap_spi_bus_initialize"
     "-Wl,--wrap=esp_lcd_new_panel_io_spi"
     "-Wl,--undefined=__wrap_esp_lcd_new_panel_io_spi")

@@ -10,6 +10,26 @@
 
 esp_err_t __real_esp_lcd_new_panel_io_spi(esp_lcd_spi_bus_handle_t,
     const esp_lcd_panel_io_spi_config_t *, esp_lcd_panel_io_handle_t *);
+esp_err_t __real_spi_bus_initialize(spi_host_device_t, const spi_bus_config_t *, spi_dma_chan_t);
+
+esp_err_t __wrap_spi_bus_initialize(spi_host_device_t host,
+    const spi_bus_config_t *config, spi_dma_chan_t dma)
+{
+    if (host != BSP_LCD_SPI_HOST || !config || dma != SPI_DMA_CH_AUTO ||
+        (config->sclk_io_num != BSP_LCD_SCL_V1_0 && config->sclk_io_num != BSP_LCD_SCL_V1_2) ||
+        config->mosi_io_num != BSP_LCD_DATA0 || config->miso_io_num != BSP_LCD_DATA1 ||
+        config->quadwp_io_num != BSP_LCD_DATA2 || config->quadhd_io_num != BSP_LCD_DATA3 ||
+        config->max_transfer_sz <= BOARD_DISPLAY_SPI_TRANSFER_REQUEST_BYTES) {
+        return __real_spi_bus_initialize(host, config, dma);
+    }
+    /* The BSP's eight-row request becomes two DMA descriptors (8190 bytes on
+     * S31). One queued chunk still needs that much contiguous internal memory.
+     * Bound the BSP request; let the unchanged LCD driver split
+     * the full payload and issue its one final completion callback. */
+    spi_bus_config_t bounded = *config;
+    bounded.max_transfer_sz = BOARD_DISPLAY_SPI_TRANSFER_REQUEST_BYTES;
+    return __real_spi_bus_initialize(host, &bounded, dma);
+}
 
 esp_err_t __wrap_esp_lcd_new_panel_io_spi(esp_lcd_spi_bus_handle_t bus,
     const esp_lcd_panel_io_spi_config_t *config, esp_lcd_panel_io_handle_t *out)
