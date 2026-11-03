@@ -213,6 +213,8 @@
         display: flex;
         flex-direction: column;
         gap: 8px;
+        touch-action: none;
+        user-select: none;
       }
       .scroll button {
         flex: 1;
@@ -825,6 +827,7 @@
       let state = initial();
       let wakeGesture = false;
       let capturedGesture = false;
+      let wheelContact = null;
       const groups = [
         "ABCD",
         "EFGH",
@@ -919,7 +922,7 @@
               ${state.gain === 1 ? "1" : `1/${state.gain}`}×</span
             >
           </div>
-          <div class="at scroll">
+          <div class="at scroll" role="group" aria-label="Mouse wheel" title="Tap an arrow or slide up and down">
             ${button(
               "↑",
               "scroll-up",
@@ -1214,6 +1217,7 @@
         return "";
       }
       function render() {
+        wheelContact = null;
         screen.className = "screen" + (state.theme === "light" ? " light" : "");
         screen.innerHTML = { mouse, keyboard, audio }[state.mode]() + panels();
         if (state.locked)
@@ -1362,7 +1366,31 @@
         }
         render();
       }
+      function trackWheel(event) {
+        const contact = wheelContact;
+        if (!contact || contact.id !== event.pointerId) return;
+        const box = contact.rail.getBoundingClientRect();
+        if (event.clientX < box.left || event.clientX >= box.right ||
+            event.clientY < box.top || event.clientY >= box.bottom) {
+          wheelContact = null;
+          return;
+        }
+        const scale = contact.rail.clientHeight / box.height;
+        if (Math.max(Math.abs(event.clientY - contact.startY),
+                     Math.abs(event.clientX - contact.startX)) * scale >= 8 ||
+            (contact.arrow && !contact.arrow.contains(document.elementFromPoint(event.clientX, event.clientY))))
+          contact.arrow = null;
+        const steps = Math.trunc((contact.anchorY - event.clientY) * scale / 24);
+        if (steps) {
+          contact.anchorY -= steps * 24 / scale;
+          log(`Mouse wheel ${steps > 0 ? "up" : "down"} × ${Math.abs(steps)} (preview).`);
+        }
+      }
       screen.addEventListener("pointerdown", (event) => {
+        if (wheelContact || !event.isPrimary) {
+          wheelContact = null;
+          return;
+        }
         wakeGesture = capturedGesture = false;
         if (state.asleep) {
           state.asleep = false;
@@ -1378,12 +1406,30 @@
           screen.setPointerCapture(event.pointerId);
           document.getElementById("fixture").value = "ready";
           log("Local takeover: current gesture consumed.");
+          return;
+        }
+        const rail = event.target.closest(".scroll");
+        if (rail && event.button === 0 && !state.locked && !state.panel && state.fixture !== "offline") {
+          wheelContact = {rail, id: event.pointerId, startX: event.clientX,
+                          startY: event.clientY, anchorY: event.clientY,
+                          arrow: event.target.closest("button")};
+          screen.setPointerCapture(event.pointerId);
         }
       });
-      screen.addEventListener("pointerup", () => {
+      screen.addEventListener("pointerup", (event) => {
+        trackWheel(event);
+        if (wheelContact?.id === event.pointerId) {
+          const arrow = wheelContact.arrow;
+          wheelContact = null;
+          if (arrow) action(arrow.dataset.action);
+        }
         if (wakeGesture || capturedGesture) render();
       });
+      screen.addEventListener("lostpointercapture", (event) => {
+        if (wheelContact?.id === event.pointerId) wheelContact = null;
+      });
       screen.addEventListener("pointercancel", () => {
+        wheelContact = null;
         if (wakeGesture || capturedGesture) {
           wakeGesture = capturedGesture = false;
           render();
@@ -1391,6 +1437,8 @@
       });
       screen.addEventListener("click", (event) => {
         const target = event.target.closest("[data-action]");
+        // Pointer releases on the wheel already resolved tap versus slide.
+        if (event.detail > 0 && target?.closest(".scroll")) return;
         if (target && !target.disabled) action(target.dataset.action);
         else if (wakeGesture || capturedGesture) {
           wakeGesture = false;
@@ -1399,6 +1447,7 @@
         }
       });
       screen.addEventListener("pointermove", (event) => {
+        trackWheel(event);
         if (
           event.buttons &&
           event.target.closest("[data-pad]") &&

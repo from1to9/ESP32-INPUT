@@ -44,7 +44,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 | --- | --- | --- |
 | M01 | Motion mouse | Handheld waving gives intuitive relative movement; stopping holds the pointer; no braking reversal, unexplained timeout or stale burst |
 | M02 | Touch fine control | Relative single-finger movement; quarter/eighth gain; touch priority and a short release freeze |
-| M03 | Mouse buttons | Left/right click, explicit drag and separate scroll; interruptions release drag |
+| M03 | Mouse buttons and wheel | Left/right click and explicit drag. Tap either scroll arrow for one wheel step or slide one finger vertically anywhere in the right scroll column. Interruptions release drag. |
 | M04 | Touchpad gestures | Configurable tap-to-click: single tap, double tap and double-tap-and-hold drag; movement-only when disabled |
 | M05 | Automatic grip reference | Establish a stable grip when Motion starts; recover after reference loss without jumps; expose waiting/ready states and a separate Recenter action that preserves sensor bias |
 | K01 | Composite HID | One stable HID service with separate mouse/keyboard report IDs; no re-pairing when changing modes |

@@ -5391,6 +5391,38 @@ static void contacts_at(uint64_t sequence, uint64_t time, unsigned contacts, uns
     assert(submit_contacts(&sample)); consume_one();
 }
 
+static void wheel_slide_and_arrow_tap_reports(void)
+{
+    for (int transport = APP_INPUT_BLUETOOTH; transport <= APP_INPUT_USB; ++transport) {
+        transport_setup(INPUT_MOUSE, (app_input_transport_t)transport);
+        app_intent_t contact = make_intent(APP_TOUCH_BEGIN, 440, 210, NULL);
+        contact.surface = APP_SURFACE_CONTROL;
+        contact.gesture = 8001;
+        deliver(contact);
+        app_intent_t wheel = contact;
+        wheel.action = APP_SCROLL;
+        const int distance[] = {2, 1, -4};
+        for (size_t i = 0; i < sizeof(distance) / sizeof(distance[0]); ++i) {
+            wheel.x = distance[i];
+            deliver(wheel);
+            const uint8_t report[] = {0, 0, 0, (uint8_t)distance[i]};
+            expect_report(2, report, sizeof(report));
+        }
+        contact.action = APP_TOUCH_END;
+        deliver(contact);
+        expect_idle();
+        local_control_contact(8002);
+        wheel.gesture = 8002;
+        wheel.x = 1;
+        deliver(wheel); deliver(wheel);
+        const uint8_t up[] = {0, 0, 0, 1};
+        expect_report(2, up, sizeof(up));
+        expect_idle();
+        assert(test_usb_send_attempts == (transport == APP_INPUT_USB ? 4U : 0U));
+        assert(test_ble_send_attempts == (transport == APP_INPUT_BLUETOOTH ? 4U : 0U));
+    }
+}
+
 static void full_contact_fifo_precedes_primary_and_drains_pair(void)
 {
     setup(INPUT_MOUSE); s_multitouch_available = true;
@@ -6112,6 +6144,7 @@ int main(int argc, char **argv)
     RUN(new_settings_pages_reach_shared_preferences);
     RUN(temporary_preferences_do_not_leak_into_unrelated_native_saves);
     RUN(temporary_transport_switch_waits_without_persisting);
+    RUN(wheel_slide_and_arrow_tap_reports);
     RUN(full_contact_fifo_precedes_primary_and_drains_pair);
     RUN(full_contact_right_click_and_cancelled_drag);
     RUN(contact_overflow_stale_context_and_motion_keep_safe_defaults);
@@ -6127,6 +6160,8 @@ int main(int argc, char **argv)
 
 /* The coordinator suite substitutes only the board-reader boundary. Native UI
  * tests exercise visible geometry; board-touch tests exercise driver reads. */
+void app_ui_observe_contact_count(uint8_t count, bool valid)
+{ (void)count; (void)valid; }
 app_ui_touch_context_t app_ui_touch_context(void)
 { return (app_ui_touch_context_t){.epoch = s_engine.state.epoch, .ui_revision = s_ui_revision,
     .eligible_pad = s_overlay == APP_OVERLAY_NONE, .x1 = 0, .y1 = 0, .x2 = 480, .y2 = 480}; }

@@ -493,6 +493,7 @@ static bool submit_intent(app_intent_t *intent)
 static bool submit_contacts(const board_touch_snapshot_t *sample)
 {
     if (!sample) return false;
+    app_ui_observe_contact_count(sample->count, sample->valid && !sample->overflow);
     const app_ui_touch_context_t visible = app_ui_touch_context();
     coordinator_event_t event = {.contacts = true};
     interaction_contact_snapshot_t *out = &event.value.touch.sample;
@@ -966,7 +967,11 @@ static bool route_touch(const app_intent_t *intent)
         phase = DEVICE_INPUT_BEGIN;
     } else {
         if (intent->gesture != s_idle_touch_gesture) return false;
-        if (intent->action == APP_TOUCH_MOVE) phase = DEVICE_INPUT_MOVE;
+        /* The wheel strip emits distance while pressed. Arrow taps arrive
+         * after END and keep the ordinary one-action-per-contact guard. */
+        if (intent->action == APP_TOUCH_MOVE ||
+            (intent->action == APP_SCROLL && s_idle.down[DEVICE_INPUT_TOUCH]))
+            phase = DEVICE_INPUT_MOVE;
         else if (intent->action == APP_TOUCH_END) phase = DEVICE_INPUT_END;
         else if (intent->action == APP_TOUCH_CANCEL) phase = DEVICE_INPUT_CANCEL;
     }

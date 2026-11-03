@@ -552,3 +552,6 @@ typedef struct {
  * Put complete driver contact snapshots in the coordinator's queue envelope
  * before app_intent_t primary events; no APP_CONTACTS/UI dependency is needed. */
 app_ui_touch_context_t app_ui_touch_context(void);
+
+/* Called by the touch reader before LVGL processes its primary pointer. */
+void app_ui_observe_contact_count(uint8_t count, bool valid);

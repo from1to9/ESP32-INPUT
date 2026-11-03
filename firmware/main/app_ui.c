@@ -101,6 +101,12 @@ static lv_indev_t *s_touch_device;
 static app_touch_surface_t s_touch_surface;
 static lv_point_t s_last_point;
 static uint32_t s_last_touch_heartbeat;
+enum { WHEEL_STEP_PX = 24, WHEEL_TAP_SLOP_PX = 8 };
+static struct {
+    lv_area_t bounds;
+    int32_t anchor_y;
+    bool tracking, tap, wait_all_up;
+} s_wheel;
 static app_local_edit_submit_fn s_local_submit;
 static char s_wifi_password[APP_UI_WIFI_PASSWORD_CAPACITY];
 static char s_bluetooth_name[APP_UI_BLUETOOTH_NAME_CAPACITY];
@@ -550,6 +556,7 @@ static void on_action(lv_event_t *event)
 {
     binding_t *binding = lv_event_get_user_data(event);
     if (s_view.locked || s_view.screen_off || s_wake_touch || (s_view.overlay != APP_OVERLAY_NONE && !in_overlay(binding->object))) return;
+    if (binding->action == APP_SCROLL && !s_wheel.tap) return;
     if (binding->action == APP_CONFIRM && s_view.confirmation == APP_CONFIRM_REMOTE) {
         remote_review_action(binding->object, binding->value != 0); return;
     }
@@ -695,6 +702,45 @@ static void critical_state(lv_obj_t *object, bool alert, bool capture, bool prov
     border(object, error ? ERROR : WARNING, 0);
 }
 
+/* The existing arrows own taps. A gap press belongs to the mouse panel.
+ * LVGL's press lock retains that original target throughout the contact. */
+static void begin_wheel(lv_obj_t *target, lv_point_t point)
+{
+    s_wheel.tracking = s_wheel.tap = false;
+    bool arrow = target == s_mouse_controls[0] || target == s_mouse_controls[1];
+    if (s_wheel.wait_all_up || (!arrow && target != s_panels[INPUT_MOUSE]) || s_view.mode != INPUT_MOUSE ||
+        s_view.overlay != APP_OVERLAY_NONE || s_wake_touch || s_touch_local_blocked ||
+        lv_obj_has_state(s_mouse_controls[0], LV_STATE_DISABLED)) return;
+    lv_area_t lower;
+    lv_obj_get_coords(s_mouse_controls[0], &s_wheel.bounds);
+    lv_obj_get_coords(s_mouse_controls[1], &lower);
+    s_wheel.bounds.y2 = lower.y2;
+    if (point.x < s_wheel.bounds.x1 || point.x > s_wheel.bounds.x2 ||
+        point.y < s_wheel.bounds.y1 || point.y > s_wheel.bounds.y2) return;
+    s_wheel.tracking = true;
+    s_wheel.tap = arrow;
+    s_wheel.anchor_y = point.y;
+}
+
+static void track_wheel(lv_point_t point)
+{
+    if (point.x < s_wheel.bounds.x1 || point.x > s_wheel.bounds.x2 ||
+        point.y < s_wheel.bounds.y1 || point.y > s_wheel.bounds.y2) {
+        s_wheel.tracking = s_wheel.tap = false;
+        return;
+    }
+    if (LV_ABS(point.x - s_last_point.x) >= WHEEL_TAP_SLOP_PX ||
+        LV_ABS(point.y - s_last_point.y) >= WHEEL_TAP_SLOP_PX ||
+        (s_wheel.tap && !lv_obj_hit_test(s_touch_target, &point))) s_wheel.tap = false;
+    int steps = (s_wheel.anchor_y - point.y) / WHEEL_STEP_PX;
+    if (steps) {
+        /* Consume this sample even on queue rejection. A stationary finger
+         * must never replay a rejected wheel report. */
+        s_wheel.anchor_y -= steps * WHEEL_STEP_PX;
+        (void)submit(APP_SCROLL, steps, 0);
+    }
+}
+
 static void on_touch(lv_event_t *event)
 {
     lv_event_code_t code = lv_event_get_code(event);
@@ -727,7 +773,10 @@ static void on_touch(lv_event_t *event)
         s_touch_surface = target == s_pad ? APP_SURFACE_TOUCHPAD : APP_SURFACE_CONTROL;
         s_last_point = point;
         s_last_touch_heartbeat = lv_tick_get();
-        (void)submit(APP_TOUCH_BEGIN, point.x, point.y);
+        begin_wheel(target, point);
+        if (!submit(APP_TOUCH_BEGIN, point.x, point.y)) s_wheel.tracking = s_wheel.tap = false;
+    } else if (code == LV_EVENT_PRESSING && s_touch_active && s_wheel.tracking) {
+        track_wheel(point);
     } else if (code == LV_EVENT_PRESSING && s_touch_active &&
                s_touch_surface == APP_SURFACE_TOUCHPAD && !s_view.locked &&
                !s_view.screen_off && !s_wake_touch &&
@@ -743,6 +792,9 @@ static void on_touch(lv_event_t *event)
             s_last_touch_heartbeat = lv_tick_get();
         }
     } else if (s_touch_active && (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST)) {
+        if (s_wheel.tracking && code == LV_EVENT_RELEASED) track_wheel(point);
+        if (code == LV_EVENT_PRESS_LOST) s_wheel.tap = false;
+        s_wheel.tracking = false;
         (void)submit(code == LV_EVENT_RELEASED ? APP_TOUCH_END : APP_TOUCH_CANCEL, point.x, point.y);
         s_touch_active = false;
         s_touch_target = NULL;
@@ -1754,6 +1806,7 @@ void app_ui_create(lv_display_t *display, app_submit_fn callback)
     s_dark_theme = false;
     s_gesture = 0;
     s_touch_active = false;
+    memset(&s_wheel, 0, sizeof(s_wheel));
     s_touch_target = NULL;
     s_touch_device = NULL;
     s_wake_touch = false;
@@ -2279,6 +2332,10 @@ void app_ui_render(const app_view_t *view)
         !provider_available || !view->ready || view->transport_switch_pending;
     bool hid_ready = view->connected && view->ready && !view->release_pending &&
         !view->transport_error && provider_available && !view->transport_switch_pending;
+    if (!hid_ready || view->mode != INPUT_MOUSE || view->overlay != APP_OVERLAY_NONE ||
+        view->locked || view->screen_off || view->remote_owned ||
+        view->epoch != s_touch_epoch || view->ui_revision != s_touch_revision)
+        s_wheel.tracking = s_wheel.tap = false;
     /* A lock/wake shield does not depend on navigation teardown. Clear any
      * setup labels immediately even when a held gesture defers destruction. */
     if (view->locked || view->screen_off || view->overlay != APP_OVERLAY_WIFI_SETUP) {
@@ -2522,6 +2579,18 @@ uint64_t app_ui_capture_indicator_armed_generation(void)
 app_ui_capture_indicator_t app_ui_capture_indicator(void)
 {
     return s_screen && lv_obj_is_visible(s_screen) ? s_capture_indicator : (app_ui_capture_indicator_t){0};
+}
+
+void app_ui_observe_contact_count(uint8_t count, bool valid)
+{
+    /* LVGL receives only the primary point. A second finger may replace
+     * that point without a release, even when both fingers are still. */
+    if (!valid || count > 1) {
+        s_wheel.wait_all_up = true;
+        s_wheel.tracking = s_wheel.tap = false;
+    } else if (count == 0) {
+        s_wheel.wait_all_up = false;
+    }
 }
 
 app_ui_touch_context_t app_ui_touch_context(void)

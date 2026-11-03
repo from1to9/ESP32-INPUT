@@ -848,6 +848,102 @@ static void text_boundary_checks(void)
     puts("PASS: 64 wide characters stay above the counter; status stays above draft actions; unavailable haptics fits fully");
 }
 
+/* Match the board reader: report the count before exposing only the primary point. */
+static void wheel_contact_sample(uint8_t count, int y)
+{
+    app_ui_observe_contact_count(count, true);
+    pointer(440, y, count != 0);
+}
+
+static void wheel_checks(void)
+{
+    app_view_t original = s_state;
+    s_state.mode = INPUT_MOUSE;
+    s_state.locked = s_state.screen_off = s_state.remote_owned = false;
+    s_state.overlay = APP_OVERLAY_NONE;
+    s_state.connected = s_state.ready = s_state.bluetooth_available = s_state.usb_available = true;
+    s_state.release_pending = s_state.transport_switch_pending = s_state.transport_error = false;
+    for (unsigned context = 0; context < 4; ++context) {
+        s_state.input_transport = context & 2 ? APP_INPUT_USB : APP_INPUT_BLUETOOTH;
+        s_state.tap_to_click_enabled = (context & 1) != 0;
+        render();
+        clear_intents(); tap(416, 64); tap(467, 355);
+        assert(action_count(APP_SCROLL) == 2 && last_action(APP_SCROLL)->x == -1);
+        clear_intents(); tap(440, 210); tap(415, 210); tap(468, 210);
+        assert(action_count(APP_SCROLL) == 0);
+        /* Gap-origin sweep: signed distance, retained fraction, a pause
+         * and a reversal. Release over an arrow cannot add an arrow tap. */
+        clear_intents(); pointer(440, 210, true); pointer(440, 189, true);
+        assert(action_count(APP_SCROLL) == 0);
+        pointer(440, 156, true);
+        assert(action_count(APP_SCROLL) == 1 && last_action(APP_SCROLL)->x == 2);
+        pointer(440, 138, true);
+        assert(action_count(APP_SCROLL) == 2 && last_action(APP_SCROLL)->x == 1);
+        lv_tick_inc(500); pointer(440, 138, true); pointer(440, 138, true);
+        assert(action_count(APP_SCROLL) == 2);
+        pointer(440, 234, true); pointer(440, 234, false);
+        assert(action_count(APP_SCROLL) == 3 && last_action(APP_SCROLL)->x == -4);
+        assert(action_count(APP_TOUCH_BEGIN) == 1 && action_count(APP_TOUCH_END) == 1);
+        assert(last_action(APP_SCROLL)->surface == APP_SURFACE_CONTROL &&
+            last_action(APP_SCROLL)->gesture == last_action(APP_TOUCH_BEGIN)->gesture);
+        assert(action_count(APP_TOUCH_MOVE) == 0 && action_count(APP_CLICK) == 0 && action_count(APP_DRAG) == 0);
+    }
+    /* The board reports all contacts before LVGL sees its primary point.
+     * Holding A and B still while lifting A replaces the primary with B. */
+    clear_intents();
+    wheel_contact_sample(1, 210);
+    wheel_contact_sample(2, 210);
+    wheel_contact_sample(1, 282);
+    wheel_contact_sample(0, 282);
+    assert(action_count(APP_SCROLL) == 0 && action_count(APP_CLICK) == 0);
+    wheel_contact_sample(1, 210);
+    wheel_contact_sample(1, 186);
+    wheel_contact_sample(0, 186);
+    assert(action_count(APP_SCROLL) == 1 && last_action(APP_SCROLL)->x == 1);
+    /* Two points in the first sample must suppress even a stationary tap. */
+    clear_intents();
+    wheel_contact_sample(2, 150);
+    wheel_contact_sample(1, 150);
+    wheel_contact_sample(0, 150);
+    assert(action_count(APP_SCROLL) == 0);
+    /* Press one arrow, cross the other, and release back on the first. */
+    clear_intents(); pointer(440, 150, true); pointer(440, 246, true);
+    assert(action_count(APP_SCROLL) == 1 && last_action(APP_SCROLL)->x == -4);
+    pointer(440, 150, true); pointer(440, 150, false);
+    assert(action_count(APP_SCROLL) == 2 && last_action(APP_SCROLL)->x == 4);
+    clear_intents(); pointer(440, 190, true); pointer(448, 190, true); pointer(440, 190, false);
+    assert(action_count(APP_SCROLL) == 0);
+    clear_intents(); pointer(440, 205, true); pointer(440, 207, true); pointer(440, 207, false);
+    assert(action_count(APP_SCROLL) == 0);
+    /* Leaving the column cancels this contact, including re-entry. */
+    clear_intents(); pointer(440, 210, true); pointer(395, 270, true);
+    pointer(440, 320, true); pointer(440, 320, false);
+    assert(action_count(APP_SCROLL) == 0 && action_count(APP_TOUCH_MOVE) == 0 && action_count(APP_CLICK) == 0);
+    clear_intents(); pointer(395, 200, true); pointer(440, 260, true); pointer(440, 260, false);
+    assert(action_count(APP_TOUCH_MOVE) > 0 && action_count(APP_SCROLL) == 0);
+    for (unsigned change = 0; change < 7; ++change) {
+        app_view_t admitted = s_state;
+        clear_intents(); pointer(440, 210, true); pointer(440, 200, true);
+        if (change == 0) s_state.locked = true;
+        if (change == 1) s_state.mode = INPUT_KEYBOARD;
+        if (change == 2) s_state.overlay = APP_OVERLAY_MODES;
+        if (change == 3) s_state.screen_off = true;
+        if (change == 4) s_state.ready = false;
+        if (change == 5) ++s_state.epoch;
+        if (change == 6) s_state.remote_owned = true;
+        render(); s_state = admitted; render();
+        pointer(440, 140, true); pointer(440, 140, false);
+        assert(action_count(APP_SCROLL) == 0 && action_count(APP_TOUCH_MOVE) == 0 && action_count(APP_CLICK) == 0);
+    }
+    clear_intents(); pointer(440, 180, true); lv_indev_wait_release(s_pointer);
+    pointer(440, 120, false);
+    assert(action_count(APP_TOUCH_CANCEL) == 1 && action_count(APP_SCROLL) == 0);
+    clear_intents(); tap(440, 190);
+    assert(action_count(APP_SCROLL) == 1 && last_action(APP_SCROLL)->x == 1);
+    s_state = original; render(); clear_intents();
+    puts("PASS: wheel strip taps, gap slides, reversal, bounds, cancellation and pad isolation over BLE/USB");
+}
+
 static void congestion_checks(void)
 {
     app_view_t original = s_state;
@@ -1408,6 +1504,7 @@ int main(int argc, char **argv)
             motion_reason_and_tap_setting_checks();
             motion_settings_checks();
             common_keys_checks();
+            wheel_checks();
             congestion_checks();
             continue;
         }
@@ -1489,6 +1586,7 @@ int main(int argc, char **argv)
         pairing_capacity_checks();
         transport_and_grid_checks();
         text_boundary_checks();
+        wheel_checks();
         congestion_checks();
         interaction_checks();
         quick_panel_and_chooser_checks();

@@ -28,7 +28,7 @@ Opening Menu or the same panel through AI double-click suppresses motion, cancel
 | Element | Geometry | Behavior |
 | --- | --- | --- |
 | Relative touchpad | x 12/y 64/w 396/h 292 | Fine pointer movement; entire surface remains an input area |
-| Separate scroll column | x 416/y 64/w 52/h 292 | Two equal 52 x 142 up/down targets with 8 px gap; can preserve the production scroll intent semantics |
+| Separate scroll column | x 416/y 64/w 52/h 292 | Tap either 52 x 142 arrow for one step. Slide one finger up or down across the full column for vertical wheel input, including the 8 px gap between arrows. |
 | Left click / Right click / Drag or Release | x 12/x 168/x 324, y 368, w 144/h 48 | Explicit buttons; active Release remains admitted independently of ordinary ready state |
 | Motion toggle / Fine gain chooser | x 12/x 244, y 424, w 224/h 48 | Motion Off/On and the current approved gain; choose among actual supported gains |
 
