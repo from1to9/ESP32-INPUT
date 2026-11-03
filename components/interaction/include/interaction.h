@@ -239,6 +239,9 @@ bool interaction_set_motion_owned(interaction_t *model, input_owner_t source, bo
  * readiness. Preserves bias/config/intent/sample-time guards and fault history.
  * Next real stable samples use ordinary acquisition; recovery emits no delta. */
 bool interaction_recenter_owned(interaction_t *model, input_owner_t source);
+/* Explicit local Input-setting reset while Mouse output is paused by a menu.
+ * Clears the grip reference without enabling Motion or changing calibration. */
+bool interaction_reset_grip_owned(interaction_t *model, input_owner_t source);
 void interaction_set_keyboard_motion(interaction_t *model, bool enabled);
 void interaction_set_suppressed(interaction_t *model, bool touch, bool menu,
                                 bool haptic, uint64_t now_ms);

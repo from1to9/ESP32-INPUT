@@ -7,7 +7,7 @@
 #define DEVICE_SETTINGS_RECORD_SIZE 56U
 #define DEVICE_SETTINGS_V3_RECORD_SIZE 40U
 #define DEVICE_SETTINGS_LEGACY_RECORD_SIZE 16U
-#define DEVICE_SETTINGS_SCHEMA_VERSION 4U
+#define DEVICE_SETTINGS_SCHEMA_VERSION 5U
 #define DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES 18U
 #define DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME "ESP32-INPUT"
 #define DEVICE_SETTINGS_MIN_BRIGHTNESS 10U
@@ -37,6 +37,7 @@ typedef struct {
     uint16_t motion_deadzone_mdps; /* 0..10000; milli-degrees/second. */
     uint16_t motion_filter_ms, motion_freeze_ms; /* Each 0..1000 milliseconds. */
     bool motion_invert_x, motion_invert_y;
+    bool navigation;
 } device_settings_t;
 
 typedef enum {
@@ -56,7 +57,8 @@ typedef enum {
 
 /* Defaults: Dark, Ctrl, haptics enabled, brightness 50%, timeout five minutes,
  * preferred transport Bluetooth, tap-to-click enabled, name ESP32-INPUT;
- * motion X/Y gain 4, deadzone 0.5 dps, filter 30 ms, freeze 150 ms, no inversion.
+ * motion X/Y gain 4, deadzone 0.5 dps, filter 30 ms, freeze 150 ms, no inversion;
+ * optional Navigation layout disabled.
  * Actual switching/name application belongs to the coordinator/adapters.
  * Brightness is 10..100 inclusive, in steps of ten percentage points.
  * No hardware availability, persistence state or credentials are inferred. */
@@ -71,12 +73,13 @@ bool device_settings_equal(const device_settings_t *a, const device_settings_t *
  * This component never writes, allocates, sleeps or accesses hardware. */
 device_settings_apply_t device_settings_apply(device_settings_t *current,
                                               const device_settings_t *candidate);
-/* Encode exact 56-byte schema 4, never C struct/padding serialization. Decode
- * also accepts 16-byte schema 1/2 and 40-byte schema 3. Preserve every old
+/* Encode exact 56-byte schema 5, never C struct/padding serialization. Decode
+ * also accepts 16-byte schema 1/2, 40-byte schema 3 and 56-byte schema 4. Preserve every old
  * value and default only absent fields. V1 byte 11 must be zero (Bluetooth).
  * V3/v4: tap flag at 12, name length at 13, zero-padded name[19] at 14..32,
  * reserved zero at 33..35. V4 LE uint16 gain X/Y at 36/38, deadzone at 40,
- * filter/freeze at 42/44; inversion bits X=1/Y=2 at 46; 47..51 zero.
+ * filter/freeze at 42/44; inversion bits X=1/Y=2 at 46; v4 47..51 zero.
+ * V5 keeps the v4 layout, uses byte 47 for Navigation (0/1), 48..51 zero.
  * CRC32 at the last four bytes covers all preceding bytes in each schema.
  * Unknown versions are rejected. Failures leave output untouched;
  * decoding/migration never writes storage or silently replaces bad data. */

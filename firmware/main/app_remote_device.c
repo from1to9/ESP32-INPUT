@@ -123,8 +123,9 @@ static cp_error_t reset_candidate(app_remote_device_request_t *request, const de
         request->settings.motion_deadzone_mdps = defaults.motion_deadzone_mdps; request->settings.motion_filter_ms = defaults.motion_filter_ms;
         request->settings.motion_freeze_ms = defaults.motion_freeze_ms;
         request->settings.motion_invert_x = defaults.motion_invert_x; request->settings.motion_invert_y = defaults.motion_invert_y;
+        request->settings.navigation = defaults.navigation;
         request->settings_fields |= APP_REMOTE_SETTING_SHORTCUT | APP_REMOTE_SETTING_TAP | APP_REMOTE_SETTING_TRANSPORT |
-            APP_REMOTE_SETTING_MOTION;
+            APP_REMOTE_SETTING_MOTION | APP_REMOTE_SETTING_NAVIGATION;
     }
     if (haptics) { request->settings.haptics_enabled = defaults.haptics_enabled; request->settings_fields |= APP_REMOTE_SETTING_HAPTICS; }
     if (bluetooth) {
@@ -139,7 +140,8 @@ static unsigned domains(const app_remote_device_request_t *request)
     if (request->settings_fields & APP_REMOTE_SETTING_BRIGHTNESS) value |= 2U;
     if (request->settings_fields & (APP_REMOTE_SETTING_BLUETOOTH_NAME | APP_REMOTE_SETTING_TRANSPORT)) value |= 4U;
     if (request->settings_fields & APP_REMOTE_SETTING_HAPTICS) value |= 8U;
-    if (request->settings_fields & (APP_REMOTE_SETTING_MOTION | APP_REMOTE_SETTING_TAP | APP_REMOTE_SETTING_SHORTCUT)) value |= 16U;
+    if (request->settings_fields & (APP_REMOTE_SETTING_MOTION | APP_REMOTE_SETTING_TAP |
+        APP_REMOTE_SETTING_SHORTCUT | APP_REMOTE_SETTING_NAVIGATION)) value |= 16U;
     if (request->operation >= CP_OP_BLUETOOTH_PAIRING_OPEN && request->operation <= CP_OP_BLUETOOTH_TARGET_REQUEST) value |= 4U;
     if (request->operation == CP_OP_DISPLAY_WAKE || request->operation == CP_OP_DISPLAY_SLEEP) value |= 2U;
     if (request->operation == CP_OP_HAPTICS_TEST || request->operation == CP_OP_HAPTICS_RECOVER) value |= 8U;

@@ -30,7 +30,7 @@ The 17 cases include schema-3 Bluetooth/USB, tap-to-click and Bluetooth-name
 round trips and invalid preference rejection. Frozen 16-byte schema-1/2 records
 retain every old field (including 70% or custom brightness), default only new
 tap/name values, and remain byte-for-byte unchanged through worker polls and
-unchanged requests. An explicit changed preference writes the 56-byte schema 4
+unchanged requests. An explicit changed preference writes the 56-byte schema 5
 after the quiet interval and survives simulated restart. The store caches the
 validated logical value canonically for deduplication; this memory-only cache
 is not evidence that the on-flash record was upgraded. These cases prove store
@@ -50,4 +50,4 @@ setting coalescing does not weaken BLE subscription commit-before-success rules.
 The integration owner maintains `tools/check.py` and fixes production defects;
 this suite retains failures until the owning implementation is corrected.
 
-Schema-3 tap-off migration is additionally checked with a frozen independent CRC fixture: equal requests and changed-then-restored values preserve the original 40-byte record without a boot or format-only write. Explicit motion changes persist schema 4 and round-trip across restart.
+Schema-3 tap-off migration is additionally checked with a frozen independent CRC fixture: equal requests and changed-then-restored values preserve the original 40-byte record without a boot or format-only write. Explicit motion changes persist schema 5 and round-trip across restart.

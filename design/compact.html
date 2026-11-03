@@ -176,6 +176,15 @@
         width: 132px;
         height: 48px;
       }
+      .nav-home, .nav-back {
+        top: 8px;
+        width: 62px;
+        height: 48px;
+        font-size: 16px;
+        padding: 0;
+      }
+      .nav-home { left: 140px; }
+      .nav-back { left: 210px; }
       .pad {
         left: 12px;
         top: 64px;
@@ -812,6 +821,7 @@
         audioConnection: null,
         theme: "dark",
         motion: false,
+        navigation: false,
         drag: false,
         gain: 1,
         preview: "",
@@ -914,6 +924,10 @@
       }
       function mouse() {
         return html`${workspaceHeader("Mouse")}
+          ${state.navigation ?
+            button("Home", "nav-home", "at nav-home", state.drag || state.fixture !== "ready") +
+            button("Back", "nav-back", "at nav-back", state.drag || state.fixture !== "ready") :
+            button("Recenter", "reset-grip", "at submode", !state.motion || state.fixture !== "ready")}
           <div class="at pad" data-pad="true">
             <div class="pad-marker"></div>
             <strong>Touch to move</strong
@@ -1106,11 +1120,11 @@
           <p class="at panel-note">AI double-click opens this same panel.</p>
         </div>`;
       }
-      function detail(title, rows) {
+      function detail(title, rows, back = "quick", backLabel = "Back to quick panel") {
         return html`<div class="panel">
           ${panelHeader(title)}
           <div class="at detail-list">${rows}</div>
-          ${button("Back to quick panel", "quick", "at panel-back")}
+          ${button(backLabel, back, "at panel-back")}
         </div>`;
       }
       function panels() {
@@ -1173,7 +1187,22 @@
         if (state.panel === "input")
           return detail(
             "Input",
-            '<div class="detail"><strong>Host modifier</strong><span>Ctrl · fixture</span></div><div class="detail"><strong>Haptics</strong><span>On · fixture</span></div><div class="detail"><strong>Motion calibration</strong><span>Requires device capability</span></div>',
+            '<div class="detail"><strong>Host modifier</strong><span>Ctrl · fixture</span></div>' +
+            '<div class="detail"><strong>Haptics</strong><span>On · fixture</span></div>' +
+            button("Calibrate sensor", "calibrate") +
+            button("Reset grip", "reset-grip", "", state.mode !== "mouse" || state.fixture !== "ready") +
+            button(`Navigation / ${state.navigation ? "on" : "off"}`, "navigation"),
+          );
+        if (state.panel === "navigation")
+          return detail(
+            "Navigation",
+            button(`Navigation / ${state.navigation ? "on" : "off"}`, "navigation-toggle") +
+            '<p><strong>Home / setup</strong><br>Enable AssistiveTouch: Settings &gt; Accessibility &gt; Touch. ' +
+            'In AssistiveTouch &gt; Devices, select this device and map Button 3 to Home. ' +
+            'Close this panel and tap Home on Mouse during button registration.</p>' +
+            '<p><strong>Back / Command+[</strong><br>Only in apps that support this shortcut. ' +
+            'No system-wide Back or touchscreen swipe.</p>',
+            "input", "Back to Input",
           );
         if (state.panel === "about")
           return detail(
@@ -1291,6 +1320,7 @@
             "settings",
             "display",
             "input",
+            "navigation",
             "about",
             "connectivity",
             "submodes",
@@ -1313,6 +1343,19 @@
           log("Preview audio connection selected; no capture or playback started.");
         } else if (name === "theme") {
           state.theme = state.theme === "dark" ? "light" : "dark";
+        } else if (name === "navigation-toggle") {
+          state.navigation = !state.navigation;
+          log("Navigation layout changed in this browser preview; firmware persists the preference.");
+        } else if (name === "nav-home" || name === "nav-back") {
+          if (state.mode !== "mouse" || !state.navigation || state.drag || state.fixture !== "ready") return;
+          log(name === "nav-home" ?
+            "Preview: Button 3 tap. Home requires your AssistiveTouch mapping; no host outcome is observed." :
+            "Preview: Command+[ tap for supporting apps; no system-wide Back or touchscreen swipe.");
+        } else if (name === "reset-grip") {
+          if (state.mode !== "mouse" || state.drag || state.fixture !== "ready") return;
+          log("Reset grip requested. Sensor calibration and Motion intent are unchanged; hold still after enabling Motion.");
+        } else if (name === "calibrate") {
+          log("Sensor calibration requires the actual device; this preview cannot acknowledge it.");
         } else if (name === "motion") {
           state.motion = !state.motion;
           log(

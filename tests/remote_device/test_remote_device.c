@@ -429,12 +429,32 @@ static void bounded_instance_initialization(void)
     assert(app_remote_device_init(NULL, app_remote_device_bytes(), &device->port, &unchanged) == CP_INVALID);
     assert(unchanged == device);
 }
+static void navigation_reset_defaults_follow_input_domain(void)
+{
+    device_settings_t current; device_settings_defaults(&current); current.navigation = true;
+    const char *groups[] = {"input", "all", "display", "haptics", "bluetooth"};
+    for (unsigned i = 0; i < sizeof groups / sizeof groups[0]; ++i) {
+        app_remote_device_request_t request = {.operation = CP_OP_PREFERENCES_RESET};
+        strcpy(request.group, groups[i]);
+        assert(reset_candidate(&request, &current) == CP_OK);
+        assert(request.settings.navigation == (i >= 2));
+        assert(((request.settings_fields & APP_REMOTE_SETTING_NAVIGATION) != 0) == (i < 2));
+        assert(current.navigation); /* Candidate preparation is inert. */
+    }
+    app_remote_device_request_t factory = {.operation = CP_OP_DEVICE_FACTORY_RESET_REQUEST};
+    assert(reset_candidate(&factory, &current) == CP_OK && !factory.settings.navigation);
+    assert(factory.settings_fields & APP_REMOTE_SETTING_NAVIGATION);
+    app_remote_device_request_t navigation = {.settings_fields = APP_REMOTE_SETTING_NAVIGATION};
+    assert(domains(&navigation) == (1U | 16U));
+}
+
 int main(void)
 {
     configuration_transactions(); exact_values_and_secret_rejection(); immutable_approvals(); jobs_and_ui_gates(); read_snapshots_and_clock();
     independent_native_motion_fields_and_alias_conflicts();
     workspace_reentry_and_instance_isolation(); retained_copies_survive_workspace_reuse(); early_exit_cleanup();
     bounded_instance_initialization();
+    navigation_reset_defaults_follow_input_domain();
     free(memory);
     puts("Remote device: canonical inert transactions, shared settings requests, identity/scope/revision gates, immutable approvals, actual-boundary results, cancellation and secret-free reads passed.");
     return 0;

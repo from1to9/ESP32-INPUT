@@ -161,6 +161,11 @@ identity, scope, action digest and revisions. Reset/restart confirmation require
 fresh physical input on that exact review, and cancellation remains available
 when confirmation becomes stale or expired.
 
+Input, all-preference and factory resets include the local Navigation preference,
+restoring its default off value through the input ownership/release domain.
+Display, haptic and Bluetooth-only preference resets preserve that choice.
+This reset coverage does not add a remote Navigation patch key.
+
 ## Validation gate
 
 Reconcile new fields and changes with the complete API function matrix and the

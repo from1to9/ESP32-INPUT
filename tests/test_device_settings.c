@@ -14,6 +14,15 @@ static const uint8_t default_record[56] = {
     0xf4, 0x01, 0x1e, 0x00, 0x96, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x89, 0x9e, 0xf8, 0x2a
 };
+static const uint8_t default_v5_record[56] = {
+    0x44, 0x53, 0x45, 0x54, 0x05, 0x38, 0x01, 0x00,
+    0x01, 0x32, 0x05, 0x00, 0x01, 0x0b, 0x45, 0x53,
+    0x50, 0x33, 0x32, 0x2d, 0x49, 0x4e, 0x50, 0x55,
+    0x54, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x90, 0x01, 0x90, 0x01,
+    0xf4, 0x01, 0x1e, 0x00, 0x96, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x55, 0x72, 0x49, 0x17,
+};
 static const uint8_t v3_record[DEVICE_SETTINGS_V3_RECORD_SIZE] = {
     0x44, 0x53, 0x45, 0x54, 0x03, 0x28, 0x01, 0x00,
     0x01, 0x32, 0x05, 0x00, 0x01, 0x0b, 0x45, 0x53,
@@ -39,11 +48,11 @@ static void settings_codec_and_changes(void)
     assert(settings.theme == DEVICE_THEME_DARK && settings.host_modifier == DEVICE_HOST_CTRL);
     assert(settings.haptics_enabled && settings.brightness_percent == 50);
     assert(settings.idle_timeout == DEVICE_IDLE_5_MIN && settings.tap_to_click);
-    assert(settings.preferred_transport == DEVICE_TRANSPORT_BLUETOOTH);
+    assert(settings.preferred_transport == DEVICE_TRANSPORT_BLUETOOTH && !settings.navigation);
     assert(strcmp(settings.bluetooth_name, "ESP32-INPUT") == 0);
     uint8_t record[DEVICE_SETTINGS_RECORD_SIZE];
     assert(device_settings_encode(&settings, record, sizeof record) == DEVICE_SETTINGS_OK);
-    assert(memcmp(record, default_record, sizeof record) == 0);
+    assert(memcmp(record, default_v5_record, sizeof record) == 0);
     assert(device_settings_decode(default_record, sizeof default_record, &decoded) == DEVICE_SETTINGS_OK);
     assert(device_settings_equal(&settings, &decoded));
     assert(device_settings_decode(v3_record, sizeof v3_record, &decoded) == DEVICE_SETTINGS_OK);
@@ -58,7 +67,7 @@ static void settings_codec_and_changes(void)
         assert(device_settings_decode(legacy[i], 16, &decoded) == DEVICE_SETTINGS_OK);
         assert(device_settings_equal(&expected, &decoded));
         assert(device_settings_encode(&decoded, record, sizeof record) == DEVICE_SETTINGS_OK);
-        assert(record[4] == 4 && record[5] == 56 && record[9] == 70);
+        assert(record[4] == 5 && record[5] == 56 && record[9] == 70);
         assert(device_settings_decode(record, sizeof record, &decoded) == DEVICE_SETTINGS_OK);
         assert(device_settings_equal(&expected, &decoded));
         assert(device_settings_apply(&expected, &decoded) == DEVICE_SETTINGS_APPLY_UNCHANGED);
@@ -105,7 +114,12 @@ static void settings_codec_and_changes(void)
     if (device_settings_apply(&settings, &candidate) == DEVICE_SETTINGS_APPLY_CHANGED) ++saves;
     strcpy(candidate.bluetooth_name, "Desk Pad");
     if (device_settings_apply(&settings, &candidate) == DEVICE_SETTINGS_APPLY_CHANGED) ++saves;
-    assert(saves == 8 && device_settings_equal(&settings, &candidate));
+    candidate.navigation = true;
+    if (device_settings_apply(&settings, &candidate) == DEVICE_SETTINGS_APPLY_CHANGED) ++saves;
+    assert(saves == 9 && device_settings_equal(&settings, &candidate));
+    assert(device_settings_encode(&settings, record, sizeof record) == DEVICE_SETTINGS_OK);
+    assert(record[47] == 1 && device_settings_decode(record, sizeof record, &decoded) == DEVICE_SETTINGS_OK);
+    assert(decoded.navigation && device_settings_equal(&settings, &decoded));
     assert(device_settings_apply(&settings, &candidate) == DEVICE_SETTINGS_APPLY_UNCHANGED);
 }
 
@@ -179,6 +193,16 @@ static void rejected_records_and_values(void)
         assert(device_settings_decode(record, sizeof record, &output) == DEVICE_SETTINGS_INVALID_VALUE);
         assert(device_settings_equal(&output, &sentinel));
     }
+    /* Frozen independent CRC for a v5 navigation flag outside its wire range. */
+    uint8_t invalid_navigation[DEVICE_SETTINGS_RECORD_SIZE];
+    memcpy(invalid_navigation, default_v5_record, sizeof invalid_navigation);
+    invalid_navigation[47] = 2;
+    uint32_t navigation_crc = UINT32_C(0x6d892135);
+    for (unsigned byte = 0; byte < 4; ++byte)
+        invalid_navigation[52 + byte] = (uint8_t)(navigation_crc >> (8U * byte));
+    device_settings_t preserved = sentinel;
+    assert(device_settings_decode(invalid_navigation, sizeof invalid_navigation, &preserved) == DEVICE_SETTINGS_INVALID_VALUE);
+    assert(device_settings_equal(&preserved, &sentinel));
     static const uint8_t invalid_legacy[][16] = {
         {0x44,0x53,0x45,0x54,1,16,2,0,1,70,5,0,0x52,0x72,0xa1,0xa9},
         {0x44,0x53,0x45,0x54,1,16,1,2,1,70,5,0,0x9c,0x53,0xf5,0x55},
@@ -243,7 +267,7 @@ static void rejected_records_and_values(void)
     damaged_legacy[15] ^= 1;
     device_settings_t output = sentinel;
     assert(device_settings_decode(damaged_legacy, 16, &output) == DEVICE_SETTINGS_INVALID_CHECKSUM);
-    uint8_t future[DEVICE_SETTINGS_RECORD_SIZE]; memcpy(future, default_record, sizeof future); future[4] = 5;
+    uint8_t future[DEVICE_SETTINGS_RECORD_SIZE]; memcpy(future, default_record, sizeof future); future[4] = 6;
     assert(device_settings_decode(future, DEVICE_SETTINGS_RECORD_SIZE, &output) == DEVICE_SETTINGS_UNSUPPORTED_VERSION);
     assert(device_settings_equal(&output, &sentinel));
 }

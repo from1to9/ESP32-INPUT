@@ -803,15 +803,17 @@ static app_motion_reference_t motion_reference_state(void)
 
 static cp_error_t motion_recenter_status(input_owner_t source, bool immediate)
 {
+    const bool input_settings = source == INPUT_LOCAL && s_overlay == APP_OVERLAY_SETTINGS &&
+        s_settings_page == APP_SETTINGS_INPUT;
     if (s_engine.state.locked) return CP_LOCKED;
     if (s_engine.state.mode != INPUT_MOUSE || s_engine.state.owner != source ||
-        !s_engine.state.gyro_enabled || !s_interaction.view.motion_enabled ||
-        s_interaction.motion_source != source) return CP_STALE;
+        (!input_settings && (!s_engine.state.gyro_enabled || !s_interaction.view.motion_enabled ||
+        s_interaction.motion_source != source))) return CP_STALE;
     if (!board_capabilities().imu || !s_interaction.view.calibrated || s_interaction.view.calibrating)
         return CP_UNAVAILABLE;
     if (s_engine.state.release_pending) return CP_RELEASE_PENDING;
     if (!s_engine.ready || !s_interaction.output_ready) return CP_UNAVAILABLE;
-    if (s_engine.congested || s_overlay != APP_OVERLAY_NONE || remote_update_maintenance() ||
+    if (s_engine.congested || (s_overlay != APP_OVERLAY_NONE && !input_settings) || remote_update_maintenance() ||
         s_transport_switch_pending || s_idle.asleep || s_idle.wake_capture || s_drag_requested ||
         s_engine.mouse_buttons || interaction_touch_holding(&s_interaction)) return CP_BUSY;
     if (immediate) {
@@ -828,9 +830,22 @@ static cp_error_t recenter_motion(input_owner_t source)
     sync_interaction();
     cp_error_t error = motion_recenter_status(source, true);
     if (error != CP_OK) return error;
-    if (!interaction_recenter_owned(&s_interaction, source)) return CP_BUSY;
+    bool input_settings = source == INPUT_LOCAL && s_overlay == APP_OVERLAY_SETTINGS &&
+        s_settings_page == APP_SETTINGS_INPUT;
+    if (!(input_settings ? interaction_reset_grip_owned(&s_interaction, source) :
+        interaction_recenter_owned(&s_interaction, source))) return CP_BUSY;
     s_message = "Reference reset. Hold still briefly; sensor calibration is unchanged.";
     return CP_OK;
+}
+
+static bool navigation_available(void)
+{
+    return s_settings.navigation && s_engine.state.mode == INPUT_MOUSE &&
+        s_engine.state.owner == INPUT_LOCAL && !s_engine.state.locked &&
+        !s_engine.state.release_pending && s_engine.ready && !s_engine.congested &&
+        s_overlay == APP_OVERLAY_NONE && !s_idle.asleep && !s_idle.wake_capture &&
+        !s_transport_switch_pending && !remote_update_maintenance() &&
+        !s_drag_requested && !s_engine.mouse_buttons && !interaction_touch_holding(&s_interaction);
 }
 
 static bool activate_primary(input_owner_t source)
@@ -913,6 +928,7 @@ static bool update_settings(const device_settings_t *candidate)
     COPY_CHANGED(tap_to_click); COPY_CHANGED(motion_gain_x_centi); COPY_CHANGED(motion_gain_y_centi);
     COPY_CHANGED(motion_deadzone_mdps); COPY_CHANGED(motion_filter_ms); COPY_CHANGED(motion_freeze_ms);
     COPY_CHANGED(motion_invert_x); COPY_CHANGED(motion_invert_y);
+    COPY_CHANGED(navigation);
 #undef COPY_CHANGED
     if (strcmp(candidate->bluetooth_name, s_settings.bluetooth_name))
         memcpy(durable.bluetooth_name, candidate->bluetooth_name, sizeof(durable.bluetooth_name));
@@ -1160,7 +1176,9 @@ static bool allowed_in_overlay(app_action_t action)
     switch (s_settings_page) {
     case APP_SETTINGS_INPUT:
         return action == APP_HAPTICS || action == APP_HOST_OS || action == APP_CALIBRATE ||
-            action == APP_TAP_TO_CLICK || action == APP_MOTION_CONFIG;
+            action == APP_TAP_TO_CLICK || action == APP_MOTION_CONFIG || action == APP_RECENTER;
+    case APP_SETTINGS_NAVIGATION:
+        return action == APP_NAVIGATION;
     case APP_SETTINGS_MOTION:
         return action == APP_MOTION_CONFIG || action == APP_CALIBRATE;
     case APP_SETTINGS_MOTION_ADVANCED:
@@ -1560,6 +1578,16 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
             (void)update_settings(&candidate);
         }
         return;
+    case APP_NAVIGATION:
+        if (s_overlay != APP_OVERLAY_SETTINGS || s_settings_page != APP_SETTINGS_NAVIGATION ||
+            (intent->x != 0 && intent->x != 1)) return;
+        {
+            cancel_input();
+            device_settings_t candidate = s_settings;
+            candidate.navigation = intent->x != 0;
+            (void)update_settings(&candidate);
+        }
+        return;
     case APP_MOTION_CONFIG: {
         if (s_overlay != APP_OVERLAY_SETTINGS ||
             (s_settings_page != APP_SETTINGS_INPUT && s_settings_page != APP_SETTINGS_MOTION &&
@@ -1612,7 +1640,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         if ((s_overlay == APP_OVERLAY_API_CONNECTION || s_overlay == APP_OVERLAY_WIFI_PROFILES) &&
             intent->x != APP_SETTINGS_WIFI) return;
         if (s_overlay == APP_OVERLAY_BLUETOOTH_TARGET && intent->x != APP_SETTINGS_BLUETOOTH) return;
-        if (intent->x < APP_SETTINGS_HOME || intent->x > APP_SETTINGS_GESTURES) return;
+        if (intent->x < APP_SETTINGS_HOME || intent->x > APP_SETTINGS_NAVIGATION) return;
         s_settings_page = (app_settings_page_t)intent->x;
         open_overlay(APP_OVERLAY_SETTINGS);
         return;
@@ -1846,6 +1874,12 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         if (error != CP_OK) s_message = "Recenter unavailable. Release input and wait for Motion readiness.";
         return;
     }
+    case APP_NAV_HOME: case APP_NAV_BACK:
+        if (!navigation_available()) return;
+        result = intent->action == APP_NAV_HOME ?
+            hid_engine_enqueue_mouse_click(&s_engine, intent->epoch, INPUT_LOCAL, 4) :
+            hid_engine_enqueue_mouse_key(&s_engine, intent->epoch, INPUT_LOCAL, 0x08, 0x2f);
+        break;
     case APP_GAIN:
         if (s_engine.state.mode != INPUT_MOUSE) return;
         (void)interaction_set_touch_divisor(&s_interaction, (unsigned)intent->x);
@@ -2591,6 +2625,8 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
     view->tap_to_click_enabled = s_settings.tap_to_click;
     /* Queue occupancy is rechecked on admission, not rendered per report. */
     view->motion_recenter_available = motion_recenter_status(INPUT_LOCAL, false) == CP_OK;
+    view->navigation_enabled = s_settings.navigation;
+    view->navigation_available = navigation_available();
     view->two_finger_scroll_available = s_multitouch_available;
     view->swipe_scroll_available = s_multitouch_available;
     view->motion_settings = (app_motion_settings_view_t){

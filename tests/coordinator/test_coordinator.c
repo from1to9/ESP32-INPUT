@@ -5928,6 +5928,7 @@ static void applied_remote_receipt_survives_later_local_selection(void)
 }
 
 #include "update_cases.inc"
+#include "navigation_cases.inc"
 #include "remote_device_cases.inc"
 
 static void consumed_event_workspace_does_not_retain_private_payloads(void)
@@ -6019,6 +6020,7 @@ int main(int argc, char **argv)
     RUN(advertising_failure_replay_preserves_domains_and_input);
     RUN(admission_failure_replay_is_bounded_repeatable_and_observation_only);
     REMOTE_UPDATE_CASES(RUN);
+    NAVIGATION_CASES(RUN);
 #if defined(CONFIG_APP_IMU_CAPTURE) && CONFIG_APP_IMU_CAPTURE
     RUN(raw_capture_observes_without_mutating_production_input);
     RUN(raw_capture_full_and_dump_pause_do_not_stop_motion);

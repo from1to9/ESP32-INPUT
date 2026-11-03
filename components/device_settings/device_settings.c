@@ -97,6 +97,7 @@ bool device_settings_equal(const device_settings_t *a, const device_settings_t *
         a->motion_deadzone_mdps == b->motion_deadzone_mdps &&
         a->motion_filter_ms == b->motion_filter_ms && a->motion_freeze_ms == b->motion_freeze_ms &&
         a->motion_invert_x == b->motion_invert_x && a->motion_invert_y == b->motion_invert_y &&
+        a->navigation == b->navigation &&
         strcmp(a->bluetooth_name, b->bluetooth_name) == 0;
 }
 
@@ -152,6 +153,7 @@ device_settings_status_t device_settings_encode(const device_settings_t *setting
     put_u16(encoded + 44, settings->motion_freeze_ms);
     encoded[46] = (uint8_t)((settings->motion_invert_x ? 1U : 0U) |
                           (settings->motion_invert_y ? 2U : 0U));
+    encoded[47] = settings->navigation ? 1U : 0U;
     const size_t crc_at = sizeof encoded - 4U;
     const uint32_t crc = checksum(encoded, crc_at);
     for (unsigned int i = 0; i < 4; ++i) encoded[crc_at + i] = (uint8_t)(crc >> (8U * i));
@@ -167,7 +169,7 @@ device_settings_status_t device_settings_decode(const uint8_t *record, size_t le
         length != DEVICE_SETTINGS_LEGACY_RECORD_SIZE)
         return DEVICE_SETTINGS_INVALID_LENGTH;
     if (memcmp(record, "DSET", 4) != 0) return DEVICE_SETTINGS_INVALID_MAGIC;
-    if (record[4] != 1 && record[4] != 2 && record[4] != 3 &&
+    if (record[4] != 1 && record[4] != 2 && record[4] != 3 && record[4] != 4 &&
         record[4] != DEVICE_SETTINGS_SCHEMA_VERSION)
         return DEVICE_SETTINGS_UNSUPPORTED_VERSION;
     const bool legacy = record[4] < 3;
@@ -197,9 +199,10 @@ device_settings_status_t device_settings_decode(const uint8_t *record, size_t le
         memset(decoded.bluetooth_name, 0, sizeof decoded.bluetooth_name);
         memcpy(decoded.bluetooth_name, record + 14, record[13]);
     }
-    if (record[4] == DEVICE_SETTINGS_SCHEMA_VERSION) {
+    if (record[4] >= 4) {
         if (record[46] & ~3U) return DEVICE_SETTINGS_INVALID_VALUE;
-        for (size_t i = 47; i < crc_at; ++i)
+        if (record[47] > (record[4] >= 5 ? 1U : 0U)) return DEVICE_SETTINGS_INVALID_VALUE;
+        for (size_t i = 48; i < crc_at; ++i)
             if (record[i]) return DEVICE_SETTINGS_INVALID_VALUE;
         decoded.motion_gain_x_centi = get_u16(record + 36);
         decoded.motion_gain_y_centi = get_u16(record + 38);
@@ -208,6 +211,7 @@ device_settings_status_t device_settings_decode(const uint8_t *record, size_t le
         decoded.motion_freeze_ms = get_u16(record + 44);
         decoded.motion_invert_x = (record[46] & 1U) != 0;
         decoded.motion_invert_y = (record[46] & 2U) != 0;
+        decoded.navigation = record[47] != 0;
     }
     if (!device_settings_validate(&decoded)) return DEVICE_SETTINGS_INVALID_VALUE;
     *settings = decoded;

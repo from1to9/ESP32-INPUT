@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -370,7 +371,30 @@ class CompanionTests(unittest.TestCase):
         payload = json.loads(catalog["payload"])
         self.assertEqual(payload["project"], "esp32_input"); self.assertEqual(payload["version"], "2.0.0")
         self.assertEqual(payload["layout"], "esp32s31-16m-ota6-v3")
+        self.assertEqual(payload["settings_schema"], 5)
         self.assertEqual(payload["sha256"], hashlib.sha256(image).hexdigest())
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "image.bin").write_bytes(image)
+            (directory / "publisher.pem").write_bytes(pem)
+            for schema in (None, 4):
+                output = directory / f"catalog-{schema}.json"
+                command = [sys.executable, str(ROOT / "bridge/sign_release.py"), "sign",
+                    "--image", str(directory / "image.bin"), "--private-key", str(directory / "publisher.pem"),
+                    "--output", str(output), "--key-id", "publisher", "--product", "input", "--board", "mosaico",
+                    "--release-id", "release-2", "--release-index", "2", "--url", "https://publisher.example/image.bin",
+                    "--expires", str(int(time.time()) + 3600)]
+                if schema is not None: command += ["--settings-schema", str(schema)]
+                subprocess.run(command, check=True, capture_output=True)
+                signed = json.loads(output.read_text())
+                self.assertEqual(json.loads(signed["payload"])["settings_schema"], 5 if schema is None else 4)
+                signature = bytes.fromhex(signed["signature"])
+                der = utils.encode_dss_signature(int.from_bytes(signature[:32], "big"), int.from_bytes(signature[32:], "big"))
+                key.public_key().verify(der, signed["payload"].encode(), ec.ECDSA(hashes.SHA256()))
+        with self.assertRaises(BridgeError):
+            sign_release(bytes(image), pem, key_id="publisher", product="input", board="mosaico",
+                release_id="release-2", release_index=2, url="https://publisher.example/image.bin",
+                expires=int(time.time())+3600, settings_schema=6)
         with self.assertRaises(BridgeError): sign_release(b"wrong", pem, key_id="publisher", product="input", board="mosaico", release_id="release-2", release_index=2, url="https://publisher.example/image.bin", expires=int(time.time())+3600)
 
     def test_actual_mcp_stdio(self):

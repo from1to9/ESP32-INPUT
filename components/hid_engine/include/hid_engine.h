@@ -157,6 +157,11 @@ hid_engine_enqueue_result_t hid_engine_enqueue_mouse_scroll(hid_engine_t *engine
 hid_engine_enqueue_result_t hid_engine_enqueue_key(hid_engine_t *engine,
     uint64_t epoch, input_owner_t owner, unsigned int modifier,
     unsigned int usage);
+/* Explicit composite-keyboard tap while staying in Mouse mode. Uses the same
+ * epoch/owner/transport and down/up recovery path as keyboard taps, rejects an
+ * active or queued drag, and never changes a keyboard preview or text batch. */
+hid_engine_enqueue_result_t hid_engine_enqueue_mouse_key(hid_engine_t *engine,
+    uint64_t epoch, input_owner_t owner, unsigned int modifier, unsigned int usage);
 /* Printable US ANSI bytes only, explicit length 1..TEXT_MAX_LENGTH; no NUL or
  * implicit Enter. Copies each character to one action (two reports).
  * Only one text batch may be queued at a time. text_accepted counts successful

@@ -34,7 +34,9 @@ typedef enum {
     APP_MOTION_CONFIG, APP_RECORDING_STORAGE_PREPARE_REQUEST, APP_MEDIA_CONTROL,
     APP_API_COMMISSIONING, APP_WIFI_PROFILE_CONTROL, APP_BLUETOOTH_TARGET_CONTROL,
     APP_API_INPUT_ALLOW_SET, /* x = explicit Boolean; api.revision = allowance generation. */
-    APP_RECENTER /* Reacquire the grip reference; never recalibrate sensor bias. */
+    APP_RECENTER, /* Reacquire the grip reference; never recalibrate sensor bias. */
+    APP_NAVIGATION, /* Input settings: x=0/1, persisted optional Mouse layout. */
+    APP_NAV_HOME, APP_NAV_BACK /* Mouse only: button 3 tap, Command+[ tap. */
 } app_action_t;
 
 typedef enum {
@@ -53,7 +55,8 @@ typedef enum {
 typedef enum {
     APP_SETTINGS_HOME, APP_SETTINGS_CONNECTIVITY, APP_SETTINGS_DISPLAY,
     APP_SETTINGS_INPUT, APP_SETTINGS_ABOUT, APP_SETTINGS_BLUETOOTH, APP_SETTINGS_WIFI,
-    APP_SETTINGS_MOTION, APP_SETTINGS_MOTION_ADVANCED, APP_SETTINGS_GESTURES
+    APP_SETTINGS_MOTION, APP_SETTINGS_MOTION_ADVANCED, APP_SETTINGS_GESTURES,
+    APP_SETTINGS_NAVIGATION
 } app_settings_page_t;
 typedef enum {
     APP_PAIR_OPEN, APP_PAIR_CLOSE, APP_PAIR_FORGET_ALL, APP_PAIR_DISCONNECT, APP_PAIR_RESUME
@@ -501,6 +504,8 @@ typedef struct {
     app_media_view_t media;
     app_media_review_t media_review;
     bool motion_recenter_available; /* Coordinator admits a local Mouse Recenter request. */
+    bool navigation_enabled;
+    bool navigation_available; /* Live local Mouse admission, not host mapping acknowledgement. */
     char developer[32];
     char repository_url[96];
     char git_commit[41]; /* Full 40-digit hexadecimal commit, distinct from build_id. */

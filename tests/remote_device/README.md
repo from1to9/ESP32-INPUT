@@ -21,7 +21,9 @@ immutable local review, restart-pending semantics, ordered partial factory reset
 failure preservation, scoped read caches and bounded rejection recovery.
 
 `preferences.reset` supports `all`, `display`, `input`, `haptics` and `bluetooth`.
-Input defaults include the complete native motion preferences. Factory reset is
+Input defaults include the complete native motion preferences and Navigation off.
+Navigation remains a local-only preference, with no new remote patch key.
+Factory reset is
 explicitly **Reset preferences and connections**: device preferences, LE HID
 bonds, Wi-Fi profiles and HID target preferences. Its published retention
 manifest preserves control trust, Classic bonds, firmware/OTA, models,

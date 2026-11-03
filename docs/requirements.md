@@ -110,6 +110,22 @@ provider evidence; unavailable multi-touch must not be simulated from ambiguous
 single contacts. Expose concise gesture help, visible drag state and a clear
 release/cancel action. Gesture interruption must never leave a host button held.
 
+#### Optional Navigation controls
+
+Input settings provides a persisted **Navigation** layout, disabled by default.
+It replaces only the Mouse header Recenter rectangle with independent Home and
+Back buttons; pointer, wheel, critical controls, Menu, ordinary layout and keyboard
+draft behavior remain intact. Input settings retains **Reset grip**, distinct
+from sensor calibration and unable to enable Motion by itself.
+
+Home uses the existing third mouse button and requires an explicit AssistiveTouch
+Button 3 to Home mapping. The setup instructions must permit returning to Mouse
+to emit the button during registration. Back is a Command+[ tap for supporting
+apps, not a system-wide return or a simulated screen swipe. Both use existing
+local ownership and USB/Bluetooth send/release recovery, and must not act across
+drag, lock, sleep, modal, maintenance or target/transport boundaries. See the
+[Navigation interaction contract](interaction.md#optional-navigation-layout).
+
 ### Keyboard behavior
 
 - The device displays a two-level, three-column by three-row character grid; the host needs no custom input method. This user-requested nine-cell update supersedes the original six-cell layout while retaining the original preview and explicit-send workflow. Empty character cells cannot receive motion focus or confirm a character.

@@ -61,6 +61,7 @@ static UI_TASK_BSS binding_t s_bindings[MAX_BINDINGS];
 static size_t s_binding_count;
 static lv_obj_t *s_screen, *s_panels[3], *s_mode_title, *s_context, *s_status;
 static lv_obj_t *s_critical, *s_keyboard_choice, *s_host_keys, *s_audio_choice, *s_gain;
+static lv_obj_t *s_navigation_home, *s_navigation_back, *s_navigation, *s_reset_grip;
 static lv_obj_t *s_motion, *s_pad, *s_drag, *s_mouse_controls[4];
 static lv_obj_t *s_pad_hint;
 static lv_obj_t *s_submodes[4], *s_preview, *s_progress, *s_clear;
@@ -557,6 +558,10 @@ static void on_action(lv_event_t *event)
     binding_t *binding = lv_event_get_user_data(event);
     if (s_view.locked || s_view.screen_off || s_wake_touch || (s_view.overlay != APP_OVERLAY_NONE && !in_overlay(binding->object))) return;
     if (binding->action == APP_SCROLL && !s_wheel.tap) return;
+    if ((binding->action == APP_NAV_HOME || binding->action == APP_NAV_BACK) &&
+        (s_view.mode != INPUT_MOUSE || !s_view.navigation_enabled ||
+         !s_view.navigation_available || s_touch_local_blocked ||
+         s_touch_epoch != s_view.epoch || s_touch_revision != s_view.ui_revision)) return;
     if (binding->action == APP_CONFIRM && s_view.confirmation == APP_CONFIRM_REMOTE) {
         remote_review_action(binding->object, binding->value != 0); return;
     }
@@ -603,6 +608,7 @@ static void on_action(lv_event_t *event)
     case APP_SYMBOLS: value = !s_view.symbols; break;
     case APP_HAPTICS: value = !s_view.haptics_enabled; break;
     case APP_TAP_TO_CLICK: value = !s_view.tap_to_click_enabled; break;
+    case APP_NAVIGATION: value = !s_view.navigation_enabled; break;
     case APP_AUDIO_POWER: value = !s_view.audio_active; break;
     case APP_AUDIO_MUTE: value = !s_view.microphone_muted; break;
     default: break;
@@ -619,7 +625,8 @@ static void on_action(lv_event_t *event)
     if (action == APP_SETTINGS_PAGE && value == APP_SETTINGS_HOME && s_view.overlay == APP_OVERLAY_SETTINGS) {
         if (s_view.settings_page == APP_SETTINGS_HOME) { action = APP_MENU; value = APP_OVERLAY_MODES; }
         else if (s_view.settings_page == APP_SETTINGS_BLUETOOTH || s_view.settings_page == APP_SETTINGS_WIFI) value = APP_SETTINGS_CONNECTIVITY;
-        else if (s_view.settings_page == APP_SETTINGS_MOTION || s_view.settings_page == APP_SETTINGS_GESTURES) value = APP_SETTINGS_INPUT;
+        else if (s_view.settings_page == APP_SETTINGS_MOTION || s_view.settings_page == APP_SETTINGS_GESTURES ||
+                 s_view.settings_page == APP_SETTINGS_NAVIGATION) value = APP_SETTINGS_INPUT;
         else if (s_view.settings_page == APP_SETTINGS_MOTION_ADVANCED) value = APP_SETTINGS_MOTION;
     }
     if ((binding->object == s_critical || binding->object == s_overlay_critical) &&
@@ -1385,8 +1392,8 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         label(input, "Host shortcut modifier", 0, 0, 448, INK);
         s_hosts[0] = button(input, "Ctrl / Windows", 0, 24, 220, 44, APP_HOST_OS, APP_HOST_CTRL);
         s_hosts[1] = button(input, "Command / Apple", 228, 24, 220, 44, APP_HOST_OS, APP_HOST_COMMAND);
-        label(input, "Haptic feedback", 0, 96, 228, INK);
-        s_haptics_text = label(input, "Off", 236, 96, 112, MUTED);
+        label(input, "Haptic feedback", 0, 88, 228, INK);
+        s_haptics_text = label(input, "Off", 236, 88, 112, MUTED);
         single_line(s_haptics_text);
         s_haptics = lv_switch_create(input);
         lv_obj_remove_style_all(s_haptics);
@@ -1396,7 +1403,7 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
             lv_obj_set_style_radius(s_haptics, LV_RADIUS_CIRCLE, parts[i]);
         }
         lv_obj_set_style_pad_all(s_haptics, -4, LV_PART_KNOB);
-        lv_obj_set_pos(s_haptics, 360, 84);
+        lv_obj_set_pos(s_haptics, 360, 76);
         lv_obj_set_size(s_haptics, 88, 44);
         background(s_haptics, LINE, LV_PART_MAIN);
         background(s_haptics, LINE, LV_PART_INDICATOR);
@@ -1405,13 +1412,28 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         background(s_haptics, ON_ACCENT, LV_PART_KNOB);
         lv_obj_add_flag(s_haptics, LV_OBJ_FLAG_EVENT_BUBBLE);
         lv_obj_add_event_cb(s_haptics, on_haptics, LV_EVENT_VALUE_CHANGED, NULL);
-        s_calibrate = button(input, "Calibrate sensor", 0, 144, 448, 44, APP_CALIBRATE, 0);
-        s_tap_click = button(input, "Tap to click / unavailable", 0, 200, 448, 44, APP_TAP_TO_CLICK, 0);
-        button(input, "Motion settings", 0, 256, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_MOTION);
-        button(input, "Gesture help", 228, 256, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_GESTURES);
-        s_motion_detail = label(input, "Motion status unavailable", 0, 308, 448, MUTED);
-        single_line(s_motion_detail);
+        s_motion_detail = label(input, "Motion status unavailable", 0, 112, 348, MUTED);
         lv_obj_set_style_text_font(s_motion_detail, META_FONT, 0);
+        single_line(s_motion_detail);
+        s_calibrate = button(input, "Calibrate sensor", 0, 132, 220, 44, APP_CALIBRATE, 0);
+        s_reset_grip = button(input, "Reset grip", 228, 132, 220, 44, APP_RECENTER, 0);
+        s_tap_click = button(input, "Tap to click / unavailable", 0, 184, 448, 44, APP_TAP_TO_CLICK, 0);
+        button(input, "Motion settings", 0, 236, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_MOTION);
+        button(input, "Gesture help", 228, 236, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_GESTURES);
+        s_navigation = button(input, "Navigation / off", 0, 288, 448, 44,
+            APP_SETTINGS_PAGE, APP_SETTINGS_NAVIGATION);
+        return;
+    }
+    if (page == APP_SETTINGS_NAVIGATION) {
+        s_navigation = button(settings, "Navigation / off", 0, 0, 456, 48,
+            APP_NAVIGATION, 0);
+        heading(settings, "Home / setup", 0, 64, 456);
+        label(settings, "Enable AssistiveTouch: Settings > Accessibility > Touch. "
+            "In AssistiveTouch > Devices, select this device and map Button 3 to Home.", 0, 100, 448, MUTED);
+        label(settings, "During button setup, close this panel and tap Home on Mouse.", 0, 190, 448, MUTED);
+        heading(settings, "Back / Command+[", 0, 252, 456);
+        label(settings, "Only in apps that support this shortcut. "
+            "No system-wide Back or touchscreen swipe.", 0, 288, 448, MUTED);
         return;
     }
     if (page == APP_SETTINGS_MOTION) {
@@ -1483,6 +1505,7 @@ static void clear_panel_bindings(void)
     s_network_name = s_network_detail = s_network_note = NULL;
     s_wifi_find = s_wifi_saved = s_wifi_backend = s_name_edit = s_tap_click = NULL;
     s_motion_detail = s_common_context = s_common_modifiers = NULL;
+    s_navigation = s_reset_grip = NULL;
     memset(s_motion_values, 0, sizeof(s_motion_values));
     memset(s_motion_sliders, 0, sizeof(s_motion_sliders));
     memset(s_motion_nudges, 0, sizeof(s_motion_nudges));
@@ -1833,6 +1856,8 @@ void app_ui_create(lv_display_t *display, app_submit_fn callback)
     button(s_screen, "Menu", 404, 8, 64, 48, APP_MENU, APP_OVERLAY_MODES);
     s_keyboard_choice = button(s_screen, "Touch", 140, 8, 132, 48, APP_MENU, APP_OVERLAY_KEYBOARD);
     s_host_keys = button(s_screen, "Keys", 224, 8, 48, 48, APP_MENU, APP_OVERLAY_COMMON_KEYS);
+    s_navigation_home = button(s_screen, "Home", 140, 8, 62, 48, APP_NAV_HOME, 0);
+    s_navigation_back = button(s_screen, "Back", 210, 8, 62, 48, APP_NAV_BACK, 0);
     s_audio_choice = button(s_screen, "Connection", 140, 8, 132, 48, APP_MENU, APP_OVERLAY_MEDIA_OPTIONS);
     for (int i = 0; i < 3; ++i) s_panels[i] = box(s_screen, 12, 64, 456, 408, SURFACE);
     create_mouse(s_panels[INPUT_MOUSE]);
@@ -1984,7 +2009,7 @@ static void render_device(const app_view_t *view, const char *link)
         label_format(s_telemetry, "%s / Wi-Fi %d dBm", battery, view->wifi_rssi_dbm);
     else label_format(s_telemetry, "%s / Wi-Fi %s", battery, wifi_status);
     const char *titles[] = {"Settings", "Connectivity", "Display", "Input", "About", "Bluetooth hosts", "Wi-Fi",
-        "Motion sensitivity", "Motion tuning", "Touch gestures"};
+        "Motion sensitivity", "Motion tuning", "Touch gestures", "Navigation"};
     unsigned page = (unsigned)view->settings_page < sizeof(titles) / sizeof(titles[0]) ? (unsigned)view->settings_page : 0;
     label_text(s_settings_title, titles[page]);
     const char *saved = view->settings_save_state == APP_SAVE_SAVED ? "Settings saved" :
@@ -2438,6 +2463,9 @@ void app_ui_render(const app_view_t *view)
             view->tap_to_click_enabled ? "Tap to click / on" : "Tap to click / off");
         selected(s_tap_click, view->tap_to_click_available && view->tap_to_click_enabled);
         enabled(s_tap_click, view->tap_to_click_available);
+        text(s_navigation, view->navigation_enabled ? "Navigation / on" : "Navigation / off");
+        selected(s_navigation, view->navigation_enabled);
+        enabled(s_reset_grip, view->motion_recenter_available);
         label_text(s_motion_detail, motion_reason(view));
         bool settings_known = motion_settings_valid(&view->motion_settings);
         bool settings_editable = settings_known && view->motion_settings.editable;
@@ -2492,7 +2520,16 @@ void app_ui_render(const app_view_t *view)
     label_text(s_mode_title, (unsigned)view->mode < 3 ? mode_names[view->mode] : "Input");
     if (view->mode != INPUT_AUDIO) label_format(s_context, "%s / %s", usb ? "USB" : "BT", s_target_text);
     critical_state(s_critical, alert, capture, provider_available);
-    visible(s_keyboard_choice, view->mode == INPUT_KEYBOARD || view->mode == INPUT_MOUSE);
+    bool navigation = view->mode == INPUT_MOUSE && view->navigation_enabled;
+    /* Revoke a pressed header before hiding it, so LVGL cannot retarget the
+     * same held contact onto a newly revealed Home/Back/Recenter control. */
+    enabled(s_keyboard_choice, !navigation &&
+        (view->mode != INPUT_MOUSE || view->motion_recenter_available));
+    enabled(s_navigation_home, navigation && view->overlay == APP_OVERLAY_NONE && view->navigation_available);
+    enabled(s_navigation_back, navigation && view->overlay == APP_OVERLAY_NONE && view->navigation_available);
+    visible(s_keyboard_choice, view->mode == INPUT_KEYBOARD || (view->mode == INPUT_MOUSE && !navigation));
+    visible(s_navigation_home, navigation && view->overlay == APP_OVERLAY_NONE);
+    visible(s_navigation_back, navigation && view->overlay == APP_OVERLAY_NONE);
     visible(s_host_keys, view->mode == INPUT_KEYBOARD);
     bool compact_header = view->mode == INPUT_KEYBOARD;
     if (compact_header != s_keyboard_header_compact) {
@@ -2504,7 +2541,6 @@ void app_ui_render(const app_view_t *view)
     visible(s_audio_choice, view->mode == INPUT_AUDIO);
     if (view->mode == INPUT_KEYBOARD)
         text(s_keyboard_choice, (unsigned)view->keyboard_submode < 4 ? entry_names[view->keyboard_submode] : "Entry");
-    enabled(s_keyboard_choice, view->mode != INPUT_MOUSE || view->motion_recenter_available);
     if (view->mode == INPUT_AUDIO) {
         text(s_audio_choice, media_connection_name(&view->media));
         label_text(s_context, !view->media.known ? "Status unknown" :

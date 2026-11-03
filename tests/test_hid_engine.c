@@ -1135,6 +1135,52 @@ static void descriptor_structure(void)
     assert(HID_ENGINE_KEYBOARD_LED_LENGTH == 1);
 }
 
+static void mouse_composite_shortcut_uses_existing_release_recovery(void)
+{
+    for (unsigned failure = 0; failure < 3; ++failure) {
+        hid_engine_t engine;
+        sink_t sink = {0};
+        connected(&engine, &sink, INPUT_MOUSE);
+        uint64_t epoch = engine.state.epoch;
+        assert(hid_engine_enqueue_key(&engine, epoch, INPUT_LOCAL, 8, 0x2f) == HID_ENGINE_ENQUEUE_BLOCKED);
+        assert(hid_engine_enqueue_mouse_key(&engine, epoch, INPUT_LOCAL, 8, 0x2f) == HID_ENGINE_ENQUEUE_OK);
+        if (failure == 1) sink.fail_next = true;
+        if (failure != 1) {
+            const uint8_t back[] = {8, 0, 0x2f, 0, 0, 0, 0, 0};
+            expect_report(&engine, &sink, 1, back, sizeof back);
+            assert(engine.state.mode == INPUT_MOUSE && engine.state.epoch == epoch);
+        }
+        if (failure == 2) sink.fail_next = true;
+        if (failure) {
+            assert(step(&engine, &sink) == HID_ENGINE_STEP_SEND_FAILED);
+            assert(engine.state.release_pending && !engine.count);
+            release_barrier(&engine, &sink);
+            assert(step(&engine, &sink) == HID_ENGINE_STEP_IDLE);
+        } else expect_zero(&engine, &sink, 1);
+        assert(!engine.text_pending && !engine.text_accepted && !engine.text_completed);
+    }
+    hid_engine_t engine;
+    sink_t sink = {0};
+    connected(&engine, &sink, INPUT_MOUSE);
+    uint64_t epoch = engine.state.epoch;
+    assert(hid_engine_enqueue_mouse_buttons(&engine, epoch, INPUT_LOCAL, 1) == HID_ENGINE_ENQUEUE_OK);
+    assert(hid_engine_enqueue_mouse_key(&engine, epoch, INPUT_LOCAL, 8, 0x2f) == HID_ENGINE_ENQUEUE_BLOCKED);
+    assert(step(&engine, &sink) == HID_ENGINE_STEP_SENT);
+    assert(hid_engine_enqueue_mouse_key(&engine, epoch, INPUT_LOCAL, 8, 0x2f) == HID_ENGINE_ENQUEUE_BLOCKED);
+    hid_engine_cancel(&engine);
+    release_barrier(&engine, &sink);
+    epoch = engine.state.epoch;
+    assert(hid_engine_enqueue_mouse_key(&engine, epoch - 1, INPUT_LOCAL, 8, 0x2f) == HID_ENGINE_ENQUEUE_STALE);
+    assert(hid_engine_enqueue_mouse_key(&engine, epoch, INPUT_REMOTE, 8, 0x2f) == HID_ENGINE_ENQUEUE_STALE);
+    assert(hid_engine_enqueue_mouse_key(&engine, epoch, INPUT_LOCAL, 256, 0x2f) == HID_ENGINE_ENQUEUE_INVALID);
+    assert(hid_engine_enqueue_mouse_key(&engine, epoch, INPUT_LOCAL, 8, 2) == HID_ENGINE_ENQUEUE_INVALID);
+    assert(hid_engine_enqueue_mouse_key(&engine, epoch, INPUT_LOCAL, 8, 0x2f) == HID_ENGINE_ENQUEUE_OK);
+    assert(step(&engine, &sink) == HID_ENGINE_STEP_SENT);
+    hid_engine_set_locked(&engine, true);
+    release_barrier(&engine, &sink);
+    assert(step(&engine, &sink) == HID_ENGINE_STEP_IDLE && !engine.count);
+}
+
 int main(void)
 {
     initial_and_readiness();
@@ -1145,6 +1191,7 @@ int main(void)
     drag_failures_and_short_congestion();
     interrupted_release_barrier();
     explicit_keys_and_text();
+    mouse_composite_shortcut_uses_existing_release_recovery();
     invalid_ranges();
     queue_capacity_and_wrap();
     interruption_sequences();

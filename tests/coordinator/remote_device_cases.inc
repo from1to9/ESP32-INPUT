@@ -110,6 +110,7 @@ static void remote_device_review_is_inert_immutable_and_physically_confirmed(voi
 static void remote_device_factory_reset_sequence(bool orphan_at_admission)
 {
     remote_device_case_setup(); remote_device_case_off(); test_link.connected = false;
+    s_settings.navigation = true;
     test_bonds.count = 1; test_wifi_profiles.count = 1;
     test_update_target.selected = true;
     test_update_target.target = (ble_hid_target_t){.bond_id_known = true, .bond_id = {0x42}};
@@ -137,6 +138,7 @@ static void remote_device_factory_reset_sequence(bool orphan_at_admission)
     test_wifi_profiles.operation_pending = false; test_wifi_profiles.completed_request_id = test_wifi_profiles.request_id;
     test_wifi_profiles.count = 0; test_control_session_alive = false; /* The admitted final step may sever management. */
     remote_device_case_tick(); assert(test_control_result.state == CP_RESULT_COMPLETED && !remote_device_maintenance());
+    assert(!s_settings.navigation && !test_saved_request.navigation);
     assert(!test_restart_requests && !test_pair_opens && !test_wifi_forgets);
 }
 static void remote_device_factory_reset_waits_for_each_exact_manager_receipt(void)

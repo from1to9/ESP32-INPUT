@@ -12,7 +12,7 @@
 #define IDLE_MS 10000
 #define FRAME_BYTES (WIDTH * HEIGHT * 2U)
 /* design/ui-plan.md: fixed input pages preserve gestures; one panel is dynamic. */
-#define CORE_OBJECT_LIMIT 114 /* Two Mic level objects extend the approved 112-object Audio core. */
+#define CORE_OBJECT_LIMIT 118 /* Four Navigation header objects extend the existing 114-object core. */
 #define PANEL_OBJECT_LIMIT 160
 
 typedef struct {
@@ -35,6 +35,7 @@ static const panel_case_t s_panels[] = {
     {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_MOTION, 0},
     {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_MOTION_ADVANCED, 0},
     {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_GESTURES, 0},
+    {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_NAVIGATION, 0},
     {INPUT_KEYBOARD, APP_OVERLAY_KEYBOARD, 0, 0},
     {INPUT_AUDIO, APP_OVERLAY_AUDIO, 0, 0},
     {INPUT_MOUSE, APP_OVERLAY_WIFI_SETUP, 0, 0},
@@ -123,6 +124,7 @@ static size_t timer_count(void)
 static app_view_t view(input_mode_t mode, bool dark)
 {
     app_view_t state = {.mode = mode, .dark_theme = dark, .epoch = 11, .ui_revision = 1,
+        .navigation_enabled = true, .navigation_available = mode == INPUT_MOUSE,
         .connected = true, .ready = true, .bluetooth_available = true,
         .bluetooth_connected = true, .bluetooth_ready = true, .target_name = "Resource test peer",
         .motion_available = true, .gain_divisor = 1, .microphone_muted = true,

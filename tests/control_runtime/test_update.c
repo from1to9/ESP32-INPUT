@@ -164,7 +164,7 @@ psa_status_t psa_hash_abort(psa_hash_operation_t *op){memset(op,0,sizeof(*op));r
 static void catalog_make(void){
     uint8_t digest[32];cp_sha256(image,sizeof(image),digest);char hex_digest[65];for(unsigned i=0;i<32;++i)sprintf(hex_digest+i*2,"%02x",digest[i]);
     char payload[2048],quoted[3072],signature[129];memset(signature,'1',128);signature[128]=0;
-    int n=snprintf(payload,sizeof(payload),"{\"v\":1,\"release_id\":\"release-2\",\"release_index\":2,\"product\":\"input\",\"board\":\"mosaico\",\"chip\":\"esp32s31\",\"project\":\"esp32_input\",\"layout\":\"esp32s31-16m-ota6-v3\",\"settings_schema\":4,\"version\":\"2.0.0\",\"size\":300,\"sha256\":\"%s\",\"url\":\"https://publisher.example/image.bin\",\"expires_unix_seconds\":\"1900003600\"}",hex_digest);assert(n>0&&(size_t)n<sizeof(payload));assert(cj_escape(payload,quoted,sizeof(quoted)));
+    int n=snprintf(payload,sizeof(payload),"{\"v\":1,\"release_id\":\"release-2\",\"release_index\":2,\"product\":\"input\",\"board\":\"mosaico\",\"chip\":\"esp32s31\",\"project\":\"esp32_input\",\"layout\":\"esp32s31-16m-ota6-v3\",\"settings_schema\":%u,\"version\":\"2.0.0\",\"size\":300,\"sha256\":\"%s\",\"url\":\"https://publisher.example/image.bin\",\"expires_unix_seconds\":\"1900003600\"}",DEVICE_SETTINGS_SCHEMA_VERSION,hex_digest);assert(n>0&&(size_t)n<sizeof(payload));assert(cj_escape(payload,quoted,sizeof(quoted)));
     n=snprintf(catalog,sizeof(catalog),"{\"v\":1,\"alg\":\"ES256\",\"key_id\":\"release-key\",\"payload\":%s,\"signature\":\"%s\"}",quoted,signature);assert(n>0&&(size_t)n<sizeof(catalog));
 }
 static void step_worker(void){if(setjmp(loop_end)==0)worker(NULL);}

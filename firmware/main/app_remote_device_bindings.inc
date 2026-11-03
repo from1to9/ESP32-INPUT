@@ -238,7 +238,8 @@ static void remote_device_settings_progress(remote_device_binding_job_t *job)
         if (!device_settings_equal(&s_settings, &job->before) && !device_settings_equal(&s_settings, &interim)) {
             remote_device_failed(job, CP_STALE, job->name_done); return;
         }
-        if (request->settings_fields & (APP_REMOTE_SETTING_TAP | APP_REMOTE_SETTING_SHORTCUT | APP_REMOTE_SETTING_MOTION)) cancel_input();
+        if (request->settings_fields & (APP_REMOTE_SETTING_TAP | APP_REMOTE_SETTING_SHORTCUT |
+            APP_REMOTE_SETTING_MOTION | APP_REMOTE_SETTING_NAVIGATION)) cancel_input();
         if (!update_settings_internal(&request->settings, false)) { remote_device_failed(job, CP_UNAVAILABLE, job->name_done); return; }
         if (request->durable && !persist_settings(&request->settings)) { remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return; }
         settings_store_status_t after = settings_store_status();

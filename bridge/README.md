@@ -90,6 +90,14 @@ Create a publisher key outside the repository, then sign the **application** art
 
 The signed payload binds full SHA-256/size, version/project extracted from the image, chip, board/product, settings schema, layout, release index, artifact URL and a finite expiry of at most seven days. ECDSA uses P-256/SHA-256 and an exact 64-byte `r || s` signature. This publisher signature is separate from optional SDK secure boot signing; no fuse changes occur.
 
+The signer defaults to the canonical settings schema in `device_settings.h`
+(currently 5). The running recipient still requires an exact schema match.
+When upgrading a device that is still running schema-4 firmware, pass
+`--settings-schema 4`; use the default for recipients already running schema 5.
+The new decoder reads schemas 1 through 4 without a format-only write. Settings
+writes stay blocked during OTA probation. This explicit catalog choice does not
+relax firmware compatibility checks or infer a recipient's current version.
+
 For a bounded development source on the approved LAN, serve the frozen release:
 
 ```sh

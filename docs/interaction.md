@@ -20,6 +20,41 @@ Input settings provides **Tap to click**, default on. The input recognizer owns 
 
 Preserve relative touch displacement and precision fractions across ordinary USB/BLE backpressure. Split large movement into the existing signed 8-bit reports, and merge only adjacent local movement without crossing click, scroll or button transitions. A contact beginning while busy may move once output resumes, but cannot grant a delayed tap or drag. Retained movement uses the existing 32-slot queue, a 4096-unit per-axis action bound and a 250 ms deadline from the oldest source sample; overflow or expiry cancels the pending epoch and prioritizes neutral releases. Cancellation, lock, mode/owner changes and target replacement discard residual movement. Remote touch uses the same displacement conversion and splitting, with explicit busy/capacity rejection before consuming a retryable request; lease revocation takes priority over retained movement.
 
+#### Optional Navigation layout
+
+**Input > Navigation** selects a persisted layout, off by default. On Mouse,
+the original 132 x 48 Recenter header region becomes two independent controls:
+Home at x 140/y 8/w 62/h 48 and Back at x 210/y 8/w 62/h 48. The touchpad,
+wheel, click/drag row, Motion/gain row, Menu and critical controls keep their
+geometry. Turning Navigation off restores the original Recenter header.
+
+**Home** sends the existing third mouse button (bit 2, value 4), then its neutral
+release. It requires host configuration; it does not claim that Home occurred.
+Enable AssistiveTouch under Settings > Accessibility > Touch, then open
+AssistiveTouch > Devices, select the pointer device and map Button 3 to Home.
+The user can close the setup panel and press Home on Mouse while registering
+the additional button. See [Apple's button-assignment instructions](https://support.apple.com/en-au/111775).
+
+**Back** sends one Command+[ keyboard tap through the existing composite HID
+connection while remaining in Mouse mode. It is independent of the draft's
+Ctrl/Command preference, applies only to apps that support that shortcut, and
+is neither system-wide Back nor a touchscreen swipe. Navigation never types
+into or sends the local keyboard draft.
+
+Both controls use local ownership, epoch/revision and selected USB/Bluetooth
+admission. Active or queued drag, lock, release recovery, unavailable/busy input,
+covered or sleeping UI, firmware maintenance and target/transport changes reject
+or cancel the action. Failures use the existing neutral-release recovery without
+replaying an accepted down report. Changing the header layout under a held
+contact cancels that contact; a fresh press is required.
+
+**Input > Reset grip** retains discoverable access when Navigation occupies the
+header. In Mouse mode this clears the grip reference while the settings menu
+keeps Motion off; it preserves sensor calibration, draft and settings, and
+emits no HID report. Enable Motion and hold still to acquire the current grip.
+The ordinary header Recenter and remote Recenter retain their original
+Motion-enabled admission. Calibrate sensor remains a separate bias operation.
+
 ### Keyboard
 
 One compact chooser opens **Motion**, **Touch**, **Spoken letters** and **Shortcuts**; four persistent submode tabs are unnecessary. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. The nine-cell layout is an explicit user revision of the original six-cell prototype. Motion moves local focus only; empty cells never receive focus or confirm input.

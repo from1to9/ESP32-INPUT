@@ -4,16 +4,16 @@ This fixed-storage C11 component validates device preferences, encodes a version
 
 ## Settings record
 
-Defaults are Dark theme, Ctrl host modifier, haptics enabled, brightness 50%, a five-minute screen timeout, Bluetooth input, tap-to-click enabled and Bluetooth name `ESP32-INPUT`. Valid stored brightness values, including earlier 70% preferences, remain unchanged. Light/Dark, Ctrl/Command and Bluetooth/USB are the only enum values for those preferences. Brightness accepts 10..100% in ten-point steps; timeout accepts Off or exactly 1/5/10/30 minutes. Tap-to-click off disables pad-generated clicks/drag while preserving movement and explicit mouse buttons. Applying that policy must cancel any touch-owned hold through the coordinator's release path. Preferences do not establish motor/transport availability, host delivery or a live gesture. The coordinator persists transport/name changes only after their owning manager confirms application.
+Defaults are Dark theme, Ctrl host modifier, haptics enabled, brightness 50%, a five-minute screen timeout, Bluetooth input, tap-to-click enabled, Navigation disabled and Bluetooth name `ESP32-INPUT`. Valid stored brightness values, including earlier 70% preferences, remain unchanged. Light/Dark, Ctrl/Command and Bluetooth/USB are the only enum values for those preferences. Brightness accepts 10..100% in ten-point steps; timeout accepts Off or exactly 1/5/10/30 minutes. Tap-to-click off disables pad-generated clicks/drag while preserving movement and explicit mouse buttons. Applying that policy must cancel any touch-owned hold through the coordinator's release path. Preferences do not establish motor/transport availability, host delivery or a live gesture. The coordinator persists transport/name changes only after their owning manager confirms application.
 
 `device_settings_bluetooth_name_valid` is the shared pure validator for settings and BLE adapters. It accepts 1..18 UTF-8 bytes, excluding the terminator; rejects malformed/overlong sequences, surrogates, code points beyond Unicode, NUL/C0/C1 controls and outer ASCII spaces. Internal spaces and valid multibyte names are allowed. The explicit-length input need not be terminated. Runtime settings own a 19-byte terminated name; an unterminated array is invalid.
 
-Encoding uses exactly 56 bytes for schema 4, independent of C layout, padding or endianness. Decoding additionally accepts 16-byte schema-1/2 and 40-byte schema-3 records:
+Encoding uses exactly 56 bytes for schema 5, independent of C layout, padding or endianness. Decoding additionally accepts 16-byte schema-1/2 and 40-byte schema-3 and 56-byte schema-4 records:
 
 | Offset | Bytes | Meaning |
 | --- | --- | --- |
 | 0 | 4 | ASCII `DSET` magic |
-| 4 | 1 | Schema version 4 |
+| 4 | 1 | Schema version 5 |
 | 5 | 1 | Record length 56 |
 | 6 | 1 | Theme: Light 0, Dark 1 |
 | 7 | 1 | Host modifier: Ctrl 0, Command 1 |
@@ -31,12 +31,13 @@ Encoding uses exactly 56 bytes for schema 4, independent of C layout, padding or
 | 42 | 2 | Filter milliseconds, LE uint16 |
 | 44 | 2 | Settling freeze milliseconds, LE uint16 |
 | 46 | 1 | Bit 0 invert X, bit 1 invert Y; other bits zero |
-| 47 | 5 | Reserved, must be zero |
+| 47 | 1 | Navigation layout: disabled 0 (default), enabled 1 |
+| 48 | 4 | Reserved, must be zero |
 | 52 | 4 | Little-endian CRC-32/ISO-HDLC over bytes 0..51 |
 
 CRC uses reflected polynomial `0xedb88320`, initial value `0xffffffff` and final complement. It detects accidental corruption and is not authentication. Decode distinguishes invalid arguments/length/magic/checksum/value from unsupported schema, and leaves the destination untouched on every failure. It never silently replaces data with defaults. The persistence owner decides how to expose missing, corrupt, unsupported or unavailable storage and retain recovery evidence.
 
-Legacy records retain their length 16, CRC over bytes 0..11 and little-endian checksum at 12..15. Schema 1 requires reserved byte 11 zero and derives Bluetooth transport; schema 2 retains its saved transport. Both preserve every old field and default only absent tap/name and motion fields. Schema 3 preserves its saved tap/name values and defaults only motion fields; its CRC remains at 36..39 over 0..35. Invalid flags, lengths, nonzero padding/reserved bytes or unknown versions are rejected even with a valid CRC. Migration changes memory only. A later explicit changed preference encodes schema 4; loading legacy data or requesting unchanged logical settings never triggers a format-upgrade write.
+Legacy records retain their length 16, CRC over bytes 0..11 and little-endian checksum at 12..15. Schema 1 requires reserved byte 11 zero and derives Bluetooth transport; schema 2 retains its saved transport. Both preserve every old field and default only absent tap/name and motion fields. Schema 3 preserves its saved tap/name values and defaults only motion fields; its CRC remains at 36..39 over 0..35. Invalid flags, lengths, nonzero padding/reserved bytes or unknown versions are rejected even with a valid CRC. Schema 4 retains all motion fields and defaults the absent Navigation preference to off; its byte 47 must remain zero. Migration changes memory only. A later explicit changed preference encodes schema 5; loading legacy data or requesting unchanged logical settings never triggers a format-upgrade write.
 
 Motion defaults are independent X/Y gain 4 HID units/degree, deadzone 0.5 degrees/second, filter 30 ms, freeze 150 ms and no inversion. Durable gains accept 25..10000 centi-units (0.25..100); deadzone accepts 0..10000 milli-degrees/second and filter/freeze accept 0..1000 ms. Runtime motion intent, gravity, calibration and confidence are never persisted.
 

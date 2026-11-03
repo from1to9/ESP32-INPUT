@@ -38,6 +38,28 @@ Touch start and physical AI down suppress motion. Existing click freeze, relativ
 
 The 2026-10-23 grip-reference revision reuses the Mouse header slot at x 140/y 8/w 132/h 48 for `Recenter`. Auto grip is automatic behavior, with its acknowledged state in the existing noninteractive pad caption. `Motion / waiting` means Motion is requested but the reference is acquiring or restoring; it remains tappable to stop. `Motion / on` requires the coordinator's ready reference, while sensor, calibration and connection blockers retain priority. Ordinary touch pauses and zero-delta samples do not change this coarse reference state. `Recenter` is available only while Motion is requested, uses a distinct coordinator-admitted intent, preserves sensor bias, settings and the current Motion request, and never enables Motion while off. Input settings retains `Calibrate sensor` for bias calibration. The 106-object core, 160-object dynamic ceiling and all pad, scroll, click and bottom-row rectangles remain unchanged.
 
+### Optional Navigation revision
+
+The user-approved Navigation preference is off by default and persists through
+the settings owner. When enabled, Mouse replaces only the Recenter slot with
+Home (140, 8, 62, 48) and Back (210, 8, 62, 48), separated by 8 px. All other
+Mouse and safety geometry stays fixed. The ordinary layout retains Recenter.
+Input places Calibrate sensor and Reset grip side by side, with separate
+Tap-to-click, Motion settings/Gesture help and Navigation rows; Back and save
+status remain at their existing positions. The current Motion reason remains
+visible below the haptics text. Reset grip clears the reference while
+Motion stays off in the menu, without changing sensor bias or sending input.
+
+The Navigation page explains AssistiveTouch Button 3 to Home setup, including
+returning to Mouse to register the button. It labels Back as Command+[ for apps
+that support it, without promising system-wide Back or touchscreen gestures.
+The two independent header buttons add four fixed LVGL objects to the current
+114-object baseline, for a **118-object core**. The dynamic panel ceiling remains
+160, with native resource checks covering layout changes and teardown. Held contacts are
+cancelled before revealing replacement header actions. The
+[interaction contract](../docs/interaction.md#optional-navigation-layout) owns
+admission and transport semantics; `compact.html` models the same opt-in layout.
+
 ## 3. Keyboard geometry and workflow
 
 | Element | Geometry | Behavior |
@@ -121,7 +143,7 @@ The existing 280 ms single/double exclusion window remains subject to hardware q
 
 The current production construction was measured at **315 objects, 84 action bindings and 663 color bindings**. The linked UI's static internal SRAM footprint is 19, 016 bytes, including 14, 336 bytes for the fixed color registry. These are baseline source/native object and target-map observations, not the dynamic target heap total. Exact run artifacts stay in `.agent/local/`; they must not be confused with a performance result for this proposal.
 
-Keep the three primary pages and safety/navigation shell fixed, with at most one dynamically constructed panel or Settings category. This avoids destroying a primary input surface during a gesture while removing all eagerly constructed hidden settings and overlays. Domain state, drafts, mode, confirmation identity and settings remain in the coordinator. The original focused-layout core measured 102 objects; the explicit speech Reject control raised it to 104. The user-requested persistent Keys button and caption add exactly two objects, making the current architectural ceilings **106 with no panel** and **160 with one panel**. Independent panel-peak and repeated-navigation measurements must confirm these ceilings before acceptance. Required controls are not removed to meet an obsolete proposal.
+Keep the three primary pages and safety/navigation shell fixed, with at most one dynamically constructed panel or Settings category. This avoids destroying a primary input surface during a gesture while removing all eagerly constructed hidden settings and overlays. Domain state, drafts, mode, confirmation identity and settings remain in the coordinator. The focused-layout baseline progressed from 102 objects through speech Reject (104), Keys (106), the two Audio cards (112) and Mic level (114). Navigation adds four fixed objects, making the current architectural ceilings **118 with no panel** and **160 with one panel**. Native panel-peak and repeated-navigation measurements must confirm these ceilings before acceptance. Required controls are not removed to meet an obsolete proposal.
 
 Object lifetime changes require a dedicated reviewed lifecycle, not a touch workaround:
 

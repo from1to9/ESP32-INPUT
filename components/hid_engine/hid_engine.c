@@ -334,6 +334,23 @@ hid_engine_enqueue_result_t hid_engine_enqueue_key(hid_engine_t *engine,
     return HID_ENGINE_ENQUEUE_OK;
 }
 
+hid_engine_enqueue_result_t hid_engine_enqueue_mouse_key(hid_engine_t *engine,
+    uint64_t epoch, input_owner_t owner, unsigned int modifier, unsigned int usage)
+{
+    if (modifier > 255 || usage > HID_ENGINE_KEY_USAGE_MAX ||
+        (usage > 0 && usage < 4) || (usage == 0 && modifier == 0))
+        return HID_ENGINE_ENQUEUE_INVALID;
+    const hid_engine_enqueue_result_t result =
+        check_enqueue(engine, epoch, owner, INPUT_MOUSE, 1, false);
+    if (result != HID_ENGINE_ENQUEUE_OK) return result;
+    if (drag_active_or_queued(engine)) return HID_ENGINE_ENQUEUE_BLOCKED;
+    const input_key_report_t report = {.modifier = (uint8_t)modifier, .keys = {(uint8_t)usage}};
+    hid_engine_action_t action = key_action(epoch, owner, &report);
+    action.mode = INPUT_MOUSE;
+    push(engine, &action);
+    return HID_ENGINE_ENQUEUE_OK;
+}
+
 hid_engine_enqueue_result_t hid_engine_enqueue_text(hid_engine_t *engine,
     uint64_t epoch, input_owner_t owner, const char *text, size_t length)
 {

@@ -17,6 +17,8 @@ from secure_transport import BridgeError
 
 LAYOUT = "esp32s31-16m-ota6-v3"
 MAX_IMAGE = 0x600000
+SETTINGS_SCHEMA = int(re.search(r"^#define DEVICE_SETTINGS_SCHEMA_VERSION (\d+)U?$",
+    (ROOT / "components/device_settings/include/device_settings.h").read_text(), re.M).group(1))
 
 def private_destination(path: Path):
     path = path.expanduser().resolve()
@@ -44,7 +46,7 @@ def image_identity(data: bytes):
 
 def sign_release(image: bytes, key_pem: bytes, *, key_id: str, product: str, board: str,
                  release_id: str, release_index: int, url: str, expires: int,
-                 settings_schema: int = 4) -> dict:
+                 settings_schema: int = SETTINGS_SCHEMA) -> dict:
     version, project = image_identity(image)
     for value in (key_id, product, board, release_id):
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value):
@@ -53,7 +55,7 @@ def sign_release(image: bytes, key_pem: bytes, *, key_id: str, product: str, boa
     now = int(dt.datetime.now(dt.timezone.utc).timestamp())
     if source.scheme != "https" or not source.hostname or source.username or source.password or source.query or source.fragment or not source.path or len(url) >= 512:
         raise BridgeError("Artifact needs an explicit HTTPS origin and path")
-    if not 0 <= release_index <= 2**32-1 or not now < expires <= now+604800 or settings_schema != 4:
+    if not 0 <= release_index <= 2**32-1 or not now < expires <= now+604800 or settings_schema not in (4, SETTINGS_SCHEMA):
         raise BridgeError("Invalid release index, finite expiry or settings schema")
     key = serialization.load_pem_private_key(key_pem, password=None)
     if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
@@ -80,6 +82,8 @@ def main():
         sign.add_argument("--" + flag, required=True)
     sign.add_argument("--release-index", required=True, type=int)
     sign.add_argument("--expires", required=True, type=int)
+    sign.add_argument("--settings-schema", type=int, choices=(4, SETTINGS_SCHEMA), default=SETTINGS_SCHEMA,
+                      help="schema accepted by the running recipient (default: %(default)s); use 4 when upgrading schema-4 firmware")
     args = parser.parse_args()
     try:
         if args.command == "keygen":
@@ -94,7 +98,7 @@ def main():
                 raise BridgeError("Image exceeds six MiB")
             catalog = sign_release(args.image.read_bytes(), key, key_id=args.key_id, product=args.product,
                                    board=args.board, release_id=args.release_id, release_index=args.release_index,
-                                   url=args.url, expires=args.expires)
+                                   url=args.url, expires=args.expires, settings_schema=args.settings_schema)
             write_private(args.output, json.dumps(catalog, indent=2).encode() + b"\n")
             print(json.dumps({"catalog_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest()}))
     except (BridgeError, OSError, ValueError):

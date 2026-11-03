@@ -46,3 +46,10 @@ clang -std=c11 -Wall -Wextra -Werror -pedantic -Wconversion -Wshadow \
 The host regression also runs 100,000 deterministic lifecycle cycles using fixed engine and sender storage. They repeatedly exercise queued movement, accepted key/button presses, mode/lock/ownership cancellation, disconnect/reconnect, failed key-up recovery, short congestion and deadline cancellation. Every cycle checks bounded storage, completed releases, local ownership, cleared pending work and idle output; this is portable lifecycle evidence rather than an elapsed-time device soak.
 
 `hid_engine_set_gyro_owned` supports the coordinator's explicitly authorized local or remote producer through the same input-core readiness/epoch/owner gates. The original function remains the local-source wrapper. It does not create a lease or bypass release/congestion checks.
+
+`hid_engine_enqueue_mouse_key` admits one composite-keyboard tap while retaining
+Mouse mode. It uses the same report-ID-1 down/up and neutral-release recovery
+as explicit keyboard keys, including cancellation, owner/epoch, transport and
+congestion checks, and rejects active or queued drag. The application uses it
+for Navigation Back (Command+[); this never changes a keyboard draft or creates
+a text batch. Home uses the existing third-button mouse click (value 4).

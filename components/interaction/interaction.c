@@ -324,6 +324,15 @@ bool interaction_recenter_owned(interaction_t *m, input_owner_t source)
     return true;
 }
 
+bool interaction_reset_grip_owned(interaction_t *m, input_owner_t source)
+{
+    if (source != INPUT_LOCAL || m->view.mode != INPUT_MOUSE ||
+        !m->view.calibrated || m->view.calibrating || !m->output_ready ||
+        m->control.locked || m->control.owner != source) return false;
+    recenter_reference(m, INTERACTION_REFERENCE_RESET_RECENTER);
+    return true;
+}
+
 void interaction_set_keyboard_motion(interaction_t *m, bool enabled)
 {
     m->view.keyboard_motion = enabled;

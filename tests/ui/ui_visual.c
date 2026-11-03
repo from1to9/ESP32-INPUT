@@ -1421,6 +1421,7 @@ static void setup_cache_lifetime_checks(void)
 #include "ui_extensions.inc"
 #include "ui_motion_settings.inc"
 #include "ui_motion_grip.inc"
+#include "ui_navigation.inc"
 #include "ui_about_metadata.inc"
 #include "ui_capture_indicator.inc"
 #include "ui_touch_context.inc"
@@ -1435,12 +1436,13 @@ static void setup_cache_lifetime_checks(void)
 
 int main(int argc, char **argv)
 {
-    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion") || !strcmp(argv[2], "about") || !strcmp(argv[2], "audio") || !strcmp(argv[2], "bluetooth"))));
+    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion") || !strcmp(argv[2], "about") || !strcmp(argv[2], "audio") || !strcmp(argv[2], "bluetooth") || !strcmp(argv[2], "navigation"))));
     bool keys_only = argc == 3 && !strcmp(argv[2], "keys");
     bool motion_only = argc == 3 && !strcmp(argv[2], "motion");
     bool about_only = argc == 3 && !strcmp(argv[2], "about");
     bool audio_only = argc == 3 && !strcmp(argv[2], "audio");
     bool bluetooth_only = argc == 3 && !strcmp(argv[2], "bluetooth");
+    bool navigation_only = argc == 3 && !strcmp(argv[2], "navigation");
     assert(!app_ui_touch_context().eligible_pad);
     s_output = argv[1];
     ui_memory_check_observer();
@@ -1480,6 +1482,13 @@ int main(int argc, char **argv)
         }
         strcpy(s_state.bluetooth_hosts[1].name, "Named test host");
         grid_groups();
+        if (navigation_only) {
+            navigation_checks();
+            motion_grip_checks();
+            common_keys_checks();
+            device_settings_checks();
+            continue;
+        }
         if (keys_only) {
             common_keys_checks();
             continue;
@@ -1595,6 +1604,7 @@ int main(int argc, char **argv)
         extension_checks();
         motion_settings_checks();
         motion_grip_checks();
+        navigation_checks();
         capture_indicator_checks();
         touch_context_checks();
         recording_storage_checks();

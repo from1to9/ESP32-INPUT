@@ -663,7 +663,7 @@ static void legacy_record_migrates_only_after_explicit_transport_change(void)
         worker_at(requested + 999999);
         assert(hw.sets == 0);
         worker_at(requested + 1000000);
-        assert(hw.sets == 1 && hw.commits == 1 && hw.durable_length == 56 && hw.durable[4] == 4);
+        assert(hw.sets == 1 && hw.commits == 1 && hw.durable_length == 56 && hw.durable[4] == 5);
         reset_runtime();
         device_settings_t reloaded = defaults();
         assert(settings_store_init(&reloaded) == ESP_OK);
