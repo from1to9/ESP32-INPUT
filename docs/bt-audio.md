@@ -223,6 +223,34 @@ uncertain result and cannot establish disconnection. Snapshot
 `error` and its stage/time preserve the first historical transport failure;
 current readiness and the current request error are separate fields.
 
+## Locating A2DP packet loss on S31
+
+The default-off `CONFIG_APP_A2DP_ACL_DIAGNOSTICS` build option observes the
+first enabled A2DP speaker grant for up to 180 seconds. It freezes on grant
+closure/replacement, a different Classic ACL handle, or the time limit.
+The coordinator logs totals on state changes and every ten seconds while
+active. States 0 through 4 mean waiting, active, grant closed, time limit and
+handle change. Later grants cannot restart the window before reboot.
+
+Compare deltas within a single continuous stream. Use intervals inside the
+window because packets can already be in flight when the observer starts or
+stops. Leading continuations before the first START have no known predecessor.
+
+| Serial field | Observation and interpretation |
+| --- | --- |
+| `ACL in` / `out` | Each tuple counts Classic H4 fragments, complete L2CAP PDUs, STARTs replacing incomplete PDUs, orphan continuations and invalid headers. The input probe runs in Bluedroid's VHCI receive callback before allocation. The output probe runs on the HCI thread just after queue removal, before H4 validation and SDK reassembly. Compare the replacement counts to the SDK's own unfinished-packet warnings. A replacement at input establishes a missing continuation at that boundary. Sender, radio and controller ownership still needs separate evidence. |
+| `host_unready`, `alloc_failed`, `queued`, `enqueue_failed` | Results for observed Classic inputs. If a continuation reaches input and fails enqueue, the next START can produce a replacement only at output. A fatal SDK allocation assertion can prevent a subsequent summary. |
+| `queue_samples`, `handoff_over_10ms`, `max_handoff_us`, `max_admission_us` | One packet at a time is timed from immediately before enqueue to dequeue. The count over 10 ms uses the application's frame period. Admission measures callback observation to enqueue return, including allocation and copy. A long sampled handoff measures delay. Sampling cannot exclude a longer unsampled delay. |
+| `btu_post_reject_peak_high`, `credits` | Successful and rejected BTU ACL queue posts, peak enqueue depth, and posts at or above the SDK congestion high-water mark. The BTU queue is shared with LE. Credits count completions for the observed Classic handle submitted at the H4 command boundary. Interval differences show changes, not absolute controller credit balance or acknowledgements. |
+| `RTP encoded` / `decode` | Each tuple counts packets, forward sequence jumps, the sum of skipped IDs at those jumps, and duplicate/backward/ambiguous steps. AVDTP supplies the parsed RTP sequence. The first probe is at the SBC queue entry, the second immediately before the decoder's existing sequence check. Additional decode-only gaps localize losses between these probes. Nonforward steps preclude interpreting skipped IDs as unique missing packets. |
+
+The observer uses fixed-size counters and inspects only H4/ACL lengths and
+flags, L2CAP length, the selected flow-control command's handle/count fields,
+and the sequence already parsed by AVDTP. No payloads, keys, peer addresses
+or packet pointers are logged. No logging or allocation occurs in the hooks.
+The diagnostic build instruments copies of the pinned SDK sources and keeps
+the normal callback owner, queue results, credits and decoder behavior.
+
 ## Saved Classic host UI
 
 `bt_audio_bond_list()` returns the actual bounded Classic SDK saved-address

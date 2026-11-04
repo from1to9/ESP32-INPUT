@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "bt_audio.h"
+#include "bt_acl_diag.h"
 
 #include <limits.h>
 #include <string.h>
@@ -113,6 +114,7 @@ static void invalidate_locked(bool reset_policy)
     audio.adapter.partial_frames = 0;
     audio.adapter.playback_enabled = false;
     audio.adapter.gap_pending = false;
+    bt_acl_diag_binding(false);
     memset(audio.adapter.partial, 0, sizeof(audio.adapter.partial));
     if (reset_policy) {
         audio.public.route = BT_AUDIO_OFF;
@@ -1363,6 +1365,7 @@ static ae_result_t port_bind_playback(void *context, ae_route_t route, uint64_t 
         audio.adapter.sequence = audio.adapter.sample_offset = 0;
         audio.adapter.gap_pending = false;
         audio.adapter.playback_enabled = enabled;
+        bt_acl_diag_binding(enabled && route == AE_ROUTE_A2DP_SINK);
         audio.adapter.playback_consumer = consumer;
         if (enabled) {
             audio.adapter.playback_max_consumer = consumer;
@@ -1446,6 +1449,7 @@ ae_result_t bt_audio_receive(ae_frame_t *frame)
             const bt_audio_pcm_t *packet = &ring->slots[ring->head];
             if (!packet->consumer_generation || packet->consumer_generation != audio.adapter.playback_consumer) {
                 clear_ring(ring); audio.adapter.partial_frames = 0; audio.adapter.playback_enabled = false;
+                bt_acl_diag_binding(false);
                 portEXIT_CRITICAL(&audio_lock); return AE_STALE;
             }
             tail_timestamp_us = packet->timestamp_us;

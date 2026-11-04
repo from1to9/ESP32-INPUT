@@ -11,6 +11,16 @@ menu "Input device board resources"
             test confirms codec shutdown. No settings are persisted and no
             public remote audio-test API is enabled by this option.
 
+    config APP_A2DP_ACL_DIAGNOSTICS
+        bool "Observe one A2DP playback at Bluetooth receive boundaries"
+        depends on IDF_TARGET_ESP32S31 && BT_CLASSIC_ENABLED && BT_A2DP_ENABLE && !BT_A2DP_USE_EXTERNAL_CODEC && BT_CTRL_BR_EDR_MAX_ACL_CONN = 1
+        default n
+        help
+            Starting the first A2DP speaker grant opens a header-only diagnostic
+            window of up to 180 seconds. The normal audio diagnostic summary
+            reports aggregate HCI fragments, queue timing and RTP sequence gaps.
+            No media, keys or device addresses are collected.
+
     config APP_IMU_CAPTURE
         bool "Bounded raw IMU diagnostic capture"
         default n

@@ -28,3 +28,7 @@ target_compile_options(${input_tinyusb_lib} PUBLIC
 # Keep the managed dependency pristine and compile only the exact reviewed
 # generated audio-class repair with the existing TinyUSB target configuration.
 include("${CMAKE_CURRENT_LIST_DIR}/tinyusb_audio_patch.cmake")
+
+if(CONFIG_APP_A2DP_ACL_DIAGNOSTICS)
+    include("${CMAKE_CURRENT_LIST_DIR}/bt_acl_diag.cmake")
+endif()

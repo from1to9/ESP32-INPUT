@@ -5,6 +5,7 @@
 #include "board_audio_mosaico.h"
 #include "usb_audio.h"
 #include "bt_audio.h"
+#include "bt_acl_diag.h"
 #include "usb_audio_transport.h"
 #include "esp_log.h"
 #ifdef ESP_PLATFORM
@@ -54,6 +55,9 @@ typedef struct {
     ae_result_t speech_result;
     bool speech_cleanup;
     bt_audio_a2dp_rx_t a2dp;
+#if CONFIG_APP_A2DP_ACL_DIAGNOSTICS
+    bt_acl_diag_t acl;
+#endif
     usb_audio_snapshot_t usb;
     usb_audio_transport_snapshot_t transport;
     board_audio_status_t codec;
@@ -152,6 +156,9 @@ static void observe(void)
         out->speech_cleanup = media->speech.cleanup_pending;
     }
     bt_audio_a2dp_rx_snapshot(&out->a2dp);
+#if CONFIG_APP_A2DP_ACL_DIAGNOSTICS
+    bt_acl_diag_snapshot(&out->acl);
+#endif
     out->usb = usb_audio_snapshot();
     usb_audio_transport_snapshot(&out->transport);
     out->codec = board_audio_mosaico_status();
@@ -254,6 +261,26 @@ static void log_a2dp(const bt_audio_a2dp_rx_t *rx)
         rx->overruns, rx->expired, rx->malformed, rx->partial_expiries, rx->gap_discarded_samples,
         rx->callback_intervals, rx->max_callback_gap_us);
 }
+
+#if CONFIG_APP_A2DP_ACL_DIAGNOSTICS
+static void log_acl(const bt_acl_diag_t *v)
+{
+    ESP_LOGI(TAG, "Audio diag ACL state=%u in=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
+        " out=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
+        " host_unready=%" PRIu32 " alloc_failed=%" PRIu32 " queued=%" PRIu32 " enqueue_failed=%" PRIu32 " credits=%" PRIu32
+        " btu_post_reject_peak_high=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
+        " queue_samples=%" PRIu32 " handoff_over_10ms=%" PRIu32 " max_handoff_us=%" PRIu32 " max_admission_us=%" PRIu32,
+        (unsigned)v->state, v->input.fragments, v->input.completed, v->input.replaced, v->input.orphan, v->input.invalid,
+        v->dequeue.fragments, v->dequeue.completed, v->dequeue.replaced, v->dequeue.orphan, v->dequeue.invalid,
+        v->host_unready, v->alloc_failed, v->queued, v->enqueue_failed, v->credits_submitted,
+        v->btu_posts, v->btu_rejected, v->btu_peak, v->btu_high_water_posts, v->queue_samples,
+        v->handoff_over_10ms, v->max_handoff_us, v->max_admission_us);
+    ESP_LOGI(TAG, "Audio diag RTP encoded=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32
+        " decode=%" PRIu32 "/%" PRIu32 "/%" PRIu32 "/%" PRIu32,
+        v->encoded.packets, v->encoded.gaps, v->encoded.skipped, v->encoded.nonforward,
+        v->decode.packets, v->decode.gaps, v->decode.skipped, v->decode.nonforward);
+}
+#endif
 
 static void log_transport(const usb_audio_transport_snapshot_t *transport)
 {
@@ -440,6 +467,10 @@ void app_audio_diagnostics_poll(uint64_t now_ms)
          current->a2dp.bound != previous->a2dp.bound ||
          job_changed(&current->jobs[AE_CONSUMERS_MAX], &previous->jobs[AE_CONSUMERS_MAX])))
         log_a2dp(&current->a2dp);
+#if CONFIG_APP_A2DP_ACL_DIAGNOSTICS
+    if (!diagnostics.observed || (summary && current->acl.state == BT_ACL_ACTIVE) || current->acl.state != previous->acl.state)
+        log_acl(&current->acl);
+#endif
     if (summary || usb_changed(&current->usb, &previous->usb)) log_usb(&current->usb);
     if (summary || transport_changed(&current->transport, &previous->transport)) log_transport(&current->transport);
     if (summary || codec_changed(&current->codec, &previous->codec)) log_codec(&current->codec);

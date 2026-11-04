@@ -34,6 +34,12 @@ def main():
                          "dispatch-post-failure", "dispatch-reentrant", "profile-actions", "timeout-hfp", "timeout-a2dp", "pairing", "pairing-expiry", "pairing-timeout", "discovery-timeout", "playback-binding", "expiry-observation", "sustained-sbc",
                          "a2dp-queued-gap", "hfp-transmit-clock", "hfp-write-clock"):
             subprocess.run([str(binary), scenario], check=True)
+        diag = command[:command.index(str(SUITE / "test_bt_audio.c"))]
+        diag.remove("-DTEST_BT_AUDIO_LOCKS")
+        subprocess.run(diag + ["-DCONFIG_APP_A2DP_ACL_DIAGNOSTICS=1", str(SUITE / "test_acl_diagnostics.c"),
+            str(ROOT / "firmware/main/bt_acl_diag.c"), "-o", str(binary)], check=True)
+        for scenario in ("before-host", "enqueue", "headers", "window", "handle"):
+            subprocess.run([str(binary), scenario], check=True)
         composition = [part for part in command if part != str(SUITE / "test_bt_audio.c")]
         composition += [str(SUITE / "engine_pairing_transport.c"), str(SUITE / "test_engine_pairing.c")]
         composition += [str(ROOT / "components/audio_engine" / name) for name in
