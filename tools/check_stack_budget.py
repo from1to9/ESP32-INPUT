@@ -305,6 +305,20 @@ PATHS = {
 # owner request functions copy work for other tasks; those worker stacks are
 # deliberately not nested under the submitting coordinator frame.
 LOCAL_INTENT = CORE + [("main", "consume_coordinator_event"), ("main", "handle_intent")]
+# Each listed controller may have an authenticated session. Checking that
+# session re-reads the credential while the outer catalog snapshot is live.
+CONTROLLER_SNAPSHOT = [("controller_access", "app_control_access_snapshot"),
+    ("server", "app_control_server_client_connected"), ("server", "cached_session"),
+    ("server", "cached_authority"), ("control_runtime", "principal_source"),
+    ("controller_access", "app_control_access_principal"), ("controller_access", "records"),
+    ("controller_access", "records_version"), ("control_trust", "app_control_trust_principals")]
+CONTROLLER_INTENT = LOCAL_INTENT + [("main", "handle_controller_intent")]
+PATHS["controller_ui_render"] = CORE + [("main", "render_view"),
+    ("main", "fill_controller_view")] + CONTROLLER_SNAPSHOT
+PATHS["controller_ui_revalidate"] = CONTROLLER_INTENT + CONTROLLER_SNAPSHOT
+# Submission only fills the owner's mailbox. Flash persistence is on its worker.
+PATHS["controller_ui_submit"] = CONTROLLER_INTENT + [("control_runtime", "app_control_runtime_access_request"),
+    ("controller_access", "app_control_access_submit")]
 BT_BEGIN = LOCAL_INTENT + [("connectivity", "app_connectivity_controls_bluetooth_start"),
     ("bluetooth_management", "app_bluetooth_management_begin")]
 BT_EXACT_BEGIN = LOCAL_INTENT + [("connectivity", "app_connectivity_controls_handle"),
