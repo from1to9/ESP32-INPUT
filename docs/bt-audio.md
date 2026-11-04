@@ -52,15 +52,16 @@ SDK submission only; both profile success events are required for readiness.
 Missing events expire after five seconds. Partial initialization retains its
 resources and fails closed until the complete shared stack is reset/rebooted.
 The transport never initializes/enables/disables those singletons, opens I2S or
-a codec, changes a device name, automatically pairs or starts capture.
+a codec, automatically pairs or starts capture.
 `ble_hid_init` is the current shared lifecycle owner: it enables BTDM when
 Classic is configured, and retains BLE mode for a BLE-only image. The audio
-module owns Classic GAP/security and bounded discoverability. Its device name
-comes from asynchronous Classic GAP readback verified against HCI Read Local Name at initialization and each
-explicit pairing window. Read failure/timeout leaves the name unavailable and
-does not fail audio or prevent closing pairing. The application currently has no
-Classic name writer: the Classic name can differ from the separately configured
-HID name. Neither a GAP name nor discovery cache observation proves radio receipt.
+module owns Classic GAP/security and bounded discoverability. The shared device-name setting
+derives the Classic name as `<base>-AUD` and the BLE HID name as `<base>-IN`.
+The audio module applies the Classic name and verifies the GAP readback against
+the controller's HCI Read Local Name response. It also checks the name at
+initialization and when opening an explicit pairing window. A failed or timed-out
+read leaves the name unavailable. Audio and pairing-window closure remain usable.
+Fresh discovery on a host verifies the name visible over the air.
 BLE HID readiness is unrelated to either Classic profile's readiness.
 
 The shared owner must enable Classic A2DP, HFP client, HFP HCI audio and WBS,
