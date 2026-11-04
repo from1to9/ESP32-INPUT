@@ -1649,10 +1649,43 @@ def digest(path):
 
 def measurement_units(build):
     units = dict(UNITS)
+    if "#define CONFIG_APP_TOUCH_LATENCY_DIAGNOSTICS 1" in (build / "config/sdkconfig.h").read_text():
+        units["touch_trace"] = "firmware/main/app_touch_trace.c"
     for name, spec in GENERATED_TINYUSB.items():
         generated = build.resolve() / "generated/tinyusb_audio" / spec["filename"]
         units[name] = str(generated.relative_to(ROOT)) if generated.is_relative_to(ROOT) else str(generated)
     return units
+
+
+def touch_trace_paths():
+    """Optional observer task paths; SDK/event dispatch still uses the reserve."""
+    entries = {
+        "start": ("main", LOCAL_INTENT, "app_touch_trace_start", []),
+        "consume": ("main", CORE + [("main", "consume_coordinator_event")], "app_touch_trace_consume", ["age", "metric"]),
+        "enqueue": ("main", LOCAL_INTENT, "app_touch_trace_displacement", ["age", "metric"]),
+        "loop": ("main", CORE, "app_touch_trace_loop", ["metric"]),
+        "send_age": ("main", TOUCH_SEND, "app_touch_trace_send_begin", ["metric"]),
+        "send_result": ("main", TOUCH_SEND, "app_touch_trace_send", []),
+        "step": ("main", CORE, "app_touch_trace_step", []),
+        "scan": ("lvgl", LVGL_TOUCH + [("main", "submit_contacts")], "app_touch_trace_scan", ["metric"]),
+        "primary": ("lvgl", LVGL_TOUCH[:5] + [("ui", "on_touch"), ("ui", "submit"),
+            ("main", "submit_intent")], "app_touch_trace_primary", []),
+        "ble_begin": ("main", TOUCH_SEND + [("ble", "ble_hid_send_generation")], "app_touch_trace_ble_begin", ["metric"]),
+        "ble_return": ("main", TOUCH_SEND + [("ble", "ble_hid_send_generation")], "app_touch_trace_ble_return", ["metric"]),
+        "ble_complete": ("btc", BLE_ADMISSION_PRODUCERS["gatts_callback"][1], "app_touch_trace_ble_complete", ["metric"]),
+        "take": ("main", CORE + [("main", "report_touch_diagnostics")], "app_touch_trace_take", []),
+    }
+    paths, owners, required = {}, {}, set()
+    for name, (owner, prefix, entry, tail) in entries.items():
+        base = prefix + [("touch_trace", entry)]
+        label = "touch_trace_" + name
+        paths[label] = base + [("touch_trace", helper) for helper in tail]
+        owners[label] = owner
+        required.add(("touch_trace", entry))
+        if name not in ("start", "send_result", "step", "take"):
+            paths[label + "_close"] = base + [("touch_trace", "in_window"), ("touch_trace", "close_window")]
+            owners[label + "_close"] = owner
+    return paths, owners, required
 
 
 def verify_generated_source(build, database, unit):
@@ -1882,7 +1915,11 @@ def main():
         r"\b(?:ble_hid_bond_list|bt_audio_bond_list)\s*\(", (ROOT / path).read_text())]
     with ThreadPoolExecutor(max_workers=3) as pool:
         frames = dict(pool.map(lambda unit: compile_unit(unit, database, output), units.items()))
-    chains, errors = evaluate_paths(frames, budgets)
+    declared_paths, owners, required = dict(PATHS), dict(PATH_OWNERS), set(REQUIRED)
+    if "touch_trace" in units:
+        extra_paths, extra_owners, extra_required = touch_trace_paths()
+        declared_paths.update(extra_paths); owners.update(extra_owners); required.update(extra_required)
+    chains, errors = evaluate_paths(frames, budgets, paths=declared_paths, owners=owners, required=required)
     interrupt_inventory, interrupt_errors = interrupt_frame_inventory(frames, config)
     if legacy:
         errors.append("Large by-value bond getter remains in: " + ", ".join(sorted(legacy)))

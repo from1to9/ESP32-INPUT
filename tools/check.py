@@ -40,7 +40,7 @@ subprocess.run([sys.executable, str(root / "tests/wifi/run.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/presenter/run.py")], check=True)
 # Domain and composition suites run production code at named SDK boundaries.
 # These commands never enumerate, open, flash or test a physical device.
-for suite in ("motion_capture", "sensor_api", "sensor_capture", "touch_pointer", "multitouch", "board_touch", "usb_audio", "bt_audio", "board_audio",
+for suite in ("motion_capture", "sensor_api", "sensor_capture", "touch_pointer", "touch_trace", "multitouch", "board_touch", "usb_audio", "bt_audio", "board_audio",
               "display_transfer", "boot_ui", "audio_engine", "spoken_letters",
               "media_runtime", "media_controls", "audio_diagnostics", "control_protocol", "command_bridge",
               "remote_input", "remote_device", "device_restart", "remote_media", "control_runtime", "connectivity_controls"):

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "ble_hid.h"
+#include "app_touch_trace.h"
 
 #include <string.h>
 #include "sdkconfig.h"
@@ -269,6 +270,9 @@ static struct {
     bool subscription_timed_out;
     bool subscription_timeout_reported;
     TickType_t notification_started;
+#if APP_TOUCH_TRACE_ENABLED
+    uint32_t notification_trace_id;
+#endif
     uint64_t connection_generation;
     uint64_t notification_generation;
     uint16_t notification_conn_id;
@@ -2598,6 +2602,11 @@ static void gatts_callback(esp_gatts_cb_event_t event, esp_gatt_if_t interface,
         if (state.notification_pending &&
             state.notification_conn_id == parameter->conf.conn_id &&
             state.notification_handle == parameter->conf.handle) {
+#if APP_TOUCH_TRACE_ENABLED
+            if (state.notification_trace_id && app_touch_trace_active())
+                app_touch_trace_ble_complete(state.notification_trace_id, (int32_t)parameter->conf.status,
+                    (uint64_t)esp_timer_get_time());
+#endif
             if (parameter->conf.status != ESP_GATT_OK && state.public.connected &&
                 state.public.generation == state.notification_generation) {
                 record_failure_locked("Notification completion", ESP_FAIL, true,
@@ -3232,6 +3241,12 @@ bool ble_hid_send_generation(uint64_t generation, uint8_t report_id,
     state.notification_generation = generation;
     state.notification_conn_id = conn_id;
     state.notification_handle = handle;
+#if APP_TOUCH_TRACE_ENABLED
+    const bool trace_movement = report_id == HID_ENGINE_MOUSE_REPORT_ID && (data[1] || data[2]);
+    const uint32_t trace_id = trace_movement && app_touch_trace_active() ?
+        app_touch_trace_ble_begin((uint64_t)esp_timer_get_time()) : 0;
+    state.notification_trace_id = trace_id;
+#endif
     refresh_locked();
     portEXIT_CRITICAL(&state_lock);
 
@@ -3243,6 +3258,10 @@ bool ble_hid_send_generation(uint64_t generation, uint8_t report_id,
 
     portENTER_CRITICAL(&state_lock);
     state.submitting = false;
+#if APP_TOUCH_TRACE_ENABLED
+    if (trace_id && app_touch_trace_active())
+        app_touch_trace_ble_return(trace_id, (int32_t)error, (uint64_t)esp_timer_get_time());
+#endif
     if (error != ESP_OK) {
         if (state.public.connected && state.public.generation == generation) {
             record_failure_locked("Notification submission", error, false, 0);

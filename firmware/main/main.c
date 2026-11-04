@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
+#include "app_touch_trace.h"
 #include "app_build_identity.h"
 #include "app_sensor_api.h"
 #include "app_presenter.h"
@@ -475,9 +476,17 @@ static bool submit_intent(app_intent_t *intent)
         return true;
     }
     coordinator_event_t event = {.value.intent = *intent};
-    if (xQueueSend(s_intents, &event, 0) == pdTRUE) {
-        return true;
+    const bool queued = xQueueSend(s_intents, &event, 0) == pdTRUE;
+#if APP_TOUCH_TRACE_ENABLED
+    if (app_touch_trace_active() && intent->surface == APP_SURFACE_TOUCHPAD &&
+        (intent->action == APP_TOUCH_BEGIN || intent->action == APP_TOUCH_MOVE ||
+         intent->action == APP_TOUCH_END || intent->action == APP_TOUCH_CANCEL)) {
+        app_touch_trace_primary(intent->event_ms, intent->action == APP_TOUCH_BEGIN ? TOUCH_TRACE_BEGIN :
+            intent->action == APP_TOUCH_MOVE ? TOUCH_TRACE_MOVE : TOUCH_TRACE_END,
+            queued, uxQueueMessagesWaiting(s_intents));
     }
+#endif
+    if (queued) return true;
     if (priority && intent->gesture) {
         /* Preserve a real Lock under queue pressure without bypassing wake
          * capture. Each emergency kind has one bounded coordinator-owned slot. */
@@ -517,7 +526,13 @@ static bool submit_contacts(const board_touch_snapshot_t *sample)
     app_sensor_api_touch(sample, event.value.touch.eligible);
     /* Complete snapshots and primary events share one FIFO; a later sensor
      * update can never overtake an earlier primary pointer event. */
-    if (xQueueSend(s_intents, &event, 0) == pdTRUE) return true;
+    const bool queued = xQueueSend(s_intents, &event, 0) == pdTRUE;
+#if APP_TOUCH_TRACE_ENABLED
+    if (app_touch_trace_active()) app_touch_trace_scan(sample->sequence, sample->timestamp_ms,
+        sample->valid, sample->overflow, event.value.touch.eligible && sample->valid &&
+        !sample->overflow && sample->count == 1, queued, uxQueueMessagesWaiting(s_intents));
+#endif
+    if (queued) return true;
     portENTER_CRITICAL(&s_control_lock);
     s_priority_requests |= RELEASE_REQUEST;
     portEXIT_CRITICAL(&s_control_lock);
@@ -548,9 +563,17 @@ static bool send_report(void *context, uint8_t report_id,
     const bool movement = report_id == HID_ENGINE_MOUSE_REPORT_ID &&
         length == HID_ENGINE_MOUSE_REPORT_LENGTH && (data[1] || data[2]);
     if (movement) motion_trace_count(&s_motion_trace.move_attempts);
+#if APP_TOUCH_TRACE_ENABLED
+    if (movement && app_touch_trace_active()) {
+        const hid_engine_action_t *head = &s_engine.queue[s_engine.head];
+        app_touch_trace_send_begin(s_engine.count && head->buffered_motion,
+            head->motion_since_ms, (uint64_t)esp_timer_get_time());
+    }
+#endif
     bool accepted = s_input_transport == APP_INPUT_USB ?
         usb_hid_send_generation(*generation, report_id, data, length) :
         ble_hid_send_generation(*generation, report_id, data, length);
+    if (movement) app_touch_trace_send(accepted);
     if (movement) motion_trace_count(accepted ? &s_motion_trace.move_admitted : &s_motion_trace.move_rejected);
     return accepted;
 }
@@ -1993,11 +2016,20 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
             return;
         }
         if (!allow_motion) return;
+#if APP_TOUCH_TRACE_ENABLED
+        if ((intent->x || intent->y) && s_input_transport == APP_INPUT_BLUETOOTH &&
+            s_engine.ready && s_engine.state.connected && !s_engine.state.release_pending &&
+            s_engine.state.owner == INPUT_LOCAL && link->ready)
+            app_touch_trace_start(s_now_ms * 1000U, link->generation, intent->gesture, intent->event_ms);
+        const size_t trace_before = s_engine.count;
+#endif
         interaction_touch_delta_t delta = interaction_touch_displacement_owned(&s_interaction,
             INPUT_LOCAL, (float)intent->x, (float)intent->y);
         if (!delta.x && !delta.y) return;
         result = hid_engine_enqueue_mouse_displacement(&s_engine, intent->epoch, INPUT_LOCAL,
             delta.x, delta.y, intent->event_ms, s_now_ms);
+        app_touch_trace_displacement(result == HID_ENGINE_ENQUEUE_OK,
+            trace_before && s_engine.count <= trace_before, intent->event_ms, s_now_ms);
         if (result != HID_ENGINE_ENQUEUE_OK) {
             cancel_input();
             s_message = result == HID_ENGINE_ENQUEUE_FULL ?
@@ -2983,8 +3015,60 @@ static void consume_coordinator_event(coordinator_event_t *event, const ble_hid_
 {
     if (event->contacts) handle_contacts(event);
     else handle_intent(&event->value.intent, link);
+#if APP_TOUCH_TRACE_ENABLED
+    if (event->contacts || event->value.intent.surface == APP_SURFACE_TOUCHPAD)
+        app_touch_trace_consume(event->contacts, event->contacts ? event->value.touch.sample.timestamp_ms :
+            event->value.intent.event_ms, s_now_ms);
+#endif
     clear_private(event, sizeof(*event));
 }
+
+#if APP_TOUCH_TRACE_ENABLED
+static void __attribute__((noinline)) report_touch_diagnostics(void)
+{
+    static EXT_RAM_BSS_ATTR app_touch_trace_snapshot_t trace;
+    static const char *const names[] = {"scan_interval", "primary_age", "contact_age", "loop_interval",
+        "motion_enqueue_age", "submit_interval", "submit_duration", "complete_duration", "send_age"};
+    _Static_assert(HID_ENGINE_STEP_RETRY_EXHAUSTED == 4, "touch trace step result order");
+    _Static_assert(sizeof names / sizeof names[0] == TOUCH_TRACE_METRICS, "touch trace metric names");
+    if (!app_touch_trace_take(&trace)) return;
+    ESP_LOGI(TAG, "TouchTrace start_us=%llu end_us=%llu generation=%llu gesture=%u trigger_ms=%llu "
+        "link_changed=%u outstanding=%u return_unobserved=%u clock_errors=%u",
+        (unsigned long long)trace.start_us, (unsigned long long)trace.end_us,
+        (unsigned long long)trace.generation, (unsigned)trace.gesture, (unsigned long long)trace.trigger_source_ms,
+        (unsigned)trace.link_changed, (unsigned)trace.outstanding, (unsigned)trace.return_unobserved, (unsigned)trace.clock_errors);
+    ESP_LOGI(TAG, "TouchTrace scans=%u single_pad=%u invalid=%u overflow=%u source_missing=%u contact_drops=%u "
+        "primary=%u/%u/%u primary_drops=%u/%u/%u consumed=%u/%u queue_observed_peak=%u",
+        (unsigned)trace.scans, (unsigned)trace.single_pad_scans, (unsigned)trace.invalid_scans,
+        (unsigned)trace.overflow_scans, (unsigned)trace.missing_scans, (unsigned)trace.contact_queue_drops,
+        (unsigned)trace.primary[0], (unsigned)trace.primary[1], (unsigned)trace.primary[2],
+        (unsigned)trace.primary_drops[0], (unsigned)trace.primary_drops[1], (unsigned)trace.primary_drops[2],
+        (unsigned)trace.contacts_consumed, (unsigned)trace.primary_consumed, (unsigned)trace.queue_peak);
+    ESP_LOGI(TAG, "TouchTrace motion=%u merged=%u rejected=%u send=%u send_rejected=%u "
+        "age_unknown=%u steps_idle_blocked_sent_failed_exhausted=%u/%u/%u/%u/%u congested_polls=%u busy_span_us=%llu busy_at_us=%llu",
+        (unsigned)trace.motion_enqueues, (unsigned)trace.motion_merged, (unsigned)trace.motion_rejected,
+        (unsigned)trace.send_calls, (unsigned)trace.send_rejected, (unsigned)trace.send_age_unknown,
+        (unsigned)trace.steps[0], (unsigned)trace.steps[1],
+        (unsigned)trace.steps[2], (unsigned)trace.steps[3], (unsigned)trace.steps[4], (unsigned)trace.congested_polls,
+        (unsigned long long)trace.max_congested_us, (unsigned long long)trace.max_congested_at_us);
+    ESP_LOGI(TAG, "TouchTrace sdk_started=%u accepted=%u rejected=%u complete_ok=%u failed=%u early=%u "
+        "last_submit_error=%ld last_complete_status=%ld",
+        (unsigned)trace.sdk_started, (unsigned)trace.sdk_accepted, (unsigned)trace.sdk_rejected,
+        (unsigned)trace.complete_ok, (unsigned)trace.complete_failed, (unsigned)trace.early_complete,
+        (long)trace.last_submit_error, (long)trace.last_complete_status);
+    for (unsigned i = 0; i < TOUCH_TRACE_METRICS; ++i) {
+        const app_touch_trace_metric_value_t *m = &trace.metrics[i];
+        ESP_LOGI(TAG, "TouchTrace metric=%s n=%u max_us=%llu at_us=%llu source=%llu "
+            "b_le_1_5_10_20_50_100_250_gt250ms=%u/%u/%u/%u/%u/%u/%u/%u",
+            names[i], (unsigned)m->count, (unsigned long long)m->max_us, (unsigned long long)m->max_at_us,
+            (unsigned long long)m->max_source, (unsigned)m->buckets[0], (unsigned)m->buckets[1],
+            (unsigned)m->buckets[2], (unsigned)m->buckets[3], (unsigned)m->buckets[4],
+            (unsigned)m->buckets[5], (unsigned)m->buckets[6], (unsigned)m->buckets[7]);
+    }
+}
+#else
+#define report_touch_diagnostics() ((void)0)
+#endif
 
 /* Runtime snapshots must not inflate the main task frame during board/NVS
  * startup. Keep this lifetime boundary explicit under target optimization. */
@@ -2995,6 +3079,9 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
     int64_t last_health_us = esp_timer_get_time();
     hid_engine_step_result_t previous_step = HID_ENGINE_STEP_IDLE;
     unsigned ui_tick = 0;
+#if APP_TOUCH_TRACE_ENABLED
+    ESP_LOGI(TAG, "TouchTrace armed: first ready local Bluetooth pad movement starts one 20s window");
+#endif
     for (;;) {
         s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
         remote_update_service();
@@ -3002,6 +3089,8 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
         service_usb_selection();
         input_link_t link = input_link_snapshot(&bluetooth);
+        app_touch_trace_loop(s_now_ms, s_input_transport == APP_INPUT_BLUETOOTH ? link.generation : 0,
+            link.congested, s_interaction.touch.active);
         observe_input_link(&link, &previous);
         sync_interaction();
         (void)process_priority();
@@ -3025,6 +3114,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         service_motion_capture();
         if (!link.congested) {
             hid_engine_step_result_t step = hid_engine_step(&s_engine, send_report, &link.generation);
+            app_touch_trace_step((unsigned)step);
             if (step != previous_step &&
                 (step == HID_ENGINE_STEP_SEND_FAILED || step == HID_ENGINE_STEP_RETRY_EXHAUSTED)) {
                 s_message = "Send failed; input cancelled. Release recovery has priority.";
@@ -3052,6 +3142,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         int64_t now = esp_timer_get_time();
         if (now - last_health_us >= 10000000) {
             last_health_us = now;
+            report_touch_diagnostics();
             report_memory_diagnostics();
             report_runtime_diagnostics();
             report_bluetooth_advertising_diagnostics();

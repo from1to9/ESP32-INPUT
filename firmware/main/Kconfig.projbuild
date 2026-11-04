@@ -1,5 +1,16 @@
 menu "Input device board resources"
 
+    config APP_TOUCH_LATENCY_DIAGNOSTICS
+        bool "Observe one real local Bluetooth touchpad movement window"
+        default n
+        help
+            The first eligible moving pad gesture after Bluetooth HID is ready
+            starts one 20 second aggregate capture. Boot, menus, stationary
+            touches and release recovery cannot consume it. No input timing or
+            permission is changed. Fixed memory records scan/queue/merge and
+            Bluetooth submission/completion timing; the existing health log
+            prints the frozen summary once. Completion is not host receipt.
+
     config APP_LOCAL_SPEAKER_TEST
         bool "One bounded local speaker tone before media startup"
         default n

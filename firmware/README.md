@@ -77,6 +77,10 @@ largest internal DMA blocks. These observations do not alter input admission,
 retry errors or restart the device. Check actual generated `sdkconfig` after
 changing defaults; an existing configuration keeps its previous values.
 
+The optional [local touchpad timing observer](../docs/touch-latency-diagnostics.md)
+captures one genuine ready Bluetooth pad movement window and reports it once;
+normal builds leave it disabled.
+
 ## Device procedure
 
 Device deployment is separate from compilation. Identify the actual chip and flash, retain a complete original-flash backup with its hash, and check recovery before writing. Backups may contain credentials and stay in ignored `.agent/local/` with private permissions. Never commit them. The adapter rejects unknown board eFuse revisions before configuring board peripherals.
