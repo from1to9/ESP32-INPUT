@@ -598,6 +598,31 @@ static void a2dp_overrun_future(void)
     }
 }
 
+static void a2dp_next_head_clock(void)
+{
+    initialized(); bt_audio_service();
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    music_format(ESP_A2D_SBC_CIE_SF_44K, ESP_A2D_SBC_CIE_CH_MODE_MONO, 3);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    ae_route_port_t port = bt_audio_route_port();
+    ae_route_capabilities_t route = caps(port, AE_ROUTE_A2DP_SINK);
+    assert(port.prepare(NULL, AE_ROUTE_A2DP_SINK, &route.format, AE_SPEAKER, 11, &route.token) == AE_OK);
+    assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 11, &route.token, 12, true) == AE_OK);
+    uint8_t pcm[64 * 2] = {0};
+    for (unsigned i = 0; i < 2; ++i) a2_rx(pcm, sizeof pcm);
+    clock_us += 1000; memset(pcm, 0x5a, sizeof pcm);
+    for (unsigned i = 0; i < 6; ++i) a2_rx(pcm, sizeof pcm);
+    clock_us -= 1000; a2_rx(pcm, sizeof pcm);
+    ae_frame_t frame = {0};
+    assert(bt_audio_receive(&frame) == AE_TIMEOUT);
+    ae_result_t result = bt_audio_receive(&frame);
+    bt_audio_a2dp_rx_t rx; bt_audio_a2dp_rx_snapshot(&rx);
+    printf("Second read result=%d, emitted=%llu, bound=%d, expired=%u\n",
+        result, (unsigned long long)rx.emitted_samples, rx.bound, rx.expired);
+    fflush(stdout);
+    assert(result == AE_STALE && !rx.emitted_samples && !rx.bound && rx.expired == 1);
+}
+
 static void replace_playback_during_pcm(void) {
     assert(interrupt_port.bind_playback(NULL, AE_ROUTE_HFP_HF, 100, &interrupt_token, 40, true) == AE_OK);
 }
@@ -1165,6 +1190,7 @@ int main(int argc, char **argv)
         else if (!strcmp(scenario, "hfp-transmit-clock")) hfp_queue_clock(false);
         else if (!strcmp(scenario, "hfp-write-clock")) hfp_queue_clock(true);
         else if (!strcmp(scenario, "a2dp-queued-gap")) a2dp_queued_gap();
+        else if (!strcmp(scenario, "a2dp-next-head-clock")) a2dp_next_head_clock();
         else if (!strcmp(scenario, "a2dp-overrun-future")) a2dp_overrun_future();
         else if (strcmp(scenario, "sustained-sbc") == 0) sustained_sbc();
         else if (strcmp(scenario, "playback-binding") == 0) playback_binding_test();

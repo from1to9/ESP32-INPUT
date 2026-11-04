@@ -1464,18 +1464,19 @@ ae_result_t bt_audio_receive(ae_frame_t *frame)
             }
         }
         pcm_ring_t *ring = audio.adapter.route == AE_ROUTE_HFP_HF ? &audio.voice : &audio.music;
-        expire_ring_locked(ring, now);
-        if (audio.adapter.transport_generation != audio.public.generation) {
-            portEXIT_CRITICAL(&audio_lock); return AE_STALE;
-        }
-        if (audio.adapter.gap_pending) {
-            audio.adapter.gap_pending = false;
-            refresh_locked(); portEXIT_CRITICAL(&audio_lock); return AE_TIMEOUT;
-        }
         uint16_t wanted = (uint16_t)(audio.adapter.format.sample_rate_hz / 100U);
         uint64_t tail_timestamp_us = audio.adapter.partial_started_us;
         /* At most four queued HFP packets/eight SBC packets per call. */
-        while (audio.adapter.partial_frames < wanted && ring->count) {
+        do {
+            expire_ring_locked(ring, now);
+            if (audio.adapter.transport_generation != audio.public.generation) {
+                portEXIT_CRITICAL(&audio_lock); return AE_STALE;
+            }
+            if (audio.adapter.gap_pending) {
+                audio.adapter.gap_pending = false;
+                refresh_locked(); portEXIT_CRITICAL(&audio_lock); return AE_TIMEOUT;
+            }
+            if (!ring->count || audio.adapter.partial_frames >= wanted) break;
             const bt_audio_pcm_t *packet = &ring->slots[ring->head];
             if (!packet->consumer_generation || packet->consumer_generation != audio.adapter.playback_consumer) {
                 clear_ring(ring); audio.adapter.partial_frames = 0; audio.adapter.playback_enabled = false;
@@ -1488,7 +1489,7 @@ ae_result_t bt_audio_receive(ae_frame_t *frame)
                 packet->frames * sizeof(int16_t));
             audio.adapter.partial_frames = (uint16_t)(audio.adapter.partial_frames + packet->frames);
             pop_ring(ring);
-        }
+        } while (audio.adapter.partial_frames < wanted && ring->count);
         if (wanted && audio.adapter.partial_frames >= wanted) {
             if (audio.adapter.sequence == UINT64_MAX || UINT64_MAX - audio.adapter.sample_offset < wanted) {
                 invalidate_locked(true); result = AE_EXHAUSTED;

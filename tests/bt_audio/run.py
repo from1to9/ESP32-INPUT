@@ -32,7 +32,7 @@ def main():
                          "pair-failure", "pair-late", "pair-late-failure", "pair-terminal", "connect-race", "peer-switch", "pair-foreign", "pair-prewindow", "pair-unsaved",
                          "other-profile", "foreign-bonds", "a2dp-reconnect", "observed-disconnect", "dispatch-replace", "dispatch-down", "dispatch-cancel",
                          "dispatch-post-failure", "dispatch-reentrant", "profile-actions", "timeout-hfp", "timeout-a2dp", "pairing", "pairing-expiry", "pairing-timeout", "discovery-timeout", "playback-binding", "expiry-observation", "sustained-sbc",
-                         "a2dp-queued-gap", "a2dp-overrun-future", "hfp-transmit-clock", "hfp-write-clock"):
+                         "a2dp-queued-gap", "a2dp-overrun-future", "a2dp-next-head-clock", "hfp-transmit-clock", "hfp-write-clock"):
             subprocess.run([str(binary), scenario], check=True)
         diag = command[:command.index(str(SUITE / "test_bt_audio.c"))]
         diag.remove("-DTEST_BT_AUDIO_LOCKS")
