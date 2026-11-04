@@ -76,6 +76,7 @@ def main():
     parser.add_argument("--playwright-module", required=True, type=Path)
     parser.add_argument("--browser-executable", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--case", choices=("all", "pad-freshness"), default="all")
     args = parser.parse_args()
     args.protocol_root = args.protocol_root.resolve()
     output = args.output_dir.resolve()
@@ -144,7 +145,8 @@ def main():
                 environment["WEB_BROWSER_EXECUTABLE"] = str(args.browser_executable.resolve())
             try:
                 with (output / "browser.log").open("w") as log:
-                    result = subprocess.run(["node", SUITE / "test_browser.mjs"], env=environment, stdout=log, stderr=subprocess.STDOUT)
+                    script = "test_pad_freshness.mjs" if args.case == "pad-freshness" else "test_browser.mjs"
+                    result = subprocess.run(["node", SUITE / script], env=environment, stdout=log, stderr=subprocess.STDOUT)
             finally:
                 server.shutdown(); backend.stdin.close(); backend.wait(timeout=10)
             (output / "http-metadata.json").write_text(json.dumps(records, indent=2) + "\n")

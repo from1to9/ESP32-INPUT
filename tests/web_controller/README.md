@@ -5,6 +5,15 @@ without a DOM. It covers whole-input US ANSI rejection, typed envelopes,
 sequence and CSRF options, retained progress, no replay of an unknown command,
 and owner/target/readiness changes.
 
+For the focused delayed-pad regression, pass `--case pad-freshness` to `run.py`.
+It pauses the real browser's state GET, ends, cancels, expires or replaces the
+contact, then resumes that GET and checks that no old move POST or HID report
+appears. Fresh movement on an ongoing/new contact, movement released only after
+POST, direction buttons and discrete clicks retain their existing behavior.
+The client tests additionally cover every asynchronous renewal/preflight stage,
+the original sample deadline and lost replies after actual submission. Dropping
+an unsubmitted sample does not consume a command sequence or revoke the lease.
+
 `run.py` uses a real Chromium browser and real loopback HTTPS. Static responses
 come from production `app_control_web_serve`; dynamic requests use the actual
 `header`, `error_response` and `handle_request` functions extracted unchanged

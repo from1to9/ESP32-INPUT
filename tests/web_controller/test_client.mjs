@@ -76,6 +76,75 @@ for (const change of [s => { s.target_id = "usb:18"; }, s => { s.epoch = "9"; },
   assert(!f.client.controlled);
 }
 assert.match(describeResult(null), /unknown/);
+// The same local sample survives every awaited preflight/renewal read, but may
+// never become a new command after its contact ends or original deadline passes.
+for (const stage of [1, 2, 3, 4]) {
+  const f = fixture();
+  if (stage > 1) f.state.now_ms = "2500";
+  let active = true, reads = 0, arrived, resume;
+  const paused = new Promise(resolve => { arrived = resolve; });
+  const proceed = new Promise(resolve => { resume = resolve; });
+  const fetcher = f.client.fetcher;
+  f.client.fetcher = async (url, options) => {
+    if (url === "/api/v1/state" && ++reads === stage) { arrived(); await proceed; }
+    return fetcher(url, options);
+  };
+  const beforeMessage = f.client.message;
+  const moving = f.client.run("mouse.move_relative", {dx: 27, dy: 9}, undefined,
+    {expiresAt: performance.now() + 10000, current: () => active});
+  await paused; active = false; resume();
+  assert.equal(await moving, null, "contact invalidation must discard an unsubmitted sample after any asynchronous stage");
+  const posts = f.calls.filter(call => call.options.method === "POST").map(call => JSON.parse(call.options.body));
+  assert(!posts.some(command => command.op === "mouse.move_relative"));
+  assert.equal(f.client.session.next_seq, stage === 1 ? 1 : 2, "only an actual renewal may consume sequence");
+  assert(f.client.controlled && !f.client.uncertain && !f.client.busy);
+  assert.equal(f.client.message, beforeMessage);
+}
+{
+  const f = fixture(); let arrived, resume;
+  const paused = new Promise(resolve => { arrived = resolve; });
+  const proceed = new Promise(resolve => { resume = resolve; });
+  const fetcher = f.client.fetcher;
+  f.client.fetcher = async (url, options) => {
+    if (url === "/api/v1/state") { arrived(); await proceed; }
+    return fetcher(url, options);
+  };
+  const moving = f.client.run("mouse.move_relative", {dx: 27, dy: 9}, undefined,
+    {expiresAt: performance.now() + 30, current: () => true});
+  await paused; await new Promise(resolve => setTimeout(resolve, 60)); resume();
+  assert.equal(await moving, null);
+  assert(!f.calls.some(call => call.options.method === "POST"));
+  assert(f.client.controlled && !f.client.uncertain);
+}
+{
+  const f = fixture();
+  await f.client.run("mouse.move_relative", {dx: 8, dy: 3}, undefined,
+    {expiresAt: performance.now() + 150, current: () => true});
+  const command = JSON.parse(f.calls.find(call => call.options.method === "POST").options.body);
+  assert(BigInt(command.deadline_ms) > 100n && BigInt(command.deadline_ms) <= 250n,
+    "the wire deadline may use only the sample's original remaining freshness");
+}
+for (const lostReply of [false, true]) {
+  const f = fixture(); let active = true, submitted, finish;
+  const posted = new Promise(resolve => { submitted = resolve; });
+  const reply = new Promise((resolve, reject) => { finish = lostReply ? reject : resolve; });
+  const fetcher = f.client.fetcher;
+  f.client.fetcher = async (url, options) => {
+    if (options.method === "POST") {
+      const response = await fetcher(url, options); submitted(); await reply; return response;
+    }
+    return fetcher(url, options);
+  };
+  const moving = f.client.run("mouse.move_relative", {dx: 8, dy: 3}, undefined,
+    {expiresAt: performance.now() + 150, current: () => active});
+  await posted; active = false;
+  if (lostReply) {
+    finish(new Error("Reply lost after submission"));
+    await assert.rejects(moving);
+    assert(f.client.uncertain && !f.client.controlled);
+  } else { finish(); assert.equal((await moving).state, "sent"); }
+  assert.equal(f.calls.filter(call => call.options.method === "POST").length, 1);
+}
 {
   const f = fixture();
   let finish;

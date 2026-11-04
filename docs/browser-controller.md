@@ -36,8 +36,15 @@ and right clicks. Dragging the pad moves the target pointer; it does not hold a
 host mouse button. Mouse and touch use Pointer Events and pointer capture.
 Movement is coalesced only inside the current contact, limited to the existing
 signed 127-unit report bounds, and discarded after 150 ms or contact/context
-loss. It is not queued for later replay. The pad also accepts arrow keys while
-focused; a key repeat does not generate a stored movement sequence.
+loss. It is not queued for later replay.
+
+The original sample deadline and contact identity remain attached across state
+preflight and lease renewal, and are checked immediately before POST. An ended,
+cancelled, replaced or expired sample is discarded without command submission;
+fresh movement from the current contact remains eligible. A request already
+submitted retains its actual result or uncertainty when the contact ends.
+The pad also accepts arrow keys while focused; a key repeat does not generate a
+stored movement sequence.
 
 Keyboard provides individual letter/number taps and Space, Enter, Backspace,
 Tab, Esc, Delete, Home, End and arrow keys. Letter buttons send lowercase;

@@ -8,6 +8,7 @@ const IDENTITY_KEY = "mosaico.browser.identity.v1";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 const decimal = value => typeof value === "string" && DECIMAL.test(value) && BigInt(value) <= 18446744073709551615n;
+const currentPadSample = sample => !sample || (sample.current() && performance.now() < sample.expiresAt);
 
 export function validateText(text) {
   if (typeof text !== "string" || !text.length || text.length > 32) {
@@ -142,9 +143,12 @@ export class Controller {
     this.changed();
     return s;
   }
-  async send(op, args, total) {
+  async send(op, args, total, sample) {
+    // A discarded local sample has no protocol result or sequence consumption.
+    if (!currentPadSample(sample)) return null;
     const observe = op !== "control.renew";
     let s = await this.refresh();
+    if (!currentPadSample(sample)) return null;
     if (op !== "control.acquire" && op !== "control.release" && !this.controlled) throw new Error("Take control again before sending input.");
     if (this.uncertain) throw new Error("A reply is unknown. Reconnect explicitly; no command will be replayed.");
     if (!["control.acquire", "control.release", "control.renew"].includes(op)) {
@@ -159,15 +163,21 @@ export class Controller {
     }
     const seq = this.session.next_seq;
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
+    const lifetime = sample ? Math.min(200, Math.floor(sample.expiresAt - performance.now())) :
+      op === "mouse.move_relative" ? 200 : 1500;
+    if (sample && (!sample.current() || lifetime <= 0)) return null;
     const envelope = {
       v: 1, boot_id: this.session.boot_id, session_id: this.session.session_id,
       request_id: this.session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
-      deadline_ms: (BigInt(s.now_ms) + (op === "mouse.move_relative" ? 200n : 1500n)).toString(),
+      deadline_ms: (BigInt(s.now_ms) + BigInt(lifetime)).toString(),
       epoch: s.epoch, transport_generation: s.transport_generation, target_id: s.target_id,
       ui_revision: s.ui_revision, op,
       args: op === "control.acquire" || op === "control.renew" ? {...args, state_sequence: s.state_sequence} : args,
       ...(op !== "control.acquire" && s.lease_id ? {lease_id: s.lease_id} : {}),
     };
+    // Nothing asynchronous may intervene between this check and request/fetch.
+    // Once POST starts, retain its real result/uncertainty even if contact ends.
+    if (!currentPadSample(sample)) return null;
     const generation = this.generation;
     let answer;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
@@ -206,11 +216,11 @@ export class Controller {
     this.changed();
     return answer;
   }
-  async run(op, args = {}, total) {
+  async run(op, args = {}, total, sample) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     this.busy = true;
     this.changed();
-    try { return await this.send(op, args, total); }
+    try { return await this.send(op, args, total, sample); }
     catch (error) { this.halt(this.uncertain ? this.message : error.message); throw error; }
     finally { this.busy = false; this.changed(); }
   }
@@ -382,7 +392,7 @@ function mount() {
     if (!pad || pad.id !== event.pointerId || $("mouse-controls").disabled) return;
     event.preventDefault();
     const now = performance.now();
-    if (!movement || now - movement.at > 150) movement = {dx: 0, dy: 0, at: now};
+    if (!movement || now - movement.at > 150) movement = {dx: 0, dy: 0, at: now, contact: pad};
     movement.dx = Math.max(-127, Math.min(127, movement.dx + event.clientX - pad.x));
     movement.dy = Math.max(-127, Math.min(127, movement.dy + event.clientY - pad.y));
     pad.x = event.clientX; pad.y = event.clientY;
@@ -399,7 +409,8 @@ function mount() {
     const next = movement; movement = null;
     if (performance.now() - next.at > 150) return;
     const dx = Math.trunc(next.dx), dy = Math.trunc(next.dy);
-    if (dx || dy) act(() => client.run("mouse.move_relative", {dx, dy}));
+    if (dx || dy) act(() => client.run("mouse.move_relative", {dx, dy}, undefined,
+      {expiresAt: next.at + 150, current: () => pad === next.contact}));
   }, 60);
   setInterval(() => {
     if (!client.session || client.busy || document.hidden) return;
