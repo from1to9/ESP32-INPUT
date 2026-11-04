@@ -23,7 +23,7 @@ static lv_obj_t *s_controller_permission_title, *s_controller_duration_title, *s
 static void create_controller_panel(lv_obj_t *body, lv_obj_t *title, app_overlay_t kind)
 {
     if (kind == APP_OVERLAY_CONTROLLERS) {
-        label_text(title, "Browser controllers");
+        label_text(title, "Wi-Fi controllers");
         s_controller_summary = connection_label(body, 0, 44, MUTED);
         for (unsigned i = 0; i < sizeof(s_controller_rows) / sizeof(s_controller_rows[0]); ++i) {
             lv_obj_t *row = button(body, "", 0, 48 + 60 * (int)i, 456, 54,
@@ -159,7 +159,7 @@ static void render_controllers(void)
     if (row) label_format(s_controller_state, "%s%s%s%s%s", controller_status(row), controller_session(row), row->legacy ? " / USB import" : "",
         pairing ? "" : " / ", pairing ? "" : controller_duration_label(row->duration));
     else label_text(s_controller_state, "Return to the list for current information.");
-    if (fingerprint) label_format(s_controller_fingerprint, "Compare the browser fingerprint\n%.32s\n%.32s",
+    if (fingerprint) label_format(s_controller_fingerprint, "Compare the controller fingerprint\n%.32s\n%.32s",
         row->fingerprint, row->fingerprint + 32);
     else if (row && !pairing) {
         char identity[33];

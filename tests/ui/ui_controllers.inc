@@ -6,7 +6,7 @@ static void controller_permission_checks(void)
     s_state.locked = s_state.screen_off = s_state.remote_owned = false;
     s_state.local_access = APP_LOCAL_NORMAL;
     ++s_state.ui_revision;
-    render(); clear_intents(); tap_control("Browser controllers");
+    render(); clear_intents(); tap_control("Wi-Fi controllers");
     assert(last_action(APP_MENU)->x == APP_OVERLAY_CONTROLLERS);
     s_state.overlay = APP_OVERLAY_CONTROLLERS;
     ++s_state.ui_revision;

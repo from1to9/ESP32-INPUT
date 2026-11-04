@@ -251,7 +251,7 @@ See the [native setup contract](../design/native-wifi-ui.md) for limits and stat
 ### Browser controller permissions
 
 In Settings → Wi-Fi → Web/API, open the displayed station HTTPS address on
-the controller and request pairing. On the device, open **Browser controllers**,
+the controller and request pairing. On the device, open **Wi-Fi controllers**,
 choose the request and compare its full credential fingerprint with the browser.
 A new approval starts with Keyboard & mouse for six hours. Management and
 Updates are independent choices. The term can also be 24 hours or until revoked.

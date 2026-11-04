@@ -112,7 +112,7 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         s_connection_state = connection_label(body, 0, 32, INK);
         s_connection_detail = connection_label(body, 36, 56, MUTED);
         s_connection_reason = connection_label(body, 92, 56, MUTED);
-        button(body, "Browser controllers", 0, 152, 456, 48, APP_MENU, APP_OVERLAY_CONTROLLERS);
+        button(body, "Wi-Fi controllers", 0, 152, 456, 48, APP_MENU, APP_OVERLAY_CONTROLLERS);
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
         s_connection_actions[0] = button(body, "Open USB window", 0, 208, 224, 48, APP_API_COMMISSIONING, 0);
         s_connection_actions[1] = button(body, "Close window", 232, 208, 224, 48, APP_API_COMMISSIONING, 0);
