@@ -8,7 +8,11 @@
     "components/bt/host/bluedroid/api/include/api/esp_gap_bt_api.h": {
       "before": "29970cfc8865de4dea7ffe2ec6e9436633764dac744be5d57e8dd2bac486940e",
       "after": "3e9f8b8b4bc90c6627ece08bdd385f1d5285b92d6991814e6c2cd29c6f57b9e8"
+    },
+    "components/bt/host/bluedroid/stack/smp/smp_act.c": {
+      "before": "0ff9068b0427bac770b2362b19a7c9cf48e82cd33d99826c2810996a236be98b",
+      "after": "9d2e2650fafdb75625911e618e4a59ea9d4c091f41ff7aaeab58592fcfe45517"
     }
   },
-  "patch_sha256": "8ed3b8ea114774db5566afef8d439925cbb4458945aa02995414faf2a45dcf25"
+  "patch_sha256": "36fbabec49419c34eac011298d8be363498bb8f6f155a90f53386bb2efe8a8da"
 }

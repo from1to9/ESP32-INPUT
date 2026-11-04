@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply or verify the exact reviewed Classic pairing patch on the pinned SDK."""
+"""Apply or verify the reviewed Bluetooth security patch on the pinned SDK."""
 import argparse
 import hashlib
 import json

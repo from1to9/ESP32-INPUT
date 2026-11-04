@@ -15,3 +15,16 @@
 +
 +/* Repository admission patch: Just Works requires the existing CFM_REQ reply. */
 +#define ESP_BT_GAP_JUST_WORKS_CONFIRM_REQUIRED 1
+--- a/components/bt/host/bluedroid/stack/smp/smp_act.c
++++ b/components/bt/host/bluedroid/stack/smp/smp_act.c
+@@ -1438,7 +1438,9 @@
+            than when the Pairing Request is exchanged keeps the old key in place for a
+            pairing that never completes. */
+         tBTM_SEC_DEV_REC *p_dev_rec = btm_find_dev(p_cb->pairing_bda);
+-        if (p_dev_rec) {
++        /* Host-initiated bonded re-encryption also reaches this action.
++         * Only a completed new pairing replaces the previous bond. */
++        if (p_dev_rec && (p_cb->flags & SMP_PAIR_FLAG_ENC_AFTER_PAIR)) {
+             if (p_dev_rec->ble.key_type & (BTM_LE_KEY_PENC | BTM_LE_KEY_LENC)) {
+                 SMP_TRACE_DEBUG("LE replace bond after enc, BDA:0x%02X%02X%02X%02X%02X%02X",
+                                 p_cb->pairing_bda[0], p_cb->pairing_bda[1], p_cb->pairing_bda[2],

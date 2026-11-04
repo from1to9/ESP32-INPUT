@@ -54,6 +54,20 @@ Saved peers may reconnect outside the window, including at capacity. An unknown 
 
 Outside the pairing window the peripheral waits for host-initiated encryption with an existing LTK. It does not initiate a fresh SMP Security Request: pinned Bluedroid's `SMP_PAIR_FLAGS_WE_STARTED_DD` path can otherwise approve the following pairing request without an application security-request grant. During an admitted window, security replies are scoped to that connection and its 30-second deadline. Authentication consumes that admission, so later fresh security requests do not reuse it.
 
+The repository's pinned SDK patch also preserves existing keys during bonded
+re-encryption. In `383dda6c1`, `smp_link_encrypted()` routes a host-initiated
+encryption completion through `smp_check_auth_req()`. Its upstream unconditional
+key clear discards that bond before the next connection. The patch restricts
+replacement to `SMP_PAIR_FLAG_ENC_AFTER_PAIR`, which the pairing request/response
+path sets; successful fresh pairing still clears the old material before new
+key distribution. Failed or unfinished pairing preserves the old keys.
+Run `python3 tests/ble_hid/test_sdk_reconnect.py` after SDK setup. It compiles the
+actual SMP state tables, event dispatcher, encryption actions and peripheral
+LTK reply from that SDK, substituting record lookup, key clearing, HCI replies,
+completion observation and unrelated actions. It covers restored encryption
+in both roles, fresh SC/legacy replacement, failure and missing-key controls.
+This is a focused native replay, not a full Bluetooth stack or radio test.
+
 `ble_hid_bond_list()` returns a bounded cached value copy containing up to 32 actual SDK bond addresses and address types. The worker refreshes it after startup, bonded authentication and each forget step. A full-capacity read followed by a total-count check prevents an intervening addition from appearing as a truncated or empty list. The copy performs no Bluetooth or NVS access. It publishes availability, management-in-progress, error and completed-read/status revision. Unavailable results retain the last rows with `known=false`; they do not claim an empty list. Current-link flags can change without a read revision.
 
 Every authentication completion immediately invalidates the durable bond cache and latches a worker refresh independently of active-link state. A successful new bonded authentication closes the pairing window in the callback. Disconnect cannot discard that refresh, and a late authentication event received after disconnect still invalidates the view. A mutation revision prevents a read overtaken by another authentication completion from publishing stale capacity or clearing the refresh latch. Stable read failure leaves the cached rows explicitly unavailable; it cannot authorize a new host. An existing host can trigger a later refresh through authentication.
