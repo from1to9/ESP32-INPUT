@@ -110,13 +110,14 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
     if (kind == APP_OVERLAY_API_CONNECTION) {
         label_text(title, "Web / API connection");
         s_connection_state = connection_label(body, 0, 32, INK);
-        s_connection_detail = connection_label(body, 40, 64, MUTED);
-        s_connection_reason = connection_label(body, 112, 88, MUTED);
+        s_connection_detail = connection_label(body, 36, 56, MUTED);
+        s_connection_reason = connection_label(body, 92, 56, MUTED);
+        button(body, "Browser controllers", 0, 152, 456, 48, APP_MENU, APP_OVERLAY_CONTROLLERS);
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
         s_connection_actions[0] = button(body, "Open USB window", 0, 208, 224, 48, APP_API_COMMISSIONING, 0);
         s_connection_actions[1] = button(body, "Close window", 232, 208, 224, 48, APP_API_COMMISSIONING, 0);
         s_connection_actions[2] = button(body, "Review imported identity", 0, 264, 456, 44, APP_MENU, APP_OVERLAY_API_REVIEW);
-        s_connection_actions[3] = button(body, "Remote input / unknown", 0, 316, 456, 44, APP_API_INPUT_ALLOW_SET, 0);
+        s_connection_actions[3] = button(body, "Legacy API input / unknown", 0, 316, 456, 44, APP_API_INPUT_ALLOW_SET, 0);
         lv_obj_set_y(lv_obj_get_child(s_connection_actions[3], 0), -8);
         s_connection_allow_note = metadata(s_connection_actions[3], "", 4, 26, 448);
         lv_obj_set_style_text_align(s_connection_allow_note, LV_TEXT_ALIGN_CENTER, 0);
@@ -228,17 +229,18 @@ static void render_connection_panel(void)
             label_text(s_connection_detail, api->known && api->ready && api->tls && *api->url ? api->url :
                 "No confirmed HTTPS address.\nConnect this device to your existing Wi-Fi.");
             if (api->remaining_known && api->commissioning_open)
-                label_format(s_connection_reason, "USB window: %us left\nImport the identity package over local USB.\nReview permissions on this device before approval.\n%.96s", api->remaining_seconds, api->reason);
-            else label_format(s_connection_reason, "Open a local USB enrollment window, then import the identity package.\nWi-Fi hotspot setup does not authorize API access.\n%.96s", api->reason);
+                label_format(s_connection_reason, "USB import open: %us left. Review the imported identity here.\n%.96s", api->remaining_seconds, api->reason);
+            else label_text(s_connection_reason, *api->reason ? api->reason :
+                "Request pairing in your browser, then review it below.");
             connection_request_t request = {.api = {.operation = APP_API_WINDOW_OPEN, .revision = api->revision}};
             connection_bind(s_connection_actions[0], APP_API_COMMISSIONING, request, api->known && api->can_open);
             request.api.operation = APP_API_WINDOW_CLOSE;
             connection_bind(s_connection_actions[1], APP_API_COMMISSIONING, request, api->known && api->can_close);
             enabled(s_connection_actions[2], review);
-            text(s_connection_actions[3], !api->remote_input_generation ? "Remote input / unknown" :
-                api->remote_input_allowed ? "Block remote input" : "Allow remote input");
+            text(s_connection_actions[3], !api->remote_input_generation ? "Legacy API input / unknown" :
+                api->remote_input_allowed ? "Block legacy API input" : "Allow legacy API input");
             label_text(s_connection_allow_note, !api->remote_input_generation ? "Status unavailable" :
-                api->remote_input_allowed ? "Remote input allowed" : "Blocked; enabling returns to main screen");
+                api->remote_input_allowed ? "Legacy API input allowed" : "Legacy API input blocked");
             foreground(s_connection_allow_note, api->remote_input_generation && api->remote_input_allowed ? ON_ACCENT : MUTED, 0);
             connection_request_t allowance = {.remote = {.generation = api->remote_input_generation, .allowed = !api->remote_input_allowed}};
             connection_bind(s_connection_actions[3], APP_API_INPUT_ALLOW_SET, allowance, api->remote_input_generation != 0);

@@ -8,11 +8,11 @@ static void connection_checks(void)
     s_state.api = (app_api_view_t){0}; screenshot("api-unknown");
     clear_intents(); tap_control("Open USB window"); assert(action_count(APP_API_COMMISSIONING) == 0);
     ui_fixture_connections(&s_state); screenshot("api-local-window-closed");
-    clear_intents(); tap_control("Allow remote input");
+    clear_intents(); tap_control("Allow legacy API input");
     assert(last_action(APP_API_INPUT_ALLOW_SET)->x == 1 && last_action(APP_API_INPUT_ALLOW_SET)->api.revision == 997);
     assert(!s_state.api.remote_input_allowed);
     s_state.api.remote_input_allowed = true; ++s_state.api.remote_input_generation; screenshot("api-remote-input-allowed");
-    clear_intents(); tap_control("Block remote input");
+    clear_intents(); tap_control("Block legacy API input");
     assert(last_action(APP_API_INPUT_ALLOW_SET)->x == 0 && last_action(APP_API_INPUT_ALLOW_SET)->api.revision == 998);
     clear_intents(); pointer(240, 400, true); ++s_state.api.remote_input_generation; render(); pointer(240, 400, false);
     assert(action_count(APP_API_INPUT_ALLOW_SET) == 0);

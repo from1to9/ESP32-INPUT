@@ -1456,13 +1456,14 @@ static void setup_cache_lifetime_checks(void)
 #include "ui_audio_level.inc"
 #include "ui_media.inc"
 #include "ui_connections.inc"
+#include "ui_controllers.inc"
 #include "ui_bluetooth_management.inc"
 #include "ui_remote_review.inc"
 #include "ui_trust_review.inc"
 
 int main(int argc, char **argv)
 {
-    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion") || !strcmp(argv[2], "about") || !strcmp(argv[2], "audio") || !strcmp(argv[2], "bluetooth") || !strcmp(argv[2], "navigation"))));
+    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion") || !strcmp(argv[2], "about") || !strcmp(argv[2], "audio") || !strcmp(argv[2], "bluetooth") || !strcmp(argv[2], "navigation") || !strcmp(argv[2], "controllers"))));
     bool keys_only = argc == 3 && !strcmp(argv[2], "keys");
     bool motion_only = argc == 3 && !strcmp(argv[2], "motion");
     bool about_only = argc == 3 && !strcmp(argv[2], "about");
@@ -1517,6 +1518,11 @@ int main(int argc, char **argv)
         }
         if (keys_only) {
             common_keys_checks();
+            continue;
+        }
+        if (argc == 3 && !strcmp(argv[2], "controllers")) {
+            connection_checks();
+            controller_permission_checks();
             continue;
         }
         if (about_only) {
@@ -1636,6 +1642,7 @@ int main(int argc, char **argv)
         recording_storage_checks();
         media_checks();
         connection_checks();
+        controller_permission_checks();
         bluetooth_management_checks();
         remote_review_checks();
         trust_review_checks();

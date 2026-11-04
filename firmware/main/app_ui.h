@@ -4,6 +4,7 @@
 #include "input_core.h"
 #include "app_media_ui.h"
 #include "app_connection_ui.h"
+#include "app_controller_ui.h"
 #include "app_remote_review_ui.h"
 #include "lvgl.h"
 #include <stddef.h>
@@ -37,7 +38,8 @@ typedef enum {
     APP_RECENTER, /* Reacquire the grip reference; never recalibrate sensor bias. */
     APP_NAVIGATION, /* Input settings: x=0/1, persisted optional Mouse layout. */
     APP_BLUETOOTH_DEVICES, /* x=0 input devices, x=1 audio devices. */
-    APP_NAV_HOME, APP_NAV_BACK /* Mouse only: button 3 tap, Command+[ tap. */
+    APP_NAV_HOME, APP_NAV_BACK, /* Mouse only: button 3 tap, Command+[ tap. */
+    APP_CONTROLLER_SELECT, APP_CONTROLLER_EDIT
 } app_action_t;
 
 /* Local navigation can run during first-boot observation. HID, radio,
@@ -50,7 +52,8 @@ static inline bool app_local_action_allowed(app_local_access_t access, app_actio
     return access == APP_LOCAL_BROWSE &&
         (action == APP_MENU || action == APP_SETTINGS_PAGE || action == APP_CLOSE ||
          action == APP_MODE || action == APP_KEYBOARD_SUBMODE || action == APP_BLUETOOTH_PAGE ||
-         action == APP_BLUETOOTH_DEVICES || action == APP_WIFI_SCAN_PAGE || action == APP_WIFI_NETWORK_SELECT);
+         action == APP_BLUETOOTH_DEVICES || action == APP_WIFI_SCAN_PAGE ||
+         action == APP_WIFI_NETWORK_SELECT || action == APP_CONTROLLER_SELECT);
 }
 
 typedef enum {
@@ -62,7 +65,8 @@ typedef enum {
     APP_OVERLAY_MEDIA_OPTIONS, APP_OVERLAY_RECORDINGS, APP_OVERLAY_RECORDING_DETAIL,
     APP_OVERLAY_RECORDING_START, APP_OVERLAY_API_CONNECTION, APP_OVERLAY_API_REVIEW,
     APP_OVERLAY_WIFI_PROFILES, APP_OVERLAY_BLUETOOTH_TARGET, APP_OVERLAY_BLUETOOTH_PAIRING,
-    APP_OVERLAY_BLUETOOTH_DEVICES, APP_OVERLAY_AUDIO_DEVICE
+    APP_OVERLAY_BLUETOOTH_DEVICES, APP_OVERLAY_AUDIO_DEVICE,
+    APP_OVERLAY_CONTROLLERS, APP_OVERLAY_CONTROLLER_ACCESS
 } app_overlay_t;
 typedef enum {
     APP_KEYBOARD_MOTION, APP_KEYBOARD_TOUCH, APP_KEYBOARD_SPOKEN, APP_KEYBOARD_SHORTCUTS
@@ -317,7 +321,10 @@ typedef struct {
     uint64_t event_ms; /* Coordinator stamps monotonic ms at callback admission. */
     app_motion_patch_t motion_patch; /* APP_MOTION_CONFIG only; no x/y alias. */
     uint64_t recording_storage_generation, recording_storage_revision;
-    app_api_request_t api;
+    union {
+        app_api_request_t api;
+        app_controller_request_t controller;
+    };
     app_remote_review_request_t remote_review; /* Exact reviewed request; parent revalidates before APP_CONFIRM. */
     app_saved_wifi_request_t wifi_profile;
     app_bluetooth_target_request_t bluetooth_target;
@@ -514,6 +521,7 @@ typedef struct {
     app_capture_state_t capture_state;
     app_recording_storage_view_t recording_storage;
     app_api_view_t api;
+    app_controllers_view_t controllers;
     app_remote_review_view_t remote_review;
     app_saved_wifi_view_t saved_wifi;
     app_bluetooth_target_view_t bluetooth_target;

@@ -14,6 +14,7 @@
 #include "app_connectivity_controls.h"
 #include "app_recording_store.h"
 #include "app_control_runtime.h"
+#include "app_control_access.h"
 #include "app_remote_input.h"
 #include "app_command_bridge.h"
 #include "esp_random.h"
@@ -1164,7 +1165,8 @@ static bool allowed_in_overlay(app_action_t action)
             s_overlay == APP_OVERLAY_WIFI_NETWORK || s_overlay == APP_OVERLAY_MEDIA_OPTIONS ||
             s_overlay == APP_OVERLAY_RECORDINGS || s_overlay == APP_OVERLAY_RECORDING_DETAIL ||
             s_overlay == APP_OVERLAY_RECORDING_START || s_overlay == APP_OVERLAY_RECORDING_STORAGE ||
-            s_overlay == APP_OVERLAY_API_CONNECTION;
+            s_overlay == APP_OVERLAY_API_CONNECTION || s_overlay == APP_OVERLAY_CONTROLLERS ||
+            s_overlay == APP_OVERLAY_CONTROLLER_ACCESS;
     if (s_overlay == APP_OVERLAY_MODES) return action == APP_MODE;
     if (s_overlay == APP_OVERLAY_KEYBOARD) return action == APP_KEYBOARD_SUBMODE;
     if (s_overlay == APP_OVERLAY_AUDIO) return action == APP_AUDIO_KIND;
@@ -1175,6 +1177,8 @@ static bool allowed_in_overlay(app_action_t action)
     if (s_overlay == APP_OVERLAY_API_CONNECTION)
         return action == APP_API_COMMISSIONING || action == APP_API_INPUT_ALLOW_SET || action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_API_REVIEW) return action == APP_API_COMMISSIONING;
+    if (s_overlay == APP_OVERLAY_CONTROLLERS) return action == APP_CONTROLLER_SELECT;
+    if (s_overlay == APP_OVERLAY_CONTROLLER_ACCESS) return action == APP_CONTROLLER_EDIT;
     if (s_overlay == APP_OVERLAY_WIFI_PROFILES) return action == APP_WIFI_PROFILE_CONTROL || action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_BLUETOOTH_TARGET) return action == APP_BLUETOOTH_TARGET_CONTROL || action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING) return action == APP_PAIRING_REQUEST || action == APP_SETTINGS_PAGE;
@@ -1467,6 +1471,8 @@ static void recover_input(const ble_hid_snapshot_t *link)
     s_message = "Link recovery requested; old input will not replay.";
 }
 
+#include "app_controller_access_bindings.inc"
+
 /* Optional intent branches must not become a permanent coordinator-loop frame. */
 static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, const ble_hid_snapshot_t *link)
 {
@@ -1520,21 +1526,25 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
          intent->action == APP_SEND || intent->action == APP_STOP)) return;
     /* A modal and its settings page own focus. */
     if (!allowed_in_overlay(intent->action)) return;
+    if (intent->action == APP_CONTROLLER_SELECT || intent->action == APP_CONTROLLER_EDIT) {
+        handle_controller_intent(intent);
+        return;
+    }
     if (intent->action == APP_CONFIRM && s_confirmation == APP_CONFIRM_REMOTE && (intent->x == 0 || intent->x == 1) &&
         remote_device_confirm_local(intent->x != 0, &intent->remote_review)) return;
     if (intent->action == APP_API_INPUT_ALLOW_SET) {
         if (s_overlay != APP_OVERLAY_API_CONNECTION || (intent->x != 0 && intent->x != 1) ||
             !intent->api.revision || intent->api.revision != s_remote_allowance_generation) return;
         if (!set_remote_allowance(intent->x != 0)) {
-            s_message = "Remote input unavailable; keep local control.";
+            s_message = "Legacy API input unavailable.";
             return;
         }
         /* Return to the core surface as part of granting permission. A second
          * local tap to close the dialog would immediately revoke the grant. */
         if (intent->x) open_overlay(APP_OVERLAY_NONE);
         else ++s_ui_revision;
-        s_message = intent->x ? "Remote input allowed. Touch or press AI to take over." :
-            "Remote input blocked. Independent media and API remain available.";
+        s_message = intent->x ? "Legacy API input allowed. Touch or press AI to take over." :
+            "Legacy API input blocked. Saved controller permissions are independent.";
         return;
     }
     refresh_media_context();
@@ -1573,12 +1583,19 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
              (s_overlay == APP_OVERLAY_NONE || s_overlay == APP_OVERLAY_KEYBOARD) &&
              s_engine.state.mode == INPUT_KEYBOARD) ||
             (intent->x == APP_OVERLAY_WIFI_NETWORKS && s_overlay == APP_OVERLAY_WIFI_NETWORK) ||
-            (intent->x == APP_OVERLAY_API_REVIEW && s_overlay == APP_OVERLAY_API_CONNECTION) ||
+            ((intent->x == APP_OVERLAY_API_REVIEW || intent->x == APP_OVERLAY_CONTROLLERS) &&
+             s_overlay == APP_OVERLAY_API_CONNECTION) ||
+            (intent->x == APP_OVERLAY_API_CONNECTION && s_overlay == APP_OVERLAY_CONTROLLERS) ||
+            (intent->x == APP_OVERLAY_CONTROLLERS && s_overlay == APP_OVERLAY_CONTROLLER_ACCESS) ||
             (s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_WIFI &&
              (intent->x == APP_OVERLAY_WIFI_PROFILES || intent->x == APP_OVERLAY_API_CONNECTION)) ||
             (s_engine.state.mode == INPUT_AUDIO &&
              (intent->x == APP_OVERLAY_MEDIA_OPTIONS || intent->x == APP_OVERLAY_RECORDINGS ||
               intent->x == APP_OVERLAY_RECORDING_START || intent->x == APP_OVERLAY_RECORDING_STORAGE))) {
+            if (intent->x == APP_OVERLAY_CONTROLLERS && s_overlay == APP_OVERLAY_API_CONNECTION) {
+                s_controller_receipt = 0;
+                s_controller_notice = NULL;
+            }
             if (intent->x == APP_OVERLAY_SETTINGS) s_settings_page = APP_SETTINGS_HOME;
             open_overlay((app_overlay_t)intent->x);
         }
@@ -2886,6 +2903,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
     app_media_controls_fill(&view);
     app_audio_diagnostics_media_view(s_now_ms, &view.media);
     app_connectivity_controls_fill(&view);
+    fill_controller_view(&view.controllers);
     view.api.remote_input_allowed = s_remote_allowed;
     view.api.remote_input_generation = s_remote_input && s_command_bridge &&
         s_remote_allowance_generation != UINT64_MAX ? s_remote_allowance_generation : 0;

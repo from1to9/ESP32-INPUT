@@ -134,6 +134,18 @@ static cp_device_state_t test_control_state;
 static cp_result_t test_control_result;
 static unsigned test_control_completions;
 static bool test_control_completion_reject;
+/* The controller service is the asynchronous storage boundary. */
+static app_control_access_snapshot_t test_controller_catalog;
+static app_control_access_request_t test_controller_mutation;
+static unsigned test_controller_calls;
+static esp_err_t test_controller_ingress;
+void app_control_access_snapshot(app_control_access_snapshot_t *out) { *out = test_controller_catalog; }
+esp_err_t app_control_runtime_access_request(const app_control_access_request_t *request, uint64_t *ticket)
+{
+    test_controller_mutation = *request; ++test_controller_calls;
+    *ticket = test_controller_ingress == ESP_OK ? 81 : 0;
+    return test_controller_ingress;
+}
 static app_update_snapshot_t test_update_snapshot;
 static app_update_authority_t test_update_authority;
 static cp_error_t test_update_authority_error = CP_UNAVAILABLE;
@@ -6016,6 +6028,7 @@ static void applied_remote_receipt_survives_later_local_selection(void)
 }
 
 #include "update_cases.inc"
+#include "controller_cases.inc"
 #include "navigation_cases.inc"
 #include "remote_device_cases.inc"
 
@@ -6225,6 +6238,8 @@ int main(int argc, char **argv)
     RUN(keyboard_entry_defaults_to_touch_for_local_and_remote_modes);
     RUN(keyboard_session_navigation_preserves_explicit_submode_and_draft);
     REMOTE_UPDATE_CASES(RUN);
+    RUN(controller_approval_is_physical_scoped_and_observed);
+    RUN(controller_status_uses_the_active_lease);
     NAVIGATION_CASES(RUN);
 #if defined(CONFIG_APP_IMU_CAPTURE) && CONFIG_APP_IMU_CAPTURE
     RUN(raw_capture_observes_without_mutating_production_input);

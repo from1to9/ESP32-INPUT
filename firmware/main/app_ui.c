@@ -140,6 +140,8 @@ static void media_action(lv_obj_t *target, int level);
 static void render_media_core(void);
 static void render_speech(void);
 static void connection_press(lv_obj_t *target);
+static void controller_press(lv_obj_t *target);
+static void controller_action(const binding_t *binding);
 static void connection_action(lv_obj_t *target);
 static void remote_review_press(lv_obj_t *target);
 static void remote_review_action(lv_obj_t *target, bool confirm);
@@ -569,6 +571,10 @@ static void on_action(lv_event_t *event)
 {
     binding_t *binding = lv_event_get_user_data(event);
     if (s_view.locked || s_view.screen_off || s_wake_touch || (s_view.overlay != APP_OVERLAY_NONE && !in_overlay(binding->object))) return;
+    if (binding->action == APP_CONTROLLER_SELECT || binding->action == APP_CONTROLLER_EDIT) {
+        controller_action(binding);
+        return;
+    }
     if (binding->action == APP_SCROLL && !s_wheel.tap) return;
     if ((binding->action == APP_NAV_HOME || binding->action == APP_NAV_BACK) &&
         (s_view.mode != INPUT_MOUSE || !s_view.navigation_enabled ||
@@ -790,6 +796,7 @@ static void on_touch(lv_event_t *event)
         s_touch_editor_session = s_view.local_editor.session;
         media_press(target);
         connection_press(target);
+        controller_press(target);
         remote_review_press(target);
         s_touch_active = true;
         s_touch_target = target;
@@ -1182,6 +1189,7 @@ static void reconcile_editor(const app_view_t *view)
 #include "app_ui_media.inc"
 #include "app_ui_remote_review.inc"
 #include "app_ui_connections.inc"
+#include "app_ui_controllers.inc"
 
 static void create_mouse(lv_obj_t *panel)
 {
@@ -1742,6 +1750,8 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         button(body, "Back to Audio", 0, 360, 456, 48, APP_CLOSE, 0);
     } else if (kind >= APP_OVERLAY_MEDIA_OPTIONS && kind <= APP_OVERLAY_RECORDING_START) {
         create_media_panel(body, title, kind);
+    } else if (kind == APP_OVERLAY_CONTROLLERS || kind == APP_OVERLAY_CONTROLLER_ACCESS) {
+        create_controller_panel(body, title, kind);
     } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_AUDIO_DEVICE) {
         create_connection_panel(body, title, kind);
     } else if (kind == APP_OVERLAY_RECORDING_STORAGE) {
@@ -2464,6 +2474,7 @@ void app_ui_render(const app_view_t *view)
         }
         render_media_panel();
         render_connection_panel();
+        render_controllers();
         label_text(s_overlay_target, s_target_text);
         if (view->local_access == APP_LOCAL_BROWSE && !capture)
             label_text(s_overlay_state, "Verifying first boot. Input and edits are paused.");

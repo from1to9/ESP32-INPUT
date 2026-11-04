@@ -248,6 +248,26 @@ Close, Back, AI double, lock, screen-off, session replacement and the five-minut
 deadline clear local drafts. AI single cannot activate the hidden HID grid.
 See the [native setup contract](../design/native-wifi-ui.md) for limits and states.
 
+### Browser controller permissions
+
+In Settings → Wi-Fi → Web/API, open the displayed station HTTPS address on
+the controller and request pairing. On the device, open **Browser controllers**,
+choose the request and compare its full credential fingerprint with the browser.
+A new approval starts with Keyboard & mouse for six hours. Management and
+Updates are independent choices. The term can also be 24 hours or until revoked.
+Review the device and the selected permissions before approving or saving.
+Changing an imported USB identity replaces its previous scopes, including any
+capture grants. Revoke removes that controller's access.
+
+The list identifies the controller separately from the HID target and shows
+requests, saved permissions, current input control, expiry and revocation.
+Timed approvals require trusted time. Saving permission does not take control
+or resume an old session. The Legacy API input switch applies to unconverted
+USB-imported identities. It does not grant or revoke a browser permission.
+The page reports the result of the matching request
+after the access service acknowledges it. Local takeover and USB trust import
+remain available.
+
 ## Runtime and revision safety
 
 Keep the three primary mode pages and safety/navigation shell fixed, with at most
