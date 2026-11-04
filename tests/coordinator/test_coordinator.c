@@ -1069,6 +1069,7 @@ static void setup(input_mode_t mode)
     s_button_count = 0;
     s_button_overflow = false;
     s_button_resync = false;
+    s_button_down_us = s_button_access_since_us = 0;
     s_button_context_revision = 0;
     s_button_context_epoch = 0;
     memset(s_button_edges, 0, sizeof s_button_edges);

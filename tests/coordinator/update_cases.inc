@@ -686,7 +686,85 @@ static void first_boot_local_navigation(void)
     assert(s_engine.state.locked && s_overlay == APP_OVERLAY_NONE);
 }
 
+static void first_boot_button_queued_before_confirmation(void)
+{
+    setup(INPUT_MOUSE);
+    calibrate();
+    test_boot_boundary_enabled = true;
+    test_update_snapshot.state = APP_UPDATE_PENDING_HEALTH;
+    remote_update_service(); release_barrier(); sync_interaction();
+    uint64_t down = s_now_ms + 10;
+    button_edge(true, down); button_edge(false, down + 20); buttons_at(down + 300);
+    assert(!s_engine.state.gyro_enabled);
+    down += 400;
+    physical_button(BOARD_BUTTON_DOWN, down * 1000);
+    s_now_ms = down + 1; /* Confirmation occurs after the queued hardware edge. */
+    test_update_snapshot.state = APP_UPDATE_CONFIRMED;
+    remote_update_service();
+    buttons_at(down + 1);
+    button_edge(false, down + 20);
+    buttons_at(down + 300);
+    assert(!s_engine.state.gyro_enabled);
+    button_edge(true, down + 310);
+    button_edge(false, down + 330);
+    buttons_at(down + 610);
+    assert(s_engine.state.gyro_enabled);
+}
+
+/* A pending first click cannot pair with a fresh click after maintenance.
+ * The second DOWN is in the same millisecond, just after the policy change. */
+static void button_double_does_not_span_maintenance(void)
+{
+    setup(INPUT_MOUSE);
+    calibrate();
+    remote_device_set_maintenance(true);
+    uint64_t down = s_now_ms + 10;
+    button_edge(true, down); button_edge(false, down + 20);
+    s_now_ms = down + 100;
+    remote_device_set_maintenance(false);
+    physical_button(BOARD_BUTTON_DOWN, s_now_ms * 1000U + 1);
+    buttons_at(s_now_ms);
+    button_edge(false, down + 120);
+    assert(s_overlay == APP_OVERLAY_NONE && !s_engine.state.gyro_enabled);
+    buttons_at(down + 400);
+    assert(s_engine.state.gyro_enabled);
+}
+
+static void first_boot_button_menu_policy(void)
+{
+    const struct {
+        app_update_state_t update;
+        bool flash_busy, restart, menu_opens;
+    } cases[] = {
+        {.update = APP_UPDATE_IDLE, .flash_busy = true},
+        {.update = APP_UPDATE_IDLE, .restart = true},
+        {.update = APP_UPDATE_PENDING_HEALTH, .menu_opens = true},
+        {.update = APP_UPDATE_IDLE, .menu_opens = true},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        setup(INPUT_MOUSE);
+        test_boot_boundary_enabled = true;
+        test_update_busy = cases[i].flash_busy;
+        remote_device_set_maintenance(cases[i].restart);
+        test_update_snapshot.state = cases[i].update;
+        remote_update_service();
+        if (s_engine.state.release_pending) release_barrier();
+        sync_interaction();
+        uint64_t down = s_now_ms + 10;
+        button_edge(true, down); button_edge(false, down + 20);
+        button_edge(true, down + 200); button_edge(false, down + 220);
+        assert(s_overlay == (cases[i].menu_opens ? APP_OVERLAY_MODES : APP_OVERLAY_NONE));
+        button_edge(true, down + 500); buttons_at(down + 1400);
+        assert(s_engine.state.locked && s_engine.state.release_pending);
+        release_barrier();
+        button_edge(false, down + 1450);
+    }
+}
+
 #define REMOTE_UPDATE_CASES(RUN)                                                                   \
+    RUN(first_boot_button_queued_before_confirmation);                                              \
+    RUN(button_double_does_not_span_maintenance);                                                  \
+    RUN(first_boot_button_menu_policy);                                                           \
     RUN(first_boot_local_navigation);                                                              \
     RUN(update_maintenance_waits_for_actual_neutral_and_cleanup);                                  \
     RUN(update_mailbox_rejects_competing_stale_and_lost_authority);                                \

@@ -14,6 +14,12 @@ static app_remote_device_t *s_remote_device;
 static uint64_t s_remote_device_maintenance_revision = 1;
 static bool s_remote_device_maintenance_active;
 static bool remote_device_maintenance(void) { return s_remote_device_maintenance_active; }
+static void remote_device_set_maintenance(bool active)
+{
+    app_local_access_t previous = local_access();
+    s_remote_device_maintenance_active = active;
+    button_access_changed(previous);
+}
 static bool remote_device_restart_available;
 typedef struct {
     bool used, applied, name_done, transport_done, disconnect_requested, action_started;
@@ -384,7 +390,7 @@ static cp_error_t remote_device_submit_action(remote_device_binding_job_t *job, 
             }
         }
         if (!found || s_remote_device_maintenance_revision == UINT64_MAX) return CP_STALE;
-        ++s_remote_device_maintenance_revision; s_remote_device_maintenance_active = true;
+        ++s_remote_device_maintenance_revision; remote_device_set_maintenance(true);
         cancel_input(); ble_hid_pairing_close(); bt_audio_pairing_close();
         app_media_runtime_stop(AE_STOP_MAINTENANCE); job->stop_requested = true;
         if (operation == CP_OP_SYSTEM_RESTART) { board_haptics_enable(false); remote_device_restart_progress(job); }

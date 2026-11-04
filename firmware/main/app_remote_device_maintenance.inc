@@ -17,7 +17,7 @@ static bool remote_device_media_off(void)
 static void remote_device_maintenance_cancelled(remote_device_binding_job_t *job)
 {
     job->outcome = (app_remote_device_outcome_t){.phase = APP_REMOTE_DEVICE_CANCELLED, .boundary_confirmed = true};
-    s_remote_device_maintenance_active = false;
+    remote_device_set_maintenance(false);
 }
 static void remote_device_restart_progress(remote_device_binding_job_t *job)
 {
@@ -28,7 +28,7 @@ static void remote_device_restart_progress(remote_device_binding_job_t *job)
         if (!authorized) { remote_device_maintenance_cancelled(job); return; }
         if (!ready) return;
         if (app_device_restart_request(job->request.deadline_ms, &job->restart_id) != ESP_OK) {
-            remote_device_failed(job, CP_UNAVAILABLE, false); s_remote_device_maintenance_active = false; return;
+            remote_device_failed(job, CP_UNAVAILABLE, false); remote_device_set_maintenance(false); return;
         }
     }
     app_device_restart_authorize(job->restart_id, authorized, ready);
@@ -57,7 +57,7 @@ static void remote_device_factory_progress(remote_device_binding_job_t *job)
         if (bluetooth.connected) {
             if (!job->disconnect_requested) {
                 if (bluetooth.generation != job->request.bluetooth_generation || !ble_hid_disconnect_generation(bluetooth.generation)) {
-                    remote_device_failed(job, CP_STALE, false); s_remote_device_maintenance_active = false; return;
+                    remote_device_failed(job, CP_STALE, false); remote_device_set_maintenance(false); return;
                 }
                 job->disconnect_requested = true;
             }
@@ -129,6 +129,6 @@ static void remote_device_factory_progress(remote_device_binding_job_t *job)
         if (wifi.operation_pending || wifi.completed_request_id != job->wifi_id || !wifi.known || wifi.count) return;
         job->reset_step = 5;
         remote_device_applied(job, s_remote_device_maintenance_revision, true);
-        s_remote_device_maintenance_active = false;
+        remote_device_set_maintenance(false);
     }
 }

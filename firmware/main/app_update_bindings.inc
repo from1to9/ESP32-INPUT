@@ -215,7 +215,6 @@ static void __attribute__((noinline)) remote_update_service(void)
         verifying ? APP_LOCAL_BROWSE : APP_LOCAL_NORMAL;
     bool requested = next_access != APP_LOCAL_NORMAL;
     /* Do not admit a held or queued action under a later access policy. */
-    if (next_access != s_update_access) ++s_ui_revision;
     if (requested && s_update_access == APP_LOCAL_NORMAL) {
         cancel_local_editor();
         remote_local_override(false);
@@ -225,7 +224,12 @@ static void __attribute__((noinline)) remote_update_service(void)
         app_media_runtime_stop(AE_STOP_MAINTENANCE);
         ble_hid_pairing_close();
     }
-    s_update_access = next_access;
+    if (next_access != s_update_access) {
+        app_local_access_t previous = local_access();
+        s_update_access = next_access;
+        ++s_ui_revision;
+        button_access_changed(previous);
+    }
     app_wifi_set_maintenance(requested);
     bool ready = false;
     uint32_t rejected = 0;

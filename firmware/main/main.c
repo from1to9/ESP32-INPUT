@@ -229,12 +229,13 @@ typedef struct {
 static EXT_RAM_BSS_ATTR motion_trace_t s_motion_trace;
 static EXT_RAM_BSS_ATTR interaction_reference_diagnostics_t s_reference_diagnostics;
 _Static_assert(sizeof(s_reference_diagnostics) <= 1024, "Reference evidence must stay bounded");
-typedef struct { bool down; uint64_t time_ms; } button_edge_t;
+typedef struct { bool down; uint64_t time_us; } button_edge_t;
 static button_edge_t s_button_edges[8];
 static unsigned s_button_head, s_button_count;
 static bool s_button_overflow;
 static bool s_button_resync;
 static uint64_t s_button_context_revision, s_button_context_epoch;
+static uint64_t s_button_down_us, s_button_access_since_us;
 static unsigned s_wifi_page;
 static uint32_t s_wifi_selection_generation;
 static uint16_t s_wifi_selection_index;
@@ -421,7 +422,7 @@ static void physical_button(board_button_event_t event, uint64_t timestamp_us)
     s_user_activity_ms = timestamp_us / 1000U;
     if (s_button_count < 8) {
         unsigned tail = (s_button_head + s_button_count) % 8;
-        s_button_edges[tail] = (button_edge_t){s_physical_down, timestamp_us / 1000U};
+        s_button_edges[tail] = (button_edge_t){s_physical_down, timestamp_us};
         ++s_button_count;
     } else {
         /* Lost button edges cannot become a delayed click or an unlock. */
@@ -2135,8 +2136,22 @@ static bool process_priority(void)
     return true;
 }
 
+/* The board timestamps edges with the same monotonic clock before enqueue.
+ * Only the coordinator records policy transitions and classifies gestures. */
+static void button_access_changed(app_local_access_t previous)
+{
+    if (previous == local_access()) return;
+    s_button_access_since_us = (uint64_t)esp_timer_get_time();
+    interaction_consume_press(&s_interaction);
+}
+
 static void handle_button_events(unsigned events)
 {
+    if (!events) return;
+    if (s_button_down_us <= s_button_access_since_us) {
+        interaction_consume_press(&s_interaction);
+        return;
+    }
     if (events & (INTERACTION_EVENT_SINGLE | INTERACTION_EVENT_DOUBLE | INTERACTION_EVENT_HOLD)) {
         uint64_t now = s_now_ms < s_idle.now_ms ? s_idle.now_ms : s_now_ms;
         if (device_idle_input(&s_idle, DEVICE_INPUT_AI, DEVICE_INPUT_ACTION, s_ai_token, now)
@@ -2168,7 +2183,7 @@ static void handle_button_events(unsigned events)
     if (events & INTERACTION_EVENT_DOUBLE) {
         /* A physical shortcut navigates ordinary panels, never confirms or
          * dismisses a pending privileged operation on the user's behalf. */
-        if (s_overlay == APP_OVERLAY_CONFIRM) return;
+        if (!app_local_action_allowed(local_access(), APP_MENU) || s_overlay == APP_OVERLAY_CONFIRM) return;
         open_overlay(s_overlay == APP_OVERLAY_MODES ? APP_OVERLAY_NONE : APP_OVERLAY_MODES);
         return;
     }
@@ -2213,11 +2228,12 @@ static void process_buttons(void)
         if (!available) break;
         /* Handlers may synchronize/open a modal. Keep those operations on
          * this edge's time until the complete ordered batch is consumed. */
-        s_now_ms = edge.time_ms;
+        const uint64_t edge_ms = edge.time_us / 1000U;
+        s_now_ms = edge_ms;
         if (s_now_ms > poll_ms) poll_ms = s_now_ms;
         /* Classify any older pending single before assigning a new press token. */
-        observe_model_clock(edge.time_ms);
-        handle_button_events(interaction_tick(&s_interaction, edge.time_ms));
+        observe_model_clock(edge_ms);
+        handle_button_events(interaction_tick(&s_interaction, edge_ms));
         if (edge.down && s_ai_token < UINT64_MAX) ++s_ai_token;
         bool was_asleep = s_idle.asleep;
         device_input_route_t route = device_idle_input(&s_idle, DEVICE_INPUT_AI,
@@ -2237,7 +2253,9 @@ static void process_buttons(void)
                 (void)board_brightness_set((int)s_settings.brightness_percent);
             continue;
         }
-        handle_button_events(interaction_button_update(&s_interaction, edge.down, edge.time_ms));
+        unsigned events = interaction_button_update(&s_interaction, edge.down, edge_ms);
+        if (events & INTERACTION_EVENT_DOWN) s_button_down_us = edge.time_us;
+        handle_button_events(events);
     }
     s_now_ms = poll_ms;
     handle_button_events(interaction_tick(&s_interaction, s_now_ms));
