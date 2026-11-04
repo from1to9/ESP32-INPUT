@@ -89,8 +89,8 @@ typedef struct { unsigned enc_handle; UINT8 key_size; } tBTM_CB;
 #define SMP_CONN_TOUT 0x19
 #define HCI_ROLE_MASTER 0
 #define HCI_ROLE_SLAVE 1
-#define BTM_LE_KEY_LENC 8
-#define BTM_LE_KEY_PENC 1
+#define BTM_LE_KEY_LENC (SMP_SEC_KEY_TYPE_ENC << 4)
+#define BTM_LE_KEY_PENC SMP_SEC_KEY_TYPE_ENC
 #define BD_ADDR_LEN 6
 #define SMP_TRACE_DEBUG(...) ((void)0)
 #define SMP_TRACE_EVENT(...) ((void)0)
