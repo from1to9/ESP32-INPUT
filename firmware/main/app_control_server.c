@@ -15,6 +15,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "app_network_task.h"
+#include "app_control_web.h"
 
 #define CERT_BYTES 2048U
 #define KEY_BYTES 1024U
@@ -219,6 +220,12 @@ static esp_err_t error_response(httpd_req_t *request, const char *status, const 
 }
 #include "app_control_server_media.inc"
 
+static esp_err_t handle_web(httpd_req_t *request)
+{
+    server_t *s = request->user_ctx;
+    return app_control_web_serve(request, s->host, s->origin);
+}
+
 static esp_err_t handle_request(httpd_req_t *request)
 {
     server_t *s = request->user_ctx;
@@ -375,7 +382,10 @@ static esp_err_t initialize(server_t *s)
     config.httpd.if_name = &s->interface;
     config.httpd.ctrl_port = 32770;
     config.httpd.max_open_sockets = 4;
-    config.httpd.max_uri_handlers = 4;
+    config.httpd.max_uri_handlers = 7;
+    /* Reserve room for browser UA, Accept, Fetch Metadata and cookie headers.
+     * The SDK allocates according to the actual request header length. */
+    config.httpd.max_req_hdr_len = 3072;
     config.httpd.backlog_conn = 2;
     config.httpd.stack_size = 12288;
 #if APP_NETWORK_EXTERNAL_STACK
@@ -408,6 +418,12 @@ static esp_err_t initialize(server_t *s)
                                                 : HTTP_DELETE,
                              .handler = handle_request,
                              .user_ctx = s};
+        error = httpd_register_uri_handler(s->listener, &route);
+    }
+    const char *const web_paths[] = {"/", "/controller.css", "/controller.js"};
+    for (unsigned i = 0; error == ESP_OK && i < sizeof(web_paths) / sizeof(web_paths[0]); ++i) {
+        httpd_uri_t route = {.uri = web_paths[i], .method = HTTP_GET,
+                             .handler = handle_web, .user_ctx = s};
         error = httpd_register_uri_handler(s->listener, &route);
     }
     bool websocket = false;

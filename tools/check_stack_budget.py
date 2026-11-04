@@ -63,6 +63,7 @@ UNITS = {
     "sensor_usb": "components/control_protocol/control_sensor_usb.c",
     "protocol": "components/control_protocol/control_protocol.c",
     "server": "firmware/main/app_control_server.c",
+    "control_web": "firmware/main/app_control_web.c",
     "touch": "firmware/main/board_touch_mosaico.c",
     "ui": "firmware/main/app_ui.c",
     "control_trust": "firmware/main/app_control_trust.c",
@@ -954,6 +955,9 @@ USB_RECEIVE = USB_POLL + [("sensor_usb", "cp_sensor_usb_receive")]
 USB_BATCH = USB_RECEIVE + [("control_runtime", "sensor_usb_batch"),
     ("sensor_api", "app_sensor_api_read_batch"), ("sensor_api", "read_page")]
 USB_READ = USB_RECEIVE + [("control_runtime", "sensor_usb_read"), ("sensor_api", "app_sensor_api_read")]
+PATHS["browser_static_response"] = [("server", "handle_web"), ("control_web", "app_control_web_serve")]
+PATH_OWNERS["browser_static_response"] = "https"
+
 HTTP_READ = [("server", "handle_request"), ("protocol", "cp_http"), ("protocol", "http_inner"),
     ("protocol", "get_resource"), ("protocol", "provider_read"), ("server", "read_state"),
     ("control_runtime", "read_resource"), ("sensor_api", "app_sensor_api_read")]

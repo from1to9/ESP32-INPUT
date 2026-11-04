@@ -1,5 +1,7 @@
 # Remote control and Mac bridge design
 
+The station HTTPS listener also provides the [browser mouse and keyboard controller](browser-controller.md), with its own device-approved browser identity and explicit input lease.
+
 Status: implemented source and host-tested integration candidate, 2026-10-21. The station HTTPS/WSS transport, typed protocol, protected local trust import, native MCP companion, Wi-Fi profiles, clock and OTA workers now exist. Actual manager/resource availability remains authoritative; source/host/target evidence does not establish device, browser, audio-route or release qualification. See [companion operation](../bridge/README.md) and [validation](validation.md).
 
 ## 1. Baseline and contract ownership

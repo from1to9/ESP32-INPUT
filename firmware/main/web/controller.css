@@ -1,0 +1,46 @@
+:root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #e5edf3; background: #0c1118; --panel: #151e28; --line: #2c3b4c; --muted: #aab9c8; --accent: #8bddff; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 900px; margin: auto; padding: 28px 20px; }
+header, .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+header { margin-bottom: 24px; }
+h1 { font-size: clamp(26px, 5vw, 36px); margin: 4px 0; letter-spacing: -.04em; }
+h2 { font-size: 18px; margin: 0 0 10px; }
+p { line-height: 1.55; margin: 10px 0; }
+.eyebrow { color: var(--accent); letter-spacing: .14em; font-size: 11px; font-weight: 700; }
+section, details { border: 1px solid var(--line); border-radius: 18px; padding: 20px; background: var(--panel); margin-bottom: 16px; }
+summary { cursor: pointer; font-size: 18px; font-weight: 700; min-height: 24px; }
+.badge { border: 1px solid var(--line); border-radius: 30px; font-size: 12px; padding: 8px 12px; white-space: nowrap; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+button, input, textarea { font: inherit; border-radius: 10px; border: 1px solid var(--line); }
+button { min-height: 44px; padding: 10px 15px; background: #223142; color: inherit; cursor: pointer; touch-action: manipulation; }
+button:hover:enabled { border-color: var(--accent); }
+button:focus-visible, input:focus-visible, textarea:focus-visible, #pad:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+button:disabled { cursor: default; opacity: .42; }
+.primary, button[aria-pressed="true"] { color: #092230; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+.quiet { background: transparent; color: var(--muted); }
+label { display: block; font-weight: 600; font-size: 14px; margin: 16px 0 8px; }
+input, textarea { width: 100%; color: inherit; background: #0d151e; padding: 12px; }
+textarea { resize: vertical; min-height: 100px; }
+.fingerprint { font-family: ui-monospace, monospace; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.target { font-size: 21px; font-weight: 600; overflow-wrap: anywhere; }
+.hint, footer { font-size: 13px; color: var(--muted); }
+fieldset { border: 0; margin: 18px 0 0; padding: 0; min-width: 0; }
+legend { font-weight: 600; margin-bottom: 10px; }
+#pad { min-height: 230px; background: #0e1823; border: 1px dashed #66849c; border-radius: 14px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; user-select: none; touch-action: none; cursor: crosshair; position: relative; }
+#pad small { color: var(--muted); }
+#pad i { position: absolute; bottom: 14px; right: 20px; font-size: 30px; color: #526b80; font-style: normal; }
+fieldset:disabled #pad { opacity: .45; cursor: default; }
+.mouse-row { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; margin-top: 12px; }
+.directions { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: 44px 44px; gap: 4px; }
+.directions button { padding: 0; font-size: 22px; }
+.directions button:first-child { grid-column: 2; }
+.directions button:nth-child(2) { grid-column: 1; }
+.letters { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 5px; }
+.letters button { min-width: 0; padding: 9px 0; }
+.function-keys { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin-top: 12px; }
+.function-keys button { font-size: 12px; padding: 8px 4px; }
+#result { overflow-wrap: anywhere; }
+footer { text-align: center; margin: 22px 0; }
+@media (max-width: 560px) { main { padding: 18px 12px; } section, details { padding: 16px; } header { align-items: flex-start; } .mouse-row { gap: 6px; grid-template-columns: 1fr 140px 1fr; } .mouse-row > button { padding: 8px 4px; font-size: 13px; } .letters { grid-template-columns: repeat(6, minmax(0, 1fr)); } .function-keys { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (prefers-color-scheme: light) { :root { color: #162c3e; background: #f2f6f9; --panel: #fff; --line: #cfdae4; --muted: #4b6377; --accent: #a3e1fa; } button { background: #eaf1f7; } input, textarea, #pad { background: #f6f9fc; } .primary, button[aria-pressed="true"] { background: var(--accent); } }

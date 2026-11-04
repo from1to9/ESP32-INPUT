@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Mosaico · Remote input</title>
+  <link rel="stylesheet" href="/controller.css">
+  <script type="module" src="/controller.js"></script>
+</head>
+<body>
+  <main>
+    <header><div><p class="eyebrow">MOSAICO / LOCAL NETWORK</p><h1>Remote input</h1></div><span id="connection" class="badge">Disconnected</span></header>
+    <details id="pairing" open>
+      <summary id="pair-title">Connect this browser</summary>
+      <p>Approve this browser on Mosaico. Compare the fingerprint on both screens. Access is separate from taking control of the mouse and keyboard.</p>
+      <label for="client-name">Browser name</label>
+      <input id="client-name" maxlength="32" value="My browser" autocomplete="off">
+      <p class="fingerprint" id="fingerprint">No browser identity yet</p>
+      <div class="actions"><button id="pair">Pair this browser</button><button id="check">Check approval</button><button id="connect">Connect saved browser</button></div>
+      <p id="approval" role="status">Default approval is 6 hours. Choose permissions and duration on Mosaico.</p>
+    </details>
+    <section aria-labelledby="target-title">
+      <div class="section-head"><h2 id="target-title">Input target</h2><button id="refresh" class="quiet">Refresh</button></div>
+      <p id="target" class="target">Unavailable</p><p id="readiness">Connect to read the actual input state.</p>
+      <div class="actions"><button id="acquire" class="primary" disabled>Take control</button><button id="stop" disabled>Stop control</button><button id="disconnect" class="quiet" disabled>Disconnect browser</button></div>
+      <p class="hint">Local touch, lock, a target change or a lost connection stops control. Reconnecting never resumes input. Mosaico must allow remote input.</p>
+    </section>
+    <section aria-labelledby="input-title">
+      <h2 id="input-title">Mouse &amp; keyboard</h2>
+      <div class="actions modes"><button id="mouse-mode" disabled>Mouse</button><button id="keyboard-mode" disabled>Keyboard</button></div>
+      <fieldset id="mouse-controls" disabled>
+        <legend>Mouse</legend>
+        <div id="pad" tabindex="0" role="group" aria-label="Touchpad: drag a finger or mouse to move the target pointer"><span>Drag to move</span><small>Touch or mouse · relative movement</small><i aria-hidden="true">+</i></div>
+        <div class="mouse-row"><button data-click="left">Left click</button><div class="directions" aria-label="Pointer directions"><button data-move="0,-24" aria-label="Move up">↑</button><button data-move="-24,0" aria-label="Move left">←</button><button data-move="0,24" aria-label="Move down">↓</button><button data-move="24,0" aria-label="Move right">→</button></div><button data-click="right">Right click</button></div>
+      </fieldset>
+      <fieldset id="keyboard-controls" disabled>
+        <legend>Keyboard</legend>
+        <div id="letters" class="letters" aria-label="On-screen keyboard"></div>
+        <div id="function-keys" class="function-keys" aria-label="Function keys"></div>
+        <label for="text">Compose text</label>
+        <textarea id="text" rows="3" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="Type text here, then press Send text"></textarea>
+        <div class="section-head"><span id="text-count" class="hint">0 / 32 characters</span><button id="send" class="primary">Send text</button></div>
+        <p class="hint">Up to 32 printable US ANSI characters per send. The host needs a US keyboard layout. Unsupported characters, newlines and longer text are rejected as a whole. Enter is a separate key. Text stays here after sending.</p>
+      </fieldset>
+    </section>
+    <section aria-labelledby="result-title"><div class="section-head"><h2 id="result-title">Last action</h2><button id="result-check" class="quiet" disabled>Check result</button></div><p id="result" role="status" aria-live="polite">Nothing sent.</p><p class="hint">“Sent” means the HID transport accepted the key/button reports and releases. The target application's response is not observed. An unknown reply is never replayed automatically.</p></section>
+    <footer><button id="forget" class="quiet">Forget identity in this browser</button><p>For the station HTTPS address only. Provisioning Wi-Fi does not provide remote input. Manage or revoke permissions on Mosaico.</p></footer>
+  </main>
+</body>
+</html>
