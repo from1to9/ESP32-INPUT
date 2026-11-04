@@ -125,7 +125,7 @@ try {
   await fixture(page, "allow"); await page.locator("#refresh").click();
   await page.locator("#acquire").click(); await waitText(page, "connection", "Controlling");
   await fixture(page, "target"); await waitText(page, "connection", "Connected / idle");
-  assert.match(await page.locator("#target").textContent(), /bluetooth:18/);
+  await waitText(page, "target", "bluetooth:18");
   assert.equal(await page.locator("#keyboard-controls").evaluate(node => node.disabled), true);
   await page.locator("#disconnect").click(); await waitText(page, "connection", "Disconnected");
   await page.reload(); await waitText(page, "approval", "Access approved");
