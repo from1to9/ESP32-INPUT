@@ -977,6 +977,15 @@ esp_err_t bt_audio_set_policy(uint64_t generation, bt_audio_route_t route,
     return ready ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
+static bool control_peer_compatible_locked(bt_audio_command_t command, const uint8_t peer[6])
+{
+    bool hfp = command == BT_AUDIO_CONNECT_HFP || command == BT_AUDIO_OPEN_VOICE;
+    if (!hfp && command != BT_AUDIO_CONNECT_A2DP) return true;
+    bool connected = hfp ? audio.public.a2dp_connected : audio.public.hfp_connected;
+    bool known = hfp ? audio.public.a2dp_peer_known : audio.public.hfp_peer_known;
+    return !(connected || known) || (known && peer_matches(peer, hfp ? audio.public.a2dp_peer : audio.public.hfp_peer));
+}
+
 static esp_err_t submit_control_locked(uint64_t generation, uint64_t link_generation, bt_audio_command_t command,
                                        const uint8_t peer[6], uint64_t *request_id)
 {
@@ -988,6 +997,7 @@ static esp_err_t submit_control_locked(uint64_t generation, uint64_t link_genera
     bool connecting = command == BT_AUDIO_CONNECT_HFP || command == BT_AUDIO_CONNECT_A2DP;
     bool accepted = audio.public.initialized && !audio.public.failed && generation == audio.public.generation &&
         !audio.public.pairing_busy && !audio.command_pending && !audio.public.control_inflight &&
+        control_peer_compatible_locked(command, peer ? peer : current) &&
         (connecting ? !known : (known && (!peer || peer_matches(peer, current))));
     if (command == BT_AUDIO_OPEN_VOICE || command == BT_AUDIO_CLOSE_VOICE)
         accepted = accepted && audio.public.hfp_connected && (audio.public.hfp_audio_connected == (command == BT_AUDIO_CLOSE_VOICE));
@@ -1094,7 +1104,8 @@ static void dispatch_control(void *unused)
     bt_audio_command_t command = audio.command;
     uint64_t link = command_is_hfp(command) ? audio.public.hfp_link_generation : audio.public.a2dp_link_generation;
     bool saved = audio.public.classic_bonds_known && !audio.bond_refresh_pending && saved_peer_locked(audio.command_peer);
-    if (audio.command_link_generation != link || (audio.command_requires_saved && !saved)) {
+    if (audio.command_link_generation != link || (audio.command_requires_saved && !saved) ||
+        !control_peer_compatible_locked(command, audio.command_peer)) {
         audio.public.request_status = BT_AUDIO_JOB_FAILED;
         audio.public.request_error = audio.command_link_generation != link ? ESP_ERR_NOT_FOUND : ESP_ERR_INVALID_STATE;
         portEXIT_CRITICAL(&audio_lock); return;

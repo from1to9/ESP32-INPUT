@@ -64,6 +64,11 @@ typedef enum {
     APP_MEDIA_DEVICE_DETAILS, APP_MEDIA_DEVICE_PAGE, APP_MEDIA_DEVICE_LINK
 } app_media_operation_t;
 
+static inline bool app_media_device_navigation(app_media_operation_t operation)
+{
+    return operation == APP_MEDIA_DEVICE_DETAILS || operation == APP_MEDIA_DEVICE_PAGE;
+}
+
 typedef struct {
     app_media_operation_t operation;
     uint64_t management_generation, audio_generation, resource_revision;
@@ -170,14 +175,14 @@ typedef struct {
     bool connected, selected;
 } app_media_device_row_t;
 typedef struct {
-    bool known, pending;
+    bool known, pending, refreshing, selected_saved, voice_connected;
     unsigned page, pages, count;
     uint64_t revision;
     app_media_device_row_t rows[APP_MEDIA_ROWS];
     app_media_id_t selected;
     char identity[24], reason[97];
     uint8_t address[6]; /* Display-only transport address, never a merged identity. */
-    bool can_connect[2], can_disconnect[2], connected[2];
+    bool can_connect[2], can_disconnect[2], connected[2], connection_known[2];
 } app_media_devices_view_t;
 typedef struct {
     bool known, command_pending;

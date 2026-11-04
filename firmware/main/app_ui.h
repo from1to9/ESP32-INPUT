@@ -65,7 +65,7 @@ typedef enum {
     APP_OVERLAY_MEDIA_OPTIONS, APP_OVERLAY_RECORDINGS, APP_OVERLAY_RECORDING_DETAIL,
     APP_OVERLAY_RECORDING_START, APP_OVERLAY_API_CONNECTION, APP_OVERLAY_API_REVIEW,
     APP_OVERLAY_WIFI_PROFILES, APP_OVERLAY_BLUETOOTH_TARGET, APP_OVERLAY_BLUETOOTH_PAIRING,
-    APP_OVERLAY_BLUETOOTH_DEVICES, APP_OVERLAY_AUDIO_DEVICE,
+    APP_OVERLAY_BLUETOOTH_DEVICES, APP_OVERLAY_AUDIO_DEVICE, APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS,
     APP_OVERLAY_CONTROLLERS, APP_OVERLAY_CONTROLLER_ACCESS
 } app_overlay_t;
 typedef enum {
@@ -330,6 +330,13 @@ typedef struct {
     app_bluetooth_target_request_t bluetooth_target;
     app_media_request_t media; /* APP_MEDIA_CONTROL and media APP_CONFIRM; x/y are not aliases. */
 } app_intent_t;
+
+static inline bool app_local_intent_allowed(app_local_access_t access, const app_intent_t *intent)
+{
+    return app_local_action_allowed(access, intent->action) || (access == APP_LOCAL_BROWSE &&
+        ((intent->action == APP_MEDIA_CONTROL && app_media_device_navigation(intent->media.operation)) ||
+         (intent->action == APP_BLUETOOTH_TARGET_CONTROL && intent->bluetooth_target.operation == APP_BLUETOOTH_TARGET_DETAILS)));
+}
 
 /* All state is a read-only snapshot from the coordinator. Strings are copied by
  * render; the caller retains ownership. No UI callback mutates product state.

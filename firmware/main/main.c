@@ -709,6 +709,7 @@ static void refresh_media_context(void)
     app_media_controls_context_t context = {.epoch = s_engine.state.epoch,
         .ui_revision = s_ui_revision, .mode = s_engine.state.mode, .overlay = s_overlay,
         .keyboard_submode = s_keyboard_submode, .locked = s_engine.state.locked,
+        .local_access = local_access(),
         .bluetooth_audio_devices = s_bluetooth_audio_devices &&
             (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES || s_overlay == APP_OVERLAY_AUDIO_DEVICE ||
              (s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == APP_CONFIRM_AUDIO_PAIR)),
@@ -1123,8 +1124,10 @@ static void service_local_editor(void)
     } else {
         s_message = "Local edit expired or changed; open a new editor.";
     }
+    bool bluetooth_name = request.purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME;
     clear_private(&request, sizeof(request));
-    open_overlay(APP_OVERLAY_SETTINGS);
+    if (bluetooth_name) s_bluetooth_audio_devices = false;
+    open_overlay(bluetooth_name ? APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS : APP_OVERLAY_SETTINGS);
 }
 
 static void service_bluetooth_name(void)
@@ -1154,10 +1157,12 @@ static bool allowed_in_overlay(app_action_t action)
     if (action == APP_CLOSE) return true;
     if (action == APP_BLUETOOTH_DEVICES) return s_overlay == APP_OVERLAY_NONE || s_overlay == APP_OVERLAY_SETTINGS ||
         s_overlay == APP_OVERLAY_MEDIA_OPTIONS || s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES ||
-        s_overlay == APP_OVERLAY_AUDIO_DEVICE || s_overlay == APP_OVERLAY_BLUETOOTH_TARGET || s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING;
+        s_overlay == APP_OVERLAY_AUDIO_DEVICE || s_overlay == APP_OVERLAY_BLUETOOTH_TARGET ||
+        s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING || s_overlay == APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS;
     if (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES) return s_bluetooth_audio_devices ? action == APP_MEDIA_CONTROL :
-        action == APP_BLUETOOTH_TARGET_CONTROL || action == APP_PAIRING_REQUEST || action == APP_BLUETOOTH_PAGE;
+        action == APP_BLUETOOTH_TARGET_CONTROL || action == APP_PAIRING_REQUEST || action == APP_BLUETOOTH_PAGE || action == APP_MENU;
     if (s_overlay == APP_OVERLAY_AUDIO_DEVICE) return action == APP_MEDIA_CONTROL;
+    if (s_overlay == APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS) return action == APP_PAIRING_REQUEST || action == APP_BLUETOOTH_NAME_EDIT;
     if (action == APP_MENU)
         return s_overlay == APP_OVERLAY_MODES || s_overlay == APP_OVERLAY_TARGET ||
             s_overlay == APP_OVERLAY_SETTINGS || s_overlay == APP_OVERLAY_WIFI_SETUP ||
@@ -1515,7 +1520,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         return;
     }
     if (s_engine.state.locked) return;
-    if (!app_local_action_allowed(local_access(), intent->action)) {
+    if (!app_local_intent_allowed(local_access(), intent)) {
         return;
     }
     if (s_transport_switch_pending) return;
@@ -1574,6 +1579,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         (void)select_mode((input_mode_t)intent->x);
         return;
     case APP_MENU:
+        if (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && intent->x != APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS) return;
         if ((intent->x >= APP_OVERLAY_MODES && intent->x <= APP_OVERLAY_SETTINGS) ||
             (intent->x == APP_OVERLAY_KEYBOARD && s_overlay == APP_OVERLAY_NONE &&
              s_engine.state.mode == INPUT_KEYBOARD) ||
@@ -1587,6 +1593,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
              s_overlay == APP_OVERLAY_API_CONNECTION) ||
             (intent->x == APP_OVERLAY_API_CONNECTION && s_overlay == APP_OVERLAY_CONTROLLERS) ||
             (intent->x == APP_OVERLAY_CONTROLLERS && s_overlay == APP_OVERLAY_CONTROLLER_ACCESS) ||
+            (intent->x == APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS && s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !s_bluetooth_audio_devices) ||
             (s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_WIFI &&
              (intent->x == APP_OVERLAY_WIFI_PROFILES || intent->x == APP_OVERLAY_API_CONNECTION)) ||
             (s_engine.state.mode == INPUT_AUDIO &&
@@ -1716,7 +1723,8 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         return;
     }
     case APP_BLUETOOTH_NAME_EDIT: {
-        if (s_overlay != APP_OVERLAY_SETTINGS || s_settings_page != APP_SETTINGS_BLUETOOTH) return;
+        if (s_overlay != APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS &&
+            !(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH)) return;
         ble_hid_name_snapshot_t name = ble_hid_name_snapshot();
         if (!link->initialized || link->failed || s_name_should_persist ||
             name.status == BLE_HID_NAME_PENDING || name.status == BLE_HID_NAME_APPLYING ||
@@ -1813,7 +1821,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
     case APP_PAIRING_REQUEST:
         if (intent->x < APP_PAIR_OPEN || intent->x > APP_PAIR_RESUME ||
             s_pair_operation != APP_CONFIRM_NONE) return;
-        if (s_overlay != APP_OVERLAY_BLUETOOTH_DEVICES && s_overlay != APP_OVERLAY_TARGET && s_overlay != APP_OVERLAY_BLUETOOTH_PAIRING &&
+        if (s_overlay != APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS && s_overlay != APP_OVERLAY_BLUETOOTH_DEVICES && s_overlay != APP_OVERLAY_TARGET && s_overlay != APP_OVERLAY_BLUETOOTH_PAIRING &&
             !(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH)) return;
         if (s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING && intent->x == APP_PAIR_CLOSE) {
             app_connectivity_controls_effect_t effect = {0};

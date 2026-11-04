@@ -486,6 +486,15 @@ PATHS.update(AUDIO_DIAGNOSTIC_PATHS)
 PAIRING_OPEN = MEDIA_INTENT + [("media_controls", "confirm_review"), ("classic", "bt_audio_pairing_open_reviewed"),
                              ("classic", "pairing_open")]
 AUDIO_ADAPTER_PATHS = {
+    "audio_device_connect_voice": MEDIA_INTENT + [("media_controls", "connect_voice"),
+        ("media_controls", "submit_voice_phase"), ("classic", "bt_audio_saved_request"),
+        ("classic", "submit_control_locked"), ("classic", "control_peer_compatible_locked"), ("classic", "peer_matches")],
+    "audio_device_voice_second_phase": CORE + [("main", "service_media"), ("media_controls", "app_media_controls_poll"),
+        ("media_controls", "poll_voice_link"), ("media_controls", "submit_voice_phase"),
+        ("classic", "bt_audio_saved_request"), ("classic", "submit_control_locked"),
+        ("classic", "control_peer_compatible_locked"), ("classic", "peer_matches")],
+    "audio_device_context_cancel": CORE + [("main", "handle_intent"), ("main", "refresh_media_context"),
+        ("media_controls", "app_media_controls_context"), ("classic", "bt_audio_cancel_request")],
     "audio_pairing_startup_name": [("main", "app_main"), ("media_runtime", "app_media_runtime_init"),
         ("classic", "bt_audio_init"), ("classic", "request_device_name")],
     "audio_pairing_open_name": PAIRING_OPEN + [("classic", "request_device_name")],
@@ -754,6 +763,8 @@ for _name, (_prefix, _can_start) in {
 PATHS.update(BOARD_AUDIO_PATHS)
 BTC_DISPATCH = [("osi_thread", "osi_thread_run"), ("osi_thread", "osi_thread_run_item"),
     ("btc_thread", "btc_thread_handler")]
+PATHS["audio_device_dispatch_peer"] = BTC_DISPATCH[:2] + [("classic", "dispatch_control"),
+    ("classic", "control_peer_compatible_locked"), ("classic", "peer_matches")]
 BLE_ADVERTISING_PATHS = {
     "ble_advertising_replay_copy": ("main", CORE + [("main", "report_bluetooth_advertising_diagnostics"),
         ("ble", "ble_hid_copy_advertising_diagnostics")]),
@@ -911,6 +922,7 @@ PATH_OWNERS.update({label: owner for label, (owner, _) in AUDIO_RUNTIME_PATHS.it
 PATH_OWNERS.update({label: "board_audio" for label in BOARD_AUDIO_PATHS})
 PATH_OWNERS.update({label: owner for label, (owner, _) in BLE_ADVERTISING_PATHS.items()})
 PATH_OWNERS.update({label: owner for label, (owner, _) in BLE_ADMISSION_PATHS.items()})
+PATH_OWNERS["audio_device_dispatch_peer"] = "btc"
 PATH_OWNERS.update({label: "usb_audio" for label in USB_AUDIO_WORKER_PATHS})
 PATH_OWNERS.update({label: owner for label, (owner, _) in USB_TRANSPORT_TASK_PATHS.items()})
 # These execute on the hardware interrupt stack. They are an explicitly

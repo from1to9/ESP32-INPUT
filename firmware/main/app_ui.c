@@ -1752,7 +1752,7 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         create_media_panel(body, title, kind);
     } else if (kind == APP_OVERLAY_CONTROLLERS || kind == APP_OVERLAY_CONTROLLER_ACCESS) {
         create_controller_panel(body, title, kind);
-    } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_AUDIO_DEVICE) {
+    } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS) {
         create_connection_panel(body, title, kind);
     } else if (kind == APP_OVERLAY_RECORDING_STORAGE) {
         label_text(title, "Recording storage");

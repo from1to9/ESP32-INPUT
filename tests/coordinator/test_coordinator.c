@@ -6267,6 +6267,25 @@ static void shared_bluetooth_manager_preserves_mode_and_draft(void)
     }
 }
 
+static void shared_bluetooth_input_options_reaches_owners(void)
+{
+    setup(INPUT_KEYBOARD); fill_preview(2);
+    test_link.connection_admitted = test_link.connected = test_link.ready = false;
+    test_link.reconnect_paused = true;
+    test_bonds = (ble_hid_bond_list_t){.known = true, .count = 2, .revision = 51};
+    test_update_target = (ble_hid_target_snapshot_t){.loaded = true, .revision = 61};
+    action(APP_BLUETOOTH_DEVICES, 0);
+    action(APP_MENU, APP_OVERLAY_MODES); assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES);
+    action(APP_MENU, APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS); assert(s_overlay == APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS);
+    action(APP_PAIRING_REQUEST, APP_PAIR_RESUME); assert(!test_link.reconnect_paused);
+    action(APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL);
+    assert(s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == APP_CONFIRM_PAIR_FORGET_ALL && !test_pair_forgets);
+    action(APP_CONFIRM, 0); assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !test_native_management_starts);
+    action(APP_MENU, APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS); action(APP_BLUETOOTH_NAME_EDIT, 0);
+    assert(s_overlay == APP_OVERLAY_LOCAL_EDITOR && s_local_editor.purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME);
+    assert(!strcmp(s_interaction.view.preview, "AB") && !s_send_token && !test_pair_forgets);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -6291,6 +6310,7 @@ int main(int argc, char **argv)
     RUN(cancelled_remote_receipt_cannot_hold_a_new_local_switch);
     REMOTE_DEVICE_CASES(RUN);
     RUN(shared_bluetooth_manager_preserves_mode_and_draft);
+    RUN(shared_bluetooth_input_options_reaches_owners);
     RUN(native_bluetooth_resume_and_selection_release_effect);
     RUN(provisional_bluetooth_retries_preserve_local_intents);
     RUN(review_forget_all_survives_provisional_churn);

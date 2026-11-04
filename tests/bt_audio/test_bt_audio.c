@@ -707,7 +707,8 @@ static void connect_race(void)
     assert(bt_audio_snapshot().a2dp_connected && !memcmp(bt_audio_snapshot().a2dp_peer, other, 6));
     uint64_t current;
     target = bt_audio_snapshot();
-    assert(bt_audio_request(target.generation, target.hfp_link_generation, BT_AUDIO_CONNECT_HFP, peer, &current) == ESP_OK);
+    assert(bt_audio_request(target.generation, target.hfp_link_generation, BT_AUDIO_CONNECT_HFP, peer, &current) == ESP_ERR_INVALID_STATE);
+    assert(bt_audio_request(target.generation, target.hfp_link_generation, BT_AUDIO_CONNECT_HFP, other, &current) == ESP_OK);
     bt_audio_cancel_request(token);
     assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_PENDING && current != token);
     bt_audio_cancel_request(current); bt_audio_service();

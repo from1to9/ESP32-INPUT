@@ -45,6 +45,7 @@ bool app_media_runtime_pairing_current(uint64_t generation, uint64_t revision)
     return snapshot_available && owner.initialized && !owner.busy && !owner.result_ready && owner.audio_known &&
         owner.audio.hardware_off_confirmed && owner.audio.audio_generation == generation && owner.audio.revision == revision;
 }
+#ifndef TEST_MEDIA_REAL_BLUETOOTH
 esp_err_t bt_audio_pairing_open_reviewed(uint32_t duration, const bt_audio_snapshot_t *expected, uint64_t revision,
                                         bool (*resources_current)(void))
 {
@@ -58,6 +59,11 @@ esp_err_t bt_audio_pairing_open_reviewed(uint32_t duration, const bt_audio_snaps
     return pairing_result;
 }
 void bt_audio_pairing_close(void) { ++pairing_closes; bluetooth.pairing_requested = false; }
+void bt_audio_cancel_request(uint64_t token)
+{
+    if (token && bluetooth.request_id == token && bluetooth.request_status == BT_AUDIO_JOB_PENDING)
+        bluetooth.request_status = BT_AUDIO_JOB_CANCELLED;
+}
 bt_audio_snapshot_t bt_audio_snapshot(void) { return bluetooth; }
 void bt_audio_copy_bond_list(bt_audio_bond_list_t *out) { assert(out); *out = bonds; }
 esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t link_generation, uint64_t revision, bt_audio_command_t command,
@@ -72,6 +78,7 @@ esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t link_generation, 
     }
     ++link_count; return link_result;
 }
+#endif
 static ae_result_t codec_caps(void *unused, ae_codec_capabilities_t *out) { (void)unused; *out = hardware; return AE_OK; }
 ae_codec_port_t board_audio_mosaico_port(void) { return (ae_codec_port_t){.capabilities = codec_caps}; }
 void board_audio_capture_snapshot(board_audio_capture_snapshot_t *out) { *out = capture_level; }
@@ -1143,7 +1150,8 @@ static void test_shared_devices(void)
     choose.media.value.peer_id = view.media.devices.rows[1].id;
     ++bonds.revision; bonds.count = 1; poll_at(1070);
     handle(choose);
-    assert(context.overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !view.media.devices.selected.bytes[0]);
+    assert(context.overlay == APP_OVERLAY_BLUETOOTH_DEVICES && view.media.devices.selected.bytes[15] == 2 &&
+        !view.media.devices.selected_saved);
     assert(view.media.devices.page == 0 && view.media.devices.pages == 1 && !submissions && link_count == 1);
 }
 static void test_shared_devices_pairing(void)

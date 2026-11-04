@@ -55,7 +55,7 @@ typedef struct {
     unsigned device_page;
     uint64_t device_request_id;
     struct {
-        bool active, opening_voice;
+        bool active, opening_voice, device_management;
         uint64_t token, deadline_ms, epoch, bond_revision;
         uint8_t peer[6];
     } voice_link;
@@ -205,7 +205,7 @@ static bool format_supported(const ae_format_t *format, ae_role_t role)
 static bool local_ready(void)
 {
     return controls.initialized && controls.clock_known && !controls.clock_failed &&
-        !controls.context.locked && !controls.context.screen_off && controls.runtime_known &&
+        controls.context.local_access == APP_LOCAL_NORMAL && !controls.context.locked && !controls.context.screen_off && controls.runtime_known &&
         controls.runtime.initialized && controls.runtime.audio_known;
 }
 static bool idle_controls(void)
@@ -238,6 +238,7 @@ static ae_result_t submit_voice_phase(bool opening_voice)
     if (error != ESP_OK) return error == ESP_ERR_INVALID_STATE || error == ESP_ERR_NOT_FOUND ? AE_STALE : AE_UNAVAILABLE;
     if (!token || token == controls.voice_link.token) return AE_UNCERTAIN;
     controls.voice_link.token = token;
+    if (controls.voice_link.device_management) controls.device_request_id = token;
     controls.voice_link.opening_voice = opening_voice;
     controls.voice_link.deadline_ms = controls.now_ms + BT_AUDIO_COMMAND_TIMEOUT_US / 1000U;
     controls.voice_link.active = true;
@@ -251,6 +252,7 @@ static ae_result_t connect_voice(void)
     const uint8_t *peer = bt->hfp_connected ? bt->hfp_peer : controls.selected_peer;
     if ((bt->hfp_connected && !bt->hfp_peer_known) || saved_bond(peer) < 0) return AE_STALE;
     controls.voice_link.epoch = controls.context.epoch;
+    controls.voice_link.device_management = controls.context.bluetooth_audio_devices;
     controls.voice_link.bond_revision = controls.bonds.revision;
     memcpy(controls.voice_link.peer, peer, 6);
     ae_result_t result = submit_voice_phase(bt->hfp_connected);
@@ -264,10 +266,12 @@ static void poll_voice_link(app_media_controls_effect_t *effect)
     if (!controls.runtime_known || !controls.runtime.initialized || !controls.runtime.audio_known) {
         finish_voice_link(effect, AE_UNAVAILABLE); return;
     }
-    if (!local_ready() || controls.context.epoch != controls.voice_link.epoch || controls.context.mode != INPUT_AUDIO) {
+    bool manager = controls.voice_link.device_management;
+    if (!local_ready() || controls.context.epoch != controls.voice_link.epoch ||
+        (manager ? !controls.context.bluetooth_audio_devices : controls.context.mode != INPUT_AUDIO)) {
         finish_voice_link(effect, AE_PRIVACY); return;
     }
-    if (controls.runtime.audio.route != AE_ROUTE_HFP_HF || controls.runtime.audio.quarantined ||
+    if ((!manager && controls.runtime.audio.route != AE_ROUTE_HFP_HF) || controls.runtime.audio.quarantined ||
         controls.runtime.busy || controls.runtime.result_ready || any_jobs() ||
         !bt->initialized || bt->failed || bt->request_id != controls.voice_link.token ||
         (bt->hfp_peer_known && memcmp(bt->hfp_peer, controls.voice_link.peer, 6)) ||
@@ -627,6 +631,7 @@ static void rebuild_devices(void)
     const bt_audio_snapshot_t *bt = &controls.bluetooth;
     view->known = controls.bonds.known && !controls.bonds.refreshing && controls.bonds.error == ESP_OK &&
         controls.bonds.count <= BT_AUDIO_CLASSIC_BONDS_MAX;
+    view->refreshing = controls.bonds.refreshing;
     view->revision = controls.bonds.revision;
     view->count = view->known ? controls.bonds.count : 0;
     view->pages = (view->count + APP_MEDIA_ROWS - 1U) / APP_MEDIA_ROWS;
@@ -646,7 +651,8 @@ static void rebuild_devices(void)
         row->connected = bond->hfp_current || bond->a2dp_current;
         row->selected = (int)index == selected;
     }
-    if (selected >= 0) {
+    view->selected_saved = selected >= 0;
+    if (controls.selected_peer_known) {
         const uint8_t *peer = controls.selected_peer; view->selected = peer_id(peer);
         memcpy(view->address, peer, sizeof(view->address));
         snprintf(view->identity, sizeof(view->identity), "%02X:%02X:%02X:%02X:%02X:%02X", peer[0], peer[1], peer[2], peer[3], peer[4], peer[5]);
@@ -654,14 +660,18 @@ static void rebuild_devices(void)
             bool connected = i ? bt->a2dp_connected : bt->hfp_connected;
             bool known = i ? bt->a2dp_peer_known : bt->hfp_peer_known;
             const uint8_t *current = i ? bt->a2dp_peer : bt->hfp_peer;
+            view->connection_known[i] = bt->initialized && !bt->failed && (!connected || known);
             view->connected[i] = connected && known && !memcmp(current, peer, 6);
-            view->can_disconnect[i] = idle && view->connected[i];
-            view->can_connect[i] = idle && !connected && !known &&
+            view->can_disconnect[i] = idle && selected >= 0 && view->connected[i];
+            view->can_connect[i] = idle && selected >= 0 &&
+                (i ? !connected && !known : (view->connected[i] ? !bt->hfp_audio_connected : !connected && !known)) &&
                 (!bt->hfp_connected || (bt->hfp_peer_known && !memcmp(bt->hfp_peer, peer, 6))) &&
                 (!bt->a2dp_connected || (bt->a2dp_peer_known && !memcmp(bt->a2dp_peer, peer, 6)));
         }
+        view->voice_connected = view->connected[0] && bt->hfp_audio_connected;
     }
-    snprintf(view->reason, sizeof(view->reason), "%s", !view->known ? "Saved audio devices unavailable." :
+    snprintf(view->reason, sizeof(view->reason), "%s", view->refreshing ? "Refreshing saved audio devices." :
+        !view->known ? "Saved audio devices unavailable." : controls.selected_peer_known && !view->selected_saved ? "Device is no longer saved." :
         any_jobs() ? "Stop Mic and Speaker before changing devices." : view->pending ? "Request pending; waiting for Bluetooth." :
         bt->request_status == BT_AUDIO_JOB_FAILED || bt->request_status == BT_AUDIO_JOB_UNCERTAIN ? "Connection request failed or uncertain. Check host Bluetooth settings." :
         "Connect from this device or your host. Connecting does not start audio.");
@@ -885,11 +895,18 @@ void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t 
 void app_media_controls_context(const app_media_controls_context_t *context)
 {
     if (!context || !controls.initialized) return;
+    if (controls.device_request_id && (context->locked || context->screen_off || context->local_access != APP_LOCAL_NORMAL ||
+        !context->bluetooth_audio_devices || context->epoch != controls.context.epoch)) {
+        /* Exact owner receipt revokes a queued item at its serialized dispatch
+         * boundary. An already dispatched SDK operation cannot be undone here. */
+        bt_audio_cancel_request(controls.device_request_id); controls.device_request_id = 0;
+    }
     if (controls.audio_pairing_owned && (context->locked || context->screen_off || (!context->bluetooth_audio_devices && (context->mode != INPUT_AUDIO || controls.context.bluetooth_audio_devices)))) {
         bt_audio_pairing_close(); controls.audio_pairing_owned = false;
     }
     if (controls.voice_link.active && (context->epoch != controls.voice_link.epoch || context->locked ||
-        context->screen_off || context->mode != INPUT_AUDIO)) finish_voice_link(NULL, AE_PRIVACY);
+        context->screen_off || (controls.voice_link.device_management ? !context->bluetooth_audio_devices :
+        context->mode != INPUT_AUDIO))) finish_voice_link(NULL, AE_PRIVACY);
     if (context->overlay != APP_OVERLAY_CONFIRM) controls.confirmation = APP_CONFIRM_NONE;
     if (controls.confirmation == APP_CONFIRM_NONE || context->epoch != controls.confirmation_epoch ||
         context->locked || context->screen_off || (context->mode != INPUT_AUDIO && !context->bluetooth_audio_devices)) {
@@ -1072,7 +1089,10 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
     bool confirmation = intent->action == APP_CONFIRM && controls.confirmation != APP_CONFIRM_NONE;
     if (intent->action != APP_MEDIA_CONTROL && intent->action != APP_RECORDING_STORAGE_PREPARE_REQUEST && !confirmation) return false;
     effect->handled = true;
-    if (!local_ready() || intent->epoch != controls.context.epoch || intent->ui_revision != controls.context.ui_revision) {
+    bool navigation = intent->action == APP_MEDIA_CONTROL && app_media_device_navigation(intent->media.operation);
+    bool available = navigation ? controls.context.local_access != APP_LOCAL_PAUSED &&
+        !controls.context.locked && !controls.context.screen_off : local_ready();
+    if (!available || intent->epoch != controls.context.epoch || intent->ui_revision != controls.context.ui_revision) {
         effect_result(effect, AE_STALE); return true;
     }
     if (confirmation) {
@@ -1104,7 +1124,7 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
         return true;
     }
     const app_media_request_t *request = &intent->media;
-    if (!valid_identity(request) || !allowed_panel(request->operation)) { effect_result(effect, AE_STALE); return true; }
+    if ((!navigation && !valid_identity(request)) || !allowed_panel(request->operation)) { effect_result(effect, AE_STALE); return true; }
     ae_result_t result = AE_DENIED;
     switch (request->operation) {
     case APP_MEDIA_PAIR_AUDIO_OPEN: case APP_MEDIA_PAIR_AUDIO_CLOSE:
@@ -1133,6 +1153,7 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
             !same_ui_id(request->object_id, controls.view.devices.selected) || selected_bond() < 0) { result = AE_STALE; break; }
         unsigned profile = (unsigned)action / 2U; bool disconnect = (action & 1) != 0;
         if (!(disconnect ? controls.view.devices.can_disconnect[profile] : controls.view.devices.can_connect[profile])) { result = AE_BUSY; break; }
+        if (!profile && !disconnect) { result = connect_voice(); break; }
         bt_audio_command_t command = profile ? (disconnect ? BT_AUDIO_DISCONNECT_A2DP : BT_AUDIO_CONNECT_A2DP) :
             (disconnect ? BT_AUDIO_DISCONNECT_HFP : BT_AUDIO_CONNECT_HFP);
         esp_err_t error = bt_audio_saved_request(controls.bluetooth.generation, profile ? controls.bluetooth.a2dp_link_generation :

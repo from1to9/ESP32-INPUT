@@ -26,6 +26,7 @@ esp_err_t bt_audio_pairing_open_reviewed(uint32_t duration, const bt_audio_snaps
     return ESP_OK;
 }
 void bt_audio_pairing_close(void) { ++closes; classic.pairing_requested = classic.pairing_busy = false; }
+void bt_audio_cancel_request(uint64_t token) { (void)token; abort(); }
 esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t link_generation, uint64_t revision,
     bt_audio_command_t command, const uint8_t peer[6], uint64_t *id)
 { (void)generation; (void)link_generation; (void)revision; (void)command; (void)peer; (void)id; abort(); }
@@ -127,6 +128,37 @@ int main(void)
         action(APP_CLOSE,0); present();
         assert(test_view.overlay==APP_OVERLAY_NONE && !classic.pairing_requested && test_view.mode==(input_mode_t)mode);
     }
-    puts("PASS: coordinator review open/cancel/reopen/accept/close, one-shot and stale host/resource/close/lock rejection");
+    test_classic_bonds = (bt_audio_bond_list_t){.known = true, .revision = 29, .count = 5};
+    for (unsigned i = 0; i < test_classic_bonds.count; ++i) test_classic_bonds.bonds[i].address[5] = (uint8_t)(i + 1);
+    update_test_health_ready(); remote_update_service();
+    update_control_tap(801, APP_BLUETOOTH_DEVICES, 1); present();
+    assert(test_view.local_access == APP_LOCAL_BROWSE && test_view.media.devices.pages == 2);
+    app_intent_t navigation = make_intent(APP_MEDIA_CONTROL, 0, 0, NULL);
+    navigation.media.operation = APP_MEDIA_DEVICE_PAGE;
+    navigation.media.object_revision = test_view.media.devices.revision; navigation.media.value.page_delta = 1;
+    navigation.gesture = 802; navigation.surface = APP_SURFACE_CONTROL; local_control_contact(802);
+    deliver(navigation); present(); assert(test_view.media.devices.page == 1);
+    navigation = make_intent(APP_MEDIA_CONTROL, 0, 0, NULL);
+    navigation.media.operation = APP_MEDIA_DEVICE_DETAILS;
+    navigation.media.object_revision = test_view.media.devices.revision;
+    navigation.media.value.peer_id = test_view.media.devices.rows[0].id;
+    navigation.gesture = 803; navigation.surface = APP_SURFACE_CONTROL; local_control_contact(803);
+    deliver(navigation); present(); assert(test_view.overlay == APP_OVERLAY_AUDIO_DEVICE);
+    assert(test_view.media.devices.selected.bytes[15] == 5);
+    navigation = make_intent(APP_MEDIA_CONTROL, 0, 0, NULL);
+    navigation.media.operation = APP_MEDIA_DEVICE_LINK; navigation.media.object_id = test_view.media.devices.selected;
+    navigation.media.object_revision = test_view.media.devices.revision;
+    navigation.gesture = 804; navigation.surface = APP_SURFACE_CONTROL; local_control_contact(804);
+    deliver(navigation); present(); /* The SDK seam above aborts if a mutation reaches it. */
+    update_control_tap(805, APP_BLUETOOTH_DEVICES, 1); present();
+    assert(test_view.overlay == APP_OVERLAY_BLUETOOTH_DEVICES);
+    test_update_busy = true; remote_update_service();
+    navigation = make_intent(APP_MEDIA_CONTROL, 0, 0, NULL);
+    navigation.media.operation = APP_MEDIA_DEVICE_DETAILS;
+    navigation.media.object_revision = test_view.media.devices.revision;
+    navigation.media.value.peer_id = test_view.media.devices.rows[0].id;
+    navigation.gesture = 806; navigation.surface = APP_SURFACE_CONTROL; local_control_contact(806);
+    deliver(navigation); present(); assert(test_view.overlay == APP_OVERLAY_BLUETOOTH_DEVICES);
+    puts("PASS: coordinator reviews and read-only first-boot device navigation; mutations and paused navigation blocked");
     return 0;
 }

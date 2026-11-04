@@ -1,6 +1,6 @@
 # Native media product controls
 
-Run `python3 tests/media_controls/run.py`. Thirty-six isolated cases compile the real
+Run `python3 tests/media_controls/run.py`. Isolated cases compile the real
 `app_media_controls.c` and audio format arithmetic with strict warnings,
 AddressSanitizer and UndefinedBehaviorSanitizer. Cached codec, store, runtime and
 Bluetooth interfaces are substituted at their public boundaries; no production
@@ -31,6 +31,14 @@ unmutes the microphone. Failures, replaced tokens/peers, changed bond catalogues
 lock, timeout and unavailable snapshots stop sequencing without automatic retry.
 The request seam records public queue calls; no transport implementation is
 substituted inside the production controls algorithm.
+
+Run `python3 tests/media_controls/run_device_owner.py` for the shared device
+manager composed with the production Classic owner and serialized dispatcher.
+It holds SDK dispatch across lock, leave, maintenance and foreign/same-host
+callbacks, exercises both SLC-to-SCO phases (including second-phase cancellation
+and an existing SLC), and refreshes the catalogue while a real owner link remains
+connected. Neither successful connection phase may submit an audio runtime job
+or change the selected USB route. `--case <name>` replays one boundary.
 
 These checks prove local request/admission behavior. They do not prove actual
 audio capture, transport readiness, flash publication, physical mute or host
