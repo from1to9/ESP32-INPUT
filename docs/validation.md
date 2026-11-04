@@ -57,6 +57,24 @@ BLE HID record and one saved Classic audio record.
   failure was recorded in that capture. These counters do not locate loss
   upstream of the host ingress. Continuous speaker playback remains open.
 
+The operator later reported severe jumps and intermittent stops with the local
+Mouse touchpad on the same image. Reboot improved the feel but the stalls
+persisted before Bluetooth audio was played on that boot. Unplugging and
+reconnecting USB made no perceptible difference. Periodic samples showed
+7,339–7,723 bytes of DMA memory available after reboot
+(largest block 6,656 bytes), compared with 2,851–2,883 bytes after the previous
+speaker runs (largest block 1,664 bytes). The samples do not establish a leak.
+On the USB comparison the reported BLE generation stayed the same and the link
+was ready at each observation.
+
+A 46-second capture contained 417 valid, unredacted single-contact changes.
+For 367 adjacent pairs with successive touch-source sequence numbers and the
+same contact ID, the median interval was 15 ms and the 95th percentile was
+16 ms. The journal lost 445 records during collection in addition to the
+initial retention gap. Windows report arrival times were not measured. The
+physical regression remains open; these timings cover only the retained
+device-side observations.
+
 ### Classic connection display DMA failure and chunk repair: 2026-11-04
 
 Clean `cf2c8daff4bfb529e5f90ed8c4c44a7699afde64` booted with a reported
