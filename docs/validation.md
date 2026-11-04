@@ -2316,6 +2316,35 @@ the directions and that scrolling stopped. macOS received 19 nonzero USB wheel
 reports from the Mosaico, totaling 8 positive and 15 negative steps. This run
 covers the USB wheel path on this board and host.
 
+## Windows Bluetooth audio on Mosaico (2026-11-04)
+
+The board booted and confirmed `1264c11` after a USB update to the inactive
+slot. Both saved Windows pairings (HID and Classic audio) survived. On this
+first boot HID was ready at 4.7 seconds and update probation ended at 52.2
+seconds. The operator reported about a minute of unresponsive controls. The
+coordinator rejects ordinary local input during probation. There is no
+timestamp for the individual taps or observation of an ordinary cold boot in
+this run.
+
+**Speaker recovery passed in this run.** With Windows playing music over A2DP
+at 44.1 kHz, the same playback job remained active for an observed 227.9
+seconds and delivered 19,484,262 bytes to the codec. Two partial-frame
+expiries discarded 642 aged samples. Fresh audio continued on the same link
+and consumer, and the operator heard playback resume without pressing Start.
+On the earlier `4392232` image, a comparable expiry disabled delivery until
+the user restarted Speaker.
+
+**Sound quality remains open.** The operator still heard interruptions or
+distortion. The interval above included 164 incomplete ACL replacements and
+177 media sequence warnings. The longest observed decoded callback interval
+was 196 ms and the longest interval between codec writes was 200 ms. No A2DP
+queue overruns, malformed PCM or LCD transfer errors were observed in that
+interval. These observations do not identify where the fragments were lost.
+
+Separately, the operator verified on `d736f52` that the Windows microphone
+input meter followed speech from Mosaico over HFP. That microphone test was
+not repeated on `1264c11`.
+
 ## Device evidence template
 
 ```text
