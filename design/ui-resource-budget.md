@@ -80,3 +80,7 @@ all 97 executable sections byte-identical; all 748 native rendered images also
 matched the preceding approved UI. These placement observations do not prove a
 physical redraw succeeds. The [runtime memory plan](runtime-memory.md) separately
 accounts for SPI bounce buffers, audio DMA, radio pools and task stacks.
+
+## Shared Bluetooth manager addition (2026-11-04)
+
+The current fixed core is 120 objects: the Navigation baseline has 118, and the direct Audio Manage devices button adds exactly two. The dynamic-panel limit increases by the same two objects from 160 to 162. Four-row shared lists reuse the existing bounded binding tables; no per-poll allocation is introduced. The resource harness includes both manager purposes and audio details, with unchanged idle, hidden-state and repeated close/teardown checks.

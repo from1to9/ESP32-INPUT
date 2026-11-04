@@ -377,8 +377,8 @@ static void device_settings_checks(void)
     s_state.settings_page = APP_SETTINGS_CONNECTIVITY;
     render();
     clear_intents();
-    tap_control("Bluetooth hosts");
-    assert(action_count(APP_SETTINGS_PAGE) == 1 && last_action(APP_SETTINGS_PAGE)->x == APP_SETTINGS_BLUETOOTH);
+    tap_control("Bluetooth devices");
+    assert(action_count(APP_BLUETOOTH_DEVICES) == 1 && last_action(APP_BLUETOOTH_DEVICES)->x == 0);
     s_state.settings_page = APP_SETTINGS_BLUETOOTH;
     render();
     tap_control("Add host");

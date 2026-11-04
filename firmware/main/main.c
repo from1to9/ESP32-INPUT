@@ -167,6 +167,7 @@ typedef struct {
 static device_idle_t s_idle;
 static app_settings_page_t s_settings_page;
 static unsigned s_bluetooth_page;
+static bool s_bluetooth_audio_devices;
 static app_confirmation_t s_confirmation;
 static uint64_t s_confirmation_generation;
 static uint64_t s_confirmation_bond_revision, s_confirmation_preference_revision;
@@ -707,6 +708,9 @@ static void refresh_media_context(void)
     app_media_controls_context_t context = {.epoch = s_engine.state.epoch,
         .ui_revision = s_ui_revision, .mode = s_engine.state.mode, .overlay = s_overlay,
         .keyboard_submode = s_keyboard_submode, .locked = s_engine.state.locked,
+        .bluetooth_audio_devices = s_bluetooth_audio_devices &&
+            (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES || s_overlay == APP_OVERLAY_AUDIO_DEVICE ||
+             (s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == APP_CONFIRM_AUDIO_PAIR)),
         .screen_off = !visible, .preview_characters = s_interaction.view.preview_length};
     app_media_controls_context(&context);
 }
@@ -749,7 +753,10 @@ static void refresh_connectivity_context(void)
         .settings_page = s_settings_page, .confirmation = s_confirmation,
         .locked = s_engine.state.locked, .screen_off = s_idle.asleep || s_idle.wake_capture,
         .release_pending = bluetooth_release_pending(),
-        .transport_switch_pending = s_transport_switch_pending};
+        .transport_switch_pending = s_transport_switch_pending,
+        .bluetooth_audio_devices = s_bluetooth_audio_devices &&
+            (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES || s_overlay == APP_OVERLAY_AUDIO_DEVICE ||
+             (s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == APP_CONFIRM_AUDIO_PAIR))};
     app_connectivity_controls_context(&context);
 }
 
@@ -761,6 +768,7 @@ static void apply_connectivity_effect(const app_connectivity_controls_effect_t *
         s_message = s_connectivity_message;
     }
     if (effect->release_input) cancel_input();
+    if (effect->confirmation == APP_CONFIRM_DISCONNECT) s_confirmation_generation = effect->confirmation_host_generation;
     if (effect->open_overlay) {
         s_confirmation = effect->confirmation;
         open_overlay(effect->overlay);
@@ -1143,6 +1151,12 @@ static bool allowed_in_overlay(app_action_t action)
     if (s_overlay == APP_OVERLAY_NONE) return true;
     if (s_overlay == APP_OVERLAY_CONFIRM) return action == APP_CONFIRM;
     if (action == APP_CLOSE) return true;
+    if (action == APP_BLUETOOTH_DEVICES) return s_overlay == APP_OVERLAY_NONE || s_overlay == APP_OVERLAY_SETTINGS ||
+        s_overlay == APP_OVERLAY_MEDIA_OPTIONS || s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES ||
+        s_overlay == APP_OVERLAY_AUDIO_DEVICE || s_overlay == APP_OVERLAY_BLUETOOTH_TARGET || s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING;
+    if (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES) return s_bluetooth_audio_devices ? action == APP_MEDIA_CONTROL :
+        action == APP_BLUETOOTH_TARGET_CONTROL || action == APP_PAIRING_REQUEST || action == APP_BLUETOOTH_PAGE;
+    if (s_overlay == APP_OVERLAY_AUDIO_DEVICE) return action == APP_MEDIA_CONTROL;
     if (action == APP_MENU)
         return s_overlay == APP_OVERLAY_MODES || s_overlay == APP_OVERLAY_TARGET ||
             s_overlay == APP_OVERLAY_SETTINGS || s_overlay == APP_OVERLAY_WIFI_SETUP ||
@@ -1540,6 +1554,12 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
     hid_engine_enqueue_result_t result = HID_ENGINE_ENQUEUE_BLOCKED;
     bool edited = false;
     switch (intent->action) {
+    case APP_BLUETOOTH_DEVICES:
+        if (intent->x != 0 && intent->x != 1) return;
+        s_bluetooth_audio_devices = intent->x == 1;
+        s_bluetooth_page = 0;
+        open_overlay(APP_OVERLAY_BLUETOOTH_DEVICES);
+        return;
     case APP_MODE:
         (void)select_mode((input_mode_t)intent->x);
         return;
@@ -1652,6 +1672,10 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         s_message = "Keep the device still while calibrating.";
         return;
     case APP_SETTINGS_PAGE:
+        if (intent->x == APP_SETTINGS_BLUETOOTH &&
+            (s_overlay == APP_OVERLAY_BLUETOOTH_TARGET || s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING)) {
+            s_bluetooth_audio_devices = false; open_overlay(APP_OVERLAY_BLUETOOTH_DEVICES); return;
+        }
         if ((s_overlay == APP_OVERLAY_API_CONNECTION || s_overlay == APP_OVERLAY_WIFI_PROFILES) &&
             intent->x != APP_SETTINGS_WIFI) return;
         if (s_overlay == APP_OVERLAY_BLUETOOTH_TARGET && intent->x != APP_SETTINGS_BLUETOOTH) return;
@@ -1664,7 +1688,8 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         (void)request_input_transport((app_input_transport_t)intent->x, link);
         return;
     case APP_BLUETOOTH_PAGE: {
-        if (s_overlay != APP_OVERLAY_SETTINGS || s_settings_page != APP_SETTINGS_BLUETOOTH || intent->x < 0) return;
+        if (!((s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH) ||
+            (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !s_bluetooth_audio_devices)) || intent->x < 0) return;
         static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
         ble_hid_copy_bond_list(&bonds);
         unsigned pages = bonds.known && bonds.count ?
@@ -1771,7 +1796,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
     case APP_PAIRING_REQUEST:
         if (intent->x < APP_PAIR_OPEN || intent->x > APP_PAIR_RESUME ||
             s_pair_operation != APP_CONFIRM_NONE) return;
-        if (s_overlay != APP_OVERLAY_TARGET && s_overlay != APP_OVERLAY_BLUETOOTH_PAIRING &&
+        if (s_overlay != APP_OVERLAY_BLUETOOTH_DEVICES && s_overlay != APP_OVERLAY_TARGET && s_overlay != APP_OVERLAY_BLUETOOTH_PAIRING &&
             !(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH)) return;
         if (s_overlay == APP_OVERLAY_BLUETOOTH_PAIRING && intent->x == APP_PAIR_CLOSE) {
             app_connectivity_controls_effect_t effect = {0};
@@ -1823,9 +1848,11 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         app_confirmation_t confirmation = s_confirmation;
         s_confirmation = APP_CONFIRM_NONE;
         s_settings_page = confirmation == APP_CONFIRM_WIFI_FORGET ? APP_SETTINGS_WIFI : APP_SETTINGS_BLUETOOTH;
+        if (confirmation != APP_CONFIRM_WIFI_FORGET) s_bluetooth_audio_devices = false;
         open_overlay(confirmation == APP_CONFIRM_PAIR_OPEN && intent->x == 1 &&
             (link->connection_admitted ? link->generation : 0) == s_confirmation_generation ?
-            APP_OVERLAY_BLUETOOTH_PAIRING : APP_OVERLAY_SETTINGS);
+            APP_OVERLAY_BLUETOOTH_PAIRING : confirmation == APP_CONFIRM_WIFI_FORGET ?
+            APP_OVERLAY_SETTINGS : APP_OVERLAY_BLUETOOTH_DEVICES);
         if (!intent->x) return;
         if (confirmation == APP_CONFIRM_WIFI_FORGET) {
             app_wifi_snapshot_t wifi;
@@ -2774,6 +2801,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
     view.pairing_seconds_left = (link->pairing_remaining_ms + 999U) / 1000U;
     static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
     ble_hid_copy_bond_list(&bonds);
+    view.bluetooth_audio_devices = s_bluetooth_audio_devices;
     view.bluetooth_hosts_available = bonds.known;
     view.bluetooth_host_count = bonds.known && bonds.count <= APP_UI_BOND_CAPACITY ? bonds.count : 0;
     unsigned pages = view.bluetooth_host_count ?

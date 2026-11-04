@@ -1042,6 +1042,7 @@ static void setup(input_mode_t mode)
     s_name_request_id = 0;
     s_name_should_persist = false;
     s_pair_operation = APP_CONFIRM_NONE;
+    s_bluetooth_audio_devices = false;
     s_pair_deadline_ms = 0;
     s_pair_origin_generation = 0;
     s_pair_disconnect_requested = false;
@@ -2183,6 +2184,7 @@ static void completed_quick_touch_still_freezes_motion(void)
 
 static void settings_page(app_settings_page_t page)
 {
+    if (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES) action(APP_CLOSE, 0);
     action(APP_SETTINGS_PAGE, (int)page);
     assert(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == page);
     release_barrier();
@@ -2645,7 +2647,7 @@ static void pairing_confirmation_releases_before_disconnect_and_forget(void)
         assert(test_native_generation == test_link.generation && test_native_bond_revision == 51 && test_native_preference_revision == 61);
         assert(test_native_start_release_pending && !test_disconnects && !test_pair_opens && !test_pair_forgets);
         release_barrier();
-        assert(s_overlay == (operations[i] == APP_PAIR_OPEN ? APP_OVERLAY_BLUETOOTH_PAIRING : APP_OVERLAY_SETTINGS));
+        assert(s_overlay == (operations[i] == APP_PAIR_OPEN ? APP_OVERLAY_BLUETOOTH_PAIRING : APP_OVERLAY_BLUETOOTH_DEVICES));
         deliver(approve); assert(test_native_management_starts == 1);
         assert(!strcmp(s_interaction.view.preview, "AB"));
         if (operations[i] == APP_PAIR_OPEN) {
@@ -3019,7 +3021,7 @@ static void disconnect_current_host_preserves_saved_pairings(void)
     assert(test_view.bluetooth_host_count == 2 && test_bonds.revision == 4);
     action(APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
     action(APP_PAIRING_REQUEST, APP_PAIR_DISCONNECT);
-    assert(s_overlay == APP_OVERLAY_SETTINGS && test_disconnects == 1);
+    assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && test_disconnects == 1);
 }
 
 static void saturated_queue_preserves_real_touch_lock(void)
@@ -4664,7 +4666,7 @@ static void confirmation_owns_navigation_choices_and_physical_double_click(void)
         expect_idle();
         expect_neutral_navigation_trace();
         action(APP_CONFIRM, 0);
-        assert(s_overlay == APP_OVERLAY_SETTINGS && s_confirmation == APP_CONFIRM_NONE);
+        assert(s_overlay == (network ? APP_OVERLAY_SETTINGS : APP_OVERLAY_BLUETOOTH_DEVICES) && s_confirmation == APP_CONFIRM_NONE);
         assert(s_settings_page == (network ? APP_SETTINGS_WIFI : APP_SETTINGS_BLUETOOTH));
         release_barrier();
         sync_interaction();
@@ -5973,7 +5975,7 @@ static void native_connection_review_and_back_navigation_reach_owner(void)
     action(APP_SETTINGS_PAGE, APP_SETTINGS_WIFI);
     assert(s_overlay == APP_OVERLAY_BLUETOOTH_TARGET);
     action(APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
-    assert(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH);
+    assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !s_bluetooth_audio_devices);
 }
 
 static void cancelled_remote_receipt_cannot_hold_a_new_local_switch(void)
@@ -6177,6 +6179,41 @@ static void keyboard_session_navigation_preserves_explicit_submode_and_draft(voi
     }
 }
 
+static void shared_bluetooth_manager_preserves_mode_and_draft(void)
+{
+    for (int mode=INPUT_MOUSE; mode<=INPUT_AUDIO; ++mode) {
+        setup(INPUT_KEYBOARD); fill_preview(2); (void)select_mode((input_mode_t)mode);
+        app_input_transport_t original=s_input_transport;
+        action(APP_BLUETOOTH_DEVICES,1);
+        assert(s_overlay==APP_OVERLAY_BLUETOOTH_DEVICES && s_bluetooth_audio_devices);
+        refresh_media_context(); assert(test_media_context.bluetooth_audio_devices);
+        refresh_connectivity_context(); assert(test_connectivity_context.bluetooth_audio_devices);
+        assert(s_engine.state.mode==(input_mode_t)mode && s_input_transport==original && !s_send_token);
+        action(APP_CLOSE, 0); refresh_connectivity_context(); refresh_media_context();
+        assert(!test_connectivity_context.bluetooth_audio_devices && !test_media_context.bluetooth_audio_devices);
+        open_overlay(APP_OVERLAY_TARGET); refresh_connectivity_context();
+        assert(!test_connectivity_context.bluetooth_audio_devices); /* An old Audio tab cannot cancel later BLE work. */
+        action(APP_CLOSE, 0); action(APP_BLUETOOTH_DEVICES, 1);
+        action(APP_BLUETOOTH_DEVICES,0); refresh_media_context();
+        assert(!test_media_context.bluetooth_audio_devices && !s_bluetooth_audio_devices);
+        action(APP_CLOSE,0); assert(s_overlay==APP_OVERLAY_NONE && !strcmp(s_interaction.view.preview,"AB"));
+        assert(!test_pair_opens && !test_disconnects);
+    }
+    for (int accept = 0; accept <= 1; ++accept) {
+        setup(INPUT_KEYBOARD); fill_preview(2); action(APP_BLUETOOTH_DEVICES, 0);
+        open_overlay(APP_OVERLAY_BLUETOOTH_TARGET);
+        app_connectivity_controls_effect_t disconnect = {.handled = true, .open_overlay = true,
+            .overlay = APP_OVERLAY_CONFIRM, .confirmation = APP_CONFIRM_DISCONNECT,
+            .confirmation_host_generation = test_link.generation};
+        apply_connectivity_effect(&disconnect);
+        assert(s_confirmation_generation == test_link.generation);
+        action(APP_CONFIRM, accept);
+        assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !s_bluetooth_audio_devices);
+        assert(s_engine.state.mode == INPUT_KEYBOARD && !strcmp(s_interaction.view.preview, "AB") && !s_send_token);
+        assert(s_pair_operation == (accept ? APP_CONFIRM_DISCONNECT : APP_CONFIRM_NONE));
+    }
+}
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -6198,6 +6235,7 @@ int main(int argc, char **argv)
     RUN(applied_remote_receipt_survives_later_local_selection);
     RUN(cancelled_remote_receipt_cannot_hold_a_new_local_switch);
     REMOTE_DEVICE_CASES(RUN);
+    RUN(shared_bluetooth_manager_preserves_mode_and_draft);
     RUN(native_bluetooth_resume_and_selection_release_effect);
     RUN(provisional_bluetooth_retries_preserve_local_intents);
     RUN(review_forget_all_survives_provisional_churn);

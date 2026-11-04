@@ -36,6 +36,7 @@ typedef enum {
     APP_API_INPUT_ALLOW_SET, /* x = explicit Boolean; api.revision = allowance generation. */
     APP_RECENTER, /* Reacquire the grip reference; never recalibrate sensor bias. */
     APP_NAVIGATION, /* Input settings: x=0/1, persisted optional Mouse layout. */
+    APP_BLUETOOTH_DEVICES, /* x=0 input devices, x=1 audio devices. */
     APP_NAV_HOME, APP_NAV_BACK /* Mouse only: button 3 tap, Command+[ tap. */
 } app_action_t;
 
@@ -60,7 +61,8 @@ typedef enum {
     APP_OVERLAY_COMMON_KEYS, APP_OVERLAY_RECORDING_STORAGE,
     APP_OVERLAY_MEDIA_OPTIONS, APP_OVERLAY_RECORDINGS, APP_OVERLAY_RECORDING_DETAIL,
     APP_OVERLAY_RECORDING_START, APP_OVERLAY_API_CONNECTION, APP_OVERLAY_API_REVIEW,
-    APP_OVERLAY_WIFI_PROFILES, APP_OVERLAY_BLUETOOTH_TARGET, APP_OVERLAY_BLUETOOTH_PAIRING
+    APP_OVERLAY_WIFI_PROFILES, APP_OVERLAY_BLUETOOTH_TARGET, APP_OVERLAY_BLUETOOTH_PAIRING,
+    APP_OVERLAY_BLUETOOTH_DEVICES, APP_OVERLAY_AUDIO_DEVICE
 } app_overlay_t;
 typedef enum {
     APP_KEYBOARD_MOTION, APP_KEYBOARD_TOUCH, APP_KEYBOARD_SPOKEN, APP_KEYBOARD_SHORTCUTS
@@ -453,6 +455,7 @@ typedef struct {
     int paired_host_count; /* -1 means unknown. */
     unsigned paired_host_capacity; /* Actual provider bond capacity; 0 means unknown. */
     unsigned pairing_seconds_left; /* 0 means no known countdown. */
+    bool bluetooth_audio_devices; /* Selected purpose in the shared local manager. */
     bool bluetooth_hosts_available;
     size_t bluetooth_host_count; /* 0..APP_UI_BOND_CAPACITY; unknown is not zero. */
     app_bond_view_t bluetooth_hosts[APP_UI_BOND_CAPACITY];

@@ -275,6 +275,7 @@ static void rebuild(void)
     if (found >= 0) {
         const ble_hid_bond_t *row = &controls.bonds.bonds[found]; controls.target.known = true; controls.target.target = ui_key(row);
         controls.target.selected = row->is_selected;
+        controls.target.connected = controls.bluetooth.connection_admitted && controls.bonds.current_match_known && row->is_current;
         snprintf(controls.target.name, sizeof(controls.target.name), "Saved input host");
         snprintf(controls.target.identity, sizeof(controls.target.identity), "%02X:%02X:%02X:%02X:%02X:%02X (type %u)", row->address[0], row->address[1], row->address[2], row->address[3], row->address[4], row->address[5], row->address_type);
         controls.target.selection_supported = row->selection_supported;
@@ -350,6 +351,7 @@ bool app_connectivity_controls_init(void)
 void app_connectivity_controls_context(const app_connectivity_controls_context_t *context)
 {
     if (!context || !controls.initialized) return;
+    if (context->bluetooth_audio_devices && app_connectivity_controls_bluetooth_busy()) app_bluetooth_management_cancel();
     if (controls.context.overlay == APP_OVERLAY_BLUETOOTH_PAIRING && context->overlay != APP_OVERLAY_BLUETOOTH_PAIRING) {
         app_bluetooth_management_cancel();
         ble_hid_pairing_close();
@@ -414,12 +416,19 @@ static void handle_wifi(const app_saved_wifi_request_t *request, app_connectivit
 static void handle_bluetooth(const app_bluetooth_target_request_t *request, app_connectivity_controls_effect_t *effect)
 {
     bool page = controls.context.overlay == APP_OVERLAY_BLUETOOTH_TARGET ||
-        (controls.context.overlay == APP_OVERLAY_SETTINGS && controls.context.settings_page == APP_SETTINGS_BLUETOOTH);
+        ((controls.context.overlay == APP_OVERLAY_SETTINGS && controls.context.settings_page == APP_SETTINGS_BLUETOOTH) || (controls.context.overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !controls.context.bluetooth_audio_devices));
     int found = find_bond(&request->target);
     if (!page || found < 0 || request->bond_revision != controls.bonds.revision || request->preferences_revision != controls.preference.revision) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return; }
     if (request->operation == APP_BLUETOOTH_TARGET_DETAILS) {
         controls.selected_target = request->target; controls.target_known = true;
         effect->open_overlay = true; effect->overlay = APP_OVERLAY_BLUETOOTH_TARGET; return;
+    }
+    if (request->operation == APP_BLUETOOTH_TARGET_DISCONNECT_REQUEST) {
+        if (!controls.bluetooth.connection_admitted || !controls.bonds.current_match_known ||
+            !controls.bonds.bonds[found].is_current || !ble_manageable()) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return; }
+        effect->open_overlay = true; effect->overlay = APP_OVERLAY_CONFIRM;
+        effect->confirmation = APP_CONFIRM_DISCONNECT;
+        effect->confirmation_host_generation = controls.bluetooth.generation; return;
     }
     if (request->operation == APP_BLUETOOTH_TARGET_FORGET_REQUEST) {
         if (controls.context.overlay != APP_OVERLAY_BLUETOOTH_TARGET || !controls.target.can_forget ||
@@ -586,7 +595,7 @@ void app_connectivity_controls_poll(uint64_t now_ms, app_connectivity_controls_e
         .transport_switch_pending = controls.context.transport_switch_pending};
     app_bluetooth_management_snapshot_t management_state; app_bluetooth_management_snapshot(&management_state);
     if (management_state.active && management_state.operation == APP_BT_MANAGE_ADD &&
-        controls.context.overlay != APP_OVERLAY_BLUETOOTH_PAIRING) app_bluetooth_management_cancel();
+        controls.context.overlay != APP_OVERLAY_BLUETOOTH_PAIRING && controls.context.overlay != APP_OVERLAY_BLUETOOTH_DEVICES) app_bluetooth_management_cancel();
     app_bluetooth_management_service(&bluetooth_context, now_ms);
     app_bluetooth_management_snapshot(&management_state);
     if (management_state.revision != controls.management_revision) {

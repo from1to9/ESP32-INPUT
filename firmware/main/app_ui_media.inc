@@ -75,11 +75,11 @@ static bool media_request_equal(const app_media_request_t *a, const app_media_re
     case APP_MEDIA_SELECT_CONNECTION: return a->value.connection == b->value.connection;
     case APP_MEDIA_SET_ENABLED: case APP_MEDIA_SET_MUTED: case APP_MEDIA_LIVE_START: case APP_MEDIA_LIVE_STOP:
         return a->value.role.role == b->value.role.role && a->value.role.value == b->value.role.value;
-    case APP_MEDIA_SELECT_PEER: return !memcmp(a->value.peer_id.bytes, b->value.peer_id.bytes, sizeof(a->value.peer_id.bytes));
+    case APP_MEDIA_DEVICE_DETAILS: case APP_MEDIA_SELECT_PEER: return !memcmp(a->value.peer_id.bytes, b->value.peer_id.bytes, sizeof(a->value.peer_id.bytes));
     case APP_MEDIA_SET_GAIN: return a->value.level == b->value.level;
     case APP_MEDIA_RECORD_SET_PROFILE: return a->value.profile_id == b->value.profile_id;
     case APP_MEDIA_RECORD_SET_DURATION: return a->value.duration_seconds == b->value.duration_seconds;
-    case APP_MEDIA_RECORD_LIST_PAGE: return a->value.page_delta == b->value.page_delta;
+    case APP_MEDIA_DEVICE_PAGE: case APP_MEDIA_DEVICE_LINK: case APP_MEDIA_RECORD_LIST_PAGE: return a->value.page_delta == b->value.page_delta;
     case APP_MEDIA_SPEECH_CONFIRM: return a->value.candidate == b->value.candidate;
     default: return true;
     }
@@ -361,11 +361,7 @@ static void create_media_panel(lv_obj_t *body, lv_obj_t *title, app_overlay_t ki
         s_media_connection_state = media_label(body, 60, 60, INK);
         lv_label_set_long_mode(s_media_connection_state, LV_LABEL_LONG_SCROLL_CIRCULAR);
         s_media_connection_reason = media_label(body, 120, 56, MUTED);
-        s_media_pair_open = media_button(body, "Pair audio", 0, 184, 224);
-        s_media_pair_close = media_button(body, "Close pairing", 232, 184, 224);
-        s_media_peer = media_button(body, "Choose audio device", 0, 244, 456);
-        s_media_link = media_button(body, "Connect", 0, 304, 224);
-        s_media_disconnect = media_button(body, "Disconnect", 232, 304, 224);
+        button(body, "Manage devices", 0, 244, 456, 56, APP_BLUETOOTH_DEVICES, 1);
         button(body, "Back to Audio", 0, 360, 456, 48, APP_CLOSE, 0);
     } else if (kind == APP_OVERLAY_RECORDING_START) {
         label_text(title, "Record");

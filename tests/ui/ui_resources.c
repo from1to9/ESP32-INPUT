@@ -12,8 +12,8 @@
 #define IDLE_MS 10000
 #define FRAME_BYTES (WIDTH * HEIGHT * 2U)
 /* design/ui-plan.md: fixed input pages preserve gestures; one panel is dynamic. */
-#define CORE_OBJECT_LIMIT 118 /* Four Navigation header objects extend the existing 114-object core. */
-#define PANEL_OBJECT_LIMIT 160
+#define CORE_OBJECT_LIMIT 120 /* Navigation plus the direct Manage devices entry. */
+#define PANEL_OBJECT_LIMIT 162 /* Two explicit Manage devices core objects extend every panel. */
 
 typedef struct {
     input_mode_t mode;
@@ -38,6 +38,9 @@ static const panel_case_t s_panels[] = {
     {INPUT_MOUSE, APP_OVERLAY_SETTINGS, APP_SETTINGS_NAVIGATION, 0},
     {INPUT_KEYBOARD, APP_OVERLAY_KEYBOARD, 0, 0},
     {INPUT_AUDIO, APP_OVERLAY_AUDIO, 0, 0},
+    {INPUT_MOUSE, APP_OVERLAY_BLUETOOTH_DEVICES, 0, 0},
+    {INPUT_AUDIO, APP_OVERLAY_BLUETOOTH_DEVICES, 0, 0},
+    {INPUT_AUDIO, APP_OVERLAY_AUDIO_DEVICE, 0, 0},
     {INPUT_MOUSE, APP_OVERLAY_WIFI_SETUP, 0, 0},
     {INPUT_MOUSE, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_PAIR_OPEN},
     {INPUT_MOUSE, APP_OVERLAY_CONFIRM, 0, APP_CONFIRM_PAIR_CLOSE},
@@ -153,6 +156,8 @@ static app_view_t panel_view(const panel_case_t *panel, bool dark)
 {
     app_view_t state = view(panel->mode, dark);
     state.overlay = panel->overlay;
+    state.bluetooth_audio_devices = panel->mode == INPUT_AUDIO &&
+        (panel->overlay == APP_OVERLAY_BLUETOOTH_DEVICES || panel->overlay == APP_OVERLAY_AUDIO_DEVICE);
     state.settings_page = panel->page;
     state.confirmation = panel->confirmation;
     state.paired_host_count = 15;

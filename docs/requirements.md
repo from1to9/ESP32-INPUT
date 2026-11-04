@@ -348,3 +348,7 @@ Do not persist per-frame state or write unchanged defaults on every boot.
   blanking. Expose actual available sensors and observed input events with units,
   timestamps, source identity and explicit loss/unknown state. Support independent
   developer readers and bounded host recording without additional sensor owners.
+
+### Shared Bluetooth manager revision (2026-11-04)
+
+One Bluetooth devices page serves system settings and Audio Manage devices, with entry-selected Mouse & Keyboard / Audio purposes. Each purpose lists its actual saved records, search name and pairing state and exposes only owner-supported operations. Names or private addresses do not merge pairing authority. The original mode, keyboard draft and input transport survive management. Audio remains off until separately started. Unsupported Classic single deletion must remain explicit; no address-only optimistic deletion is acceptable. The [native contract](../design/native-bluetooth-devices.md) and [prototype](../design/bluetooth-devices.html) define the 480px flow.

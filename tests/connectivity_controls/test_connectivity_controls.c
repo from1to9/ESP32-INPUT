@@ -523,6 +523,19 @@ static void bluetooth_provisional_start_edge(bool forget)
 static void bluetooth_provisional_select_edge(void) { bluetooth_provisional_start_edge(false); }
 static void bluetooth_provisional_forget_edge(void) { bluetooth_provisional_start_edge(true); }
 
+static void bluetooth_exact_shared_disconnect(void)
+{
+    setup(); context.overlay=APP_OVERLAY_BLUETOOTH_DEVICES;
+    bluetooth.connection_admitted=bluetooth.connected=bluetooth.ready=true;
+    bonds.current_match_known=true; bonds.bonds[0].is_current=true; poll_at(1010);
+    apply_overlay(handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DETAILS,0)));
+    app_connectivity_controls_effect_t wrong=handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DISCONNECT_REQUEST,1));
+    assert(!wrong.open_overlay && !disconnects);
+    app_connectivity_controls_effect_t right=handle(bluetooth_intent(APP_BLUETOOTH_TARGET_DISCONNECT_REQUEST,0));
+    assert(right.open_overlay && right.confirmation==APP_CONFIRM_DISCONNECT && right.confirmation_host_generation==bluetooth.generation);
+    assert(!disconnects && !single_forgets && !all_forgets);
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -539,6 +552,7 @@ int main(int argc, char **argv)
         {"bluetooth-pairing-status", bluetooth_pairing_status_requires_owner_evidence},
         {"bluetooth-provisional-window", bluetooth_provisional_pairing_window},
         {"bluetooth-provisional-confirm", bluetooth_provisional_forget_confirmation},
+        {"bluetooth-exact-shared-disconnect", bluetooth_exact_shared_disconnect},
         {"bluetooth-start-select-edge", bluetooth_provisional_select_edge},
         {"bluetooth-start-forget-edge", bluetooth_provisional_forget_edge}};
     if (!strcmp(argv[1], "--list")) { for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) puts(cases[i].name); return 0; }

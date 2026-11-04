@@ -14,11 +14,13 @@ typedef struct {
     /* release_pending belongs to the selected Bluetooth input transport;
      * it is not a pending release on an independently selected USB link. */
     bool locked, screen_off, release_pending, transport_switch_pending;
+    bool bluetooth_audio_devices;
 } app_connectivity_controls_context_t;
 typedef struct {
     bool handled, open_overlay, invalidate_ui, release_input;
     app_overlay_t overlay;
     app_confirmation_t confirmation;
+    uint64_t confirmation_host_generation;
     char message[97];
 } app_connectivity_controls_effect_t;
 

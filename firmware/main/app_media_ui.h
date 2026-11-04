@@ -60,7 +60,8 @@ typedef enum {
     APP_MEDIA_PLAYBACK_STOP, APP_MEDIA_SPEECH_START, APP_MEDIA_SPEECH_STOP,
     APP_MEDIA_SPEECH_REJECT, APP_MEDIA_SPEECH_CONFIRM,
     APP_MEDIA_LIVE_START, APP_MEDIA_LIVE_STOP, APP_MEDIA_SELECT_PEER,
-    APP_MEDIA_SELECT_CONNECTION, APP_MEDIA_PAIR_AUDIO_OPEN, APP_MEDIA_PAIR_AUDIO_CLOSE
+    APP_MEDIA_SELECT_CONNECTION, APP_MEDIA_PAIR_AUDIO_OPEN, APP_MEDIA_PAIR_AUDIO_CLOSE,
+    APP_MEDIA_DEVICE_DETAILS, APP_MEDIA_DEVICE_PAGE, APP_MEDIA_DEVICE_LINK
 } app_media_operation_t;
 
 typedef struct {
@@ -164,6 +165,21 @@ typedef struct {
     char reason[97];
 } app_media_pairing_view_t;
 typedef struct {
+    app_media_id_t id;
+    char identity[24];
+    bool connected, selected;
+} app_media_device_row_t;
+typedef struct {
+    bool known, pending;
+    unsigned page, pages, count;
+    uint64_t revision;
+    app_media_device_row_t rows[APP_MEDIA_ROWS];
+    app_media_id_t selected;
+    char identity[24], reason[97];
+    uint8_t address[6]; /* Display-only transport address, never a merged identity. */
+    bool can_connect[2], can_disconnect[2], connected[2];
+} app_media_devices_view_t;
+typedef struct {
     bool known, command_pending;
     uint64_t management_generation, audio_generation, resource_revision;
     app_media_state_t state;
@@ -188,6 +204,7 @@ typedef struct {
     app_media_connection_t connection;
     bool can_select_connection[APP_MEDIA_CONNECTION_COUNT];
     app_media_pairing_view_t pairing;
+    app_media_devices_view_t devices;
     /* Read-only fresh local PCM telemetry, never an action revision or proof
      * of host recording. Unknown/stale observations carry no displayed level. */
     app_media_mic_level_t microphone_level;

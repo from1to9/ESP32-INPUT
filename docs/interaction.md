@@ -266,3 +266,7 @@ snapshots and hidden-only updates produce zero additional flush callbacks.
 Measure object/allocation counts before and after; do not claim an arbitrary FPS
 improvement or partial refresh. The current display-memory fault remains a
 separate board/configuration repair, not justification for changing touch policy.
+
+## Shared Bluetooth devices
+
+System Bluetooth settings and Audio Manage devices enter the same purpose-scoped manager. Mouse & Keyboard and Audio retain separate saved records and search names. Add device enters the selected owner's local pairing flow; it never starts audio, changes input transport or sends a draft. Exact record actions preserve owner revisions and host generations. Audio connection requests report actual service state; Classic single Forget remains visibly unavailable until a safe owner transaction exists. See the [shared manager layout and acceptance](../design/native-bluetooth-devices.md).

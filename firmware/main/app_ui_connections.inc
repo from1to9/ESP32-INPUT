@@ -20,6 +20,9 @@ static lv_obj_t *s_connection_state, *s_connection_detail, *s_connection_reason;
 static lv_obj_t *s_connection_allow_note;
 static lv_obj_t *s_connection_actions[4], *s_connection_pages[2], *s_connection_page;
 static lv_obj_t *s_saved_names[4], *s_saved_actions[4][3];
+static lv_obj_t *s_device_tabs[2], *s_device_rows[4], *s_device_labels[4];
+static lv_obj_t *s_device_name, *s_device_status, *s_device_empty, *s_device_page;
+static lv_obj_t *s_device_pages[2], *s_device_add, *s_device_stop;
 
 static bool api_digest_valid(const char digest[65])
 {
@@ -145,6 +148,37 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
         s_connection_pages[0] = button(body, "Previous", 0, 360, 224, 48, APP_WIFI_PROFILE_CONTROL, 0);
         s_connection_pages[1] = button(body, "Next", 232, 360, 224, 48, APP_WIFI_PROFILE_CONTROL, 0);
+    } else if (kind == APP_OVERLAY_BLUETOOTH_DEVICES) {
+        label_text(title, "Bluetooth devices");
+        s_device_tabs[0] = button(body, "Mouse & Keyboard", 0, 0, 224, 48, APP_BLUETOOTH_DEVICES, 0);
+        s_device_tabs[1] = button(body, "Audio", 232, 0, 224, 48, APP_BLUETOOTH_DEVICES, 1);
+        s_device_name = connection_label(body, 52, 36, MUTED);
+        s_device_status = connection_label(body, 90, 34, INK);
+        lv_obj_set_style_text_font(s_device_name, META_FONT, 0);
+        lv_label_set_long_mode(s_device_name, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_style_text_font(s_device_status, META_FONT, 0);
+        for (unsigned i = 0; i < 4; ++i) {
+            s_device_rows[i] = button(body, "", 0, 128 + (int)i * 44, 456, 44, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_BLUETOOTH_TARGET_CONTROL, 0);
+            s_device_labels[i] = lv_obj_get_child(s_device_rows[i], 0);
+            lv_obj_set_style_text_font(s_device_labels[i], META_FONT, 0);
+        }
+        s_device_empty = connection_label(body, 140, 120, MUTED);
+        s_device_pages[0] = button(body, "Previous", 0, 308, 144, 44, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_BLUETOOTH_PAGE, -1);
+        s_device_page = label(body, "", 156, 318, 144, MUTED);
+        s_device_pages[1] = button(body, "Next", 312, 308, 144, 44, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_BLUETOOTH_PAGE, 1);
+        s_device_add = button(body, "Add device", 0, 360, 224, 48, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_PAIRING_REQUEST, APP_PAIR_OPEN);
+        s_device_stop = button(body, "Stop pairing", 232, 360, 224, 48, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_PAIRING_REQUEST, APP_PAIR_CLOSE);
+    } else if (kind == APP_OVERLAY_AUDIO_DEVICE) {
+        label_text(title, "Audio device");
+        s_connection_state = connection_label(body, 0, 48, INK);
+        s_connection_detail = connection_label(body, 52, 40, MUTED);
+        for (unsigned i = 0; i < 4; ++i)
+            s_connection_actions[i] = button(body, "", (int)(i % 2) * 232, 104 + (int)(i / 2) * 56, 224, 48, APP_MEDIA_CONTROL, 0);
+        s_connection_reason = connection_label(body, 224, 64, MUTED);
+        lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
+        lv_obj_t *forget = button(body, "Forget unavailable", 0, 296, 456, 48, APP_MEDIA_CONTROL, 0);
+        enabled(forget, false);
+        button(body, "Back to devices", 0, 360, 456, 48, APP_BLUETOOTH_DEVICES, 1);
     } else if (kind == APP_OVERLAY_BLUETOOTH_PAIRING) {
         label_text(title, "Add Bluetooth host");
         s_connection_state = connection_label(body, 0, 56, INK);
@@ -153,7 +187,7 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
         s_connection_actions[0] = button(body, "Stop pairing", 0, 304, 224, 48, APP_PAIRING_REQUEST, APP_PAIR_CLOSE);
         s_connection_actions[1] = button(body, "Try again", 232, 304, 224, 48, APP_PAIRING_REQUEST, APP_PAIR_OPEN);
-        button(body, "Saved Bluetooth hosts", 0, 360, 456, 48, APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
+        button(body, "Back to devices", 0, 360, 456, 48, APP_BLUETOOTH_DEVICES, 0);
     } else {
         label_text(title, "Bluetooth target");
         s_connection_state = connection_label(body, 0, 56, INK);
@@ -164,7 +198,7 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         s_connection_actions[2] = button(body, "Forget this device", 0, 248, 456, 44, APP_BLUETOOTH_TARGET_CONTROL, 0);
         lv_obj_set_height(s_connection_reason, 96);
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
-        button(body, "Saved Bluetooth hosts", 0, 360, 456, 48, APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
+        button(body, "Back to devices", 0, 360, 456, 48, APP_BLUETOOTH_DEVICES, 0);
     }
 }
 static void bind_bluetooth_row(lv_obj_t *row, const app_bond_view_t *host)
@@ -258,6 +292,86 @@ static void render_connection_panel(void)
             connection_bind(s_connection_pages[i], APP_WIFI_PROFILE_CONTROL, request, known && !list->pending &&
                 (i ? (list->page + 1) * 4 < list->count : list->page > 0));
         }
+    } else if (s_view.overlay == APP_OVERLAY_BLUETOOTH_DEVICES) {
+        bool audio = s_view.bluetooth_audio_devices;
+        const app_media_devices_view_t *devices = &s_view.media.devices;
+        selected(s_device_tabs[0], !audio); selected(s_device_tabs[1], audio);
+        bool known = audio ? devices->known : s_view.bluetooth_hosts_available;
+        unsigned count = audio ? devices->count : (unsigned)s_view.bluetooth_host_count;
+        unsigned pages = audio ? devices->pages : (count + 3U) / 4U;
+        if (!pages) pages = 1;
+        unsigned page = audio ? devices->page : s_view.bluetooth_page;
+        label_format(s_device_page, "%u / %u", page + 1, pages);
+        visible(s_device_empty, !known || !count);
+        label_text(s_device_empty, !known ? "Saved devices unavailable." : "No saved devices. Choose Add device to pair.");
+        label_format(s_device_name, "Search name: %.64s", audio ? s_view.media.pairing.name_known ?
+            s_view.media.pairing.device_name : "Unavailable" : s_view.bluetooth_name.effective_valid ? s_view.bluetooth_name.effective : "Unavailable");
+        if (audio) {
+            const app_media_pairing_view_t *pairing = &s_view.media.pairing;
+            const char *state = pairing->state == APP_MEDIA_PAIR_DISCOVERABLE ? "Discoverable" :
+                pairing->state == APP_MEDIA_PAIR_PREPARING ? "Preparing pairing" :
+                pairing->state == APP_MEDIA_PAIR_AUTHENTICATING ? "Authenticating" :
+                pairing->state == APP_MEDIA_PAIR_ERROR ? "Pairing failed" :
+                pairing->state == APP_MEDIA_PAIR_COMPLETED ? "Paired" :
+                pairing->state == APP_MEDIA_PAIR_EXPIRED ? "Pairing expired" :
+                pairing->state == APP_MEDIA_PAIR_CLOSING ? "Closing pairing" :
+                pairing->state == APP_MEDIA_PAIR_CLOSED ? "Pairing closed" : "Pairing unavailable";
+            if (pairing->state == APP_MEDIA_PAIR_ERROR) label_format(s_device_status, "Pairing failed: %.85s", pairing->reason);
+            else if (pairing->remaining_seconds) label_format(s_device_status, "%s / %us", state, pairing->remaining_seconds);
+            else label_text(s_device_status, state);
+        } else if (s_view.bluetooth_management.remaining_known)
+            label_format(s_device_status, "%s / %us", s_view.bluetooth_management.status, s_view.bluetooth_management.remaining_seconds);
+        else label_text(s_device_status, s_view.bluetooth_management.status);
+        for (unsigned i = 0; i < 4; ++i) {
+            unsigned index = page * 4U + i; bool show = known && index < count;
+            visible(s_device_rows[i], show); if (!show) continue;
+            if (audio) {
+                const app_media_device_row_t *row = &devices->rows[i];
+                label_format(s_device_labels[i], "%s   %s", row->identity, row->connected ? "Connected" : "Saved");
+                app_media_request_t request = media_request(APP_MEDIA_DEVICE_DETAILS);
+                request.object_revision = devices->revision; request.value.peer_id = row->id;
+                media_bind(s_device_rows[i], request, !devices->pending);
+            } else {
+                const app_bond_view_t *row = &s_view.bluetooth_hosts[index];
+                label_format(s_device_labels[i], "%.32s   %s", *row->name ? row->name : row->identity, row->connected ? "Connected" : "Saved");
+                bind_bluetooth_row(s_device_rows[i], row);
+            }
+        }
+        for (unsigned i = 0; i < 2; ++i) {
+            bool available = known && (i ? page + 1 < pages : page > 0);
+            if (audio) {
+                app_media_request_t request = media_request(APP_MEDIA_DEVICE_PAGE);
+                request.object_revision = devices->revision; request.value.page_delta = (int)(i ? page + 1 : page ? page - 1 : 0);
+                media_bind(s_device_pages[i], request, available);
+            } else enabled(s_device_pages[i], available);
+        }
+        if (audio) {
+            media_bind(s_device_add, media_request(APP_MEDIA_PAIR_AUDIO_OPEN), s_view.media.pairing.can_open);
+            media_bind(s_device_stop, media_request(APP_MEDIA_PAIR_AUDIO_CLOSE), s_view.media.pairing.can_close);
+        } else {
+            enabled(s_device_add, s_view.bluetooth_management.can_add);
+            enabled(s_device_stop, s_view.bluetooth_management.can_stop);
+        }
+    } else if (s_view.overlay == APP_OVERLAY_AUDIO_DEVICE) {
+        const app_media_devices_view_t *devices = &s_view.media.devices;
+        label_text(s_connection_state, *devices->identity ? devices->identity : "Device no longer saved");
+        label_format(s_connection_detail, "Mic: %s / Speaker: %s", devices->connected[0] ? "Connected" : "Disconnected", devices->connected[1] ? "Connected" : "Disconnected");
+        const char *captions[] = {"Connect mic", "Disconnect mic", "Connect speaker", "Disconnect speaker"};
+        for (unsigned i = 0; i < 4; ++i) {
+            text(s_connection_actions[i], captions[i]);
+            app_media_request_t request = media_request(APP_MEDIA_DEVICE_LINK);
+            request.object_revision = devices->revision; request.object_id = devices->selected; request.value.page_delta = (int)i;
+            media_bind(s_connection_actions[i], request, i & 1 ? devices->can_disconnect[i / 2] : devices->can_connect[i / 2]);
+        }
+        bool same_address = false;
+        for (size_t i = 0; i < s_view.bluetooth_host_count && i < APP_UI_BOND_CAPACITY; ++i)
+            same_address |= s_view.bluetooth_hosts[i].target_known &&
+                !memcmp(s_view.bluetooth_hosts[i].target.address, devices->address, 6);
+        const char *forget = !s_view.bluetooth_hosts_available ? "Input pairing state unknown. Audio Forget unavailable; Disconnect keeps pairing." :
+            same_address ? "Address also saved for input. Audio Forget unavailable; Disconnect keeps pairing." :
+            "Audio Forget unavailable. Disconnect keeps this device paired.";
+        label_format(s_connection_reason, "%.64s\n%s", devices->reason, forget);
+        lv_obj_set_height(s_connection_reason, 64);
     } else if (s_view.overlay == APP_OVERLAY_BLUETOOTH_PAIRING) {
         const app_bluetooth_management_view_t *pairing = &s_view.bluetooth_management;
         label_text(s_connection_state, s_view.bluetooth_name.effective_valid ? s_view.bluetooth_name.effective : "Device name unavailable");
@@ -280,9 +394,10 @@ static void render_connection_panel(void)
         text(s_connection_actions[0], target->selection_supported ? "Select target" : "Allow reconnect");
         connection_bind(s_connection_actions[0], APP_BLUETOOTH_TARGET_CONTROL, request,
             target->known && !target->pending && !target->uncertain && target->can_select);
-        request.bluetooth.operation = APP_BLUETOOTH_TARGET_PREFER;
+        text(s_connection_actions[1], target->connected ? "Disconnect" : "Move to first");
+        request.bluetooth.operation = target->connected ? APP_BLUETOOTH_TARGET_DISCONNECT_REQUEST : APP_BLUETOOTH_TARGET_PREFER;
         connection_bind(s_connection_actions[1], APP_BLUETOOTH_TARGET_CONTROL, request,
-            target->known && !target->pending && !target->uncertain && target->can_prefer);
+            target->known && !target->pending && !target->uncertain && (target->connected || target->can_prefer));
         request.bluetooth.operation = APP_BLUETOOTH_TARGET_FORGET_REQUEST;
         connection_bind(s_connection_actions[2], APP_BLUETOOTH_TARGET_CONTROL, request,
             target->known && !target->pending && !target->uncertain && target->can_forget);

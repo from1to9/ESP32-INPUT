@@ -55,14 +55,14 @@ typedef struct {
     bool bond_id_known;
 } app_bluetooth_target_key_t;
 typedef enum { APP_BLUETOOTH_TARGET_DETAILS, APP_BLUETOOTH_TARGET_SELECT,
-    APP_BLUETOOTH_TARGET_PREFER, APP_BLUETOOTH_TARGET_FORGET_REQUEST } app_bluetooth_target_operation_t;
+    APP_BLUETOOTH_TARGET_PREFER, APP_BLUETOOTH_TARGET_FORGET_REQUEST, APP_BLUETOOTH_TARGET_DISCONNECT_REQUEST } app_bluetooth_target_operation_t;
 typedef struct {
     app_bluetooth_target_operation_t operation;
     uint64_t bond_revision, preferences_revision;
     app_bluetooth_target_key_t target;
 } app_bluetooth_target_request_t;
 typedef struct {
-    bool known, pending, uncertain, selected, selection_supported, can_select, can_prefer, can_forget;
+    bool known, pending, uncertain, selected, connected, selection_supported, can_select, can_prefer, can_forget;
     uint64_t bond_revision, preferences_revision;
     app_bluetooth_target_key_t target;
     char name[49], identity[49], reason[97];

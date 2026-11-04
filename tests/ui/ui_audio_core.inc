@@ -252,12 +252,11 @@ static void audio_core_checks(void)
     s_state.media.routes[APP_MEDIA_ROUTE_HFP].connected = true;
     s_state.media.routes[APP_MEDIA_ROUTE_HFP].can_disconnect = true;
     screenshot("audio-connection-bluetooth");
-    clear_intents(); tap_control("Synthetic audio peer");
-    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_SELECT_PEER && last_action(APP_MEDIA_CONTROL)->media.value.peer_id.bytes[15] == 93);
-    clear_intents(); tap_control("Connect"); assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_LINK_CONNECT);
-    clear_intents(); tap_control("Disconnect"); assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_LINK_DISCONNECT);
+    clear_intents(); tap_control("Manage devices");
+    assert(last_action(APP_BLUETOOTH_DEVICES)->x==1);
+    assert(!find_control(lv_screen_active(),"Choose audio device") && !find_control(lv_screen_active(),"Pair audio"));
     s_state.media.command_pending = true; screenshot("audio-connection-pending");
-    clear_intents(); tap_control("USB"); tap_control("Connect"); tap_control("Disconnect"); assert(action_count(APP_MEDIA_CONTROL) == 0);
+    clear_intents(); tap_control("USB"); assert(action_count(APP_MEDIA_CONTROL)==0);
     s_state.media.command_pending = false; s_state.media.can_select_connection[0] = false; render();
     clear_intents(); tap_control("USB"); assert(action_count(APP_MEDIA_CONTROL) == 0);
     s_state.media.connection_known = false; screenshot("audio-connection-unknown");

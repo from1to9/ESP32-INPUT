@@ -1283,8 +1283,11 @@ static void create_audio(lv_obj_t *panel)
             s_volume = slider(surface, 24, 132, 408, 0, 100, on_volume);
         }
     }
-    s_audio_note = label(panel, "Audio unavailable", 0, 360, 456, MUTED);
-    lv_obj_set_height(s_audio_note, 48);
+    lv_obj_t *manage = button(panel, "Manage devices", 0, 360, 136, 48, APP_BLUETOOTH_DEVICES, 1);
+    lv_obj_set_style_text_font(lv_obj_get_child(manage, 0), META_FONT, 0);
+    s_audio_note = label(panel, "Audio unavailable", 144, 352, 312, MUTED);
+    lv_obj_set_style_text_font(s_audio_note, META_FONT, 0);
+    lv_obj_set_height(s_audio_note, 56);
     lv_label_set_long_mode(s_audio_note, LV_LABEL_LONG_DOT);
 }
 
@@ -1312,7 +1315,7 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         s_transports[0] = button(transport, "Bluetooth", 8, 24, 212, 44, APP_TRANSPORT_SELECT, APP_INPUT_BLUETOOTH);
         s_transports[1] = button(transport, "USB", 228, 24, 212, 44, APP_TRANSPORT_SELECT, APP_INPUT_USB);
         s_transport_status = metadata(transport, "Bluetooth selected", 12, 76, 424);
-        lv_obj_t *ble = button(connectivity, "Bluetooth hosts", 0, 104, 448, 72, APP_SETTINGS_PAGE, APP_SETTINGS_BLUETOOTH);
+        lv_obj_t *ble = button(connectivity, "Bluetooth devices", 0, 104, 448, 72, APP_BLUETOOTH_DEVICES, 0);
         lv_obj_t *caption = lv_obj_get_child(ble, 0);
         lv_obj_set_align(caption, LV_ALIGN_TOP_LEFT);
         lv_obj_set_pos(caption, 12, 8);
@@ -1735,11 +1738,11 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         label_text(title, "Audio");
         heading(body, "Mic and Speaker", 0, 12, 456);
         label(body, "Use the Audio screen to start or stop either one.", 0, 64, 456, MUTED);
-        button(body, "Audio connection", 0, 144, 456, 56, APP_MENU, APP_OVERLAY_MEDIA_OPTIONS);
+        button(body, "Manage devices", 0, 144, 456, 56, APP_BLUETOOTH_DEVICES, 1);
         button(body, "Back to Audio", 0, 360, 456, 48, APP_CLOSE, 0);
     } else if (kind >= APP_OVERLAY_MEDIA_OPTIONS && kind <= APP_OVERLAY_RECORDING_START) {
         create_media_panel(body, title, kind);
-    } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_BLUETOOTH_PAIRING) {
+    } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_AUDIO_DEVICE) {
         create_connection_panel(body, title, kind);
     } else if (kind == APP_OVERLAY_RECORDING_STORAGE) {
         label_text(title, "Recording storage");
@@ -1792,10 +1795,12 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
     lv_obj_move_foreground(s_sleep_shield);
 }
 
+static bool s_built_device_audio;
 static bool reconcile_overlay(const app_view_t *view)
 {
     app_overlay_t desired = view->locked || view->screen_off ? APP_OVERLAY_NONE : view->overlay;
     bool same = desired == s_built_overlay &&
+        (desired != APP_OVERLAY_BLUETOOTH_DEVICES || s_built_device_audio == view->bluetooth_audio_devices) &&
         (desired != APP_OVERLAY_CONFIRM || s_built_remote_review == (view->confirmation == APP_CONFIRM_REMOTE)) &&
         (desired != APP_OVERLAY_SETTINGS || view->settings_page == s_built_settings) &&
         (desired != APP_OVERLAY_WIFI_NETWORKS || (view->wifi_scan.generation == s_built_scan_generation && view->wifi_scan.page == s_built_scan_page)) &&
@@ -1814,6 +1819,7 @@ static bool reconcile_overlay(const app_view_t *view)
     s_built_overlay = desired;
     s_built_remote_review = desired == APP_OVERLAY_CONFIRM && view->confirmation == APP_CONFIRM_REMOTE;
     s_built_settings = view->settings_page;
+    s_built_device_audio = view->bluetooth_audio_devices;
     s_built_scan_generation = desired == APP_OVERLAY_WIFI_NETWORK ? view->wifi_selection.generation : view->wifi_scan.generation;
     s_built_scan_page = desired == APP_OVERLAY_WIFI_NETWORK ? view->wifi_selection.network.record_index : view->wifi_scan.page;
     s_built_editor_session = view->local_editor.session;
@@ -2573,7 +2579,9 @@ void app_ui_render(const app_view_t *view)
     if (view->mode == INPUT_AUDIO) {
         text(s_audio_choice, media_connection_name(&view->media));
         label_text(s_context, !view->media.known ? "Status unknown" :
-            view->media.command_pending ? "Updating" : view->media.state == APP_MEDIA_FAULT ? "Audio error" : "Mic / Speaker");
+            view->media.command_pending ? "Updating" : view->media.state == APP_MEDIA_FAULT ? "Audio error" : *view->media.peer_label ? view->media.peer_label :
+            view->media.connection_known && view->media.connection == APP_MEDIA_CONNECTION_USB ?
+            view->media.routes[APP_MEDIA_ROUTE_UAC].connected ? "USB host" : "USB waiting" : "No audio host");
     }
     for (int i = 0; i < 3; ++i) visible(s_panels[i], (input_mode_t)i == view->mode);
 

@@ -11,6 +11,7 @@ typedef struct {
     app_overlay_t overlay;
     app_keyboard_submode_t keyboard_submode;
     bool locked, screen_off;
+    bool bluetooth_audio_devices; /* Explicit coordinator-owned local management context. */
     size_t preview_characters; /* Actual draft size; confirm needs free capacity. */
 } app_media_controls_context_t;
 typedef struct {

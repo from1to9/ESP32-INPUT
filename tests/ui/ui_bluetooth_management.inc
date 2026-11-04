@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 static void bluetooth_management_checks(void)
 {
+    audio_pairing_checks();
     app_view_t original = s_state;
     s_state.mode = INPUT_MOUSE; s_state.locked = s_state.screen_off = false;
     s_state.overlay = APP_OVERLAY_BLUETOOTH_PAIRING;
@@ -43,13 +44,24 @@ static void bluetooth_management_checks(void)
     assert(has_visible_label(lv_screen_active(), "Pairing closed"));
     clear_intents(); tap_control("Try again");
     assert(action_count(APP_PAIRING_REQUEST) == 1 && last_action(APP_PAIRING_REQUEST)->x == APP_PAIR_OPEN);
-    clear_intents(); tap_control("Saved Bluetooth hosts");
-    assert(action_count(APP_SETTINGS_PAGE) == 1 && last_action(APP_SETTINGS_PAGE)->x == APP_SETTINGS_BLUETOOTH);
+    clear_intents(); tap_control("Back to devices");
+    assert(action_count(APP_BLUETOOTH_DEVICES) == 1 && last_action(APP_BLUETOOTH_DEVICES)->x == 0);
     s_state.overlay = APP_OVERLAY_BLUETOOTH_TARGET;
     s_state.bluetooth_target = (app_bluetooth_target_view_t){.known = true, .can_forget = true, .bond_revision = 17, .preferences_revision = 23,
         .target = {.address = {0xc3}, .address_type = 1, .bond_id_known = true}};
     memset(s_state.bluetooth_target.target.bond_id, 0x5a, 32);
     strcpy(s_state.bluetooth_target.name, "Saved input host"); strcpy(s_state.bluetooth_target.identity, "C3:00:00:00:00:00 (type 1)");
+    s_state.bluetooth_target.connected = true;
+    ++s_state.ui_revision; screenshot("bluetooth-current-device-detail");
+    clear_intents(); tap_control("Disconnect");
+    const app_intent_t *disconnect = last_action(APP_BLUETOOTH_TARGET_CONTROL);
+    assert(disconnect && disconnect->bluetooth_target.operation == APP_BLUETOOTH_TARGET_DISCONNECT_REQUEST &&
+        disconnect->bluetooth_target.bond_revision == 17 && disconnect->bluetooth_target.preferences_revision == 23 &&
+        !memcmp(disconnect->bluetooth_target.target.bond_id, s_state.bluetooth_target.target.bond_id, 32));
+    clear_intents(); pointer(356, 392, true);
+    s_state.bluetooth_target.connected = false; s_state.bluetooth_target.can_prefer = true;
+    render(); pointer(356, 392, false);
+    assert(!action_count(APP_BLUETOOTH_TARGET_CONTROL)); /* Disconnect cannot become a priority change. */
     ++s_state.ui_revision; screenshot("bluetooth-single-forget");
     clear_intents(); tap_control("Forget this device");
     const app_intent_t *forget = last_action(APP_BLUETOOTH_TARGET_CONTROL);

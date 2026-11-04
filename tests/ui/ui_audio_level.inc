@@ -148,7 +148,7 @@ static void audio_level_checks(void)
 
     audio_level_value(-24,60); render();
     size_t objects = audio_level_object_count(lv_screen_active());
-    assert(objects == 114);
+    assert(objects == 120); /* 118 baseline + the two-object Manage devices entry. */
     for (unsigned variant = 0; variant < 9; ++variant) audio_level_quiet_updates(variant);
     ui_memory_stats_t steady = ui_memory_stats();
     size_t update_allocations = 0, update_reallocations = 0, maximum_pending_bytes = 0;
@@ -184,5 +184,5 @@ static void audio_level_checks(void)
         objects, update_allocations, update_reallocations, maximum_pending_bytes, steady.live_bytes, ui_memory_stats().live_bytes);
     fclose(report);
     s_state = original; render(); clear_intents();
-    puts("PASS: real Mic meter state/bounds, held actions, static text, 114 objects, zero identical/hidden work and bounded transient layout allocation");
+    puts("PASS: real Mic meter state/bounds, held actions, static text, 120 objects, zero identical/hidden work and bounded transient layout allocation");
 }

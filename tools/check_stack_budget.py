@@ -425,6 +425,10 @@ for _name, _prefix in {
         "message": [("bluetooth_management", "message")],
     }.items():
         MANAGEMENT_PATHS[f"bluetooth_cancel_{_name}_{_leaf}"] = _prefix + _tail
+for _name, _prefix in (("poll", CORE + [("media_controls", "app_media_controls_poll")]),
+                        ("intent", MEDIA_INTENT)):
+    MANAGEMENT_PATHS["shared_devices_" + _name] = _prefix + [("media_controls", "rebuild"),
+        ("media_controls", "rebuild_devices"), ("media_controls", "selected_bond"), ("media_controls", "saved_bond")]
 PATHS.update(MANAGEMENT_PATHS)
 AUDIO_OBSERVER = CORE + [("main", "service_media"), ("audio_diagnostics", "app_audio_diagnostics_poll")]
 AUDIO_DIAGNOSTIC_PATHS = {

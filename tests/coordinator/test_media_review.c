@@ -112,6 +112,21 @@ int main(void)
     s_priority_requests = LOCK_REQUEST; assert(process_priority()); present();
     assert(test_view.locked && !test_view.media_review.valid);
     deliver(accept); present(); assert(opens == 1);
+    s_engine.state.locked = false;
+    for (int mode=INPUT_MOUSE; mode<=INPUT_AUDIO; ++mode) {
+        (void)select_mode((input_mode_t)mode);
+        action(APP_BLUETOOTH_DEVICES,1); present();
+        assert(test_view.overlay==APP_OVERLAY_BLUETOOTH_DEVICES && test_view.media.pairing.can_open);
+        unsigned before=opens;
+        app_intent_t approve=pair_review(APP_MEDIA_PAIR_AUDIO_OPEN);
+        assert(test_view.media_review.valid && test_view.confirmation==APP_CONFIRM_AUDIO_PAIR);
+        app_intent_t cancel_shared=make_intent(APP_CONFIRM,0,0,NULL); deliver(cancel_shared); present();
+        assert(opens==before && test_view.overlay==APP_OVERLAY_BLUETOOTH_DEVICES);
+        approve=pair_review(APP_MEDIA_PAIR_AUDIO_OPEN); deliver(approve); present();
+        assert(opens==before+1 && test_view.overlay==APP_OVERLAY_BLUETOOTH_DEVICES);
+        action(APP_CLOSE,0); present();
+        assert(test_view.overlay==APP_OVERLAY_NONE && !classic.pairing_requested && test_view.mode==(input_mode_t)mode);
+    }
     puts("PASS: coordinator review open/cancel/reopen/accept/close, one-shot and stale host/resource/close/lock rejection");
     return 0;
 }
