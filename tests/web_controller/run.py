@@ -23,7 +23,8 @@ def build(directory, protocol, log):
         raise SystemExit("The browser pairing/access owner must be integrated, or supplied with --protocol-root.")
     # Overlay only this public header's relative includes at the existing SDK
     # boundary. Production modules are separate, unchanged translation units.
-    shutil.copyfile(protocol / "firmware/main/app_control_access.h", directory / "app_control_access.h")
+    if not (ROOT / "firmware/main/app_control_access.h").is_file():
+        shutil.copyfile(protocol / "firmware/main/app_control_access.h", directory / "app_control_access.h")
     source = (ROOT / "firmware/main/app_control_server.c").read_text()
     header = source[source.index("static bool header("):source.index('#include "app_control_server_media.inc"')]
     handler = source[source.index("static esp_err_t handle_request("):source.index("static esp_err_t initialize(")]
@@ -56,8 +57,17 @@ def build(directory, protocol, log):
                "-Wall", "-Wextra", "-Werror", "-pedantic", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     command += ["-I" + str(path) for path in includes]
     command += [str(path) for path in files] + ["-lm", "-o", str(directory / "native_bridge")]
+    inputs = [path for path in files if path.suffix != ".S"] + [
+        ROOT / "firmware/main/app_control_server.c", ROOT / "firmware/main/main.c",
+        ROOT / "firmware/main/app_remote_input_bindings.inc",
+        protocol / "components/control_protocol/include/control_protocol.h",
+        protocol / "firmware/main/app_control_access.h",
+        *[ROOT / f"firmware/main/web/controller.{extension}" for extension in ("html", "css", "js")]]
+    hashes = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
     subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
-    return files
+    if hashes != {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}:
+        raise SystemExit("Relevant input sources changed during compilation; run again after the owner fixes its candidate.")
+    return hashes
 
 
 def main():
@@ -73,7 +83,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="mosaico-web-test-") as temporary:
         temporary = Path(temporary)
         with (output / "build.log").open("w") as log:
-            files = build(temporary, args.protocol_root, log)
+            hashes = build(temporary, args.protocol_root, log)
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
                         "-subj", "/CN=localhost", "-keyout", temporary / "key.pem", "-out", temporary / "cert.pem"],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -140,7 +150,8 @@ def main():
             (output / "http-metadata.json").write_text(json.dumps(records, indent=2) + "\n")
             manifest = {"browser_exit": result.returncode, "backend_exit": backend.returncode,
                         "boundaries": "Real loopback HTTPS/Chromium and production C HTTP/protocol/access/coordinator/HID engine; simulated station sockets, NVS, trusted clock, local approval and HID send API; no physical device",
-                        "source_sha256": {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files if path.suffix != ".S"},
+                        "source_sha256_at_compile": hashes,
+                        "native_binary_sha256": hashlib.sha256((temporary / "native_bridge").read_bytes()).hexdigest(),
                         "protocol_root": str(args.protocol_root)}
             (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
             print((output / "browser.log").read_text())
