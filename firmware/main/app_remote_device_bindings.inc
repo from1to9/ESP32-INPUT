@@ -146,7 +146,7 @@ static bool remote_device_owner_available(void *context, cp_operation_id_t opera
         static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
         ble_hid_copy_bond_list(&bonds);
         ble_hid_target_snapshot_t target = ble_hid_target_snapshot();
-        available = available && settings_store_status().available && wifi.known && !wifi.uncertain && !wifi.operation_pending &&
+        available = available && s_boot_choices_known && settings_store_status().available && wifi.known && !wifi.uncertain && !wifi.operation_pending &&
             bonds.known && !bonds.updating && remote_device_target_store_ready(&target) && s_remote_device_maintenance_revision != UINT64_MAX;
     } else available = false;
     if (!available && reason) (void)snprintf(reason, CP_REASON_CAPACITY, "%s", "actual_device_owner_unavailable");

@@ -5,7 +5,8 @@
 #undef main
 
 void device_radio_incoming_music(bool pcm);
-static void cold_music(void);
+uint64_t device_radio_timeout_with_music(void);
+static void cold_music(bool hfp_timeout);
 void device_radio_init(void);
 void device_radio_dispatch(void);
 unsigned device_radio_calls(void);
@@ -79,7 +80,9 @@ int main(int argc, char **argv)
     assert(argc == 2);
     const char *scenario = argv[1];
     device_radio_init(); setup();
-    if (!strcmp(scenario, "cold-music")) { cold_music(); return 0; }
+    if (!strcmp(scenario, "cold-music") || !strcmp(scenario, "cold-music-hfp-timeout")) {
+        cold_music(!strcmp(scenario, "cold-music-hfp-timeout")); return 0;
+    }
     context.mode = INPUT_KEYBOARD; context.overlay = APP_OVERLAY_BLUETOOTH_DEVICES;
     context.bluetooth_audio_devices = true; owner.audio.route = AE_ROUTE_USB_UAC;
     if (!strcmp(scenario, "voice-existing")) device_radio_hfp(false);
@@ -136,10 +139,11 @@ int main(int argc, char **argv)
     return 0;
 }
 
-static void cold_music(void)
+static void cold_music(bool hfp_timeout)
 {
     bt_audio_bond_list_t saved; bt_audio_copy_bond_list(&saved); assert(saved.known && saved.count);
     app_boot_audio_t pref = {.route=AE_ROUTE_A2DP_SINK, .services=APP_RESUME_A2DP, .speaker=AE_ROUTE_A2DP_SINK};
+    if (hfp_timeout) pref.services |= APP_RESUME_HFP;
     memcpy(pref.peer,saved.bonds[0].address,6);
     app_media_controls_boot(&pref,boot_save);
     context.overlay=APP_OVERLAY_NONE; context.mode=INPUT_MOUSE; owner.audio.route=AE_ROUTE_A2DP_SINK;
@@ -156,14 +160,22 @@ static void cold_music(void)
     assert(port.capabilities(NULL,AE_ROUTE_A2DP_SINK,a)==AE_OK && a->connected);
     hardware.formats[0].format=a->format;
     poll_at(1200); assert(!submissions && view.media.speaker_waiting && !bt_audio_snapshot().a2dp_pcm_us);
-    device_radio_incoming_music(true); poll_at(1250);
+    uint64_t now = 1250;
+    if (hfp_timeout) {
+        bt_audio_service(); device_radio_dispatch();
+        assert(bt_audio_snapshot().request_command == BT_AUDIO_CONNECT_HFP);
+        now = device_radio_timeout_with_music();
+        assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_UNCERTAIN && bt_audio_snapshot().control_inflight);
+        assert(port.capabilities(NULL, AE_ROUTE_A2DP_SINK, a) == AE_OK && a->reason == AE_OK);
+    } else device_radio_incoming_music(true);
+    poll_at(now);
     assert(submissions==1 && submitted.action==APP_MEDIA_START && submitted.kind==AE_PLAYBACK_STREAM &&
         ae_route_token_equal(&submitted.expected_route_token,&a->token));
-    context.mode=INPUT_AUDIO; poll_at(1251);
+    context.mode=INPUT_AUDIO; poll_at(now + 1);
     app_intent_t stop=intent(APP_MEDIA_LIVE_STOP); stop.media.value.role.role=APP_MEDIA_SPEAKER;
     handle(stop); assert(cancelled_speaker==submitted.token && !boot_value.speaker);
     bt_audio_a2dp_rx_t rx; bt_audio_a2dp_rx_snapshot(&rx);
     assert(rx.callbacks==1 && !rx.bound && !rx.enqueued_samples && !rx.emitted_samples);
-    assert(device_radio_calls()==1 && !pairing_opens && !le_pairing_closes);
+    assert(device_radio_calls() == (hfp_timeout ? 2U : 1U) && !pairing_opens && !le_pairing_closes);
     puts("PASS: saved-peer cold connect, decoded PCM before binding, exact speaker request, cancel during admission");
 }

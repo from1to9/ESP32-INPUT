@@ -191,27 +191,30 @@ static void poll_resume(void)
             controls.resume.notice = NULL; resume_save(next);
         }
         if (!job_active(job)) {
+            bool start_timed_out = controls.resume.automatic_token && job->stop_reason == AE_STOP_START_TIMEOUT;
             controls.resume.automatic_token = 0;
             uint64_t link = route == AE_ROUTE_HFP_HF ? bt->hfp_link_generation : bt->a2dp_link_generation;
-            if (job->stop_reason == AE_STOP_UNDERRUN || (job->stop_reason == AE_STOP_OWNER_LOST &&
+            if (start_timed_out || job->stop_reason == AE_STOP_UNDERRUN || (job->stop_reason == AE_STOP_OWNER_LOST &&
                 link != controls.resume.submitted_token.link_generation)) {
                 controls.resume.listen_after_us = (uint64_t)esp_timer_get_time();
-                controls.resume.attempted_stream = 0;
+                /* A failed automatic start waits for a different stream token. */
+                if (!start_timed_out) controls.resume.attempted_stream = 0;
                 controls.resume.speaker_job = (ae_id_t){0}; controls.resume.submitted_speaker = 0;
             } else resume_stop_speaker();
         }
     }
     next = controls.resume.desired;
     if (bt->pairing_busy || bt->pairing_requested || bt->pairing_handshake_pending) { resume_cancel_link(); return; }
-    if (!idle_for(true) || any_jobs() || !audio->hardware_off_confirmed || audio->quarantined ||
-        bt->control_inflight || bt->request_status == BT_AUDIO_JOB_PENDING || bt->request_status == BT_AUDIO_JOB_WAITING) return;
-    if (controls.resume.connect_id) {
+    if (!idle_for(true) || any_jobs() || !audio->hardware_off_confirmed || audio->quarantined) return;
+    bool link_busy = bt->control_inflight || bt->request_status == BT_AUDIO_JOB_PENDING ||
+        bt->request_status == BT_AUDIO_JOB_WAITING;
+    if (!link_busy && controls.resume.connect_id) {
         if (bt->request_id != controls.resume.connect_id || bt->request_status != BT_AUDIO_JOB_SUCCEEDED)
             controls.resume.notice = "Reconnect unconfirmed. Use Manage devices.";
         else controls.resume.notice = NULL;
         controls.resume.connect_id = 0;
     }
-    if (controls.resume.connect_left && next.route != AE_ROUTE_USB_UAC && resume_has_peer(next.peer)) {
+    if (!link_busy && controls.resume.connect_left && next.route != AE_ROUTE_USB_UAC && resume_has_peer(next.peer)) {
         bool music = (controls.resume.connect_left & APP_RESUME_A2DP) != 0;
         uint8_t service = music ? APP_RESUME_A2DP : APP_RESUME_HFP;
         controls.resume.connect_left &= (uint8_t)~service; /* One attempt per saved service this boot. */

@@ -186,6 +186,7 @@ static void remote_device_factory_reset_sequence(bool orphan_at_admission)
 {
     remote_device_factory_setup();
     s_settings.navigation = true;
+    s_boot_choices = test_boot_choices = (app_boot_choices_t){.mode = INPUT_KEYBOARD};
     test_bonds.count = 1; test_wifi_profiles.count = 1;
     test_update_target.selected = true;
     test_update_target.target = (ble_hid_target_t){.bond_id_known = true, .bond_id = {0x42}};
@@ -212,6 +213,12 @@ static void remote_device_factory_reset_sequence(bool orphan_at_admission)
     assert(test_control_result.state != CP_RESULT_COMPLETED && !test_restart_requests && !test_pair_opens);
     test_wifi_profiles.operation_pending = false; test_wifi_profiles.completed_request_id = test_wifi_profiles.request_id;
     test_wifi_profiles.count = 0; test_control_session_alive = false; /* The admitted final step may sever management. */
+    test_storage.pending = true;
+    remote_device_case_tick();
+    assert(remote_device_maintenance() && test_control_result.state != CP_RESULT_COMPLETED);
+    assert(!memcmp(&test_boot_choices, &(app_boot_choices_t){0}, sizeof(test_boot_choices)));
+    remote_device_case_tick(); /* Still waiting for the settings owner after session loss. */
+    test_storage.pending = false;
     remote_device_case_tick(); assert(test_control_result.state == CP_RESULT_COMPLETED && !remote_device_maintenance());
     assert(!s_settings.navigation && !test_saved_request.navigation);
     assert(!test_restart_requests && !test_pair_opens && !test_wifi_forgets);
@@ -226,7 +233,7 @@ static void remote_device_factory_reset_admits_already_orphaned_target(void)
 }
 static void remote_device_factory_admission_rejects_unknown_store_and_preserves_reviewed_revision(void)
 {
-    for (unsigned scenario = 0; scenario < 7; ++scenario) {
+    for (unsigned scenario = 0; scenario < 8; ++scenario) {
         remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
         test_update_target.selected = true; test_update_target.available = false; test_update_target.error = ESP_ERR_NOT_FOUND;
         if (scenario == 0) test_update_target.loaded = false;
@@ -235,13 +242,17 @@ static void remote_device_factory_admission_rejects_unknown_store_and_preserves_
         else if (scenario == 3) test_update_target.request_status = BLE_HID_TARGET_PENDING;
         else if (scenario == 4) test_update_target.request_status = BLE_HID_TARGET_FAILED;
         else if (scenario == 5) test_update_target.request_error = ESP_FAIL;
+        else if (scenario == 6) {
+            s_boot_choices_known = false;
+            test_bonds.count = test_wifi_profiles.count = 1;
+        }
         char digest[65], args[128]; remote_device_manifest_digest(digest);
         (void)snprintf(args,sizeof(args),"{\"retained_manifest_digest\":\"%s\"}",digest);
         cp_command_t command = remote_device_case_command(CP_OP_DEVICE_FACTORY_RESET_REQUEST, 950 + scenario, args);
         cp_result_t result;
-        if (scenario < 6) {
+        if (scenario < 7) {
             assert(remote_device_execute(&command, &result) == CP_UNAVAILABLE && result.state == CP_RESULT_REJECTED);
-            assert(s_overlay == APP_OVERLAY_NONE);
+            assert(s_overlay == APP_OVERLAY_NONE && !remote_device_maintenance());
         } else {
             assert(remote_device_execute(&command, &result) == CP_OK && result.state == CP_RESULT_ACCEPTED);
             ++test_update_target.revision; remote_device_case_confirm();

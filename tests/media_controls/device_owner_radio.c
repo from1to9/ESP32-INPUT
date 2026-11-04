@@ -15,6 +15,15 @@ void device_radio_incoming_music(bool pcm)
     }
 }
 
+uint64_t device_radio_timeout_with_music(void)
+{
+    clock_us += BT_AUDIO_COMMAND_TIMEOUT_US;
+    deadline(NULL);
+    uint8_t decoded[4096] = {0};
+    a2_rx(decoded, sizeof(decoded));
+    return clock_us / 1000;
+}
+
 void device_radio_init(void)
 {
     bond_count = shared_count = 2;

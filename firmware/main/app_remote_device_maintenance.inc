@@ -41,14 +41,17 @@ static void remote_device_restart_progress(remote_device_binding_job_t *job)
 }
 static void remote_device_factory_progress(remote_device_binding_job_t *job)
 {
+    /* Once Wi-Fi deletion is submitted it may sever the authorizing session.
+     * Step 5 only reads the receipt of the already requested preference clear. */
+    bool finishing = (job->reset_step == 4 && job->wifi_id) || job->reset_step == 5;
     if (job->cancelling && job->reset_step == 0) {
         if (remote_device_neutral() && remote_device_media_off()) remote_device_maintenance_cancelled(job);
         return;
     }
-    if (job->cancelling && job->reset_step > 0 && !(job->reset_step == 4 && job->wifi_id)) {
+    if (job->cancelling && job->reset_step > 0 && !finishing) {
         remote_device_failed(job, CP_TOO_LATE, true); return; /* A partial reset is never atomic rollback. */
     }
-    if ((!remote_device_session(&job->request.identity) || s_engine.state.locked) && !(job->reset_step == 4 && job->wifi_id)) {
+    if ((!remote_device_session(&job->request.identity) || s_engine.state.locked) && !finishing) {
         job->cancelling = true; return;
     }
     if (job->reset_step == 0) {
@@ -127,7 +130,6 @@ static void remote_device_factory_progress(remote_device_binding_job_t *job)
             remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return;
         }
         if (wifi.operation_pending || wifi.completed_request_id != job->wifi_id || !wifi.known || wifi.count) return;
-        if (!s_boot_choices_known) { remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return; }
         app_media_controls_clear_boot();
         s_boot_choices = (app_boot_choices_t){0};
         if (settings_store_boot_request(&s_boot_choices) != ESP_OK) { remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return; }

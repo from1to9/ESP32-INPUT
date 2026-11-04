@@ -58,6 +58,29 @@ static void test_restore_speaker(void)
     handle(stop); poll_at(2200);
     assert(!boot_value.speaker && !view.media.speaker_waiting && !pairing_opens);
 }
+static void test_restore_start_timeout(void)
+{
+    boot_setup(APP_RESUME_A2DP, AE_ROUTE_A2DP_SINK);
+    owner.audio.route = AE_ROUTE_A2DP_SINK;
+    boot_connected();
+    ae_route_capabilities_t *music = &routes_by_id[AE_ROUTE_A2DP_SINK];
+    music->connected = true;
+    bluetooth.a2dp_pcm_us = 1100000; poll_at(1100);
+    assert(submissions == 1 && submitted.kind == AE_PLAYBACK_STREAM);
+    owner.audio.route_token = music->token;
+    owner.result_detail.job = (ae_job_snapshot_t){.kind=AE_PLAYBACK_STREAM, .state=AE_JOB_STARTING, .job_id={{42}}};
+    owner.audio.playback = owner.result_detail.job; complete(AE_OK);
+    owner.audio.playback.state = AE_JOB_ERROR;
+    owner.audio.playback.stop_reason = AE_STOP_START_TIMEOUT;
+    poll_at(3800);
+    bluetooth.a2dp_pcm_us = 3900000; poll_at(3900);
+    assert(submissions == 1 && view.media.speaker_waiting && boot_value.speaker == AE_ROUTE_A2DP_SINK && !boot_writes);
+    ++bluetooth.a2dp_link_generation;
+    music->token.link_generation = bluetooth.a2dp_link_generation;
+    bluetooth.a2dp_pcm_us = 4000000; poll_at(4000);
+    assert(submissions == 2 && ae_route_token_equal(&submitted.expected_route_token, &music->token));
+}
+
 static void test_restore_host_boundaries(void)
 {
     boot_setup(APP_RESUME_A2DP|APP_RESUME_HFP, AE_ROUTE_A2DP_SINK);
