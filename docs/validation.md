@@ -16,6 +16,47 @@ IMU samples but still failed the error-log and physical Motion gates.
 This checkpoint is not a qualified release. Reusable findings are indexed in
 the [engineering lessons](../.agent/shared/ENGINEERING_LESSONS.md).
 
+### Wi-Fi browser input and Bluetooth reconnection on Windows (2026-11-04)
+
+Clean `1e5e7b5dae0d7ec5dc043d16fc1533ea214fbd5b` was written to the
+inactive app slot and read back. The previous confirmed application and its
+selector were preserved. The running firmware reported the expected ELF identity
+and confirmed its first boot. After confirmation, the peer API reported one saved
+BLE HID record and one saved Classic audio record.
+
+- **Local navigation.** The operator reported that the menu responded after a few
+  seconds. The first accepted tap was not timed. The log recorded an LVGL lock
+  acquisition failure at 4.1 seconds and first-boot confirmation at about 50 seconds.
+  Their relationship to the reported delay is unknown. Re-entering Keyboard
+  from Mouse opened the Touch grid. Audio → Manage devices opened the Audio tab.
+- **Wi-Fi mouse and keyboard.** The device served its HTML, CSS and JavaScript
+  over station HTTPS. The test Chromium profile pinned the enrolled public key
+  and verified the served certificate against the enrollment. System-wide trust
+  was unchanged. The operator approved keyboard/mouse, management and update
+  access for 24 hours on Mosaico. The browser reconnected using its saved
+  identity and acquired control explicitly. The Windows operator saw the pointer
+  move and click, received the complete text `Mosaico WiFi 123` in Notepad, and
+  saw `a` appear after an on-screen letter tap. The browser then released
+  control and disconnected. The bench exercised input only.
+- **Saved Bluetooth devices.** In the Audio tab, the saved Windows row
+  disappeared during a connection attempt while the page showed
+  `Pairing closed`. The operator needed `Add device` to reconnect. A later
+  snapshot showed the saved Classic record with both HFP and A2DP connected.
+  There is no synchronized peer snapshot from the instant the row vanished.
+  On the input side, selecting a saved mouse target repeatedly showed waiting,
+  pairing-closed and authentication states. The captured BLE link lost readiness
+  and later regained it. Individual screen taps were not timestamped.
+- **Speaker playback.** The operator heard audio and could restart the
+  speaker after it stopped. Three playback jobs ran for observed intervals
+  of 42.6, 17.0 and 29.9 seconds and ended in `AE_STOP_UNDERRUN`. At each
+  exit the same A2DP stream remained connected and streaming, the sample
+  binding was cleared, and the received overrun count increased by one.
+  The one-shot ACL capture observed seven replacements of incomplete packets
+  at both ingress and dequeue. Both encoded and decoder-input observations saw
+  17 forward sequence gaps spanning 28 skipped IDs. No allocation or enqueue
+  failure was recorded in that capture. These counters do not locate loss
+  upstream of the host ingress. Continuous speaker playback remains open.
+
 ### Classic connection display DMA failure and chunk repair: 2026-11-04
 
 Clean `cf2c8daff4bfb529e5f90ed8c4c44a7699afde64` booted with a reported
