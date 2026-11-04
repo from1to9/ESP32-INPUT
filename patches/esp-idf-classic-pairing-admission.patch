@@ -28,3 +28,63 @@
              if (p_dev_rec->ble.key_type & (BTM_LE_KEY_PENC | BTM_LE_KEY_LENC)) {
                  SMP_TRACE_DEBUG("LE replace bond after enc, BDA:0x%02X%02X%02X%02X%02X%02X",
                                  p_cb->pairing_bda[0], p_cb->pairing_bda[1], p_cb->pairing_bda[2],
+--- a/components/bt/host/bluedroid/bta/dm/bta_dm_act.c
++++ b/components/bt/host/bluedroid/bta/dm/bta_dm_act.c
+@@ -33,0 +34 @@
++#include "stack/hcimsgs.h"
+@@ -773,0 +775,8 @@
++#if (CLASSIC_BT_INCLUDED == TRUE)
++    if (p_data->get_name.name_type == BT_DEVICE_TYPE_BREDR && p_data->get_name.p_cback) {
++        if (!btsnd_hcic_read_name_checked(p_data->get_name.p_cback)) {
++            (*p_data->get_name.p_cback)(BTM_NO_RESOURCES, NULL);
++        }
++        return;
++    }
++#endif
+--- a/components/bt/host/bluedroid/stack/btu/btu_hcif.c
++++ b/components/bt/host/bluedroid/stack/btu/btu_hcif.c
+@@ -741,0 +742,3 @@
++#if CLASSIC_BT_INCLUDED == TRUE
++            && (opcode != HCI_READ_LOCAL_NAME)
++#endif
+@@ -1310 +1313,15 @@
+-        btm_read_local_name_complete (p, evt_len);
++        if (p_cplt_cback) {
++            /* Some write failures leave the BR/EDR cache updated. GAP can
++             * confirm a name only if this controller reply agrees with it. */
++            tBTM_GET_DEV_NAME_CBACK *reader = p_cplt_cback;
++            char *cached = NULL;
++            if (evt_len == 1 + BD_NAME_LEN && p[0] == HCI_SUCCESS &&
++                BTM_ReadLocalDeviceName(&cached, BT_DEVICE_TYPE_BREDR) == BTM_SUCCESS && cached &&
++                strncmp(cached, (const char *)(p + 1), BD_NAME_LEN) == 0) {
++                reader(BTM_SUCCESS, cached);
++            } else {
++                reader(BTM_ERR_PROCESSING, NULL);
++            }
++        } else {
++            btm_read_local_name_complete(p, evt_len);
++        }
+@@ -1662,0 +1680,6 @@
++    case HCI_READ_LOCAL_NAME:
++        if (p_vsc_status_cback) {
++            /* Only Command Complete contains the read value. */
++            ((tBTM_GET_DEV_NAME_CBACK *)p_vsc_status_cback)(BTM_ERR_PROCESSING, NULL);
++        }
++        break;
+--- a/components/bt/host/bluedroid/stack/hcic/hcicmds.c
++++ b/components/bt/host/bluedroid/stack/hcic/hcicmds.c
+@@ -1091,0 +1092,7 @@
++    return btsnd_hcic_read_name_checked(NULL);
++}
++
++/* Carry the GAP reader with this particular HCI command. A NULL reader
++ * retains the device-initialization completion path. */
++BOOLEAN btsnd_hcic_read_name_checked(void (*callback)(UINT8, char *))
++{
+@@ -1106,0 +1114,2 @@
++    hci_cmd_metadata_t *metadata = HCI_GET_CMD_METAMSG(p);
++    metadata->context = callback;
+--- a/components/bt/host/bluedroid/stack/include/stack/hcimsgs.h
++++ b/components/bt/host/bluedroid/stack/include/stack/hcimsgs.h
+@@ -596,0 +597 @@
++BOOLEAN btsnd_hcic_read_name_checked(void (*callback)(UINT8, char *));

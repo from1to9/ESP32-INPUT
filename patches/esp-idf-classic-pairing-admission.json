@@ -12,7 +12,23 @@
     "components/bt/host/bluedroid/stack/smp/smp_act.c": {
       "before": "0ff9068b0427bac770b2362b19a7c9cf48e82cd33d99826c2810996a236be98b",
       "after": "9d2e2650fafdb75625911e618e4a59ea9d4c091f41ff7aaeab58592fcfe45517"
+    },
+    "components/bt/host/bluedroid/bta/dm/bta_dm_act.c": {
+      "before": "24899ae7ed43461efb24010d9d858454e71daefe85b3ecece96023d5297556d6",
+      "after": "5a3d0322cc363419425ed79d5cb06486536d620f22baef3fe114b0d64afb7b88"
+    },
+    "components/bt/host/bluedroid/stack/btu/btu_hcif.c": {
+      "before": "cbadf52ea8ee4fa999d9cd1832d4164c51d1f0b02d468a935372e3c72785ae3b",
+      "after": "2075e518961f5a578524fefb39a34c4226ac67a1d852232f74be8f88e43a9b5f"
+    },
+    "components/bt/host/bluedroid/stack/hcic/hcicmds.c": {
+      "before": "4504e8edcdeaa8dc66649559af6dc19fcee45a448da310bba31f4eb54b34b329",
+      "after": "74caaf7073691de6896297b729026ca176cb9cc495c225bdeb9fd26d1029f2c5"
+    },
+    "components/bt/host/bluedroid/stack/include/stack/hcimsgs.h": {
+      "before": "6498953cca467408d0dd54eb50d484e41aa015a3445bdaab89b561ce5aef8add",
+      "after": "03e891dbbc279dcc0c3d1ac0451e41721c787c077ba2230b7ca6fe4101031b78"
     }
   },
-  "patch_sha256": "36fbabec49419c34eac011298d8be363498bb8f6f155a90f53386bb2efe8a8da"
+  "patch_sha256": "e9c62f6d119462374c56c2a88a682ebf7fe0ad87872d65d9e20d36391f7785e4"
 }

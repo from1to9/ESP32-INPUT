@@ -204,6 +204,9 @@ static bool remote_device_target(const app_remote_device_request_t *request, ble
 static void remote_device_settings_progress(remote_device_binding_job_t *job)
 {
     const app_remote_device_request_t *request = &job->request;
+    bool sets_name = (request->settings_fields & APP_REMOTE_SETTING_BLUETOOTH_NAME) != 0;
+    bool active_name_matches = !sets_name || (paired_name.base.active_known && !device_name_busy() &&
+        strcmp(paired_name.base.active, request->settings.bluetooth_name) == 0);
     if (!job->applied) {
         if (job->cancelling) {
             if (job->name_id) {
@@ -216,8 +219,7 @@ static void remote_device_settings_progress(remote_device_binding_job_t *job)
             return;
         }
         if (!remote_device_session(&request->identity)) { remote_device_failed(job, CP_UNAUTHENTICATED, false); return; }
-        if (!job->name_done && (request->settings_fields & APP_REMOTE_SETTING_BLUETOOTH_NAME) &&
-            strcmp(request->settings.bluetooth_name, job->before.bluetooth_name)) {
+        if (sets_name && (!active_name_matches || (job->name_id && !job->name_done))) {
             if (!job->name_id) {
                 esp_err_t error = request_device_base(request->settings.bluetooth_name, strlen(request->settings.bluetooth_name), &job->name_id);
                 if (error != ESP_OK) remote_device_failed(job, CP_UNAVAILABLE, false);
@@ -260,7 +262,7 @@ static void remote_device_settings_progress(remote_device_binding_job_t *job)
         if (request->settings_fields & APP_REMOTE_SETTING_HAPTICS) board_haptics_enable(s_settings.haptics_enabled);
         job->saved_request = after.requested_revision; job->applied_revision = s_settings_revision; job->applied = true;
     }
-    if (!device_settings_equal(&s_settings, &request->settings) || s_settings_revision != job->applied_revision) {
+    if (!active_name_matches || !device_settings_equal(&s_settings, &request->settings) || s_settings_revision != job->applied_revision) {
         remote_device_failed(job, CP_STALE, true); return;
     }
     if (request->settings_fields & APP_REMOTE_SETTING_BRIGHTNESS) {

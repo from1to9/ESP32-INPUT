@@ -41,3 +41,5 @@ Substitutes model only the hardware/API boundary. They do not model radio
 encoding, SDK queue scheduling, privacy resolution or actual physical output.
 The pinned SDK target compile checks real API names/types; the combined image
 and later authorized hardware qualification remain separate checks.
+
+Run `python3 tests/bt_audio/test_sdk_name.py` with the pinned patched SDK to exercise Classic name reads against HCI write allocation failure, controller refusal, malformed reads and a successful write/read pair. The controller boundary is simulated.

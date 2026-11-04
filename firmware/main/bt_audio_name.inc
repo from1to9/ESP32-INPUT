@@ -48,14 +48,20 @@ static void classic_name_done_locked(esp_err_t error, bool uncertain)
     classic_name.phase = AUDIO_NAME_IDLE;
 }
 
+static bool classic_name_expired_locked(void)
+{
+    if (!classic_name.result.busy || now_us() - classic_name.started_us < BT_AUDIO_INIT_TIMEOUT_US) return false;
+    classic_name_done_locked(ESP_ERR_TIMEOUT, true);
+    return true;
+}
+
 static void service_classic_name(void)
 {
     char target[sizeof(classic_name.target)];
     audio_name_phase_t issue = AUDIO_NAME_IDLE;
     portENTER_CRITICAL(&audio_lock);
-    if (classic_name.result.busy && now_us() - classic_name.started_us >= BT_AUDIO_INIT_TIMEOUT_US) {
-        classic_name_done_locked(ESP_ERR_TIMEOUT, true);
-    } else if (classic_name.phase == AUDIO_NAME_START && !audio.name_pending) {
+    classic_name_expired_locked();
+    if (classic_name.phase == AUDIO_NAME_START && !audio.name_pending) {
         issue = AUDIO_NAME_START;
         memcpy(target, classic_name.target, sizeof(target));
         audio.name_pending = true;
@@ -85,13 +91,14 @@ static void service_classic_name(void)
         portENTER_CRITICAL(&audio_lock);
         audio.name_pending = false;
         audio.public.device_name_error = err;
-        classic_name_done_locked(err, false);
+        if (classic_name.result.busy && !classic_name_expired_locked()) classic_name_done_locked(err, false);
         portEXIT_CRITICAL(&audio_lock);
     }
 }
 
 static void classic_name_read_locked(void)
 {
+    if (classic_name_expired_locked()) return;
     if (classic_name.phase == AUDIO_NAME_WAIT_EIR) {
         bool verified = audio.public.device_name_known && !strcmp(audio.public.device_name, classic_name.target) &&
             classic_name.eir_complete && !classic_name.eir_failed;
@@ -107,7 +114,7 @@ static void classic_name_read_locked(void)
 
 static void classic_name_eir_locked(const esp_bt_gap_cb_param_t *p)
 {
-    if (classic_name.phase != AUDIO_NAME_WAIT_EIR) return;
+    if (classic_name_expired_locked() || classic_name.phase != AUDIO_NAME_WAIT_EIR) return;
     bool complete = false;
     for (unsigned i = 0; i < p->config_eir_data.eir_type_num && i < ESP_BT_EIR_TYPE_MAX_NUM; ++i)
         if (p->config_eir_data.eir_type[i] == ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME) complete = true;

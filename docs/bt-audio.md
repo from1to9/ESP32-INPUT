@@ -56,7 +56,7 @@ a codec, changes a device name, automatically pairs or starts capture.
 `ble_hid_init` is the current shared lifecycle owner: it enables BTDM when
 Classic is configured, and retains BLE mode for a BLE-only image. The audio
 module owns Classic GAP/security and bounded discoverability. Its device name
-comes from asynchronous Classic GAP cache readback at initialization and each
+comes from asynchronous Classic GAP readback verified against HCI Read Local Name at initialization and each
 explicit pairing window. Read failure/timeout leaves the name unavailable and
 does not fail audio or prevent closing pairing. The application currently has no
 Classic name writer: the Classic name can differ from the separately configured

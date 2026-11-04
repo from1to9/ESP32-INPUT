@@ -1089,9 +1089,19 @@ static void rename_test(const char *scenario)
         assert(bt_audio_name_change().uncertain && bt_audio_name_change().error == ESP_ERR_TIMEOUT);
         assert(bt_audio_name_request("Retry", &id) == ESP_ERR_INVALID_STATE); return;
     }
+    if (!strcmp(scenario, "rename-late-eir") || !strcmp(scenario, "rename-late-read")) {
+        if (!strcmp(scenario, "rename-late-eir")) clock_us += BT_AUDIO_INIT_TIMEOUT_US;
+        gap(ESP_BT_GAP_CONFIG_EIR_DATA_EVT, &eir);
+        if (!strcmp(scenario, "rename-late-read")) clock_us += BT_AUDIO_INIT_TIMEOUT_US;
+        gap(ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT, &read);
+        bt_audio_service();
+        assert(bt_audio_name_change().uncertain && bt_audio_name_change().error == ESP_ERR_TIMEOUT);
+        assert(bt_audio_name_request("Retry", &id) == ESP_ERR_INVALID_STATE); return;
+    }
     if (!strcmp(scenario, "rename-short-eir")) eir.config_eir_data.eir_type[0] = 8;
     gap(ESP_BT_GAP_CONFIG_EIR_DATA_EVT, &eir);
     assert(bt_audio_name_change().busy);
+    if (!strcmp(scenario, "rename-good")) clock_us += BT_AUDIO_INIT_TIMEOUT_US - 1;
     gap(ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT, &read);
     assert(!bt_audio_name_change().busy && (bt_audio_name_change().error == ESP_OK) == !strcmp(scenario, "rename-good"));
     assert(bt_audio_snapshot().device_name_known && !strcmp(bt_audio_snapshot().device_name, "Mosaico-AUD"));

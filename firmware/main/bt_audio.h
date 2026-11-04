@@ -100,7 +100,7 @@ typedef struct {
     uint8_t classic_bond_capacity;
     bool classic_hfp_peer_bonded;
     bool classic_a2dp_peer_bonded;
-    bool device_name_known;       /* Actual Classic GAP cache readback, not the HID name. */
+    bool device_name_known;       /* Classic GAP cache confirmed by HCI Read Local Name. */
     char device_name[BT_AUDIO_DEVICE_NAME_MAX_BYTES + 1U];
     esp_err_t device_name_error;
     bool pairing_completed;      /* Admitted authentication and verified saved peer. */

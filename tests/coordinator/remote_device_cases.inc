@@ -79,6 +79,51 @@ static void remote_device_name_requires_both_radios_and_reports_canonical_base(v
     assert(strstr(json, "\"bluetooth.device_name\":\"ESP32\"") &&
         strstr(json, "\"configured_bluetooth_names\":{\"input\":\"ESP32-IN\",\"audio\":\"ESP32-AUD\"}"));
 }
+static void complete_requested_name(void)
+{
+    test_name.status = BLE_HID_NAME_APPLIED;
+    test_name.active_known = true;
+    strcpy(test_name.active, test_name.requested);
+    service_bluetooth_name();
+    assert(test_classic_change.busy);
+    test_classic_change.busy = false;
+    service_bluetooth_name();
+}
+
+static cp_result_t apply_name_patch(uint64_t key, const char *patch)
+{
+    cp_result_t stage = remote_device_case_execute(CP_OP_CONFIG_STAGE, key, patch);
+    char args[80]; snprintf(args, sizeof(args), "{\"transaction_id\":\"%s\"}", stage.object_id);
+    return remote_device_case_execute(CP_OP_CONFIG_APPLY, key + 1, args);
+}
+
+static void remote_name_retry_reconciles_both_radios_after_failed_transport(void)
+{
+    remote_device_case_setup();
+    assert(request_device_base("ESP32", 5, NULL) == ESP_OK);
+    complete_requested_name();
+    test_usb.initialized = true; test_usb.failed = false;
+    apply_name_patch(270, "{\"patch\":{\"bluetooth.device_name\":\"Desk\",\"input.preferred_transport\":\"usb\"},\"durable\":true}");
+    complete_requested_name();
+    test_usb.failed = true;
+    remote_device_case_tick(); remote_device_case_tick();
+    assert(test_control_result.error == CP_UNAVAILABLE && !test_storage_requests);
+    assert(!strcmp(paired_name.base.active, "Desk") && !strcmp(s_settings.bluetooth_name, "ESP32"));
+
+    unsigned requests = test_name_requests;
+    test_storage.pending = true; test_storage.requested_revision = 1;
+    apply_name_patch(272, "{\"patch\":{\"bluetooth.device_name\":\"ESP32\"},\"durable\":true}");
+    assert(test_name_requests == requests + 1 && !strcmp(test_name.requested, "ESP32-IN"));
+    test_name.status = BLE_HID_NAME_APPLIED; strcpy(test_name.active, test_name.requested);
+    service_bluetooth_name(); remote_device_case_tick();
+    assert(test_classic_change.busy && !strcmp(test_classic_name, "ESP32-AUD") && !test_storage_requests);
+    test_classic_change.busy = false; service_bluetooth_name(); remote_device_case_tick();
+    assert(test_storage_requests == 1 && test_control_result.state != CP_RESULT_APPLIED);
+    test_storage.pending = false; test_storage.saved_revision = 1; remote_device_case_tick();
+    assert(test_control_result.state == CP_RESULT_APPLIED && !strcmp(test_control_result.reason, "saved"));
+    apply_name_patch(274, "{\"patch\":{\"bluetooth.device_name\":\"ESP32\"},\"durable\":true}");
+    assert(test_name_requests == requests + 1); /* The verified pair is already active. */
+}
 static void remote_device_haptic_jobs_wait_for_on_and_final_off(void)
 {
     remote_device_case_setup(); test_remote_haptic_accept = true;
@@ -130,9 +175,16 @@ static void remote_device_review_is_inert_immutable_and_physically_confirmed(voi
     test_restart_status.state = APP_DEVICE_RESTART_UNCERTAIN; remote_device_case_tick();
     assert(test_control_result.state == CP_RESULT_CLEANUP_PENDING && test_restart_requests == 1);
 }
-static void remote_device_factory_reset_sequence(bool orphan_at_admission)
+static void remote_device_factory_setup(void)
 {
     remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
+    /* The factory-reset scenarios start after the stored name was confirmed at boot. */
+    assert(request_device_base("ESP32", 5, NULL) == ESP_OK);
+    complete_requested_name();
+}
+static void remote_device_factory_reset_sequence(bool orphan_at_admission)
+{
+    remote_device_factory_setup();
     s_settings.navigation = true;
     test_bonds.count = 1; test_wifi_profiles.count = 1;
     test_update_target.selected = true;
@@ -201,7 +253,7 @@ static void remote_device_factory_admission_rejects_unknown_store_and_preserves_
 static void remote_device_factory_target_clear_rejects_unknown_or_unreviewed_store(void)
 {
     for (unsigned scenario = 0; scenario < 7; ++scenario) {
-        remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
+        remote_device_factory_setup();
         test_bonds.count = 1; test_wifi_profiles.count = 1; test_update_target.selected = true;
         if (scenario == 6) {
             test_update_target.selected = false; test_update_target.durable = false; test_update_target.revision = 0;
@@ -229,7 +281,7 @@ static void remote_device_factory_target_clear_rejects_unknown_or_unreviewed_sto
 }
 static void remote_device_factory_failure_never_advances_to_unreviewed_deletion(void)
 {
-    remote_device_case_setup(); remote_device_case_off(); test_link.connection_admitted = test_link.connected = false;
+    remote_device_factory_setup();
     char digest[65], args[128]; remote_device_manifest_digest(digest);
     (void)snprintf(args,sizeof(args),"{\"retained_manifest_digest\":\"%s\"}",digest);
     (void)remote_device_case_execute(CP_OP_DEVICE_FACTORY_RESET_REQUEST, 600, args);
@@ -287,6 +339,7 @@ static void remote_device_stale_and_expired_reviews_remain_locally_cancellable(v
     assert(test_control_result.state == CP_RESULT_CANCELLED && !test_restart_requests && s_overlay != APP_OVERLAY_CONFIRM);
 }
 #define REMOTE_DEVICE_CASES(RUN) \
+    RUN(remote_name_retry_reconciles_both_radios_after_failed_transport); \
     RUN(remote_device_name_requires_both_radios_and_reports_canonical_base); \
     RUN(remote_device_runtime_settings_and_durability_use_real_boundaries); \
     RUN(remote_device_haptic_jobs_wait_for_on_and_final_off); \
