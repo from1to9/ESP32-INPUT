@@ -125,7 +125,7 @@ typedef struct {
     uint32_t callbacks, gated_callbacks, largest_callback_bytes;
     uint32_t starts, stops, overruns, expired, malformed;
     uint32_t partial_expiries; /* Subset of expired that originated in the frame assembler. */
-    uint64_t gap_discarded_samples; /* Aged packets and incomplete frames discarded at recoverable gaps. */
+    uint64_t gap_discarded_samples; /* Samples discarded from the A2DP ring and assembler on expiry or overrun. */
     uint64_t max_callback_gap_us; /* Timings restart on a new A2DP grant. */
     uint32_t callback_intervals;
     uint16_t queued_samples;

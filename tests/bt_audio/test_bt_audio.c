@@ -410,6 +410,16 @@ static void hfp_queue_clock(bool writing)
     assert(state.expired_packets == 1 && state.transmit_underflows == 1 && !state.microphone_queued_frames);
 }
 
+/* Identical left/right ramps let the receiver check downmix and FIFO order. */
+static void fill_stereo_ramp(uint8_t *pcm, unsigned frames, uint32_t first)
+{
+    for (unsigned i = 0; i < frames; ++i) {
+        uint16_t sample = (uint16_t)(first + i);
+        pcm[i*4] = pcm[i*4+2] = (uint8_t)sample;
+        pcm[i*4+1] = pcm[i*4+3] = (uint8_t)(sample >> 8);
+    }
+}
+
 static void sustained_sbc(void)
 {
     initialized(); bt_audio_service();
@@ -433,11 +443,7 @@ static void sustained_sbc(void)
         clock_us = start + tick * 10000U;
         if (produced <= tick * 441U) {
             for (unsigned n = 0; n < batch; ++n) {
-                for (unsigned i = 0; i < samples_per_packet; ++i) {
-                    uint16_t sample = (uint16_t)(produced + i);
-                    stereo[i*4] = stereo[i*4+2] = (uint8_t)sample;
-                    stereo[i*4+1] = stereo[i*4+3] = (uint8_t)(sample >> 8);
-                }
+                fill_stereo_ramp(stereo, samples_per_packet, produced);
                 a2_rx(stereo, sizeof(stereo)); produced += samples_per_packet;
             }
         }
@@ -482,16 +488,47 @@ static void sustained_sbc(void)
         rx.partial_expiries == 1 && rx.gap_discarded_samples == discarded &&
         rx.enqueued_samples == produced && rx.emitted_samples == consumed && rx.peak_slots <= 8);
 
-    /* Three undrained 1024-sample callbacks require nine packet slots.
-     * The actual eight-slot overflow must still revoke the new binding. */
+    /* Three undrained 4096-byte callbacks require nine slots. Seed the
+     * assembler with a suffix so the gap cannot splice nonadjacent PCM. */
     music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
     route = caps(port, AE_ROUTE_A2DP_SINK);
     assert(port.prepare(NULL, AE_ROUTE_A2DP_SINK, &route.format, AE_SPEAKER, 12, &route.token) == AE_OK);
     assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 12, &route.token, 13, true) == AE_OK);
-    for (unsigned i = 0; i < 3; ++i) a2_rx(stereo, sizeof(stereo));
+    const uint64_t reservation = bt_audio_snapshot().generation;
+    uint64_t prior_loss = rx.gap_discarded_samples;
+    fill_stereo_ramp(stereo, samples_per_packet, 0);
+    a2_rx(stereo, sizeof(stereo));
+    assert(bt_audio_receive(&frame) == AE_OK && bt_audio_receive(&frame) == AE_OK);
+    assert(bt_audio_receive(&frame) == AE_AGAIN); /* 1024 - 2 * 441 = 142 remaining. */
+    for (unsigned i = 1; i <= 3; ++i) {
+        fill_stereo_ramp(stereo, samples_per_packet, i * samples_per_packet);
+        a2_rx(stereo, sizeof(stereo));
+    }
     bt_audio_a2dp_rx_snapshot(&rx);
-    assert(!rx.bound && rx.streaming && rx.peak_slots == 8 && rx.overruns == 1 && !rx.queued_samples &&
-        rx.emitted_samples == consumed && bt_audio_receive(&frame) == AE_STALE);
+    assert(rx.bound && rx.streaming && rx.peak_slots == 8 && rx.overruns == 1 &&
+        rx.queued_samples == 3 * samples_per_packet - BT_AUDIO_PCM_FRAMES &&
+        rx.gap_discarded_samples == prior_loss + 142 + BT_AUDIO_PCM_FRAMES &&
+        rx.expired == 1 && bt_audio_snapshot().generation == reservation);
+    assert(bt_audio_receive(&frame) == AE_TIMEOUT);
+    /* Verify all retained samples, including the rejected-at-first new tail,
+     * by appending exactly enough fresh samples to finish the last frame. */
+    unsigned retained = rx.queued_samples;
+    unsigned extra = 441U - retained % 441U;
+    fill_stereo_ramp(stereo, extra, 4 * samples_per_packet);
+    for (unsigned n = 0; n < (retained + extra) / 441U; ++n) {
+        if (n == retained / 441U) a2_rx(stereo, extra * 4U);
+        assert(bt_audio_receive(&frame) == AE_OK && frame.bytes == 882 &&
+            frame.consumer_generation == 13 && frame.sequence == 3U + n && frame.sample_offset == (2U + n) * 441U);
+        for (unsigned j = 0; j < 441; ++j) {
+            uint16_t sample = (uint16_t)(frame.data[j*2] | (uint16_t)frame.data[j*2+1] << 8);
+            assert(sample == samples_per_packet + BT_AUDIO_PCM_FRAMES + n * 441U + j);
+        }
+    }
+    assert(bt_audio_receive(&frame) == AE_AGAIN);
+    bt_audio_a2dp_rx_snapshot(&rx);
+    assert(!rx.queued_samples && rx.bound && rx.overruns == 1 &&
+        rx.enqueued_samples == produced + 4 * samples_per_packet + extra &&
+        rx.emitted_samples == consumed + 882 + retained + extra);
 }
 
 static void a2dp_queued_gap(void)
@@ -534,6 +571,31 @@ static void a2dp_queued_gap(void)
     assert(bt_audio_receive(&frame) == AE_STALE);
     bt_audio_a2dp_rx_snapshot(&rx);
     assert(!rx.bound && !rx.callback_intervals && !rx.max_callback_gap_us);
+}
+
+/* Overrun recovery discards both the head and the partial frame. It must not
+ * hide a clock fault in either piece of discarded PCM. */
+static void a2dp_overrun_future(void)
+{
+    initialized(); bt_audio_service();
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    music_format(ESP_A2D_SBC_CIE_SF_44K, ESP_A2D_SBC_CIE_CH_MODE_MONO, 3);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    ae_route_port_t port = bt_audio_route_port();
+    uint8_t sample[2] = {1,0};
+    for (unsigned partial = 0; partial <= 1; ++partial) {
+        ae_route_capabilities_t route = caps(port, AE_ROUTE_A2DP_SINK);
+        assert(port.prepare(NULL, AE_ROUTE_A2DP_SINK, &route.format, AE_SPEAKER, 11U + partial, &route.token) == AE_OK);
+        assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 11U + partial, &route.token, 12U + partial, true) == AE_OK);
+        ae_frame_t frame;
+        a2_rx(sample, sizeof sample);
+        if (partial) assert(bt_audio_receive(&frame) == AE_AGAIN);
+        --clock_us;
+        for (unsigned i = 0; i < 8U + partial; ++i) a2_rx(sample, sizeof sample);
+        assert(bt_audio_receive(&frame) == AE_STALE);
+        bt_audio_a2dp_rx_t rx; bt_audio_a2dp_rx_snapshot(&rx);
+        assert(!rx.bound && rx.streaming && !rx.emitted_samples);
+    }
 }
 
 static void replace_playback_during_pcm(void) {
@@ -1103,6 +1165,7 @@ int main(int argc, char **argv)
         else if (!strcmp(scenario, "hfp-transmit-clock")) hfp_queue_clock(false);
         else if (!strcmp(scenario, "hfp-write-clock")) hfp_queue_clock(true);
         else if (!strcmp(scenario, "a2dp-queued-gap")) a2dp_queued_gap();
+        else if (!strcmp(scenario, "a2dp-overrun-future")) a2dp_overrun_future();
         else if (strcmp(scenario, "sustained-sbc") == 0) sustained_sbc();
         else if (strcmp(scenario, "playback-binding") == 0) playback_binding_test();
         else if (strncmp(scenario, "pairing", 7) == 0 || strcmp(scenario, "discovery-timeout") == 0) pairing_test(scenario);

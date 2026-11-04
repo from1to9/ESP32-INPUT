@@ -655,6 +655,19 @@ static int16_t sample_le(const uint8_t *data)
     return value <= INT16_MAX ? (int16_t)value : (int16_t)((int32_t)value - 65536);
 }
 
+/* Eviction must not erase a clock fault that receive would have rejected. */
+static bool a2dp_drop_overrun_locked(void)
+{
+    const bt_audio_pcm_t *head = &audio.music.slots[audio.music.head];
+    uint64_t now = now_us();
+    if (head->timestamp_us > now || (audio.adapter.partial_frames && audio.adapter.partial_started_us > now))
+        return false;
+    audio.a2dp_rx.gap_discarded_samples += head->frames - audio.music.offset;
+    a2dp_gap_locked();
+    pop_ring(&audio.music);
+    return true;
+}
+
 static void receive_pcm(bt_audio_route_t source, const uint8_t *data, uint32_t bytes)
 {
     bt_audio_pcm_t packet = {0};
@@ -712,13 +725,19 @@ static void receive_pcm(bt_audio_route_t source, const uint8_t *data, uint32_t b
             audio.public.route == source && playback_epoch == audio.adapter.playback_epoch &&
             packet.consumer_generation == (audio.adapter.playback_enabled ? audio.adapter.playback_consumer : 0) &&
             (!audio.adapter.prepared || audio.adapter.playback_enabled);
-        if (current && !push_ring(source == BT_AUDIO_HFP ? &audio.voice : &audio.music, &packet)) {
+        pcm_ring_t *ring = source == BT_AUDIO_HFP ? &audio.voice : &audio.music;
+        if (current && !push_ring(ring, &packet)) {
             count_one(&audio.public.receive_overruns);
             if (source == BT_AUDIO_A2DP) count_one(&audio.a2dp_rx.overruns);
             error_locked("Bluetooth speaker queue overflow", ESP_ERR_NO_MEM, false);
-            invalidate_locked(true);
-            current = false;
-        } else if (current && source == BT_AUDIO_A2DP) {
+            if (source == BT_AUDIO_A2DP && packet.consumer_generation && a2dp_drop_overrun_locked()) {
+                (void)push_ring(ring, &packet); /* One slot freed under the same lock. */
+            } else {
+                invalidate_locked(true);
+                current = false;
+            }
+        }
+        if (current && source == BT_AUDIO_A2DP) {
             audio.a2dp_rx.enqueued_samples += frames;
             if (audio.music.count > audio.a2dp_rx.peak_slots) audio.a2dp_rx.peak_slots = (uint8_t)audio.music.count;
         }
