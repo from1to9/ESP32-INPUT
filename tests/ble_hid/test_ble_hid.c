@@ -2755,8 +2755,11 @@ static void test_quiet_forget_all_and_empty_durable_preferences(void) {
 #include "admission_diagnostics_cases.inc"
 #include "manual_disconnect_cases.inc"
 #include "management_edges_cases.inc"
+#include "current_selection_cases.inc"
 
 int main(void) {
+    if (getenv("BLE_CURRENT_SELECTION")) { current_selection_cases(); return 0; }
+    current_selection_cases();
     if (getenv("BLE_MANAGEMENT_EDGES")) { management_edges_cases(); return 0; }
     management_edges_cases();
     if (getenv("BLE_MANUAL_CASE")) { manual_disconnect_cases(); return 0; }

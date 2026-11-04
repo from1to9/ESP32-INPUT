@@ -84,6 +84,14 @@ After an actual zero-bond read, the worker commits an empty versioned `hid_cccd/
 
 ## Native saved-host management
 
+Current-host selection covers both an already selected durable target and a
+current authenticated bond without a selected preference. After input release,
+the former skips persistence and the latter saves policy while preserving the
+same physical link. Tests retain the actual CCCD readiness state and cover
+unreserved/stale edits, provisional links, cancellation, NVS failures, link-down
+and same-address key replacement during commit. Other-host selection retains
+the existing release/disconnect and host-initiated reconnect checks below.
+
 The native `app_bluetooth_management` workflow uses the production worker in
 this suite. Add waits for input release and actual link-down, saves a revisioned
 unselected target policy, verifies its matching durable acknowledgement, then

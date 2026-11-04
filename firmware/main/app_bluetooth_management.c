@@ -12,7 +12,7 @@
 typedef struct {
     app_bluetooth_management_snapshot_t view;
     uint64_t started_ms, deadline_ms, host_generation, preference_revision, admission_reservation;
-    bool disconnect_requested;
+    bool disconnect_requested, selecting_current;
     ble_hid_target_t target;
     ble_hid_target_snapshot_t original_policy;
     ble_hid_bond_list_t original;
@@ -57,6 +57,13 @@ static bool target_matches(const ble_hid_target_t *target, const ble_hid_bond_t 
     return target->bond_id_known && bond->bond_id_known && bond->address_type_known &&
         target->address_type == bond->address_type && !memcmp(target->address, bond->address, 6) &&
         !memcmp(target->bond_id, bond->bond_id, BLE_HID_BOND_ID_BYTES);
+}
+static bool target_is_current(void)
+{
+    if (!observed.current_match_known) return false;
+    for (unsigned i = 0; i < observed.count; ++i)
+        if (observed.bonds[i].is_current && target_matches(&management.target, &observed.bonds[i])) return true;
+    return false;
 }
 static bool same_bond(const ble_hid_bond_t *a, const ble_hid_bond_t *b)
 {
@@ -173,6 +180,23 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
             finish(ESP_ERR_INVALID_STATE, false, "Bluetooth host changed. Review the new connection."); return;
         }
         if (bluetooth.connected) {
+            if (management.view.operation == APP_BT_MANAGE_SELECT && bluetooth.connection_admitted && target_is_current()) {
+                if (context->release_pending || bluetooth.congested) return;
+                if (!manifest_matches(false) || !policy_stable(&policy) || policy.revision != management.preference_revision) {
+                    finish(ESP_ERR_INVALID_STATE, false, "Saved hosts or target policy changed. Review before retrying."); return;
+                }
+                if (policy.durable && policy.selected && same_target(&policy.target, &management.target)) {
+                    finish(ESP_OK, false, bluetooth.ready ? "Selected host is already connected and ready." :
+                        "Selected host is connected; input is not ready."); return;
+                }
+                esp_err_t error = submit_policy(&policy);
+                if (error != ESP_OK) {
+                    finish(error, false, "Current host selection could not be saved."); return;
+                }
+                management.selecting_current = true; management.view.irreversible = true;
+                message(APP_BT_MANAGE_POLICY, "Saving the current host as the selected target.");
+                return;
+            }
             if (!management.disconnect_requested && (!bluetooth.connection_admitted ||
                 (!context->release_pending && !bluetooth.congested))) {
                 const uint64_t generation = bluetooth.generation;
@@ -222,7 +246,7 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
         }
         return;
     }
-    if (bluetooth.connected) {
+    if (bluetooth.connected && !(management.selecting_current && management.view.phase == APP_BT_MANAGE_POLICY)) {
         if (management.view.phase == APP_BT_MANAGE_ADVERTISING && (management.view.operation == APP_BT_MANAGE_ADD || management.view.operation == APP_BT_MANAGE_SELECT || management.view.operation == APP_BT_MANAGE_RECONNECT)) {
             if (bluetooth.ready) finish(ESP_OK, false, "A Bluetooth host connected and input readiness was verified.");
             else if (strcmp(management.view.message, "A Bluetooth host connected; waiting for secure input readiness."))
@@ -274,6 +298,13 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
         }
         if (selecting || management.view.operation == APP_BT_MANAGE_RECONNECT) {
             if (!manifest_matches(false)) { finish(ESP_ERR_INVALID_STATE, true, "Saved hosts changed during selection."); return; }
+            if (management.selecting_current && bluetooth.connected) {
+                if (bluetooth.generation != management.host_generation || !target_is_current()) {
+                    finish(ESP_ERR_INVALID_STATE, true, "Current host changed while its selection was saved."); return;
+                }
+                finish(ESP_OK, false, bluetooth.ready ? "Selected host saved. Current input connection remains ready." :
+                    "Selected host saved. Current connection is not ready for input."); return;
+            }
             if (selecting) ble_hid_management_resume(management.admission_reservation, &management.target);
             else ble_hid_management_reconnect(management.admission_reservation, &management.target);
             message(APP_BT_MANAGE_ADVERTISING, selecting ? "Selected host saved. Waiting for advertising; connection is not ready." :

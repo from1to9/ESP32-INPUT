@@ -209,7 +209,10 @@ If the host leaves before its pause is accepted, report that reconnect policy
 is unchanged; do not promise a pause or ask the user to Resume.
 
 **Select target** releases the old host's input and applies the saved target
-policy before accepting its connection. For a private saved host that cannot be
+policy before accepting its connection. Selecting the current, verified full
+pairing preserves its connection after input release and saves the target
+preference if needed. An already durable selection requires no new write;
+selection alone never creates input readiness. For a private saved host that cannot be
 identified at connection time, **Allow reconnect** gives that host 30 seconds to
 connect from its system Bluetooth settings. It must authenticate and match the
 saved pairing before receiving input. When the saved identity cannot be

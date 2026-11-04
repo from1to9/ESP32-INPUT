@@ -394,6 +394,9 @@ esp_err_t ble_hid_target_order(uint64_t bond_revision, const ble_hid_target_t *o
  * without a fingerprint is bound to that fresh row before admission; a supplied
  * fingerprint must match. Duplicate/omitted keys and unsupported identities
  * reject before NVS. An unchanged removed selection may be retained blocked.
+ * An active management reservation may select the current authenticated full
+ * bond without disconnecting it; the worker rechecks that physical generation
+ * and bond before saving. All other live preference edits remain rejected.
  * Rejected calls leave request/status/persistence unchanged. */
 esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_request_t *, uint64_t *request_id);
 

@@ -197,6 +197,7 @@ static struct {
      * held. The worker owns target_candidate after successful publication. */
     ble_hid_target_preferences_request_t target_request_scratch;
     uint64_t target_expected_bond_mutation;
+    uint64_t target_connection_generation;
     bool classic_pairing_reserved;
     uint64_t management_sequence, management_reservation;
     bool pairing_new_hosts_only;
@@ -338,6 +339,15 @@ static bool target_key_matches(const ble_hid_target_t *key, const ble_hid_bond_t
     return bond->address_type_known && key->address_type == bond->address_type &&
         memcmp(key->address, bond->address, ESP_BD_ADDR_LEN) == 0 &&
         (!key->bond_id_known || (bond->bond_id_known && memcmp(key->bond_id, bond->bond_id, BLE_HID_BOND_ID_BYTES) == 0));
+}
+
+static bool current_target_locked(const ble_hid_target_t *target)
+{
+    return state.public.connected && state.public.connection_admitted && state.public.encrypted &&
+        !state.link_fault && !state.closing && state.auth_complete && state.bonded && state.bond_resolved &&
+        state.peer_address_type_known && target->address_type == state.peer_address_type &&
+        !memcmp(target->address, state.address, ESP_BD_ADDR_LEN) && target->bond_id_known &&
+        !memcmp(target->bond_id, state.bond_fingerprint, BLE_HID_BOND_ID_BYTES);
 }
 
 static ble_hid_target_t key_for_bond(const ble_hid_bond_t *bond)
@@ -1929,7 +1939,10 @@ static void service_target_preferences(void)
     }
     bool current = !state.public.failed && state.bond_list.known && !state.bond_list.updating &&
         same_bonds && state.target_expected_bond_mutation == state.bond_mutation_revision &&
-        !state.public.connected && !state.notification_pending && !state.submitting &&
+        (!state.public.connected || (state.management_reservation && state.target_connection_generation &&
+        state.target_connection_generation == state.connection_generation &&
+        current_target_locked(&state.target_candidate.target))) &&
+        !state.notification_pending && !state.submitting &&
         state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
     if (pending) state.target.request_status = current ? BLE_HID_TARGET_APPLYING : BLE_HID_TARGET_FAILED;
     if (pending && !current) state.target.request_error = ESP_ERR_INVALID_STATE;
@@ -2811,10 +2824,10 @@ ble_hid_bond_list_t ble_hid_bond_list(void)
     return list;
 }
 
-static bool target_editable_locked(uint64_t revision)
+static bool target_editable_locked(uint64_t revision, bool keep_current)
 {
     return state.public.initialized && !state.public.failed && !device_name.blocked && !name_busy_locked() &&
-        !state.public.connected && !state.rejected_pending && !state.notification_pending && !state.submitting && !single_forget_busy_locked() &&
+        (!state.public.connected || keep_current) && !state.rejected_pending && !state.notification_pending && !state.submitting && !single_forget_busy_locked() &&
         state.bond_list.known && !state.bond_list.updating && revision == state.bond_list.revision &&
         state.public.bond_forget_state != BLE_HID_FORGET_RUNNING &&
         state.public.bond_forget_state != BLE_HID_FORGET_FAILED;
@@ -2822,7 +2835,8 @@ static bool target_editable_locked(uint64_t revision)
 
 static esp_err_t submit_preferences_locked(const ble_hid_target_preferences_request_t *request, uint64_t *request_id)
 {
-    if (!target_editable_locked(request->expected_bond_revision) || target_blocked_locked() ||
+    bool keep_current = state.management_reservation && request->selected && current_target_locked(&request->target);
+    if (!target_editable_locked(request->expected_bond_revision, keep_current) || target_blocked_locked() ||
         request->expected_revision != state.target.revision || state.target.revision == UINT64_MAX ||
         state.target.request_id == UINT64_MAX) return ESP_ERR_INVALID_STATE;
     if (request->count != state.bond_list.count) return ESP_ERR_INVALID_ARG;
@@ -2872,6 +2886,7 @@ static esp_err_t submit_preferences_locked(const ble_hid_target_preferences_requ
         state.target_candidate.target = preserve_selected ? state.target.target :
             key_for_bond(&state.bond_list.bonds[selected_index]);
     state.target_expected_bond_mutation = state.bond_mutation_revision;
+    state.target_connection_generation = keep_current ? state.connection_generation : 0;
     ++state.target.request_id;
     state.target.request_status = BLE_HID_TARGET_PENDING; state.target.request_error = ESP_OK;
     state.public.pairing_open = false;
@@ -3250,7 +3265,7 @@ esp_err_t ble_hid_forget_bond_request(uint64_t generation, uint64_t bond_revisio
     if (!target) return ESP_ERR_INVALID_ARG;
     if (!target->bond_id_known) return ESP_ERR_NOT_SUPPORTED;
     portENTER_CRITICAL(&state_lock);
-    bool ready = target_editable_locked(bond_revision) && !target_blocked_locked() && !state.classic_pairing_reserved &&
+    bool ready = target_editable_locked(bond_revision, false) && !target_blocked_locked() && !state.classic_pairing_reserved &&
         generation == state.public.generation && !state.remove_inflight && !state.pairing_admitted && !state.pairing_admission_pending &&
         state.single_forget.request_id != UINT64_MAX;
     int found = -1;
