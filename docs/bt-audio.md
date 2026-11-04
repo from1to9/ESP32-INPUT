@@ -164,7 +164,10 @@ be resurrected. The manager rejects old/zero consumer IDs rather than rebinding
 them to its newest playback job.
 Bluetooth callbacks never recurse into the manager or perform codec/storage
 I/O. `bt_audio_receive` assembles complete 10 ms frames from variable SDK PCM
-chunks without padding. The manager owns format conversion, physical mute,
+chunks without padding. After emitting a frame, it ages any remaining samples
+from the arrival time of their source packet. At 44.1 kHz a 10 ms frame has
+441 samples, so a run of 128-sample SBC frames will regularly leave a suffix.
+The manager owns format conversion, physical mute,
 recording permissions, capture consent, the indicator and privacy/lock policy.
 It must stop/cancel the transport immediately when those permissions close.
 Transport gates do not prove physical microphone-off or speaker mute.
@@ -180,6 +183,15 @@ recalled; stop confirms the local producer/queue barrier, not peer buffers or
 physical output. The legacy SDK PCM callbacks carry no peer/handle; their
 association and internal flush behavior depend on this pinned SDK. A change
 of that SDK requires re-review and hardware qualification of these boundaries.
+
+The throttled `Audio diag A2DP RX` line reports boot-lifetime decoded callback
+and input byte counts, largest callback, callbacks rejected at the entry gate,
+mono samples enqueued and emitted as complete frames, queue occupancy in
+samples, peak occupied slots, malformed/overflow/expiry counts, and matching
+SDK stream start/stop events. Compare changes across job states with the job's
+received/delivered bytes and the codec's PCM write receipts. These counters
+begin at the SDK decoded callback. HCI reassembly drops and SBC media
+sequence gaps occur upstream. Codec acceptance does not establish acoustic output.
 
 One profile command can be pending or in flight. Acceptance mutes and flushes
 the affected route. A change on the other profile preserves active PCM.

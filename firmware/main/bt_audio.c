@@ -45,6 +45,7 @@ typedef struct {
 static portMUX_TYPE audio_lock = portMUX_INITIALIZER_UNLOCKED;
 static struct {
     bt_audio_snapshot_t public;
+    bt_audio_a2dp_rx_t a2dp_rx;
     bool started, submitted, init_pending;
     uint64_t init_started_us;
     bt_audio_pcm_t *memory;
@@ -181,6 +182,7 @@ static void expire_ring_locked(pcm_ring_t *ring, uint64_t now)
         if (packet->generation == audio.public.generation && packet->timestamp_us <= now &&
             now - packet->timestamp_us <= BT_AUDIO_PCM_MAX_AGE_US) break;
         pop_ring(ring); count_one(&audio.public.expired_packets);
+        if (ring == &audio.music) count_one(&audio.a2dp_rx.expired);
         /* A receive gap must invalidate the manager's stream reservation;
          * never stitch later PCM onto an apparently contiguous sequence. */
         if (ring != &audio.microphone) { invalidate_locked(true); refresh_locked(); return; }
@@ -618,6 +620,7 @@ static void a2dp_event(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *parameter)
         parameter->audio_stat.conn_hdl == audio.a2dp_handle &&
         peer_matches(audio.public.a2dp_peer, parameter->audio_stat.remote_bda)) {
         bool streaming = parameter->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED;
+        count_one(streaming ? &audio.a2dp_rx.starts : &audio.a2dp_rx.stops);
         if (audio.public.a2dp_streaming != streaming) replace_stream_locked(false);
         audio.public.a2dp_streaming = streaming;
     }
@@ -640,6 +643,12 @@ static void receive_pcm(bt_audio_route_t source, const uint8_t *data, uint32_t b
     portENTER_CRITICAL(&audio_lock);
     bool allowed = audio.public.speaker_read_ready && audio.public.route == source &&
         (!audio.adapter.prepared || (audio.adapter.playback_enabled && audio.adapter.transport_generation == audio.public.generation));
+    if (source == BT_AUDIO_A2DP) {
+        count_one(&audio.a2dp_rx.callbacks);
+        audio.a2dp_rx.callback_bytes += bytes;
+        if (bytes > audio.a2dp_rx.largest_callback_bytes) audio.a2dp_rx.largest_callback_bytes = bytes;
+        if (!allowed) count_one(&audio.a2dp_rx.gated_callbacks);
+    }
     packet.generation = audio.public.generation;
     packet.consumer_generation = audio.adapter.playback_enabled ? audio.adapter.playback_consumer : 0;
     playback_epoch = audio.adapter.playback_epoch;
@@ -650,6 +659,7 @@ static void receive_pcm(bt_audio_route_t source, const uint8_t *data, uint32_t b
     if (!data || bytes == 0 || bytes > CALLBACK_BYTES_MAX || channels == 0 ||
         bytes % (2U * channels) != 0) {
         portENTER_CRITICAL(&audio_lock); count_one(&audio.public.malformed_packets);
+        if (source == BT_AUDIO_A2DP) count_one(&audio.a2dp_rx.malformed);
         if (packet.generation == audio.public.generation && playback_epoch == audio.adapter.playback_epoch) {
             error_locked("Malformed Bluetooth PCM", ESP_ERR_INVALID_SIZE, false);
             invalidate_locked(true); refresh_locked();
@@ -675,9 +685,13 @@ static void receive_pcm(bt_audio_route_t source, const uint8_t *data, uint32_t b
             (!audio.adapter.prepared || audio.adapter.playback_enabled);
         if (current && !push_ring(source == BT_AUDIO_HFP ? &audio.voice : &audio.music, &packet)) {
             count_one(&audio.public.receive_overruns);
+            if (source == BT_AUDIO_A2DP) count_one(&audio.a2dp_rx.overruns);
             error_locked("Bluetooth speaker queue overflow", ESP_ERR_NO_MEM, false);
             invalidate_locked(true);
             current = false;
+        } else if (current && source == BT_AUDIO_A2DP) {
+            audio.a2dp_rx.enqueued_samples += frames;
+            if (audio.music.count > audio.a2dp_rx.peak_slots) audio.a2dp_rx.peak_slots = (uint8_t)audio.music.count;
         }
         refresh_locked(); portEXIT_CRITICAL(&audio_lock);
         if (!current) return;
@@ -690,7 +704,6 @@ static void a2dp_receive(const uint8_t *data, uint32_t bytes) { receive_pcm(BT_A
 
 static uint32_t hfp_transmit(uint8_t *data, uint32_t bytes)
 {
-    uint64_t now = now_us();
     portENTER_CRITICAL(&audio_lock);
     if (!audio.public.initialized || audio.public.route != BT_AUDIO_HFP || audio.public.microphone_muted ||
         !audio.public.hfp_connected || !audio.public.hfp_audio_connected || !audio.public.hfp_format_known ||
@@ -700,7 +713,7 @@ static uint32_t hfp_transmit(uint8_t *data, uint32_t bytes)
     if (!data || bytes == 0 || (bytes & 1U) || bytes > BT_AUDIO_PCM_FRAMES * 2U) {
         count_one(&audio.public.malformed_packets); portEXIT_CRITICAL(&audio_lock); return 0;
     }
-    expire_ring_locked(&audio.microphone, now);
+    expire_ring_locked(&audio.microphone, now_us());
     size_t frames = bytes / 2U;
     if (audio.microphone.frames < frames) {
         count_one(&audio.public.transmit_underflows); refresh_locked();
@@ -777,6 +790,21 @@ esp_err_t bt_audio_init(void)
 #else
     return ESP_ERR_NOT_SUPPORTED;
 #endif
+}
+
+void bt_audio_a2dp_rx_snapshot(bt_audio_a2dp_rx_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&audio_lock);
+    *out = audio.a2dp_rx;
+    out->known = audio.public.a2dp_initialized;
+    out->connected = audio.public.a2dp_connected;
+    out->streaming = audio.public.a2dp_streaming;
+    out->bound = audio.public.route == BT_AUDIO_A2DP && audio.adapter.playback_enabled &&
+        audio.adapter.transport_generation == audio.public.generation;
+    out->link_generation = audio.public.a2dp_link_generation;
+    out->queued_samples = audio.music.frames;
+    portEXIT_CRITICAL(&audio_lock);
 }
 
 bt_audio_snapshot_t bt_audio_snapshot(void)
@@ -1067,8 +1095,8 @@ void bt_audio_service(void)
 #if AUDIO_PROFILES_SUPPORTED
     watchdog(NULL);
     service_classic_pairing();
-    uint64_t now = now_us();
     portENTER_CRITICAL(&audio_lock);
+    uint64_t now = now_us();
     expire_ring_locked(&audio.music, now); expire_ring_locked(&audio.voice, now);
     expire_ring_locked(&audio.microphone, now);
     uint64_t post = 0;
@@ -1102,9 +1130,11 @@ esp_err_t bt_audio_write_microphone(const bt_audio_pcm_t *packet)
     if (!AUDIO_PROFILES_SUPPORTED) return ESP_ERR_NOT_SUPPORTED;
     if (!packet || packet->frames == 0 || packet->frames > BT_AUDIO_PCM_FRAMES ||
         packet->source != BT_AUDIO_HFP) return ESP_ERR_INVALID_ARG;
-    uint64_t now = now_us();
-    if (packet->timestamp_us > now || now - packet->timestamp_us > BT_AUDIO_PCM_MAX_AGE_US) return ESP_ERR_TIMEOUT;
     portENTER_CRITICAL(&audio_lock);
+    uint64_t now = now_us();
+    if (packet->timestamp_us > now || now - packet->timestamp_us > BT_AUDIO_PCM_MAX_AGE_US) {
+        portEXIT_CRITICAL(&audio_lock); return ESP_ERR_TIMEOUT;
+    }
     expire_ring_locked(&audio.microphone, now);
     refresh_locked();
     esp_err_t error = ESP_ERR_INVALID_STATE;
@@ -1125,8 +1155,8 @@ esp_err_t bt_audio_write_microphone(const bt_audio_pcm_t *packet)
 bool bt_audio_read_speaker(uint64_t generation, bt_audio_pcm_t *packet)
 {
     if (!packet || !AUDIO_PROFILES_SUPPORTED) return false;
-    uint64_t now = now_us();
     portENTER_CRITICAL(&audio_lock);
+    uint64_t now = now_us();
     pcm_ring_t *ring = audio.public.route == BT_AUDIO_HFP ? &audio.voice : &audio.music;
     expire_ring_locked(ring, now);
     bool ready = generation == audio.public.generation && audio.public.speaker_read_ready && ring->count != 0;
@@ -1354,6 +1384,7 @@ ae_result_t bt_audio_receive(ae_frame_t *frame)
         if (audio.adapter.partial_frames && (audio.adapter.partial_started_us > now ||
             now - audio.adapter.partial_started_us > BT_AUDIO_PCM_MAX_AGE_US)) {
             count_one(&audio.public.expired_packets);
+            if (audio.adapter.route == AE_ROUTE_A2DP_SINK) count_one(&audio.a2dp_rx.expired);
             invalidate_locked(true); refresh_locked();
             portEXIT_CRITICAL(&audio_lock); return AE_TIMEOUT;
         }
@@ -1363,6 +1394,7 @@ ae_result_t bt_audio_receive(ae_frame_t *frame)
             portEXIT_CRITICAL(&audio_lock); return AE_STALE;
         }
         uint16_t wanted = (uint16_t)(audio.adapter.format.sample_rate_hz / 100U);
+        uint64_t tail_timestamp_us = audio.adapter.partial_started_us;
         /* At most four queued HFP packets/eight SBC packets per call. */
         while (audio.adapter.partial_frames < wanted && ring->count) {
             const bt_audio_pcm_t *packet = &ring->slots[ring->head];
@@ -1370,6 +1402,7 @@ ae_result_t bt_audio_receive(ae_frame_t *frame)
                 clear_ring(ring); audio.adapter.partial_frames = 0; audio.adapter.playback_enabled = false;
                 portEXIT_CRITICAL(&audio_lock); return AE_STALE;
             }
+            tail_timestamp_us = packet->timestamp_us;
             if (!audio.adapter.partial_frames) audio.adapter.partial_started_us = packet->timestamp_us;
             memcpy(audio.adapter.partial + audio.adapter.partial_frames, packet->samples,
                 packet->frames * sizeof(int16_t));
@@ -1389,7 +1422,11 @@ ae_result_t bt_audio_receive(ae_frame_t *frame)
                     frame->data[i * 2U] = (uint8_t)value; frame->data[i * 2U + 1U] = (uint8_t)(value >> 8);
                 }
                 audio.adapter.sample_offset += wanted;
+                if (audio.adapter.route == AE_ROUTE_A2DP_SINK) audio.a2dp_rx.emitted_samples += wanted;
                 audio.adapter.partial_frames = (uint16_t)(audio.adapter.partial_frames - wanted);
+                /* We append only while short of one frame. Any suffix left by
+                 * this emission therefore belongs to the last appended packet. */
+                audio.adapter.partial_started_us = tail_timestamp_us;
                 memmove(audio.adapter.partial, audio.adapter.partial + wanted,
                     audio.adapter.partial_frames * sizeof(int16_t));
                 result = AE_OK;

@@ -4,6 +4,7 @@
 #include "audio_media.h"
 #include "board_audio_mosaico.h"
 #include "usb_audio.h"
+#include "bt_audio.h"
 #include "usb_audio_transport.h"
 #include "esp_log.h"
 #ifdef ESP_PLATFORM
@@ -52,6 +53,7 @@ typedef struct {
     sl_state_t speech_state;
     ae_result_t speech_result;
     bool speech_cleanup;
+    bt_audio_a2dp_rx_t a2dp;
     usb_audio_snapshot_t usb;
     usb_audio_transport_snapshot_t transport;
     board_audio_status_t codec;
@@ -149,6 +151,7 @@ static void observe(void)
         out->speech_state = media->speech.state; out->speech_result = media->speech.result;
         out->speech_cleanup = media->speech.cleanup_pending;
     }
+    bt_audio_a2dp_rx_snapshot(&out->a2dp);
     out->usb = usb_audio_snapshot();
     usb_audio_transport_snapshot(&out->transport);
     out->codec = board_audio_mosaico_status();
@@ -236,6 +239,19 @@ static bool transport_changed(const usb_audio_transport_snapshot_t *a, const usb
 #define TRANSPORT_COUNTS "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
 #define TRANSPORT_VALUES(ep) (ep).submitted, (ep).accepted, (ep).rejected, (ep).completed_ok, \
     (ep).completed_failed, (ep).successful_bytes, (ep).successful_zero
+static void log_a2dp(const bt_audio_a2dp_rx_t *rx)
+{
+    if (!rx->known) { ESP_LOGI(TAG, "Audio diag A2DP RX known=0"); return; }
+    ESP_LOGI(TAG, "Audio diag A2DP RX known=1 link=%" PRIu64 " connected=%d streaming=%d bound=%d starts=%" PRIu32
+        " stops=%" PRIu32 " callbacks=%" PRIu32 " bytes=%" PRIu64 " largest=%" PRIu32 " gated=%" PRIu32
+        " enqueued_samples=%" PRIu64 " emitted_samples=%" PRIu64 " queued_samples=%u peak_slots=%u"
+        " overruns=%" PRIu32 " expired=%" PRIu32 " malformed=%" PRIu32,
+        rx->link_generation, rx->connected, rx->streaming, rx->bound, rx->starts, rx->stops,
+        rx->callbacks, rx->callback_bytes, rx->largest_callback_bytes, rx->gated_callbacks,
+        rx->enqueued_samples, rx->emitted_samples, (unsigned)rx->queued_samples, (unsigned)rx->peak_slots,
+        rx->overruns, rx->expired, rx->malformed);
+}
+
 static void log_transport(const usb_audio_transport_snapshot_t *transport)
 {
     if (!transport->observed) {
@@ -414,6 +430,11 @@ void app_audio_diagnostics_poll(uint64_t now_ms)
             log_job(i, &current->jobs[i]);
     if (summary || current->speech_known != previous->speech_known || current->speech_state != previous->speech_state ||
         current->speech_result != previous->speech_result || current->speech_cleanup != previous->speech_cleanup) log_speech(current);
+    if ((current->route == AE_ROUTE_A2DP_SINK || current->a2dp.connected || previous->a2dp.connected) &&
+        (summary || current->a2dp.link_generation != previous->a2dp.link_generation ||
+         current->a2dp.bound != previous->a2dp.bound ||
+         job_changed(&current->jobs[AE_CONSUMERS_MAX], &previous->jobs[AE_CONSUMERS_MAX])))
+        log_a2dp(&current->a2dp);
     if (summary || usb_changed(&current->usb, &previous->usb)) log_usb(&current->usb);
     if (summary || transport_changed(&current->transport, &previous->transport)) log_transport(&current->transport);
     if (summary || codec_changed(&current->codec, &previous->codec)) log_codec(&current->codec);

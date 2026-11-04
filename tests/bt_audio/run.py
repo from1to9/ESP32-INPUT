@@ -31,7 +31,8 @@ def main():
                          "audio-exclusion", "reviewed-handoff", "retry-capacity", "name-normal", "name-invalid", "name-missing", "name-event-failure", "name-submit-failure", "name-timeout",
                          "pair-failure", "pair-late", "pair-late-failure", "pair-terminal", "connect-race", "peer-switch", "pair-foreign", "pair-prewindow", "pair-unsaved",
                          "other-profile", "foreign-bonds", "a2dp-reconnect", "observed-disconnect", "dispatch-replace", "dispatch-down", "dispatch-cancel",
-                         "dispatch-post-failure", "dispatch-reentrant", "profile-actions", "timeout-hfp", "timeout-a2dp", "pairing", "pairing-expiry", "pairing-timeout", "discovery-timeout", "playback-binding"):
+                         "dispatch-post-failure", "dispatch-reentrant", "profile-actions", "timeout-hfp", "timeout-a2dp", "pairing", "pairing-expiry", "pairing-timeout", "discovery-timeout", "playback-binding", "expiry-observation", "sustained-sbc",
+                         "hfp-transmit-clock", "hfp-write-clock"):
             subprocess.run([str(binary), scenario], check=True)
         composition = [part for part in command if part != str(SUITE / "test_bt_audio.c")]
         composition += [str(SUITE / "engine_pairing_transport.c"), str(SUITE / "test_engine_pairing.c")]

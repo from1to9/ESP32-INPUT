@@ -436,6 +436,8 @@ AUDIO_DIAGNOSTIC_PATHS = {
         ("usb_audio", "usb_audio_transport_snapshot")],
     "audio_diagnostics_codec_snapshot": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
         ("board_audio", "board_audio_mosaico_status")],
+    "audio_diagnostics_a2dp_rx": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
+        ("classic", "bt_audio_a2dp_rx_snapshot")],
     "audio_diagnostics_usb_pcm": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
         ("usb_audio", "usb_audio_pcm_snapshot"), ("usb_audio", "live_locked")],
     "audio_diagnostics_board_pcm": AUDIO_OBSERVER + [("audio_diagnostics", "observe"),
@@ -451,7 +453,7 @@ for _caller, _prefix in {
         ("main", "refresh_media_context"), ("audio_diagnostics", "app_audio_diagnostics_capture_context")]
 AUDIO_DIAGNOSTIC_PATHS["audio_presenter_admission_copy"] = CORE + [("main", "render_view"),
     ("audio_diagnostics", "app_audio_diagnostics_media_view")]
-for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_codec", "log_transport", "log_capture_context", "log_usb_pcm", "log_codec_pcm", "log_admission"):
+for _logger in ("log_audio", "log_job", "log_speech", "log_usb", "log_a2dp", "log_codec", "log_transport", "log_capture_context", "log_usb_pcm", "log_codec_pcm", "log_admission"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_logger}"] = AUDIO_OBSERVER + [("audio_diagnostics", _logger)]
 for _comparison in ("audio_changed", "job_changed", "usb_changed", "codec_changed", "transport_changed", "capture_context_changed", "admission_changed"):
     AUDIO_DIAGNOSTIC_PATHS[f"audio_diagnostics_{_comparison}"] = AUDIO_OBSERVER + [("audio_diagnostics", _comparison)]

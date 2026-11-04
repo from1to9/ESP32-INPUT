@@ -118,6 +118,18 @@ typedef struct {
     uint32_t transmit_underflows;
 } bt_audio_snapshot_t;
 
+/* Boot-lifetime A2DP receive totals, independent of the current playback grant.
+ * Sample counts are per-channel PCM frames. No audio payload or peer address. */
+typedef struct {
+    uint64_t callback_bytes, enqueued_samples, emitted_samples, link_generation;
+    uint32_t callbacks, gated_callbacks, largest_callback_bytes;
+    uint32_t starts, stops, overruns, expired, malformed;
+    uint16_t queued_samples;
+    uint8_t peak_slots;
+    bool known, connected, streaming, bound;
+} bt_audio_a2dp_rx_t;
+void bt_audio_a2dp_rx_snapshot(bt_audio_a2dp_rx_t *out);
+
 /* Call once from a task AFTER the shared owner has enabled a Classic-capable
  * BTDM controller and Bluedroid. This module never initializes/enables/disables
  * either singleton, changes names, automatically pairs,

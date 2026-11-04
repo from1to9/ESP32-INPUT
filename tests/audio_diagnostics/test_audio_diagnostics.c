@@ -19,6 +19,8 @@ static size_t line_count;
 
 bool app_media_runtime_snapshot(app_media_snapshot_t *out)
 { ++media_reads; if (available) *out = owner; return available; }
+static bt_audio_a2dp_rx_t a2dp_rx;
+void bt_audio_a2dp_rx_snapshot(bt_audio_a2dp_rx_t *out) { *out = a2dp_rx; }
 usb_audio_snapshot_t usb_audio_snapshot(void) { ++usb_reads; return usb; }
 void usb_audio_transport_snapshot(usb_audio_transport_snapshot_t *out) { *out = transport; }
 board_audio_status_t board_audio_mosaico_status(void) { ++codec_reads; return codec; }
@@ -355,11 +357,25 @@ static void test_presenter_admission_is_observation(void)
     assert(contains_since(first, "admission known=0") && !contains_since(first, "mic_start="));
 }
 
+static void test_a2dp_rx(void)
+{
+    setup(); owner.audio.route = AE_ROUTE_A2DP_SINK;
+    poll_at(0); assert(contains_since(0, "A2DP RX known=0"));
+    a2dp_rx = (bt_audio_a2dp_rx_t){.known = true, .connected = true, .streaming = true, .bound = true,
+        .link_generation = 3, .callback_bytes = 8192, .callbacks = 2, .enqueued_samples = 2048, .emitted_samples = 1764};
+    size_t prior = line_count; poll_at(100);
+    assert(contains_since(prior, "A2DP RX known=1 link=3") && contains_since(prior, "enqueued_samples=2048 emitted_samples=1764"));
+    prior = line_count; ++a2dp_rx.callbacks; poll_at(200);
+    assert(!contains_since(prior, "A2DP RX")); /* Count changes alone do not produce packet-rate logging. */
+    a2dp_rx.bound = false; ++a2dp_rx.expired; poll_at(300);
+    assert(contains_since(prior, "bound=0") && contains_since(prior, "overruns=0 expired=1 malformed=0"));
+}
+
 int main(int argc, char **argv)
 {
-    const char *names[] = {"unknown_is_not_success", "idle_throttle_and_counter_summary", "failed_job_retained_and_replaced",
+    const char *names[] = {"a2dp_rx", "unknown_is_not_success", "idle_throttle_and_counter_summary", "failed_job_retained_and_replaced",
         "availability_recovery", "transport_and_codec_errors", "usb_observation_boundaries", "transport_mode_and_results", "private_metadata_wiped", "clock_regression_is_observer_only", "capture_context_is_copied_observation", "capture_context_does_not_invent_owner_state", "pcm_observation_and_volume", "presenter_admission_is_observation"};
-    void (*cases[])(void) = {test_unknown_is_not_success, test_idle_throttle_and_counter_summary, test_failed_job_retained_and_replaced,
+    void (*cases[])(void) = {test_a2dp_rx, test_unknown_is_not_success, test_idle_throttle_and_counter_summary, test_failed_job_retained_and_replaced,
         test_availability_recovery, test_transport_and_codec_errors, test_usb_observation_boundaries, test_transport_mode_and_results, test_private_metadata_wiped, test_clock_regression_is_observer_only, test_capture_context_is_copied_observation, test_capture_context_does_not_invent_owner_state, test_pcm_observation_and_volume, test_presenter_admission_is_observation};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }

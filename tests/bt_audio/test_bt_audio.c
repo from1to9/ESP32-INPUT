@@ -33,7 +33,7 @@ static bt_audio_bond_list_t observed_bonds(void)
 }
 
 static uint64_t clock_us = 1000000;
-static void (*clock_hook)(void);
+static void (*clock_hook)(void), (*after_status)(void), (*before_lock)(void);
 static bool no_memory, stack_enabled = true;
 static unsigned calls, kicks, fail_call;
 static esp_err_t command_error, name_error;
@@ -81,7 +81,7 @@ esp_err_t esp_bt_gap_get_bond_device_list(int *count, esp_bd_addr_t *list)
 { assert(*count >= bond_count); *count = bond_count; if (bond_count >= 1) memcpy(list[0], peer, 6); if (bond_count == 2) memcpy(list[1], other, 6); return bond_list_error; }
 esp_err_t esp_bt_gap_set_scan_mode(esp_bt_connection_mode_t connection, esp_bt_discovery_mode_t discovery)
 { if (discovery == ESP_BT_GENERAL_DISCOVERABLE) ++discoverable_writes; if (!drop_scan) gap_status = (esp_bt_gap_profile_status_t){.conn_mode = connection, .disc_mode = discovery}; return ESP_OK; }
-esp_err_t esp_bt_gap_get_profile_status(esp_bt_gap_profile_status_t *status) { *status = gap_status; return ESP_OK; }
+esp_err_t esp_bt_gap_get_profile_status(esp_bt_gap_profile_status_t *status) { *status = gap_status; if (after_status) { clock_hook = after_status; after_status = NULL; } return ESP_OK; }
 esp_err_t esp_bt_gap_pin_reply(esp_bd_addr_t address, bool accept, uint8_t bytes, esp_bt_pin_code_t pin)
 { (void)address; (void)pin; assert(!accept && bytes == 0); security_accept = accept; ++security_replies; return ESP_OK; }
 esp_err_t esp_bt_gap_ssp_confirm_reply(esp_bd_addr_t address, bool accept)
@@ -108,7 +108,12 @@ static uint8_t last_pid, last_action;
 struct osi_thread { int queue; };
 static osi_thread_t btc;
 bool g_a2dp_on_deinit, g_a2dp_sink_ongoing_deinit;
-void test_bt_lock(portMUX_TYPE *lock) { (void)lock; assert(!audio_locked); audio_locked = true; }
+void test_bt_lock(portMUX_TYPE *lock)
+{
+    (void)lock; assert(!audio_locked);
+    if (before_lock) { void (*inject)(void) = before_lock; before_lock = NULL; inject(); }
+    audio_locked = true;
+}
 void test_bt_unlock(portMUX_TYPE *lock) { (void)lock; assert(audio_locked); audio_locked = false; }
 osi_thread_t *btc_get_current_thread(void) { return &btc; }
 static void run_btc(void)
@@ -328,6 +333,157 @@ static void normal(void)
 
 static ae_route_port_t interrupt_port;
 static ae_route_token_t interrupt_token;
+static void publish_music_packet(void)
+{
+    uint8_t stereo[441 * 4] = {0};
+    ++clock_us; a2_rx(stereo, sizeof(stereo));
+}
+static void schedule_music_packet(void) { before_lock = publish_music_packet; }
+static void expiry_observation_race(void)
+{
+    initialized(); bt_audio_service();
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    music_format(ESP_A2D_SBC_CIE_SF_44K, ESP_A2D_SBC_CIE_CH_MODE_STEREO, 3);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    ae_route_port_t port = bt_audio_route_port();
+    ae_route_capabilities_t route = caps(port, AE_ROUTE_A2DP_SINK);
+    assert(port.prepare(NULL, AE_ROUTE_A2DP_SINK, &route.format, AE_SPEAKER, 11, &route.token) == AE_OK);
+    assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 11, &route.token, 12, true) == AE_OK);
+    /* Publish on the next lock acquisition after the service clock sample.
+     * If that sample already owns the lock, publication follows its pass. */
+    after_status = schedule_music_packet;
+    bt_audio_service();
+    ae_frame_t frame;
+    assert(bt_audio_receive(&frame) == AE_OK && frame.bytes == 882 && !bt_audio_snapshot().expired_packets);
+}
+
+static ae_frame_t concurrent_capture;
+
+static void capture_before_microphone_lock(void)
+{
+    ++clock_us;
+    ae_route_port_t port = bt_audio_route_port();
+    assert(port.capture(NULL, AE_ROUTE_HFP_HF, &concurrent_capture) == AE_OK);
+}
+
+static void hfp_queue_clock(bool writing)
+{
+    initialized(); bt_audio_service();
+    hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
+    voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC);
+    ae_route_port_t port = bt_audio_route_port();
+    ae_route_capabilities_t route = caps(port, AE_ROUTE_HFP_HF);
+    assert(port.prepare(NULL, AE_ROUTE_HFP_HF, &route.format, AE_MICROPHONE, 11, &route.token) == AE_OK);
+    concurrent_capture = (ae_frame_t){.audio_generation = 11, .consumer_generation = 12,
+        .sequence = 1, .route_token = route.token, .format = route.format, .bytes = 320};
+    for (unsigned i = 0; i < concurrent_capture.bytes; ++i) concurrent_capture.data[i] = (uint8_t)i;
+    bt_audio_pcm_t packet = {.source = BT_AUDIO_HFP, .frames = 160, .sample_rate = 16000,
+        .generation = bt_audio_snapshot().generation, .timestamp_us = clock_us};
+    for (unsigned i = 0; i < packet.frames; ++i) packet.samples[i] = (int16_t)(1000U + i);
+    uint8_t pcm[320];
+    before_lock = capture_before_microphone_lock;
+    if (writing) assert(bt_audio_write_microphone(&packet) == ESP_OK);
+    uint32_t bytes = hf_tx(pcm, sizeof(pcm));
+    bt_audio_snapshot_t state = bt_audio_snapshot();
+    printf("HFP %s: bytes=%u expired=%u underflows=%u\n", writing ? "write" : "transmit",
+        (unsigned)bytes, (unsigned)state.expired_packets, (unsigned)state.transmit_underflows);
+    fflush(stdout);
+    assert(!before_lock && bytes == sizeof(pcm) && !memcmp(pcm, concurrent_capture.data, sizeof(pcm)));
+    assert(!state.expired_packets && !state.transmit_underflows);
+    if (writing) {
+        assert(hf_tx(pcm, sizeof(pcm)) == sizeof(pcm));
+        for (unsigned i = 0; i < packet.frames; ++i) {
+            uint16_t sample = (uint16_t)(pcm[2U * i] | (uint16_t)pcm[2U * i + 1U] << 8);
+            assert(sample == (uint16_t)packet.samples[i]);
+        }
+    }
+
+    packet.timestamp_us = clock_us + 1;
+    assert(bt_audio_write_microphone(&packet) == ESP_ERR_TIMEOUT);
+    packet.timestamp_us = clock_us;
+    assert(bt_audio_write_microphone(&packet) == ESP_OK);
+    clock_us += BT_AUDIO_PCM_MAX_AGE_US + 1;
+    assert(bt_audio_write_microphone(&packet) == ESP_ERR_TIMEOUT);
+    assert(hf_tx(pcm, sizeof(pcm)) == 0);
+    state = bt_audio_snapshot();
+    assert(state.expired_packets == 1 && state.transmit_underflows == 1 && !state.microphone_queued_frames);
+}
+
+static void sustained_sbc(void)
+{
+    initialized(); bt_audio_service();
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    music_format(ESP_A2D_SBC_CIE_SF_44K, ESP_A2D_SBC_CIE_CH_MODE_STEREO, 3);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    ae_route_port_t port = bt_audio_route_port();
+    ae_route_capabilities_t route = caps(port, AE_ROUTE_A2DP_SINK);
+    assert(port.prepare(NULL, AE_ROUTE_A2DP_SINK, &route.format, AE_SPEAKER, 11, &route.token) == AE_OK);
+    assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 11, &route.token, 12, true) == AE_OK);
+
+    /* The pinned sink delivers one callback per decoded media packet, and
+     * drains queued packets back to back. Use eight 16-block/8-subband SBC
+     * frames per packet. Two such callbacks fit within eight receive slots. */
+    enum { samples_per_packet = 8 * 16 * 8, batch = 2, ticks = 200 };
+    uint8_t stereo[samples_per_packet * 4];
+    uint32_t produced = 0, consumed = 0;
+    uint64_t start = clock_us;
+    ae_frame_t frame;
+    for (unsigned tick = 0; tick < ticks; ++tick) {
+        clock_us = start + tick * 10000U;
+        if (produced <= tick * 441U) {
+            for (unsigned n = 0; n < batch; ++n) {
+                for (unsigned i = 0; i < samples_per_packet; ++i) {
+                    uint16_t sample = (uint16_t)(produced + i);
+                    stereo[i*4] = stereo[i*4+2] = (uint8_t)sample;
+                    stereo[i*4+1] = stereo[i*4+3] = (uint8_t)(sample >> 8);
+                }
+                a2_rx(stereo, sizeof(stereo)); produced += samples_per_packet;
+            }
+        }
+        bt_audio_service();
+        for (unsigned i = 0; i < 4; ++i) {
+            ae_result_t result = bt_audio_receive(&frame);
+            if (result == AE_AGAIN) break;
+            if (result != AE_OK) {
+                bt_audio_snapshot_t state = bt_audio_snapshot();
+                fprintf(stderr, "SBC stream stopped at %u ms: result=%d samples=%u/%u expired=%u overruns=%u\n",
+                    tick * 10, result, consumed, produced, state.expired_packets, state.receive_overruns);
+            }
+            assert(result == AE_OK && frame.bytes == 882 && frame.sample_offset == consumed &&
+                frame.sequence == consumed / 441U + 1 && frame.consumer_generation == 12);
+            for (unsigned j = 0; j < 441; ++j) {
+                uint16_t sample = (uint16_t)(frame.data[j*2] | (uint16_t)frame.data[j*2+1] << 8);
+                assert(sample == (uint16_t)consumed); ++consumed;
+            }
+        }
+    }
+    bt_audio_a2dp_rx_t rx;
+    bt_audio_a2dp_rx_snapshot(&rx);
+    assert(consumed >= (ticks - 1U) * 441U && rx.known && rx.connected && rx.bound && rx.starts == 1);
+    assert(rx.callbacks == produced / samples_per_packet && rx.callback_bytes == produced * 4U &&
+        rx.largest_callback_bytes == sizeof(stereo) && rx.enqueued_samples == produced && rx.emitted_samples == consumed &&
+        !rx.gated_callbacks && !rx.expired && !rx.overruns && !rx.malformed);
+    assert(produced > consumed && produced - consumed < 441);
+    clock_us += BT_AUDIO_PCM_MAX_AGE_US + 1;
+    assert(bt_audio_receive(&frame) == AE_TIMEOUT); /* A genuinely old unconsumed suffix still expires. */
+    a2_rx(stereo, sizeof(stereo));
+    music_state(ESP_A2D_AUDIO_STATE_SUSPEND, 3);
+    bt_audio_a2dp_rx_snapshot(&rx);
+    assert(!rx.bound && !rx.streaming && rx.stops == 1 && rx.expired == 1 && rx.gated_callbacks == 1 &&
+        rx.enqueued_samples == produced && rx.emitted_samples == consumed && rx.peak_slots <= 8);
+
+    /* Three undrained 1024-sample callbacks require nine packet slots.
+     * The actual eight-slot overflow must still revoke the new binding. */
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    route = caps(port, AE_ROUTE_A2DP_SINK);
+    assert(port.prepare(NULL, AE_ROUTE_A2DP_SINK, &route.format, AE_SPEAKER, 12, &route.token) == AE_OK);
+    assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 12, &route.token, 13, true) == AE_OK);
+    for (unsigned i = 0; i < 3; ++i) a2_rx(stereo, sizeof(stereo));
+    bt_audio_a2dp_rx_snapshot(&rx);
+    assert(!rx.bound && rx.streaming && rx.peak_slots == 8 && rx.overruns == 1 && !rx.queued_samples &&
+        rx.emitted_samples == consumed && bt_audio_receive(&frame) == AE_STALE);
+}
+
 static void replace_playback_during_pcm(void) {
     assert(interrupt_port.bind_playback(NULL, AE_ROUTE_HFP_HF, 100, &interrupt_token, 40, true) == AE_OK);
 }
@@ -888,6 +1044,10 @@ int main(int argc, char **argv)
         else if (!strcmp(scenario, "audio-exclusion")) pairing_audio_exclusion();
         else if (!strncmp(scenario, "name-", 5)) device_name_test(scenario);
         else if (strcmp(scenario, "normal") == 0) normal();
+        else if (strcmp(scenario, "expiry-observation") == 0) expiry_observation_race();
+        else if (!strcmp(scenario, "hfp-transmit-clock")) hfp_queue_clock(false);
+        else if (!strcmp(scenario, "hfp-write-clock")) hfp_queue_clock(true);
+        else if (strcmp(scenario, "sustained-sbc") == 0) sustained_sbc();
         else if (strcmp(scenario, "playback-binding") == 0) playback_binding_test();
         else if (strncmp(scenario, "pairing", 7) == 0 || strcmp(scenario, "discovery-timeout") == 0) pairing_test(scenario);
         else if (strcmp(scenario, "init-timeout") == 0) {
