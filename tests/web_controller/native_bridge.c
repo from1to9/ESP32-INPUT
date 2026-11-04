@@ -151,8 +151,6 @@ static void web_fixture(httpd_req_t *r)
         assert(view.receipt_request == receipt && view.receipt_state == CP_RESULT_APPLIED);
     } else if (!strcmp(r->uri, "/_fixture/takeover")) {
         remote_local_override(false); cp_physical_override(web_server.protocol, false, s_now_ms);
-    } else if (!strcmp(r->uri, "/_fixture/allow")) {
-        assert(set_remote_allowance(true));
     } else if (!strcmp(r->uri, "/_fixture/partial")) {
         web_cancel_after = trace_count + 3U;
     } else if (!strcmp(r->uri, "/_fixture/target")) {
@@ -185,7 +183,7 @@ static void web_reply(httpd_req_t *r)
 int main(int argc, char **argv)
 {
     assert(argc == 3); snprintf(web_host, sizeof(web_host), "%s", argv[1]); snprintf(web_origin, sizeof(web_origin), "%s", argv[2]);
-    setup(INPUT_MOUSE); remote_control_init(false); test_control_session_alive = true; assert(set_remote_allowance(true));
+    setup(INPUT_MOUSE); remote_control_init(false); test_control_session_alive = true; assert(!s_remote_allowed);
     assert(app_control_access_init() == ESP_OK);
     void *storage = calloc(1, cp_context_size()); assert(storage);
     cp_callbacks_t callbacks = {.user = s_command_bridge, .random = web_random_source,

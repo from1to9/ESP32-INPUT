@@ -139,7 +139,9 @@ static app_control_access_snapshot_t test_controller_catalog;
 static app_control_access_request_t test_controller_mutation;
 static unsigned test_controller_calls;
 static esp_err_t test_controller_ingress;
+#ifndef WEB_CONTROLLER_NATIVE
 void app_control_access_snapshot(app_control_access_snapshot_t *out) { *out = test_controller_catalog; }
+#endif
 esp_err_t app_control_runtime_access_request(const app_control_access_request_t *request, uint64_t *ticket)
 {
     test_controller_mutation = *request; ++test_controller_calls;

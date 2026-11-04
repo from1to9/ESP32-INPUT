@@ -106,7 +106,7 @@ try {
   assert.match(await page.locator("#result").textContent(), /1 \/ 5 key pairs complete/);
   await page.screenshot({path: path.join(output, "partial-result.png"), fullPage: true});
   evidence.cases.push("local takeover during a production text down/up sequence preserves partial/uncertain progress and does not replay the suffix");
-  await fixture(page, "allow"); await page.locator("#refresh").click();
+  await page.locator("#refresh").click();
   await page.locator("#acquire").click(); await waitText(page, "connection", "Controlling");
   await fixture(page, "drop-next");
   const beforeUnknown = commands.filter(command => command.op === "keyboard.text.enqueue").length;
@@ -122,7 +122,7 @@ try {
   await fixture(page, "takeover"); await waitText(page, "connection", "Connected / idle");
   await page.waitForTimeout(1000);
   assert.equal(commands.filter(command => command.op === "control.acquire").length, beforeTakeover, "saved approval never automatically reacquires after takeover");
-  await fixture(page, "allow"); await page.locator("#refresh").click();
+  await page.locator("#refresh").click();
   await page.locator("#acquire").click(); await waitText(page, "connection", "Controlling");
   await fixture(page, "target"); await waitText(page, "connection", "Connected / idle");
   await waitText(page, "target", "bluetooth:18");
@@ -134,7 +134,7 @@ try {
 
   const mobile = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 390, height: 844}, isMobile: true, hasTouch: true, deviceScaleFactor: 2, colorScheme: "dark"});
   const phone = await mobile.newPage(); observe(phone); await phone.goto(origin);
-  await fixture(phone, "allow"); await connect(phone, true);
+  await connect(phone, true);
   assert.notEqual(await phone.evaluate(() => JSON.parse(localStorage.getItem("mosaico.browser.identity.v1")).client_id), firstIdentity);
   await phone.locator("#mouse-mode").click(); await waitText(phone, "readiness", "mouse");
   await fixture(phone, "reset-trace");
