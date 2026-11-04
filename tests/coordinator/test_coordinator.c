@@ -370,12 +370,17 @@ void app_audio_diagnostics_capture_context(uint64_t observed_ms, const app_audio
 void app_media_runtime_environment(const ae_environment_t *environment, uint64_t epoch,
     uint64_t revision, bool speech)
 { (void)epoch; (void)revision; test_media_environment = *environment; test_media_speech_context = speech; }
+void app_media_runtime_cancel_boot_speaker(uint64_t token) { assert(token); }
 void app_media_runtime_stop(ae_stop_reason_t reason)
 { assert(reason == AE_STOP_PRIVACY || reason == AE_STOP_MAINTENANCE); ++test_media_stops; }
 esp_err_t app_presenter_bind_display(lv_display_t *display) { (void)display; return ESP_OK; }
 app_presenter_indicator_status_t app_presenter_indicator_status(void) { return test_indicator; }
 #ifndef TEST_COORDINATOR_MEDIA_REVIEW
 bool app_media_controls_init(void) { return true; }
+void app_media_controls_pause_boot(void) {}
+void app_media_controls_clear_boot(void) {}
+void app_media_controls_boot(const app_boot_audio_t *choices, void (*save)(const app_boot_audio_t *))
+{ (void)choices; (void)save; }
 void app_media_controls_revoke_devices(void) {}
 void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t epoch) { (void)confirmation; (void)epoch; }
 void app_media_controls_context(const app_media_controls_context_t *context) { test_media_context = *context; }
@@ -482,6 +487,11 @@ esp_err_t settings_store_request(const device_settings_t *settings)
     test_saved_request = *settings;
     return test_storage_error;
 }
+static app_boot_choices_t test_boot_choices;
+settings_store_status_t settings_store_boot_read(app_boot_choices_t *out)
+{ if (out) *out = test_boot_choices; return test_storage; }
+esp_err_t settings_store_boot_request(const app_boot_choices_t *value)
+{ test_boot_choices = *value; return ESP_OK; }
 settings_store_status_t settings_store_status(void) { return test_storage; }
 void app_wifi_get_snapshot(app_wifi_snapshot_t *snapshot)
 {
@@ -1138,6 +1148,8 @@ static void setup(input_mode_t mode)
     test_brightness_error = ESP_OK;
     test_brightness_count = 0;
     test_storage = (settings_store_status_t){.available = true};
+    s_boot_choices = test_boot_choices = (app_boot_choices_t){0};
+    s_boot_choices_known = true; s_boot_save_pending = s_boot_save_failed = false;
     test_storage_error = ESP_OK;
     test_storage_requests = 0;
     test_wifi = (app_wifi_snapshot_t){0};
@@ -6267,6 +6279,17 @@ static void sensor_observers_preserve_input_queue_and_redact_non_pad_context(voi
 #include "ble_advertising_diagnostics_cases.inc"
 #include "ble_admission_diagnostics_cases.inc"
 
+static void boot_restores_mode_without_input(void)
+{
+    setup(INPUT_MOUSE); select_mode(INPUT_KEYBOARD);
+    assert(test_boot_choices.mode == INPUT_KEYBOARD);
+    app_boot_choices_t persisted = test_boot_choices;
+    setup(INPUT_MOUSE); s_boot_choices = persisted; test_ble_send_attempts = test_usb_send_attempts = 0;
+    restore_boot_mode();
+    assert(s_engine.state.mode == INPUT_KEYBOARD && s_keyboard_submode == APP_KEYBOARD_TOUCH &&
+        s_engine.state.owner == INPUT_LOCAL && !s_engine.state.gyro_enabled && !s_engine.count &&
+        !s_interaction.view.preview_length && !test_ble_send_attempts && !test_usb_send_attempts);
+}
 static void keyboard_test_select_mode(bool remote, input_mode_t mode, uint64_t key)
 {
     if (remote) {
@@ -6412,6 +6435,7 @@ int main(int argc, char **argv)
     test_case = #test; test(); ++passed; } } while (0)
     RUN(advertising_failure_replay_preserves_domains_and_input);
     RUN(admission_failure_replay_is_bounded_repeatable_and_observation_only);
+    RUN(boot_restores_mode_without_input);
     RUN(keyboard_entry_defaults_to_touch_for_local_and_remote_modes);
     RUN(keyboard_session_navigation_preserves_explicit_submode_and_draft);
     REMOTE_UPDATE_CASES(RUN);

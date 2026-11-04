@@ -2,6 +2,7 @@
 #pragma once
 
 #include "device_settings.h"
+#include "app_boot_choices.h"
 #include "esp_err.h"
 
 typedef struct {
@@ -26,3 +27,6 @@ esp_err_t settings_store_init(device_settings_t *settings);
  * a later explicit request may retry. ESP_OK means accepted, not durable. */
 esp_err_t settings_store_request(const device_settings_t *settings);
 settings_store_status_t settings_store_status(void);
+
+settings_store_status_t settings_store_boot_read(app_boot_choices_t *);
+esp_err_t settings_store_boot_request(const app_boot_choices_t *);

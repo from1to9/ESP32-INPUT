@@ -54,7 +54,7 @@ typedef struct {
     app_remote_media_request_t remote_command;
     app_media_remote_authority_t remote_authority;
     media_query_t query;
-    bool command_remote, remote_cancelled;
+    bool command_remote, command_cancelled;
     uint64_t command_channel_generation;
     ae_environment_t environment;
     app_media_snapshot_t view;
@@ -232,7 +232,7 @@ static ae_result_t authority(void *context, ae_authority_operation_t operation,
             ae_id_equal(&grant->request.recording_id,&request->recording_id);
         if (grant->valid && (exact || file) && (grant->remote || now<grant->expires_ms)) { matched=*grant; break; }
     }
-    if (environment && state->command_remote && !state->remote_cancelled &&
+    if (environment && state->command_remote && !state->command_cancelled &&
         (state->pending || state->view.result_ready)) query=state->remote_command;
     if (state->query.pending && !state->query.cancelled) {
         query_active=true; query_identity=state->query.identity; query_object=state->query.object;
@@ -375,7 +375,7 @@ static void network_channel_lost(void *context, const cp_identity_t *identity, u
     if (state->command_remote && state->remote_command.action==APP_REMOTE_MEDIA_START &&
         network_request(&state->remote_command.start) && state->command_channel_generation==channel &&
         !memcmp(state->remote_command.identity.principal_id,identity->principal_id,CP_ID_BYTES) &&
-        !memcmp(state->remote_command.identity.session_id,identity->session_id,CP_ID_BYTES)) state->remote_cancelled=true;
+        !memcmp(state->remote_command.identity.session_id,identity->session_id,CP_ID_BYTES)) state->command_cancelled=true;
     portEXIT_CRITICAL(&media_lock);
     if (!ae_id_empty(&capture.job_id) && capture.original_consumer_generation)
         app_control_server_capture_cancel(&capture.identity,capture.job_id.bytes,capture.original_consumer_generation,channel);
@@ -482,7 +482,7 @@ static ae_result_t start_job(media_state_t *state, const ae_snapshot_t *audio)
     const uint64_t now = clock_ms(NULL), lifetime = (uint64_t)start->duration_seconds * 1000U + AE_START_TIMEOUT_MS;
     if (now > UINT64_MAX - lifetime) return AE_EXHAUSTED;
     portENTER_CRITICAL(&media_lock);
-    if (state->cancellation != state->command_cancellation || state->remote_cancelled || !state->environment.unlocked ||
+    if (state->cancellation != state->command_cancellation || state->command_cancelled || !state->environment.unlocked ||
         state->environment.privacy_latched || state->environment.maintenance ||
         (command->kind == AE_CAPTURE_RECOGNITION && (!state->speech_context ||
             state->epoch != command->epoch || state->ui_revision != command->ui_revision))) {
@@ -519,7 +519,7 @@ static void process_command(media_state_t *state, const ae_snapshot_t *audio)
 {
     const app_media_local_request_t *command = &state->command;
     portENTER_CRITICAL(&media_lock);
-    const bool cancelled = (state->cancellation != state->command_cancellation || state->remote_cancelled) && command->action != APP_MEDIA_STOP;
+    const bool cancelled = (state->cancellation != state->command_cancellation || state->command_cancelled) && command->action != APP_MEDIA_STOP;
     portEXIT_CRITICAL(&media_lock);
     /* Drain a submitted audio result before accepting a replacement command. */
     if (cancelled && !state->waiting) {
@@ -900,7 +900,7 @@ ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *requ
     else {
         media->query.ready=false; media->query.cancelled=true;
         ae_secure_zero(media->query.data,sizeof(media->query.data));
-        media->command_remote=false; media->remote_cancelled=false; media->command_channel_generation=0;
+        media->command_remote=false; media->command_cancelled=false; media->command_channel_generation=0;
         ae_secure_zero(&media->remote_command,sizeof(media->remote_command));
         media->command = *request; media->pending = true; media->phase = MEDIA_ADMIT;
         media->execution_checked = false;
@@ -911,6 +911,25 @@ ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *requ
     portEXIT_CRITICAL(&media_lock);
     if (result == AE_OK && request->action == APP_MEDIA_STOP) app_media_runtime_stop(AE_STOP_REQUESTED);
     return result;
+}
+/* Previously admitted restoration owns only its exact local speaker token.
+ * Prevent a queued grant from being created, or retire that grant if published. */
+void app_media_runtime_cancel_boot_speaker(uint64_t token)
+{
+    if (!token) return;
+    portENTER_CRITICAL(&media_lock);
+    if (media) {
+        if (media->pending && !media->command_remote && media->command.token == token &&
+            media->command.action == APP_MEDIA_START && media->command.kind == AE_PLAYBACK_STREAM)
+            media->command_cancelled = true;
+        local_grant_t *grant = &media->grants[AE_CONSUMERS_MAX];
+        if (grant->token == token && !grant->remote && grant->request.kind == AE_PLAYBACK_STREAM) {
+            grant->valid = false;
+            grant->cancel_requested = true;
+            grant->cancel_reason = AE_STOP_REQUESTED;
+        }
+    }
+    portEXIT_CRITICAL(&media_lock);
 }
 void app_media_runtime_stop(ae_stop_reason_t reason)
 {
@@ -1194,7 +1213,7 @@ ae_result_t app_media_runtime_submit_remote(const app_remote_media_request_t *re
     else {
         media->query.ready=false; media->query.cancelled=true;
         ae_secure_zero(media->query.data,sizeof(media->query.data));
-        media->command=command; media->remote_command=*request; media->command_remote=true; media->remote_cancelled=false;
+        media->command=command; media->remote_command=*request; media->command_remote=true; media->command_cancelled=false;
         media->command_channel_generation=channel_generation;
         media->pending=true; media->phase=MEDIA_ADMIT; media->execution_checked=false;
         media->command_cancellation=media->cancellation; media->view.busy=true;
@@ -1211,7 +1230,7 @@ bool app_media_runtime_poll_remote(uint64_t token, app_audio_result_t *output)
     if (ready) {
         *output=media->view.result_detail; output->request_token=token; output->result=media->view.result;
         identity=media->remote_command.identity; policy=media->remote_authority;
-        if (media->remote_cancelled || !media->environment.unlocked || media->environment.privacy_latched || media->environment.maintenance)
+        if (media->command_cancelled || !media->environment.unlocked || media->environment.privacy_latched || media->environment.maintenance)
             *output=(app_audio_result_t){.request_token=token,.result=AE_DENIED};
     }
     portEXIT_CRITICAL(&media_lock);
@@ -1235,7 +1254,7 @@ void app_media_runtime_cancel_remote(uint64_t token, const cp_identity_t *identi
     portENTER_CRITICAL(&media_lock);
     if (media) {
         if (media->command_remote && media->remote_command.token==token && remote_identity_equal(identity,&media->remote_command.identity))
-            media->remote_cancelled=true;
+            media->command_cancelled=true;
         for (unsigned i=0;i<AE_CONSUMERS_MAX+1;++i) {
             local_grant_t *grant=&media->grants[i];
             if (grant->remote && grant->token==token && remote_identity_equal(identity,&grant->identity)) {
@@ -1535,7 +1554,7 @@ static uint64_t remote_payload_serial(uint64_t token)
     app_media_remote_authority_t policy={0}; cp_identity_t identity={0}; uint64_t serial=0;
     portENTER_CRITICAL(&media_lock);
     if (media && media->command_remote && media->view.result_ready && media->view.request_token==token &&
-        !media->remote_cancelled && media->environment.unlocked && !media->environment.privacy_latched && !media->environment.maintenance) {
+        !media->command_cancelled && media->environment.unlocked && !media->environment.privacy_latched && !media->environment.maintenance) {
         policy=media->remote_authority; identity=media->remote_command.identity; serial=media->result_audio_serial;
     }
     portEXIT_CRITICAL(&media_lock);

@@ -247,6 +247,7 @@ static void replace_stream_locked(bool hfp)
         return;
     }
     ++*generation;
+    if (hfp) audio.public.hfp_pcm_us = 0; else audio.public.a2dp_pcm_us = 0;
     /* Only the selected profile owns the PCM queues and mute policy. */
     if (audio.public.route == BT_AUDIO_OFF || audio.public.route == (hfp ? BT_AUDIO_HFP : BT_AUDIO_A2DP))
         invalidate_locked(true);
@@ -700,6 +701,13 @@ static void receive_pcm(bt_audio_route_t source, const uint8_t *data, uint32_t b
     playback_epoch = audio.adapter.playback_epoch;
     packet.sample_rate = source == BT_AUDIO_HFP ? audio.public.hfp_sample_rate : audio.public.a2dp_sample_rate;
     channels = source == BT_AUDIO_HFP ? 1 : audio.public.a2dp_source_channels;
+    /* Observe incoming music even before a speaker job exists. Never retain its PCM. */
+    if (data && bytes && bytes <= CALLBACK_BYTES_MAX && channels && bytes % (2U * channels) == 0) {
+        if (source == BT_AUDIO_A2DP && audio.public.a2dp_streaming && audio.public.a2dp_format_known &&
+            audio.public.classic_a2dp_peer_bonded) audio.public.a2dp_pcm_us = allowed ? packet.timestamp_us : now_us();
+        if (source == BT_AUDIO_HFP && audio.public.hfp_audio_connected && audio.public.hfp_format_known &&
+            audio.public.classic_hfp_peer_bonded) audio.public.hfp_pcm_us = allowed ? packet.timestamp_us : now_us();
+    }
     portEXIT_CRITICAL(&audio_lock);
     if (!allowed) return;
     if (!data || bytes == 0 || bytes > CALLBACK_BYTES_MAX || channels == 0 ||
@@ -1027,6 +1035,8 @@ static esp_err_t submit_control_locked(uint64_t generation, uint64_t link_genera
     if (accepted) {
         memcpy(audio.command_peer, peer ? peer : current, 6);
         audio.command = command; audio.command_pending = true;
+        audio.public.request_command = command;
+        memcpy(audio.public.request_peer, audio.command_peer, 6);
         audio.command_link_generation = link_generation;
         audio.command_requires_saved = false;
         ++audio.public.request_id; if (audio.public.request_id == 0) ++audio.public.request_id;

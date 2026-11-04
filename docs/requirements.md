@@ -10,7 +10,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 
 ## Confirmed decisions
 
-1. Three primary modes: mouse, keyboard and microphone/speaker. Cold boot enters mouse mode with motion disabled.
+1. Three primary modes: mouse, keyboard and microphone/speaker. Cold boot restores the last explicitly selected primary mode. With no saved choice it enters Mouse. Motion starts disabled and a restored Keyboard opens Touch.
 2. A click toggles mouse motion. Once enabled, handheld waving controls relative movement without holding a button. Use inertial sensor data and holding orientation to estimate natural direction and speed; direct wrist-rotation pointer control is superseded by the 2026-10-23 user revision.
 3. Motion character selection, touch selection and spoken English letters belong to keyboard mode.
 4. Prioritize iPhone, iPad, Windows and macOS. No proprietary target client is required for basic HID, but pairing, input layout and accessibility settings may still be necessary.
@@ -211,7 +211,7 @@ These additions preserve the original Mouse / Keyboard / Audio workflows.
 | D05 | Safe wake and preferences | The first complete touch/AI gesture wakes only. Pause hidden keyboard selection; preserve the draft and lock state. Brightness, theme, haptics, shortcut modifier and timeout persist through a versioned validated record, coalesced writes and truthful save errors. |
 | D06 | Consistent UI and device information | Use shared layout metrics, aligned text/control grids and both themes on every page. Separate Connectivity, Display, Input and About pages. Show firmware/board/capabilities without secrets; show actual audio/speech availability, session and fault state, with reasons for unavailable routes. |
 | D07 | Input transport selection | System settings offers Bluetooth and USB, independent of foreground mode. Standard USB composite mouse/keyboard retains diagnostics under one USB stack. Cancel queued input and complete old-host releases before switching; an already disconnected old host permits explicit switching without claiming release delivery. A connected, suspended or stalled host must recover or disconnect, otherwise the switch times out without changing selection. Require fresh zero reports on the new link. Never duplicate input to both hosts or automatically fall back after cable removal. Distinguish selection, physical connection, readiness, switching and unavailable capability. |
-| D08 | Startup identity | Show a lightweight ESP32-INPUT startup logo consistent with the dark/pale-blue design, then hand off to the normal Mouse workspace. No artificial startup delay, additional full-frame allocation, hidden fault or automatic microphone activation. |
+| D08 | Startup identity | Show a lightweight ESP32-INPUT startup logo consistent with the dark/pale-blue design, then hand off to the saved workspace (Mouse by default). No artificial startup delay, additional full-frame allocation, hidden fault or automatic microphone activation. |
 | D09 | Developer and source identity | About and startup diagnostics identify the developer, repository and build-time Git commit with Clean/Modified/Unknown state. Preserve the separate firmware version and ELF build fingerprint. Missing Git data is unknown, never a fabricated commit or clean claim. |
 
 Project attribution and source identity follow the [build identity contract](build-identity.md).

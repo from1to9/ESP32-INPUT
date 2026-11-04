@@ -4,6 +4,17 @@
 #include "../bt_audio/test_bt_audio.c"
 #undef main
 
+void device_radio_incoming_music(bool pcm)
+{
+    music_format(ESP_A2D_SBC_CIE_SF_44K, ESP_A2D_SBC_CIE_CH_MODE_STEREO, 3);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    if (pcm) {
+        uint8_t decoded[4096] = {0};
+        clock_us = 1250000;
+        a2_rx(decoded, sizeof(decoded));
+    }
+}
+
 void device_radio_init(void)
 {
     bond_count = shared_count = 2;

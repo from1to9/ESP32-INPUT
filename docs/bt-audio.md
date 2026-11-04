@@ -8,6 +8,42 @@ mono PCM16LE at 16 kHz. LC3 and external-codec modes are unavailable. A2DP uses
 actual decoded SBC mono/stereo at 16/32/44.1/48 kHz, explicitly downmixing stereo
 by arithmetic mean into mono. There is no transport resampling or acoustic AEC.
 
+
+## Startup choices and trusted audio reconnection
+
+The existing v5 settings record retains the HID USB/Bluetooth choice. LE HID
+retains its own selected/preferred bonded target and advertising policy. Classic
+bonding alone does not select an audio host. The settings worker stores the
+last primary mode and audio choices in a separate versioned NVS key in
+`input_prefs`. Older firmware can still read its original v5 settings record.
+A missing new key uses the previous defaults without writing at boot. An
+unreadable key disables restore and is left intact. A queued or failed save is
+distinct from a confirmed commit. Power loss before commit can retain the
+previous choices.
+
+After boot health permits ordinary local controls, the coordinator may select
+the saved audio route and make one connection attempt per previously observed
+bonded Classic service for the saved address. It uses the current bond catalogue
+revision and link generation. HFP restore connects the service, without opening
+voice or starting a microphone. A pairing window, busy radio, different peer
+or unknown catalogue cannot authorize a new link. The operator can use Manage
+devices after an unsuccessful attempt. HID and audio keep separate owners even
+when both addresses represent the same computer.
+
+A local Classic Speaker start is remembered after its identified playback job
+actually delivers its first frame. It may resume only on the saved peer and
+service, with a current route token and fresh valid decoded PCM. Known idle display sleep can leave Speaker waiting without waking the screen.
+An unknown display state or an active lock still blocks startup. While waiting,
+Audio offers **Stop speaker** on the existing Speaker button. Waiting starts
+no codec job and never enables the microphone. A later incoming stream may
+resume after the previous stream ended. Explicit Stop, local lock, loss of the
+saved bond or selection of another audio host cancels that intent. An explicit
+disconnect requested on Mosaico or through its audio API suppresses that
+service. A new local connect or confirmed local playback can select it again.
+Opening a saved row for inspection does not change the stored host. USB audio selection is restored independently; USB supplies no
+cross-boot Classic peer identity. Mic, recording, held keys, active leases,
+jobs and commands always require fresh admission.
+
 ## Shared lifecycle and ownership
 
 The application must initialize NVS, enable one BTDM controller and one

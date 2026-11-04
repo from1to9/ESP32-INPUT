@@ -4,6 +4,8 @@
 #include "test_media_controls.c"
 #undef main
 
+void device_radio_incoming_music(bool pcm);
+static void cold_music(void);
 void device_radio_init(void);
 void device_radio_dispatch(void);
 unsigned device_radio_calls(void);
@@ -77,6 +79,7 @@ int main(int argc, char **argv)
     assert(argc == 2);
     const char *scenario = argv[1];
     device_radio_init(); setup();
+    if (!strcmp(scenario, "cold-music")) { cold_music(); return 0; }
     context.mode = INPUT_KEYBOARD; context.overlay = APP_OVERLAY_BLUETOOTH_DEVICES;
     context.bluetooth_audio_devices = true; owner.audio.route = AE_ROUTE_USB_UAC;
     if (!strcmp(scenario, "voice-existing")) device_radio_hfp(false);
@@ -131,4 +134,36 @@ int main(int argc, char **argv)
     assert(!bt_audio_snapshot().pairing_requested && !device_radio_discoveries());
     printf("PASS: shared device owner %s\n", scenario);
     return 0;
+}
+
+static void cold_music(void)
+{
+    bt_audio_bond_list_t saved; bt_audio_copy_bond_list(&saved); assert(saved.known && saved.count);
+    app_boot_audio_t pref = {.route=AE_ROUTE_A2DP_SINK, .services=APP_RESUME_A2DP, .speaker=AE_ROUTE_A2DP_SINK};
+    memcpy(pref.peer,saved.bonds[0].address,6);
+    app_media_controls_boot(&pref,boot_save);
+    context.overlay=APP_OVERLAY_NONE; context.mode=INPUT_MOUSE; owner.audio.route=AE_ROUTE_A2DP_SINK;
+    distinct_routes=true;
+    poll_at(1100); bt_audio_service();
+    /* BLE HID becoming ready advances its input epoch and cancels panel
+     * operations through this callback, possibly for the same computer. */
+    app_media_controls_revoke_devices();
+    device_radio_dispatch();
+    assert(device_radio_calls()==1 && !submissions);
+    device_radio_speaker(); device_radio_incoming_music(false);
+    ae_route_port_t port=bt_audio_route_port();
+    ae_route_capabilities_t *a=&routes_by_id[AE_ROUTE_A2DP_SINK];
+    assert(port.capabilities(NULL,AE_ROUTE_A2DP_SINK,a)==AE_OK && a->connected);
+    hardware.formats[0].format=a->format;
+    poll_at(1200); assert(!submissions && view.media.speaker_waiting && !bt_audio_snapshot().a2dp_pcm_us);
+    device_radio_incoming_music(true); poll_at(1250);
+    assert(submissions==1 && submitted.action==APP_MEDIA_START && submitted.kind==AE_PLAYBACK_STREAM &&
+        ae_route_token_equal(&submitted.expected_route_token,&a->token));
+    context.mode=INPUT_AUDIO; poll_at(1251);
+    app_intent_t stop=intent(APP_MEDIA_LIVE_STOP); stop.media.value.role.role=APP_MEDIA_SPEAKER;
+    handle(stop); assert(cancelled_speaker==submitted.token && !boot_value.speaker);
+    bt_audio_a2dp_rx_t rx; bt_audio_a2dp_rx_snapshot(&rx);
+    assert(rx.callbacks==1 && !rx.bound && !rx.enqueued_samples && !rx.emitted_samples);
+    assert(device_radio_calls()==1 && !pairing_opens && !le_pairing_closes);
+    puts("PASS: saved-peer cold connect, decoded PCM before binding, exact speaker request, cancel during admission");
 }

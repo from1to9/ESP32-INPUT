@@ -152,6 +152,9 @@ static app_host_os_t s_host_os;
 static app_audio_kind_t s_audio_kind;
 static bool s_dark_theme = true;
 static device_settings_t s_settings;
+static app_boot_choices_t s_boot_choices;
+static bool s_boot_choices_known;
+static bool s_boot_save_pending, s_boot_save_failed;
 /* Last admitted durable intent, separate from temporary effective overrides.
  * The settings store still owns commit/readback evidence and error reporting. */
 static device_settings_t s_durable_settings;
@@ -716,6 +719,29 @@ static bool capture_requires_display(void)
         media.audio.capture_indicator_required;
 }
 
+static void save_boot_choices(void)
+{
+    if (settings_store_boot_request(&s_boot_choices) == ESP_OK) s_boot_save_pending = true;
+    else { s_boot_save_failed = true; s_message = "Boot choices could not be saved."; }
+}
+static void save_boot_audio(const app_boot_audio_t *audio)
+{
+    s_boot_choices.audio = *audio;
+    save_boot_choices();
+}
+
+static void restore_boot_mode(void)
+{
+    if (s_boot_choices.mode == INPUT_KEYBOARD || s_boot_choices.mode == INPUT_AUDIO) {
+        (void)hid_engine_set_mode(&s_engine, (input_mode_t)s_boot_choices.mode);
+        if (s_boot_choices.mode == INPUT_KEYBOARD) {
+            s_keyboard_submode = APP_KEYBOARD_TOUCH;
+            interaction_set_keyboard_motion(&s_interaction, false);
+        }
+        sync_interaction();
+    }
+}
+
 static void refresh_media_context(void)
 {
     app_presenter_indicator_status_t indicator = app_presenter_indicator_status();
@@ -748,7 +774,7 @@ static void refresh_media_context(void)
         .bluetooth_audio_devices = s_bluetooth_audio_devices &&
             (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES || s_overlay == APP_OVERLAY_AUDIO_DEVICE ||
              (s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == APP_CONFIRM_AUDIO_PAIR)),
-        .screen_off = !visible, .preview_characters = s_interaction.view.preview_length};
+        .screen_off = !visible, .display_asleep = s_idle.asleep && !s_idle.wake_capture, .preview_characters = s_interaction.view.preview_length};
     app_media_controls_context(&context);
 }
 
@@ -779,6 +805,14 @@ static void service_media(void)
     refresh_media_context();
     app_media_controls_effect_t effect = {0};
     app_media_controls_poll(s_now_ms, &effect);
+    if (s_boot_save_pending) {
+        settings_store_status_t boot = settings_store_boot_read(NULL);
+        s_boot_save_pending = boot.pending;
+        if (!boot.pending) {
+            s_boot_save_failed = boot.error != ESP_OK || boot.saved_revision != boot.requested_revision;
+            if (s_boot_save_failed) s_message = "Boot choices save failed; stored state is uncertain.";
+        }
+    }
     apply_media_effect(&effect);
     app_audio_diagnostics_poll(s_now_ms);
 }
@@ -1482,6 +1516,10 @@ static bool select_mode(input_mode_t mode)
     }
     s_drag_requested = false; s_overlay = APP_OVERLAY_NONE; ++s_ui_revision;
     sync_interaction();
+    if (s_boot_choices_known && s_boot_choices.mode != (uint8_t)mode) {
+        s_boot_choices.mode = (uint8_t)mode;
+        save_boot_choices();
+    }
     s_message = mode == INPUT_AUDIO ? "Audio routing is independent of the input connection." :
         "Mode changed; previous input released.";
     board_haptic_feedback(BOARD_FEEDBACK_MODE);
@@ -2226,6 +2264,7 @@ static bool process_priority(void)
     ++s_ui_revision;
     if (requests & (LOCK_REQUEST | PHYSICAL_LONG_PRESS)) {
         bool locked = (requests & LOCK_REQUEST) || !s_engine.state.locked;
+        if (locked) app_media_controls_pause_boot();
         hid_engine_set_locked(&s_engine, locked);
         s_message = locked ? "Locked. Hold AI to unlock; old input is cancelled." :
                     "Unlocked. Motion remains off; old input will not resume.";
@@ -2970,6 +3009,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
     }
     fill_local_management_view(&view, &wifi, link);
     app_media_controls_fill(&view);
+    if (!s_boot_choices_known || s_boot_save_failed) view.media.boot_storage_error = true;
     app_audio_diagnostics_media_view(s_now_ms, &view.media);
     app_connectivity_controls_fill(&view);
     fill_controller_view(&view.controllers);
@@ -3234,6 +3274,10 @@ void app_main(void)
         s_message = "Using device settings with a storage error; data preserved.";
     }
     s_durable_settings = s_settings;
+    settings_store_status_t boot = settings_store_boot_read(&s_boot_choices);
+    s_boot_choices_known = storage_error == ESP_OK && boot.available && boot.error == ESP_OK;
+    if (s_boot_choices_known) restore_boot_mode();
+    else s_message = "Boot choices unavailable; using startup defaults.";
     s_dark_theme = s_settings.theme == DEVICE_THEME_DARK;
     s_host_os = s_settings.host_modifier == DEVICE_HOST_COMMAND ? APP_HOST_COMMAND : APP_HOST_CTRL;
     interaction_touch_config_t touch_config = s_interaction.touch_config;
@@ -3288,6 +3332,7 @@ void app_main(void)
     if (media_error != AE_OK)
         ESP_LOGW(TAG, "Media runtime unavailable: %d", (int)media_error);
     if (!app_media_controls_init()) ESP_LOGW(TAG, "Media controls unavailable");
+    else if (s_boot_choices_known) app_media_controls_boot(&s_boot_choices.audio, save_boot_audio);
     record_boot_memory("media");
     if (!board_display_lock(1000)) {
         report_boot_fault("display lock", ESP_ERR_TIMEOUT);

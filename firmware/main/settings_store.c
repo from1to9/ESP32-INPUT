@@ -15,6 +15,7 @@ static uint8_t s_requested[DEVICE_SETTINGS_RECORD_SIZE];
 static uint8_t s_saved[DEVICE_SETTINGS_RECORD_SIZE];
 static int64_t s_changed_us;
 static nvs_handle_t s_handle;
+#include "settings_boot_choices.inc"
 
 static bool take_pending(uint8_t *record, uint64_t *revision, int64_t now_us)
 {
@@ -66,6 +67,7 @@ static void store_worker(void *argument)
     (void)argument;
     for (;;) {
         save_once();
+        save_boot_choices();
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
@@ -99,6 +101,7 @@ esp_err_t settings_store_init(device_settings_t *settings)
         error = ESP_OK;
     }
     s_status.error = error;
+    load_boot_choices();
     if (xTaskCreate(store_worker, "input_settings", 3072, NULL, 2, NULL) != pdPASS) {
         nvs_close(s_handle);
         s_status.error = ESP_ERR_NO_MEM;

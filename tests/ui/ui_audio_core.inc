@@ -152,6 +152,13 @@ static void audio_core_checks(void)
     audio_start_block_checks();
     audio_host_settling_checks();
     ui_fixture_media(&s_state); screenshot("audio-core-usb-ready");
+    s_state.media.connection = APP_MEDIA_CONNECTION_BLUETOOTH;
+    s_state.media.route = APP_MEDIA_ROUTE_A2DP;
+    s_state.media.speaker_waiting = true; screenshot("audio-speaker-waiting-music");
+    assert(has_visible_label(lv_screen_active(), "Waiting for music"));
+    clear_intents(); tap_control("Stop speaker");
+    assert(last_action(APP_MEDIA_CONTROL)->media.operation == APP_MEDIA_LIVE_STOP);
+    ui_fixture_media(&s_state); render();
     assert(has_visible_label(lv_screen_active(), "Off / Ready"));
     assert(!has_visible_label(lv_screen_active(), "On")); /* Enabled hardware alone is not a running job. */
     clear_intents(); tap_control("Start mic");

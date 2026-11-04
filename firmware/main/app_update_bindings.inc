@@ -222,6 +222,7 @@ static void __attribute__((noinline)) remote_update_service(void)
         hid_engine_cancel(&s_engine);
         s_drag_requested = false;
         discard_intents();
+        app_media_controls_pause_boot();
         app_media_runtime_stop(AE_STOP_MAINTENANCE);
         ble_hid_pairing_close();
     }

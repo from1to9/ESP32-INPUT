@@ -17,6 +17,10 @@ typedef struct {
     size_t durable_length, staging_length;
     esp_err_t open_error, get_error, set_error, commit_error;
     unsigned opens, gets, sets, commits, closes, tasks, delays;
+    app_boot_choices_t boot_data, boot_staging;
+    bool boot_exists, staging_boot;
+    esp_err_t boot_read_error;
+    unsigned boot_writes;
     TaskFunction_t worker;
     void *worker_argument;
     void (*commit_hook)(void);
@@ -64,6 +68,12 @@ static void check_handle(nvs_handle_t handle)
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *value, size_t *length)
 {
     check_handle(handle);
+    if (!strcmp(key, "resume_v1")) {
+        if (hw.boot_read_error) return hw.boot_read_error;
+        if (!hw.boot_exists) return ESP_ERR_NVS_NOT_FOUND;
+        assert(*length >= sizeof(hw.boot_data)); memcpy(value, &hw.boot_data, sizeof(hw.boot_data));
+        *length = sizeof(hw.boot_data); return ESP_OK;
+    }
     assert(strcmp(key, "record") == 0 && value && length);
     ++hw.gets;
     if (hw.get_error != ESP_OK) return hw.get_error;
@@ -80,6 +90,12 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *value, size_t
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, size_t length)
 {
     check_handle(handle);
+    if (!strcmp(key, "resume_v1")) {
+        assert(length == sizeof(hw.boot_staging)); ++hw.boot_writes;
+        if (hw.set_error) return hw.set_error;
+        memcpy(&hw.boot_staging, value, length); hw.staged = hw.staging_boot = true; return ESP_OK;
+    }
+    hw.staging_boot = false;
     assert(strcmp(key, "record") == 0 && value && length == DEVICE_SETTINGS_RECORD_SIZE);
     assert(length <= sizeof hw.staging);
     ++hw.sets;
@@ -95,6 +111,11 @@ esp_err_t nvs_commit(nvs_handle_t handle)
     check_handle(handle);
     assert(hw.staged);
     ++hw.commits;
+    if (hw.staging_boot) {
+        if (!hw.commit_error || hw.commit_applies_on_error) { hw.boot_data = hw.boot_staging; hw.boot_exists = true; }
+        hw.staged = hw.staging_boot = false;
+        return hw.commit_error;
+    }
     if (hw.commit_error == ESP_OK || hw.commit_applies_on_error) {
         memcpy(hw.durable, hw.staging, hw.staging_length);
         hw.durable_length = hw.staging_length;
@@ -138,6 +159,9 @@ void vTaskDelay(TickType_t ticks)
 
 static void reset_runtime(void)
 {
+    boot_status = (settings_store_status_t){0};
+    boot_requested = boot_saved = (app_boot_choices_t){0};
+    boot_dirty = boot_durable = boot_readable = false;
     s_status = (settings_store_status_t){0};
     s_started = s_dirty = s_saved_known = false;
     memset(s_requested, 0, sizeof s_requested);
@@ -735,8 +759,36 @@ static void v3_migration_preserves_tap_and_motion_defaults_without_boot_write(vo
     assert(device_settings_equal(&loaded, &changed) && !loaded.tap_to_click);
 }
 
+static void boot_choices_round_trip(void)
+{
+    reset(); device_settings_t old = alternative(); seed(&old);
+    device_settings_t current; assert(settings_store_init(&current) == ESP_OK);
+    assert(device_settings_equal(&old, &current));
+    app_boot_choices_t choices;
+    settings_store_status_t status = settings_store_boot_read(&choices);
+    assert(status.available && !status.loaded && !choices.mode && !choices.audio.services && !hw.boot_writes);
+    choices = (app_boot_choices_t){.mode = 2, .audio = {.route = 3, .peer = {1,2,3,4,5,6}, .services = 3, .speaker = 3}};
+    assert(settings_store_boot_request(&choices) == ESP_OK);
+    assert(settings_store_boot_read(NULL).pending && !hw.boot_exists);
+    worker_at(hw.now_us); assert(hw.boot_writes == 1 && !hw.sets);
+    app_boot_choices_t restored; reset_runtime(); assert(settings_store_init(&current) == ESP_OK);
+    status = settings_store_boot_read(&restored);
+    assert(status.loaded && !memcmp(&restored, &choices, sizeof(choices)) && device_settings_equal(&old, &current));
+    assert(settings_store_boot_request(&choices) == ESP_OK); worker_at(hw.now_us);
+    assert(hw.boot_writes == 1);
+    choices.audio.speaker = 0; hw.commit_error = ESP_FAIL;
+    assert(settings_store_boot_request(&choices) == ESP_OK); worker_at(hw.now_us);
+    status = settings_store_boot_read(NULL);
+    assert(status.error == ESP_FAIL && !status.pending && status.saved_revision != status.requested_revision);
+    hw.commit_error = ESP_OK; worker_at(hw.now_us); assert(hw.boot_writes == 2);
+    hw.boot_read_error = ESP_FAIL; reset_runtime(); assert(settings_store_init(&current) == ESP_OK);
+    status = settings_store_boot_read(&restored);
+    assert(!status.available && status.error == ESP_FAIL && !restored.audio.speaker);
+    assert(settings_store_boot_request(&choices) == ESP_ERR_INVALID_STATE);
+}
 int main(int argc, char **argv)
 {
+    boot_choices_round_trip();
     assert(argc <= 2);
     unsigned passed = 0;
 #define RUN(test) do { if (argc == 1 || strcmp(argv[1], #test) == 0) { \

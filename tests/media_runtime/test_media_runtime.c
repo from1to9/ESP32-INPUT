@@ -205,6 +205,30 @@ static void assert_local_result(ae_result_t expected)
     uint64_t token = 0; ae_result_t result = AE_OK;
     assert(app_media_runtime_take_result(&token, &result) && token == 1 && result == expected);
 }
+static void restore_cancel_binds_only_its_local_speaker(void)
+{
+    setup(); audio.route = AE_ROUTE_A2DP_SINK;
+    app_media_local_request_t start = request(AE_PLAYBACK_STREAM, AE_ROUTE_A2DP_SINK);
+    assert(app_media_runtime_submit_local(&start) == AE_OK);
+    app_media_runtime_cancel_boot_speaker(start.token+1);
+    assert(!media->command_cancelled);
+    app_media_runtime_cancel_boot_speaker(start.token);
+    media_step(media);
+    assert(!commands); assert_no_local_grant(); assert_local_result(AE_PRIVACY);
+
+    setup(); audio.route = AE_ROUTE_A2DP_SINK;
+    assert(app_media_runtime_submit_local(&start) == AE_OK); media_step(media);
+    local_grant_t *speaker = &media->grants[AE_CONSUMERS_MAX];
+    assert(speaker->valid && speaker->token == start.token);
+    app_media_runtime_cancel_boot_speaker(start.token);
+    assert(!speaker->valid && speaker->cancel_requested && !safety_stops);
+
+    setup(); audio.route = AE_ROUTE_HFP_HF;
+    start = request(AE_CAPTURE_LIVE, AE_ROUTE_HFP_HF);
+    assert(app_media_runtime_submit_local(&start) == AE_OK);
+    app_media_runtime_cancel_boot_speaker(start.token);
+    assert(!media->command_cancelled && !safety_stops);
+}
 static void local_transport_identity(void)
 {
     const ae_route_t targets[] = {AE_ROUTE_USB_UAC, AE_ROUTE_HFP_HF, AE_ROUTE_A2DP_SINK};
@@ -375,7 +399,7 @@ static void remote_and_queries(void)
     remote_grant_live=true; acknowledge(AE_OK);
     channel_generation=0; network_port.channel_lost(network_port.user,&identity,17);
     assert(captured.authority(captured.policy_context,AE_AUTH_RUNNING,&request.start,now,&permission)==AE_OK && permission.allowed);
-    assert(!media->remote_cancelled); /* File-only capture does not require a WSS channel. */
+    assert(!media->command_cancelled); /* File-only capture does not require a WSS channel. */
     uint64_t token; ae_result_t result; app_audio_result_t reply;
     assert(!app_media_runtime_take_result(&token,&result));
     app_media_snapshot_t view; assert(app_media_runtime_snapshot(&view) && !view.result_ready);
@@ -496,7 +520,7 @@ static void channel_lifetime_authority(void)
         assert(app_media_runtime_submit_remote(&request)==AE_OK); media_step(media); acknowledge(AE_OK);
         network_port.channel_lost(network_port.user,&identity,19);
         assert(captured.authority(captured.policy_context,AE_AUTH_RUNNING,&request.start,now,&permission)==AE_OK && permission.allowed && permission.owner_session_alive);
-        assert(!media->remote_cancelled && !safety_stops);
+        assert(!media->command_cancelled && !safety_stops);
     }
     puts("PASS: pinned WSS admission, close-before-START cancellation, stale close rejection and independent USB/HFP authority");
 }
@@ -615,7 +639,7 @@ int main(int argc, char **argv)
     a2dp_gap = true; transport_frames = 4; ingress_capacity = 4;
     media_step(media); /* One break and three fresh frames in the same bounded pass. */
     assert(!a2dp_gap && transport_frames == 1 && transport_reads == 4 && ingress_frames == 3);
-    local_transport_identity(); remote_and_queries(); channel_lifetime_authority(); remote_link_admission();
+    restore_cancel_binds_only_its_local_speaker(); local_transport_identity(); remote_and_queries(); channel_lifetime_authority(); remote_link_admission();
     assert(!lock_depth);
     heap_caps_free(media); media=NULL;
     puts("PASS: media runtime local grants, route/start ordering, cancellation, independent HID context and speech preview");

@@ -187,6 +187,9 @@ typedef struct {
 } app_media_devices_view_t;
 typedef struct {
     bool known, command_pending;
+    const char *resume_notice; /* Static literals only. */
+    bool boot_storage_error;
+    bool speaker_waiting; /* Saved intent, no active playback job. */
     uint64_t management_generation, audio_generation, resource_revision;
     app_media_state_t state;
     app_media_route_t route;

@@ -490,6 +490,13 @@ PATHS.update(AUDIO_DIAGNOSTIC_PATHS)
 PAIRING_OPEN = MEDIA_INTENT + [("media_controls", "confirm_review"), ("classic", "bt_audio_pairing_open_reviewed"),
                              ("classic", "pairing_open")]
 AUDIO_ADAPTER_PATHS = {
+    "boot_saved_audio_connect": CORE + [("main", "service_media"), ("media_controls", "app_media_controls_poll"),
+        ("media_controls", "poll_resume"), ("classic", "bt_audio_saved_request"), ("classic", "submit_control_locked"),
+        ("classic", "control_peer_compatible_locked")],
+    "boot_speaker_start": CORE + [("main", "service_media"), ("media_controls", "app_media_controls_poll"),
+        ("media_controls", "poll_resume"), ("media_controls", "submit_start"), ("media_controls", "submit_runtime"),
+        ("media_runtime", "app_media_runtime_submit_local"), ("media_runtime", "local_start_identity"),
+        ("media_runtime", "route_caps"), ("classic", "port_capabilities"), ("classic", "token_locked")],
     "audio_device_connect_voice": MEDIA_INTENT + [("media_controls", "connect_voice"),
         ("media_controls", "submit_voice_phase"), ("classic", "bt_audio_saved_request"),
         ("classic", "submit_control_locked"), ("classic", "control_peer_compatible_locked"), ("classic", "peer_matches")],

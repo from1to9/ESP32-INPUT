@@ -72,6 +72,7 @@ typedef struct {
     bool hfp_audio_connected;
     bool a2dp_connected;
     bool a2dp_streaming;
+    uint64_t hfp_pcm_us, a2dp_pcm_us; /* Last valid decoded input on this link generation. */
     bool hfp_format_known;
     uint32_t hfp_sample_rate;     /* CVSD 8000 or mSBC 16000; LC3 unavailable. */
     bool a2dp_format_known;
@@ -89,6 +90,8 @@ typedef struct {
     uint64_t generation;
     uint64_t hfp_link_generation, a2dp_link_generation; /* Version of each profile, including while disconnected. */
     uint64_t request_id;
+    bt_audio_command_t request_command;
+    uint8_t request_peer[6];    /* Explicit command target, independent of observed profile connection. */
     bt_audio_job_status_t request_status;
     esp_err_t request_error;
     bool control_inflight;      /* May remain true after local cancellation. */

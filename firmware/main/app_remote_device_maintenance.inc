@@ -23,7 +23,7 @@ static void remote_device_restart_progress(remote_device_binding_job_t *job)
 {
     bool authorized = !job->cancelling && !s_engine.state.locked && remote_device_session(&job->request.identity) &&
         s_management_generation == job->request.management_generation && s_now_ms < job->request.deadline_ms;
-    bool ready = remote_device_neutral() && remote_device_media_off() && !board_haptics_active() && !settings_store_status().pending;
+    bool ready = remote_device_neutral() && remote_device_media_off() && !board_haptics_active() && !settings_store_status().pending && !settings_store_boot_read(NULL).pending;
     if (!job->restart_id) {
         if (!authorized) { remote_device_maintenance_cancelled(job); return; }
         if (!ready) return;
@@ -127,7 +127,18 @@ static void remote_device_factory_progress(remote_device_binding_job_t *job)
             remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return;
         }
         if (wifi.operation_pending || wifi.completed_request_id != job->wifi_id || !wifi.known || wifi.count) return;
+        if (!s_boot_choices_known) { remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return; }
+        app_media_controls_clear_boot();
+        s_boot_choices = (app_boot_choices_t){0};
+        if (settings_store_boot_request(&s_boot_choices) != ESP_OK) { remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return; }
         job->reset_step = 5;
+    }
+    if (job->reset_step == 5) {
+        app_boot_choices_t saved;
+        settings_store_status_t receipt = settings_store_boot_read(&saved);
+        if (receipt.pending) return;
+        if (!receipt.available || receipt.error != ESP_OK || receipt.saved_revision != receipt.requested_revision ||
+            memcmp(&saved, &(app_boot_choices_t){0}, sizeof(saved))) { remote_device_failed(job, CP_STORAGE_UNCERTAIN, true); return; }
         remote_device_applied(job, s_remote_device_maintenance_revision, true);
         remote_device_set_maintenance(false);
     }

@@ -248,18 +248,20 @@ static void render_media_core(void)
         const app_media_role_view_t *role = i ? &media->speaker : &media->microphone;
         const app_media_job_view_t *job = i ? &media->playback : &media->live_capture;
         bool active = media_job_active(job);
-        app_media_request_t power = media_request(active ? APP_MEDIA_LIVE_STOP : APP_MEDIA_LIVE_START);
+        bool waiting_music = i && !active && media->speaker_waiting;
+        app_media_request_t power = media_request(active || waiting_music ? APP_MEDIA_LIVE_STOP : APP_MEDIA_LIVE_START);
         power.value.role.role = i ? APP_MEDIA_SPEAKER : APP_MEDIA_MICROPHONE;
         power.job_id = job->id; power.consumer_generation = job->consumer_generation;
         media_bind(s_audio_power[i], power, active ? job->can_stop && media_id_valid(job->id) && job->consumer_generation :
-            role->known && role->can_start && !media->command_pending);
-        text(s_audio_power[i], i ? (active ? "Stop speaker" : "Start speaker") : (active ? "Stop mic" : "Start mic"));
+            role->known && (waiting_music || (role->can_start && !media->command_pending)));
+        text(s_audio_power[i], i ? (active || waiting_music ? "Stop speaker" : "Start speaker") : (active ? "Stop mic" : "Start mic"));
         selected(s_audio_power[i], active);
         start_reason[i] = media_start_reason(i != 0, role, job);
         bool waiting = start_reason[i] && media_waiting_for_host(role->start_block);
         const char *reason = job->known && *job->reason && !(waiting && job->state == APP_MEDIA_JOB_COMPLETED) ?
             job->reason : start_reason[i];
-        if (reason) label_format(s_audio_state[i], "%s\n%s", media_core_state(i != 0, role, job), reason);
+        if (waiting_music) label_text(s_audio_state[i], media->resume_notice ? media->resume_notice : "Waiting for music");
+        else if (reason) label_format(s_audio_state[i], "%s\n%s", media_core_state(i != 0, role, job), reason);
         else label_text(s_audio_state[i], media_core_state(i != 0, role, job));
         /* Both host-waiting phases share stable setup guidance. The owner
          * retains the distinct blockers and remains the only start gate. */
@@ -281,7 +283,10 @@ static void render_media_core(void)
     else label_text(s_volume_text, "--");
     bool waiting_hint = (start_reason[0] && media_waiting_for_host(media->microphone.start_block)) ||
         (start_reason[1] && media_waiting_for_host(media->speaker.start_block));
-    if (!media->known) label_text(s_audio_note, "Audio status unavailable.");
+    if (media->boot_storage_error) label_text(s_audio_note, "Boot choices unavailable. Next startup state is uncertain.");
+    else if (media->speaker_waiting) label_text(s_audio_note, "Play audio on the saved Bluetooth host, or stop Speaker to cancel.");
+    else if (media->resume_notice) label_text(s_audio_note, media->resume_notice);
+    else if (!media->known) label_text(s_audio_note, "Audio status unavailable.");
     else if (*media->reason) label_text(s_audio_note, media->reason);
     else if (media->live_capture.known && *media->live_capture.reason &&
         !(waiting_hint && media->live_capture.state == APP_MEDIA_JOB_COMPLETED)) label_format(s_audio_note, "Mic: %s", media->live_capture.reason);

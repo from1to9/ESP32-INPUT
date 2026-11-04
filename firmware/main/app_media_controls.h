@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "app_ui.h"
+#include "app_boot_choices.h"
 
 /* One coordinator owner. All runtime/store reads are bounded cached copies;
  * mutations only submit to their worker. No LVGL, codec, filesystem or radio IO.
@@ -10,7 +11,7 @@ typedef struct {
     input_mode_t mode;
     app_overlay_t overlay;
     app_keyboard_submode_t keyboard_submode;
-    bool locked, screen_off;
+    bool locked, screen_off, display_asleep; /* Known idle sleep, distinct from an unavailable display. */
     bool bluetooth_audio_devices; /* Explicit coordinator-owned local management context. */
     app_local_access_t local_access;
     size_t preview_characters; /* Actual draft size; confirm needs free capacity. */
@@ -25,6 +26,9 @@ typedef struct {
 } app_media_controls_effect_t;
 
 bool app_media_controls_init(void);
+void app_media_controls_pause_boot(void);
+void app_media_controls_clear_boot(void);
+void app_media_controls_boot(const app_boot_audio_t *, void (*save)(const app_boot_audio_t *));
 /* Called synchronously only after applying this owner's open-confirmation effect.
  * Bind its review to the input epoch produced by opening the modal. */
 void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t epoch);

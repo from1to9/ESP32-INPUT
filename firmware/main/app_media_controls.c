@@ -52,6 +52,17 @@ typedef struct {
     bt_audio_bond_list_t bonds;
     uint8_t selected_peer[6];
     bool selected_peer_known;
+    struct {
+        app_boot_audio_t desired;
+        void (*save)(const app_boot_audio_t *);
+        bool route_pending, pending_playback;
+        uint8_t ignore_connected;
+        const char *notice;
+        uint8_t connect_left, submitted_route, submitted_speaker;
+        uint64_t connect_id, automatic_token, attempted_stream, listen_after_us, seen_link_request;
+        ae_route_token_t submitted_token;
+        ae_id_t speaker_job;
+    } resume;
     unsigned device_page;
     uint64_t device_request_id;
     struct {
@@ -206,14 +217,17 @@ static bool format_supported(const ae_format_t *format, ae_role_t role)
         if ((controls.codec.formats[i].roles & role) && ae_format_equal(&controls.codec.formats[i].format, format)) return true;
     return false;
 }
-static bool local_ready(void)
+static bool owner_ready(bool resume)
 {
     return controls.initialized && controls.clock_known && !controls.clock_failed &&
-        controls.context.local_access == APP_LOCAL_NORMAL && !controls.context.locked && !controls.context.screen_off && controls.runtime_known &&
+        controls.context.local_access == APP_LOCAL_NORMAL && !controls.context.locked &&
+        (!controls.context.screen_off || (resume && controls.context.display_asleep)) && controls.runtime_known &&
         controls.runtime.initialized && controls.runtime.audio_known;
 }
-static bool idle_controls(void)
-{ return local_ready() && !controls.pending && !controls.voice_link.active && !controls.runtime.busy && !controls.runtime.result_ready; }
+static bool local_ready(void) { return owner_ready(false); }
+static bool idle_for(bool resume)
+{ return owner_ready(resume) && !controls.pending && !controls.voice_link.active && !controls.runtime.busy && !controls.runtime.result_ready; }
+static bool idle_controls(void) { return idle_for(false); }
 static bool job_active(const ae_job_snapshot_t *job)
 {
     return job->state == AE_JOB_STARTING || job->state == AE_JOB_RUNNING || job->state == AE_JOB_STOPPING ||
@@ -365,13 +379,14 @@ static ae_route_t live_route(ae_role_t role)
     if (route_ready(current, role)) return current;
     return route_ready(AE_ROUTE_A2DP_SINK, role) ? AE_ROUTE_A2DP_SINK : AE_ROUTE_HFP_HF;
 }
-static app_media_start_block_t live_start_block(ae_role_t role)
+static app_media_start_block_t live_start_block(ae_role_t role, bool resume)
 {
     if (!controls.initialized || !controls.runtime_known || !controls.runtime.initialized || !controls.runtime.audio_known)
         return APP_MEDIA_START_UNKNOWN;
     if (!controls.clock_known || controls.clock_failed) return APP_MEDIA_START_CLOCK_UNAVAILABLE;
     if (controls.context.locked) return APP_MEDIA_START_LOCKED;
-    if (controls.context.screen_off) return APP_MEDIA_START_SCREEN_UNAVAILABLE;
+    if (controls.context.screen_off && !(resume && role == AE_SPEAKER && controls.context.display_asleep))
+        return APP_MEDIA_START_SCREEN_UNAVAILABLE;
     if (controls.pending || controls.voice_link.active || controls.runtime.busy || controls.runtime.result_ready)
         return APP_MEDIA_START_PENDING;
     if (controls.runtime.audio.quarantined) return APP_MEDIA_START_QUARANTINED;
@@ -777,8 +792,8 @@ static void rebuild(void)
         view->speaker.can_enable = editable && !any_jobs() && route && route->available && route->connected && route->playback;
         /* Live routes have an actual host sink/source. Local capture belongs
          * to separately bounded recording and recognition flows. */
-        view->microphone.start_block = live_start_block(AE_MICROPHONE);
-        view->speaker.start_block = live_start_block(AE_SPEAKER);
+        view->microphone.start_block = live_start_block(AE_MICROPHONE, false);
+        view->speaker.start_block = live_start_block(AE_SPEAKER, false);
         view->microphone.can_start = view->microphone.start_block == APP_MEDIA_START_ALLOWED;
         view->speaker.can_start = view->speaker.start_block == APP_MEDIA_START_ALLOWED;
         view->volume_known = view->gain_known = true;
@@ -879,6 +894,15 @@ static void rebuild(void)
     spoken->can_confirm = spoken->can_reject && controls.context.preview_characters < APP_UI_DRAFT_CAPACITY &&
         speech->epoch == controls.context.epoch && speech->ui_revision == controls.context.ui_revision;
     if (speech->result != AE_OK) snprintf(spoken->reason, sizeof(spoken->reason), "%s", result_text(speech->result));
+    view->speaker_waiting = controls.resume.desired.speaker && !job_active(&audio->playback);
+    view->resume_notice = controls.resume.notice;
+    if (view->speaker_waiting && !view->resume_notice) {
+        bool music = controls.resume.desired.speaker == AE_ROUTE_A2DP_SINK;
+        bool connected = music ? controls.bluetooth.a2dp_connected : controls.bluetooth.hfp_connected;
+        const uint8_t *peer = music ? controls.bluetooth.a2dp_peer : controls.bluetooth.hfp_peer;
+        if (!connected || memcmp(peer, controls.resume.desired.peer, 6))
+            view->resume_notice = "Waiting for saved audio host";
+    }
     rebuild_audio_pairing();
     bool host_preparing = view->microphone.start_block == APP_MEDIA_START_HOST_PREPARING ||
         view->speaker.start_block == APP_MEDIA_START_HOST_PREPARING;
@@ -915,6 +939,7 @@ void app_media_controls_revoke_devices(void)
 void app_media_controls_context(const app_media_controls_context_t *context)
 {
     if (!context || !controls.initialized) return;
+    if (context->locked || context->local_access != APP_LOCAL_NORMAL) app_media_controls_pause_boot();
     if (controls.device_request_id && (context->locked || context->screen_off || context->local_access != APP_LOCAL_NORMAL ||
         !context->bluetooth_audio_devices || context->epoch != controls.context.epoch)) {
         app_media_controls_revoke_devices();
@@ -933,9 +958,9 @@ void app_media_controls_context(const app_media_controls_context_t *context)
     if (context->overlay == APP_OVERLAY_RECORDINGS && controls.context.overlay != APP_OVERLAY_RECORDINGS) controls.list_requested = true;
     controls.context = *context;
 }
-static ae_result_t submit_runtime(app_media_local_request_t request)
+static ae_result_t submit_runtime(app_media_local_request_t request, bool resume)
 {
-    if (!idle_controls()) return AE_BUSY;
+    if (!idle_for(resume)) return AE_BUSY;
     if (controls.serial == UINT64_MAX) return AE_EXHAUSTED;
     request.token = ++controls.serial;
     request.epoch = controls.context.epoch; request.ui_revision = controls.context.ui_revision;
@@ -944,6 +969,15 @@ static ae_result_t submit_runtime(app_media_local_request_t request)
     ae_result_t result = app_media_runtime_submit_local(&request);
     if (result == AE_OK) {
         controls.pending = true; controls.pending_token = request.token; controls.pending_action = request.action;
+        if (request.action == APP_MEDIA_ROUTE) {
+            controls.resume.route_pending = false;
+            controls.resume.submitted_route = (uint8_t)request.route;
+        }
+        controls.resume.pending_playback = request.action == APP_MEDIA_START && request.kind == AE_PLAYBACK_STREAM;
+        if (controls.resume.pending_playback) {
+            controls.resume.submitted_speaker = (uint8_t)request.route;
+            controls.resume.submitted_token = request.expected_route_token;
+        }
         increase(&controls.revision);
     }
     return result;
@@ -959,7 +993,7 @@ static const ae_format_t *selected_format(void)
         if (controls.view.recording_options.profiles[i].id == controls.profile_id) return &controls.profiles[i];
     return NULL;
 }
-static ae_result_t submit_start(ae_job_kind_t kind, const ae_record_metadata_t *record)
+static ae_result_t submit_start(ae_job_kind_t kind, const ae_record_metadata_t *record, bool resume)
 {
     const ae_format_t *format = selected_format();
     ae_route_t route = kind == AE_CAPTURE_RECORDING || kind == AE_CAPTURE_RECOGNITION || kind == AE_PLAYBACK_RECORDING ?
@@ -985,8 +1019,10 @@ static ae_result_t submit_start(ae_job_kind_t kind, const ae_record_metadata_t *
         .export_policy = AE_EXPORT_NONE};
     if (route != AE_ROUTE_LOCAL) request.expected_route_token = controls.routes[route].token;
     if (record) request.recording_id = record->object_id;
-    return submit_runtime(request);
+    return submit_runtime(request, resume);
 }
+#include "app_media_resume.inc"
+
 static bool object_request_valid(const app_media_request_t *request, const app_media_record_view_t *record)
 {
     return record->valid && same_ui_id(request->object_id, record->id) && request->object_revision == record->revision;
@@ -1027,14 +1063,14 @@ static ae_result_t request_list(uint32_t page)
 {
     if (page >= CURSOR_HISTORY) return AE_INVALID;
     ae_result_t result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_QUERY_LIST,
-        .capacity = APP_MEDIA_ROWS, .cursor = controls.cursors[page]});
+        .capacity = APP_MEDIA_ROWS, .cursor = controls.cursors[page]}, false);
     if (result == AE_OK) { controls.page = page; controls.view.recordings.pending = true; }
     return result;
 }
 static ae_result_t stop_job(const app_media_request_t *request, ae_stop_reason_t reason)
 {
     return submit_runtime((app_media_local_request_t){.action = APP_MEDIA_STOP_JOB,
-        .job_id = engine_id(request->job_id), .consumer_generation = request->consumer_generation, .stop_reason = reason});
+        .job_id = engine_id(request->job_id), .consumer_generation = request->consumer_generation, .stop_reason = reason}, false);
 }
 static bool pairing_resources_current(void)
 {
@@ -1057,7 +1093,7 @@ static ae_result_t confirm_review(const app_intent_t *intent)
         if (quota > RECORD_QUOTA_MAX) quota = RECORD_QUOTA_MAX;
         quota -= quota % 4096U;
         return submit_runtime((app_media_local_request_t){.action = APP_MEDIA_PREPARE_STORE,
-            .object_limit = RECORD_OBJECT_LIMIT, .quota_bytes = quota});
+            .object_limit = RECORD_OBJECT_LIMIT, .quota_bytes = quota}, false);
     }
     app_media_review_t review = controls.review;
     controls.review.valid = false;
@@ -1089,11 +1125,11 @@ static ae_result_t confirm_review(const app_intent_t *intent)
         if (!controls.view.recording_options.can_start || review.options.profile_id != controls.profile_id ||
             review.options.duration_seconds != controls.view.recording_options.duration_seconds ||
             review.options.byte_limit != controls.view.recording_options.byte_limit) return AE_STALE;
-        return submit_start(AE_CAPTURE_RECORDING, NULL);
+        return submit_start(AE_CAPTURE_RECORDING, NULL, false);
     case APP_MEDIA_RECORD_DELETE_REQUEST:
         if (!object_request_valid(&review.request, &controls.view.selected_recording) || !controls.view.selected_recording.can_delete) return AE_STALE;
         return submit_runtime((app_media_local_request_t){.action = APP_MEDIA_QUERY_DELETE,
-            .recording_id = engine_id(review.request.object_id), .object_revision = review.request.object_revision});
+            .recording_id = engine_id(review.request.object_id), .object_revision = review.request.object_revision}, false);
     case APP_MEDIA_RECORD_CANCEL_DISCARD_REQUEST:
         if (!job_request_valid(&review.request, &controls.view.recording) || !controls.view.recording.can_cancel_discard) return AE_STALE;
         return stop_job(&review.request, AE_STOP_CANCEL_DISCARD);
@@ -1178,6 +1214,7 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
             !same_ui_id(request->object_id, controls.view.devices.selected) || selected_bond() < 0) { result = AE_STALE; break; }
         unsigned profile = (unsigned)action / 2U; bool disconnect = (action & 1) != 0;
         if (!(disconnect ? controls.view.devices.can_disconnect[profile] : controls.view.devices.can_connect[profile])) { result = AE_BUSY; break; }
+        resume_link_choice(controls.selected_peer, profile ? APP_RESUME_A2DP : APP_RESUME_HFP, !disconnect);
         if (!profile && !disconnect) { result = connect_voice(); break; }
         bt_audio_command_t command = profile ? (disconnect ? BT_AUDIO_DISCONNECT_A2DP : BT_AUDIO_CONNECT_A2DP) :
             (disconnect ? BT_AUDIO_DISCONNECT_HFP : BT_AUDIO_CONNECT_HFP);
@@ -1194,11 +1231,12 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
                 bt_audio_pairing_close(); controls.audio_pairing_owned = false;
             }
             ae_route_t route = connection_route(request->value.connection);
-            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_ROUTE, .route = route});
+            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_ROUTE, .route = route}, false);
         }
         break;
     case APP_MEDIA_SELECT_PEER:
         if (controls.view.can_select_peer && same_ui_id(request->value.peer_id, controls.view.next_peer_id)) {
+            resume_select_peer(request->value.peer_id.bytes + 10);
             memcpy(controls.selected_peer, request->value.peer_id.bytes + 10, 6);
             controls.selected_peer_known = true; increase(&controls.revision); result = AE_OK;
         }
@@ -1209,14 +1247,18 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
         const app_media_role_view_t *role = microphone ? &controls.view.microphone : &controls.view.speaker;
         const app_media_job_view_t *job = microphone ? &controls.view.live_capture : &controls.view.playback;
         if (request->operation == APP_MEDIA_LIVE_START && role->can_start)
-            result = submit_start(microphone ? AE_CAPTURE_LIVE : AE_PLAYBACK_STREAM, NULL);
-        else if (request->operation == APP_MEDIA_LIVE_STOP && job->can_stop && job_request_valid(request, job))
+            result = submit_start(microphone ? AE_CAPTURE_LIVE : AE_PLAYBACK_STREAM, NULL, false);
+        else if (request->operation == APP_MEDIA_LIVE_STOP && job->can_stop && job_request_valid(request, job)) {
+            if (!microphone) resume_stop_speaker();
             result = stop_job(request, AE_STOP_REQUESTED);
+        } else if (!microphone && request->operation == APP_MEDIA_LIVE_STOP && controls.view.speaker_waiting) {
+            resume_cancel_start(); resume_stop_speaker(); result = AE_OK;
+        }
         break;
     }
     case APP_MEDIA_SELECT_ROUTE:
         if ((unsigned)request->value.route < APP_MEDIA_ROUTE_COUNT && controls.view.routes[request->value.route].can_select)
-            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_ROUTE, .route = (ae_route_t)request->value.route});
+            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_ROUTE, .route = (ae_route_t)request->value.route}, false);
         break;
     case APP_MEDIA_LINK_CONNECT: case APP_MEDIA_LINK_DISCONNECT: {
         app_media_route_t route = controls.view.route;
@@ -1224,6 +1266,9 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
         bool connect = request->operation == APP_MEDIA_LINK_CONNECT;
         bool allowed = connect ? controls.view.routes[route].can_connect : controls.view.routes[route].can_disconnect;
         if (allowed) {
+            resume_link_choice(connect ? controls.selected_peer : route == APP_MEDIA_ROUTE_HFP ?
+                controls.bluetooth.hfp_peer : controls.bluetooth.a2dp_peer,
+                route == APP_MEDIA_ROUTE_HFP ? APP_RESUME_HFP : APP_RESUME_A2DP, connect);
             if (connect && route == APP_MEDIA_ROUTE_HFP) { result = connect_voice(); break; }
             app_media_local_request_t command = {.action = APP_MEDIA_LINK_CONTROL, .route = (ae_route_t)route,
                 .value = connect, .bluetooth_generation = controls.bluetooth.generation,
@@ -1232,7 +1277,7 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
                 .bluetooth_bond_revision = connect ? controls.bonds.revision : 0};
             memcpy(command.bluetooth_peer, connect ? controls.selected_peer :
                 route == APP_MEDIA_ROUTE_HFP ? controls.bluetooth.hfp_peer : controls.bluetooth.a2dp_peer, 6);
-            result = submit_runtime(command);
+            result = submit_runtime(command, false);
         }
         break;
     }
@@ -1247,16 +1292,16 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
         if (allowed && format) result = submit_runtime((app_media_local_request_t){
             .action = request->operation == APP_MEDIA_SET_ENABLED ? APP_MEDIA_ENABLE_ROLE : APP_MEDIA_MUTE_ROLE,
             .role = request->value.role.role == APP_MEDIA_MICROPHONE ? AE_MICROPHONE : AE_SPEAKER,
-            .value = request->value.role.value, .format = *format});
+            .value = request->value.role.value, .format = *format}, false);
         break;
     }
     case APP_MEDIA_SET_VOLUME:
         if (controls.view.can_set_volume && request->value.level <= controls.view.safe_volume_max)
-            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_VOLUME, .level = request->value.level});
+            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_VOLUME, .level = request->value.level}, false);
         break;
     case APP_MEDIA_SET_GAIN:
         if (controls.view.can_set_gain && request->value.level <= 42 && request->value.level % 6 == 0)
-            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_GAIN, .level = request->value.level});
+            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_GAIN, .level = request->value.level}, false);
         break;
     case APP_MEDIA_RECORD_SET_PROFILE:
         if (controls.view.recording_options.can_edit) {
@@ -1301,7 +1346,7 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
         if (request->list_generation != controls.view.recordings.generation) { result = AE_STALE; break; }
         for (size_t i = 0; i < controls.view.recordings.row_count; ++i) {
             if (!object_request_valid(request, &controls.view.recordings.rows[i])) continue;
-            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_QUERY_GET, .recording_id = engine_id(request->object_id)});
+            result = submit_runtime((app_media_local_request_t){.action = APP_MEDIA_QUERY_GET, .recording_id = engine_id(request->object_id)}, false);
             if (result == AE_OK) {
                 controls.selected_known = false; controls.selected_request = request->object_id;
                 controls.selected_revision = request->object_revision;
@@ -1312,14 +1357,14 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
         break;
     case APP_MEDIA_RECORD_PLAY:
         if (object_request_valid(request, &controls.view.selected_recording) && controls.view.selected_recording.can_play)
-            result = submit_start(AE_PLAYBACK_RECORDING, &controls.selected);
+            result = submit_start(AE_PLAYBACK_RECORDING, &controls.selected, false);
         break;
     case APP_MEDIA_PLAYBACK_STOP:
         if (job_request_valid(request, &controls.view.playback) && controls.view.playback.can_stop) result = stop_job(request, AE_STOP_REQUESTED);
         break;
     case APP_MEDIA_SPEECH_START:
         if (request->speech_generation != controls.view.speech.generation || request->speech_revision != controls.view.speech.revision) { result = AE_STALE; break; }
-        if (controls.view.speech.can_listen) result = submit_start(AE_CAPTURE_RECOGNITION, NULL);
+        if (controls.view.speech.can_listen) result = submit_start(AE_CAPTURE_RECOGNITION, NULL, false);
         break;
     case APP_MEDIA_SPEECH_STOP: {
         const ae_job_snapshot_t *job = &controls.runtime.audio.capture[AE_CAPTURE_RECOGNITION];
@@ -1353,6 +1398,7 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
     if (effect) memset(effect, 0, sizeof(*effect));
     if (!controls.initialized) return;
     if (controls.clock_known && now_ms < controls.now_ms) {
+        resume_cancel_link();
         controls.clock_failed = true; controls.review.valid = controls.prepare_review = false;
         controls.microphone_level = (app_media_mic_level_t){0}; controls.microphone_level_cached = false;
         if (controls.voice_link.active) finish_voice_link(effect, AE_TIME_UNKNOWN);
@@ -1445,6 +1491,7 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
         }
         uint64_t token; ae_result_t taken;
         if (!app_media_runtime_take_result(&token, &taken) || token != controls.pending_token || taken != runtime->result) result = AE_UNCERTAIN;
+        resume_result(result, &runtime->result_detail.job);
         controls.pending = false; controls.runtime.result_ready = false;
         controls.view.recordings.pending = false;
         if (result != AE_OK && controls.pending_action == APP_MEDIA_QUERY_LIST) {
@@ -1454,6 +1501,7 @@ void app_media_controls_poll(uint64_t now_ms, app_media_controls_effect_t *effec
         increase(&controls.revision); effect_result(effect, result);
     }
     rebuild();
+    poll_resume();
     if (controls.list_requested && controls.context.overlay == APP_OVERLAY_RECORDINGS && idle_controls()) {
         ae_result_t result = request_list(controls.page);
         controls.list_requested = false;
