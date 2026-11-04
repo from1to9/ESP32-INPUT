@@ -638,6 +638,13 @@ static void first_boot_local_navigation(void)
     assert(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_DISPLAY);
     update_control_tap(104, APP_THEME, 0);
     assert(s_dark_theme);
+    update_control_tap(120, APP_SETTINGS_PAGE, APP_SETTINGS_CONNECTIVITY);
+    update_control_tap(121, APP_BLUETOOTH_DEVICES, 0);
+    assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !s_bluetooth_audio_devices);
+    update_control_tap(122, APP_PAIRING_REQUEST, APP_PAIR_OPEN);
+    assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && s_pair_operation == APP_CONFIRM_NONE);
+    update_control_tap(123, APP_BLUETOOTH_DEVICES, 1);
+    assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && s_bluetooth_audio_devices);
     update_control_tap(105, APP_CLOSE, 0);
     assert(s_overlay == APP_OVERLAY_NONE);
     assert(!test_update_health_requests);
@@ -649,6 +656,8 @@ static void first_boot_local_navigation(void)
     /* A real update claim, busy flash, or restart independently wins. */
     test_update_busy = true; remote_update_service();
     update_control_tap(106, APP_MENU, APP_OVERLAY_MODES);
+    assert(s_overlay == APP_OVERLAY_NONE);
+    update_control_tap(124, APP_BLUETOOTH_DEVICES, 1);
     assert(s_overlay == APP_OVERLAY_NONE);
     test_update_busy = false; s_update_gate.active = true; remote_update_service();
     update_control_tap(107, APP_MENU, APP_OVERLAY_MODES);

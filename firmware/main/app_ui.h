@@ -50,7 +50,7 @@ static inline bool app_local_action_allowed(app_local_access_t access, app_actio
     return access == APP_LOCAL_BROWSE &&
         (action == APP_MENU || action == APP_SETTINGS_PAGE || action == APP_CLOSE ||
          action == APP_MODE || action == APP_KEYBOARD_SUBMODE || action == APP_BLUETOOTH_PAGE ||
-         action == APP_WIFI_SCAN_PAGE || action == APP_WIFI_NETWORK_SELECT);
+         action == APP_BLUETOOTH_DEVICES || action == APP_WIFI_SCAN_PAGE || action == APP_WIFI_NETWORK_SELECT);
 }
 
 typedef enum {
