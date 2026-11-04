@@ -11,7 +11,7 @@ static struct {
     uint64_t cached_ms, admitted_until_ms;
     uint32_t rejected;
 } s_update_gate;
-static bool s_update_maintenance;
+static app_local_access_t s_update_access;
 static uint64_t s_update_health_since;
 static uint64_t s_update_health_imu_recoveries;
 
@@ -82,9 +82,13 @@ static cp_error_t remote_update_authority(void *context, const cp_command_t *com
 }
 /* Coordinator only. Parent uses this gate for all ordinary input, setting,
  * bond/profile writes and media admission; safety stop/lock/query stay usable. */
+static app_local_access_t local_access(void)
+{
+    return remote_device_maintenance() ? APP_LOCAL_PAUSED : s_update_access;
+}
 static bool remote_update_maintenance(void)
 {
-    return s_update_maintenance || remote_device_maintenance();
+    return local_access() != APP_LOCAL_NORMAL;
 }
 static bool remote_update_media_quiet(const app_media_snapshot_t *media)
 {
@@ -205,8 +209,14 @@ static void __attribute__((noinline)) remote_update_service(void)
             active = false;
         }
     }
-    bool requested = active || update.state == APP_UPDATE_PENDING_HEALTH || app_update_flash_busy();
-    if (requested && !s_update_maintenance) {
+    bool working = active || app_update_flash_busy();
+    bool verifying = update.state == APP_UPDATE_PENDING_HEALTH;
+    app_local_access_t next_access = working ? APP_LOCAL_PAUSED :
+        verifying ? APP_LOCAL_BROWSE : APP_LOCAL_NORMAL;
+    bool requested = next_access != APP_LOCAL_NORMAL;
+    /* Do not admit a held or queued action under a later access policy. */
+    if (next_access != s_update_access) ++s_ui_revision;
+    if (requested && s_update_access == APP_LOCAL_NORMAL) {
         cancel_local_editor();
         remote_local_override(false);
         hid_engine_cancel(&s_engine);
@@ -215,7 +225,7 @@ static void __attribute__((noinline)) remote_update_service(void)
         app_media_runtime_stop(AE_STOP_MAINTENANCE);
         ble_hid_pairing_close();
     }
-    s_update_maintenance = requested;
+    s_update_access = next_access;
     app_wifi_set_maintenance(requested);
     bool ready = false;
     uint32_t rejected = 0;

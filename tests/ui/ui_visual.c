@@ -308,6 +308,32 @@ static bool contains_text(lv_obj_t *object, const char *value)
 
 static void device_settings_checks(void)
 {
+    app_view_t before_boot_check = s_state;
+    s_state.mode = INPUT_MOUSE;
+    s_state.overlay = APP_OVERLAY_NONE;
+    s_state.local_access = APP_LOCAL_BROWSE;
+    screenshot("first-boot-mouse");
+    assert(lv_obj_has_state(control("Left click"), LV_STATE_DISABLED));
+    clear_intents(); tap_control("Menu");
+    assert(last_action(APP_MENU)->x == APP_OVERLAY_MODES);
+    s_state.overlay = APP_OVERLAY_MODES;
+    screenshot("first-boot-menu");
+    clear_intents(); tap_control("Settings");
+    assert(last_action(APP_MENU)->x == APP_OVERLAY_SETTINGS);
+    s_state.overlay = APP_OVERLAY_SETTINGS;
+    s_state.settings_page = APP_SETTINGS_DISPLAY;
+    screenshot("first-boot-display");
+    clear_intents(); tap_control("Light"); tap_control("Back");
+    assert(action_count(APP_THEME) == 0 && action_count(APP_SETTINGS_PAGE) == 1);
+    s_state.local_access = APP_LOCAL_PAUSED;
+    render(); clear_intents(); tap_control("Back");
+    assert(action_count(APP_SETTINGS_PAGE) == 0);
+    s_state.local_access = APP_LOCAL_NORMAL;
+    render(); clear_intents(); tap_control("Light");
+    assert(action_count(APP_THEME) == 1);
+    s_state = before_boot_check;
+    render(); clear_intents();
+
     app_view_t original = s_state;
     s_state.overlay = APP_OVERLAY_SETTINGS;
     for (int page = APP_SETTINGS_HOME; page <= APP_SETTINGS_WIFI; ++page) {

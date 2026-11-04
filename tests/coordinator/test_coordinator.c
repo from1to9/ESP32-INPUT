@@ -934,7 +934,7 @@ static void setup(input_mode_t mode)
     memset(s_remote_device_local_review, 0, sizeof(s_remote_device_local_review));
     memset(&s_update_gate, 0, sizeof(s_update_gate));
     test_update_gate_entry_hook = NULL;
-    s_update_maintenance = false; s_update_health_since = 0;
+    s_update_access = APP_LOCAL_NORMAL; s_update_health_since = 0;
     s_update_health_imu_recoveries = 0;
     memset(&s_update_health_trace, 0, sizeof s_update_health_trace);
     test_update_snapshot = (app_update_snapshot_t){.state = APP_UPDATE_UNAVAILABLE};

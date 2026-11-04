@@ -265,6 +265,11 @@ static void activation_dates_the_authority_snapshot_after_lock_acquisition(const
 }
 static void running_state_must_be_observed_valid_before_any_update_write(const app_update_config_t *config)
 {
+    regression_boot(config,false,ESP_OK);
+    app_update_snapshot_t confirmed;
+    app_update_snapshot(&confirmed);
+    assert(confirmed.running_confirmed && confirmed.state == APP_UPDATE_IDLE &&
+           !confirmed.probation_active && !app_update_flash_busy() && !health_marks);
     const esp_err_t errors[]={ESP_FAIL,ESP_ERR_NOT_FOUND};
     for(unsigned i=0;i<sizeof(errors)/sizeof(errors[0]);++i){
         regression_boot(config,false,errors[i]);app_update_snapshot_t view;app_update_snapshot(&view);

@@ -42,7 +42,7 @@ static void navigation_admission_rejects_stale_held_and_covered_input(void)
         case 6: s_engine.congested = true; break;
         case 7: s_engine.ready = false; break;
         case 8: s_idle.asleep = true; break;
-        case 9: s_update_maintenance = true; break;
+        case 9: s_update_access = APP_LOCAL_PAUSED; break;
         case 10: s_overlay = APP_OVERLAY_SETTINGS; break;
         case 11: --home.epoch; break;
         case 12: --home.ui_revision; break;

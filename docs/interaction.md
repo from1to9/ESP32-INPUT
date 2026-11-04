@@ -2,6 +2,13 @@
 
 ## Primary navigation
 
+On the first boot of an OTA image awaiting confirmation, the header shows
+**Boot check / Browse only**. Menu, Status, mode selection, Settings pages
+and Back respond immediately. Host input, media, radio changes and persistent
+edits stay paused. Confirmation restores normal controls for a fresh gesture.
+An already confirmed image boots normally. Active flash work and restart
+maintenance retain priority over browsing. Lock and release remain available.
+
 The latest user instruction revises the 480 x 480 baseline: **Mouse**, **Keyboard** and **Audio** each use the display for core functions. Remove persistent bottom tabs and the bulky target/telemetry header. One consistent Menu button (at least 44 x 44 px) and AI double-click open the same quick panel with mode choices, actual input-target/connection summary, Status, Settings and Close. The UI and physical buttons use one authoritative state. The [focused prototype and geometry plan](../design/ui-plan.md) define the authorized layout; production delivery requires native rendering, safety and resource validation.
 
 Show the foreground mode and a compact selected-input/target cue in its context. Keep full target/link, battery and Wi-Fi details in the quick panel or Status. Reserve a small area outside touchpad/grid/slider targets for critical remote ownership, active capture/recording and input error/release state, with a real Stop/takeover/details action. Lock remains a full-screen safety state. Paired, HID-connected and audio-active must not collapse into one green indicator. Do not expose private credentials or unrelated management data in global status.

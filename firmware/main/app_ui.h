@@ -39,6 +39,19 @@ typedef enum {
     APP_NAV_HOME, APP_NAV_BACK /* Mouse only: button 3 tap, Command+[ tap. */
 } app_action_t;
 
+/* Local navigation can run during first-boot observation. HID, radio,
+ * media and durable settings continue to use the maintenance barrier. */
+typedef enum { APP_LOCAL_NORMAL, APP_LOCAL_BROWSE, APP_LOCAL_PAUSED } app_local_access_t;
+
+static inline bool app_local_action_allowed(app_local_access_t access, app_action_t action)
+{
+    if (access == APP_LOCAL_NORMAL || action == APP_LOCK || action == APP_RELEASE) return true;
+    return access == APP_LOCAL_BROWSE &&
+        (action == APP_MENU || action == APP_SETTINGS_PAGE || action == APP_CLOSE ||
+         action == APP_MODE || action == APP_KEYBOARD_SUBMODE || action == APP_BLUETOOTH_PAGE ||
+         action == APP_WIFI_SCAN_PAGE || action == APP_WIFI_NETWORK_SELECT);
+}
+
 typedef enum {
     APP_OVERLAY_NONE, APP_OVERLAY_MODES, APP_OVERLAY_TARGET, APP_OVERLAY_SETTINGS,
     APP_OVERLAY_WIFI_SETUP, APP_OVERLAY_CONFIRM,
@@ -391,6 +404,7 @@ typedef struct {
     bool connected;
     bool ready;
     bool locked;
+    app_local_access_t local_access;
     bool release_pending;
     bool congested; /* Transport status, not a reason to disable local controls. */
     bool transport_error;

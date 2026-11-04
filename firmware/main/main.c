@@ -198,6 +198,7 @@ static bool s_applying_remote_safety;
 static void remote_local_override(bool locked);
 static bool set_remote_allowance(bool allowed);
 static bool remote_update_maintenance(void);
+static app_local_access_t local_access(void);
 static bool remote_device_maintenance(void);
 static bool remote_transport_admit(void);
 static void remote_transport_applied(void);
@@ -1489,8 +1490,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         return;
     }
     if (s_engine.state.locked) return;
-    if (remote_update_maintenance()) {
-        s_message = "Firmware maintenance in progress. Input is paused.";
+    if (!app_local_action_allowed(local_access(), intent->action)) {
         return;
     }
     if (s_transport_switch_pending) return;
@@ -2695,7 +2695,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
             (s_input_transport == APP_INPUT_BLUETOOTH && error != ESP_OK),
         .haptics_available = capabilities.haptics, .haptics_enabled = board_haptics_enabled(),
         .queued = s_engine.count, .keyboard_leds = active.keyboard_leds,
-        .message = s_message, .target_name = target,
+        .message = s_message, .target_name = target, .local_access = local_access(),
         .remote_owned = s_engine.state.owner == INPUT_REMOTE,
         .motion_available = capabilities.imu && interaction.calibrated,
         .calibration_available = capabilities.imu,

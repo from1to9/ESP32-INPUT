@@ -611,7 +611,83 @@ static void update_health_trace_observes_confirmation_without_changing_retries(v
     assert(strstr(test_diagnostic_logs[test_diagnostic_log_count - 1U], "kind=end"));
 }
 
+/* Match the LVGL control path: press, release, then CLICKED with the
+ * context captured at press. All three traverse the real coordinator FIFO. */
+static void update_control_tap(uint32_t gesture, app_action_t kind, int value)
+{
+    app_intent_t intent = make_intent(kind, value, 0, NULL);
+    intent.gesture = gesture;
+    intent.surface = APP_SURFACE_CONTROL;
+    local_control_contact(gesture);
+    deliver(intent);
+}
+
+static void first_boot_local_navigation(void)
+{
+    setup(INPUT_MOUSE);
+    update_test_health_ready();
+    remote_update_service();
+    assert(remote_update_maintenance() && test_wifi_maintenance);
+    render_view(&test_link, ESP_OK);
+    assert(test_view.local_access == APP_LOCAL_BROWSE);
+    update_control_tap(101, APP_MENU, APP_OVERLAY_MODES);
+    assert(s_overlay == APP_OVERLAY_MODES);
+    update_control_tap(102, APP_MENU, APP_OVERLAY_TARGET);
+    assert(s_overlay == APP_OVERLAY_TARGET);
+    update_control_tap(103, APP_SETTINGS_PAGE, APP_SETTINGS_DISPLAY);
+    assert(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_DISPLAY);
+    update_control_tap(104, APP_THEME, 0);
+    assert(s_dark_theme);
+    update_control_tap(105, APP_CLOSE, 0);
+    assert(s_overlay == APP_OVERLAY_NONE);
+    assert(!test_update_health_requests);
+    update_control_tap(114, APP_MODE, INPUT_KEYBOARD);
+    assert(s_engine.state.mode == INPUT_KEYBOARD);
+    update_control_tap(115, APP_KEY, 4);
+    assert(!s_engine.count && !set_remote_allowance(true));
+
+    /* A real update claim, busy flash, or restart independently wins. */
+    test_update_busy = true; remote_update_service();
+    update_control_tap(106, APP_MENU, APP_OVERLAY_MODES);
+    assert(s_overlay == APP_OVERLAY_NONE);
+    test_update_busy = false; s_update_gate.active = true; remote_update_service();
+    update_control_tap(107, APP_MENU, APP_OVERLAY_MODES);
+    assert(s_overlay == APP_OVERLAY_NONE);
+    s_update_gate.active = false; s_remote_device_maintenance_active = true; remote_update_service();
+    render_view(&test_link, ESP_OK);
+    assert(test_view.local_access == APP_LOCAL_PAUSED);
+    update_control_tap(108, APP_MENU, APP_OVERLAY_MODES);
+    assert(s_overlay == APP_OVERLAY_NONE);
+    s_remote_device_maintenance_active = false; remote_update_service();
+
+    update_control_tap(109, APP_MENU, APP_OVERLAY_SETTINGS);
+    update_control_tap(110, APP_SETTINGS_PAGE, APP_SETTINGS_DISPLAY);
+    app_intent_t held = make_intent(APP_THEME, 0, 0, NULL);
+    held.gesture = 111; held.surface = APP_SURFACE_CONTROL;
+    local_control_contact(111);
+    test_update_snapshot.state = APP_UPDATE_CONFIRMED; remote_update_service();
+    deliver(held);
+    assert(s_dark_theme && !remote_update_maintenance());
+    update_control_tap(112, APP_THEME, 0);
+    assert(!s_dark_theme);
+
+    setup(INPUT_MOUSE);
+    test_update_snapshot.state = APP_UPDATE_IDLE; remote_update_service();
+    update_control_tap(113, APP_MENU, APP_OVERLAY_MODES);
+    assert(s_overlay == APP_OVERLAY_MODES && !remote_update_maintenance() && !test_wifi_maintenance);
+    test_update_busy = true; remote_update_service();
+    update_control_tap(116, APP_MENU, APP_OVERLAY_SETTINGS);
+    assert(s_overlay == APP_OVERLAY_MODES);
+    test_update_busy = false; test_update_snapshot.state = APP_UPDATE_PENDING_HEALTH;
+    remote_update_service();
+    update_control_tap(117, APP_LOCK, 0);
+    assert(process_priority() && s_engine.state.locked);
+    update_control_tap(118, APP_MENU, APP_OVERLAY_MODES);
+    assert(s_engine.state.locked && s_overlay == APP_OVERLAY_NONE);
+}
+
 #define REMOTE_UPDATE_CASES(RUN)                                                                   \
+    RUN(first_boot_local_navigation);                                                              \
     RUN(update_maintenance_waits_for_actual_neutral_and_cleanup);                                  \
     RUN(update_mailbox_rejects_competing_stale_and_lost_authority);                                \
     RUN(update_lock_and_transport_ack_are_independent_gates);                                      \

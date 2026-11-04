@@ -345,9 +345,21 @@ static void visible(lv_obj_t *object, bool show)
     else lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* Keep each widget's normal availability when a temporary update policy
+ * masks it. Static buttons and live capability-driven controls share this path. */
+#define UI_BROWSE_CONTROL LV_OBJ_FLAG_USER_1
+#define UI_SAFETY_CONTROL LV_OBJ_FLAG_USER_2
+#define UI_UPDATE_MASKED LV_OBJ_FLAG_USER_3
+
 static void enabled(lv_obj_t *object, bool allow)
 {
     if (!object) return;
+    if (s_view.local_access != APP_LOCAL_NORMAL) {
+        bool blocked = !lv_obj_has_flag(object, UI_SAFETY_CONTROL) &&
+            !(s_view.local_access == APP_LOCAL_BROWSE && lv_obj_has_flag(object, UI_BROWSE_CONTROL));
+        lv_obj_set_flag(object, UI_UPDATE_MASKED, allow && blocked);
+        if (blocked) allow = false;
+    }
     /* LVGL suppresses RELEASED for a disabled active object. Keep the real
      * gesture open until physical release, which then emits PRESS_LOST even
      * for a disabled widget. This yields one CANCEL and no stale CLICKED. */
@@ -672,6 +684,9 @@ static lv_obj_t *button(lv_obj_t *parent, const char *value, int x, int y,
     lv_obj_center(caption);
     binding_t *binding = &s_bindings[s_binding_count++];
     *binding = (binding_t){.action = action, .value = argument, .object = object};
+    if (app_local_action_allowed(APP_LOCAL_PAUSED, action)) lv_obj_add_flag(object, UI_SAFETY_CONTROL);
+    else if (app_local_action_allowed(APP_LOCAL_BROWSE, action)) lv_obj_add_flag(object, UI_BROWSE_CONTROL);
+    enabled(object, true);
     lv_obj_add_event_cb(object, on_action, LV_EVENT_CLICKED, binding);
     return object;
 }
@@ -694,9 +709,12 @@ static void critical_state(lv_obj_t *object, bool alert, bool capture, bool prov
     if (!alert) return;
     const app_view_t *view = &s_view;
     bool confirmation = view->overlay == APP_OVERLAY_CONFIRM;
+    lv_obj_set_flag(object, UI_SAFETY_CONTROL, capture);
     enabled(object, !confirmation || capture || view->remote_owned);
     const char *caption = capture ? capture_warning(view, true) :
         view->remote_owned ? "Remote\nTake local" :
+        view->local_access == APP_LOCAL_BROWSE ? "Boot check\nBrowse only" :
+        view->local_access == APP_LOCAL_PAUSED ? "Maintenance\nInput paused" :
         view->release_pending ? "Releasing\nDetails" :
         view->transport_error ? "Input error\nDetails" :
         view->transport_switch_pending ? "Switching\nDetails" :
@@ -2281,7 +2299,16 @@ void app_ui_render(const app_view_t *view)
     app_ui_capture_indicator_t previous_indicator = s_capture_indicator;
     s_capture_indicator = (app_ui_capture_indicator_t){0};
     observe_remote_review_clock(&view->remote_review);
+    bool access_changed = s_view.local_access != view->local_access;
     s_view = *view;
+    if (access_changed) {
+        for (size_t i = 0; i < s_binding_count; ++i) {
+            lv_obj_t *button = s_bindings[i].object;
+            bool allow = !lv_obj_has_state(button, LV_STATE_DISABLED) || lv_obj_has_flag(button, UI_UPDATE_MASKED);
+            lv_obj_remove_flag(button, UI_UPDATE_MASKED);
+            enabled(button, allow);
+        }
+    }
     snprintf(s_target_text, sizeof(s_target_text), "%s", view->target_name && *view->target_name ?
              view->target_name : view->connected ?
              (view->input_transport == APP_INPUT_USB ? "USB host" : "Bluetooth host") : "No target");
@@ -2355,7 +2382,7 @@ void app_ui_render(const app_view_t *view)
         view->release_pending ? "Releasing input" : view->congested ? "Host busy" :
         view->ready ? "Input ready" : "Connecting input";
     bool capture = capture_warning_required(view);
-    bool alert = view->remote_owned || capture || view->release_pending || view->transport_error ||
+    bool alert = view->local_access != APP_LOCAL_NORMAL || view->remote_owned || capture || view->release_pending || view->transport_error ||
         !provider_available || !view->ready || view->transport_switch_pending;
     bool hid_ready = view->connected && view->ready && !view->release_pending &&
         !view->transport_error && provider_available && !view->transport_switch_pending;
@@ -2432,7 +2459,9 @@ void app_ui_render(const app_view_t *view)
         render_media_panel();
         render_connection_panel();
         label_text(s_overlay_target, s_target_text);
-        if (view->overlay == APP_OVERLAY_MODES)
+        if (view->local_access == APP_LOCAL_BROWSE && !capture)
+            label_text(s_overlay_state, "Verifying first boot. Input and edits are paused.");
+        else if (view->overlay == APP_OVERLAY_MODES)
             label_format(s_overlay_state, "%s / %s", usb ? "USB" : "Bluetooth", link);
         else label_text(s_overlay_state, capture ? capture_warning(view, false) : *s_message_text ? s_message_text :
             view->remote_owned ? "Remote control / touch to take local control" : "Local control");
@@ -2524,7 +2553,7 @@ void app_ui_render(const app_view_t *view)
     /* Revoke a pressed header before hiding it, so LVGL cannot retarget the
      * same held contact onto a newly revealed Home/Back/Recenter control. */
     enabled(s_keyboard_choice, !navigation &&
-        (view->mode != INPUT_MOUSE || view->motion_recenter_available));
+        (view->mode != INPUT_MOUSE || (view->motion_recenter_available && view->local_access == APP_LOCAL_NORMAL)));
     enabled(s_navigation_home, navigation && view->overlay == APP_OVERLAY_NONE && view->navigation_available);
     enabled(s_navigation_back, navigation && view->overlay == APP_OVERLAY_NONE && view->navigation_available);
     visible(s_keyboard_choice, view->mode == INPUT_KEYBOARD || (view->mode == INPUT_MOUSE && !navigation));
@@ -2551,6 +2580,7 @@ void app_ui_render(const app_view_t *view)
     /* Only the foreground mode is refreshed. Hidden uptime/settings changes
      * cannot invalidate primary input pixels, even with FULL rendering. */
     if (view->mode == INPUT_MOUSE) {
+        enabled(s_pad, true);
         text(s_keyboard_choice, "Recenter");
         label_format(s_pad_hint, "%s\n\n%s", motion_reason(view), !view->tap_to_click_available ? "Tap gestures unavailable" : view->tap_to_click_enabled ?
             "Tap / double tap / double-tap hold to drag" : "Tap to click off / movement only");
