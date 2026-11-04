@@ -162,13 +162,17 @@ static app_media_id_t peer_id(const uint8_t address[6])
     app_media_id_t id = {.bytes = {0xb7, 0xc1}};
     memcpy(id.bytes + 10, address, 6); return id;
 }
-static int saved_bond(const uint8_t peer[6])
+static int cached_bond(const uint8_t peer[6])
 {
-    if (!controls.bonds.known || controls.bonds.refreshing || controls.bonds.error != ESP_OK ||
-        controls.bonds.count > BT_AUDIO_CLASSIC_BONDS_MAX) return -1;
+    if (controls.bonds.count > BT_AUDIO_CLASSIC_BONDS_MAX) return -1;
     for (unsigned i = 0; i < controls.bonds.count; ++i)
         if (!memcmp(controls.bonds.bonds[i].address, peer, 6)) return (int)i;
     return -1;
+}
+static int saved_bond(const uint8_t peer[6])
+{
+    if (!controls.bonds.known || controls.bonds.refreshing || controls.bonds.error != ESP_OK) return -1;
+    return cached_bond(peer);
 }
 static int selected_bond(void)
 { return controls.selected_peer_known ? saved_bond(controls.selected_peer) : -1; }
@@ -633,12 +637,18 @@ static void rebuild_devices(void)
         controls.bonds.count <= BT_AUDIO_CLASSIC_BONDS_MAX;
     view->refreshing = controls.bonds.refreshing;
     view->revision = controls.bonds.revision;
-    view->count = view->known ? controls.bonds.count : 0;
+    /* The owner retains the last successful catalogue during refresh/failure.
+     * It is display identity only until saved_bond() verifies current state. */
+    view->count = controls.bonds.count <= BT_AUDIO_CLASSIC_BONDS_MAX ? controls.bonds.count : 0;
     view->pages = (view->count + APP_MEDIA_ROWS - 1U) / APP_MEDIA_ROWS;
     if (!view->pages) view->pages = 1;
     if (controls.device_page >= view->pages) controls.device_page = view->pages - 1U;
     view->page = controls.device_page;
-    view->pending = bt->control_inflight || bt->request_status == BT_AUDIO_JOB_PENDING || bt->request_status == BT_AUDIO_JOB_WAITING;
+    view->pending = controls.voice_link.active || bt->control_inflight ||
+        bt->request_status == BT_AUDIO_JOB_PENDING || bt->request_status == BT_AUDIO_JOB_WAITING;
+    view->request_failed = bt->request_status == BT_AUDIO_JOB_FAILED || bt->request_status == BT_AUDIO_JOB_UNCERTAIN;
+    view->can_refresh = bt->initialized && !bt->failed && !view->refreshing && !view->pending &&
+        !any_jobs() && controls.runtime.audio.hardware_off_confirmed && !bt->pairing_busy && !bt->pairing_requested;
     int selected = selected_bond();
     bool idle = idle_controls() && !any_jobs() && controls.runtime.audio.hardware_off_confirmed &&
         bt->initialized && !bt->failed && !view->pending && !bt->pairing_busy && !bt->pairing_requested;
@@ -648,8 +658,10 @@ static void rebuild_devices(void)
         const bt_audio_bond_t *bond = &controls.bonds.bonds[index];
         app_media_device_row_t *row = &view->rows[i]; row->id = peer_id(bond->address);
         snprintf(row->identity, sizeof(row->identity), "%02X:%02X:%02X:%02X:%02X:%02X", bond->address[0], bond->address[1], bond->address[2], bond->address[3], bond->address[4], bond->address[5]);
-        row->connected = bond->hfp_current || bond->a2dp_current;
-        row->selected = (int)index == selected;
+        row->connected = bt->initialized && !bt->failed &&
+            ((bt->hfp_connected && bt->hfp_peer_known && !memcmp(bt->hfp_peer, bond->address, 6)) ||
+             (bt->a2dp_connected && bt->a2dp_peer_known && !memcmp(bt->a2dp_peer, bond->address, 6)));
+        row->selected = controls.selected_peer_known && !memcmp(controls.selected_peer, bond->address, 6);
     }
     view->selected_saved = selected >= 0;
     if (controls.selected_peer_known) {
@@ -671,9 +683,9 @@ static void rebuild_devices(void)
         view->voice_connected = view->connected[0] && bt->hfp_audio_connected;
     }
     snprintf(view->reason, sizeof(view->reason), "%s", view->refreshing ? "Refreshing saved audio devices." :
-        !view->known ? "Saved audio devices unavailable." : controls.selected_peer_known && !view->selected_saved ? "Device is no longer saved." :
+        !view->known ? "Saved state unknown. Back to devices, then Refresh." : controls.selected_peer_known && !view->selected_saved ? "Device is no longer saved." :
         any_jobs() ? "Stop Mic and Speaker before changing devices." : view->pending ? "Request pending; waiting for Bluetooth." :
-        bt->request_status == BT_AUDIO_JOB_FAILED || bt->request_status == BT_AUDIO_JOB_UNCERTAIN ? "Connection request failed or uncertain. Check host Bluetooth settings." :
+        view->request_failed ? "Connection request failed or uncertain. Check host Bluetooth settings." :
         "Connect from this device or your host. Connecting does not start audio.");
 }
 
@@ -990,7 +1002,8 @@ static bool allowed_panel(app_media_operation_t operation)
     if (controls.context.bluetooth_audio_devices &&
         (panel == APP_OVERLAY_BLUETOOTH_DEVICES || panel == APP_OVERLAY_AUDIO_DEVICE))
         return operation == APP_MEDIA_PAIR_AUDIO_OPEN || operation == APP_MEDIA_PAIR_AUDIO_CLOSE ||
-            operation == APP_MEDIA_DEVICE_DETAILS || operation == APP_MEDIA_DEVICE_PAGE || operation == APP_MEDIA_DEVICE_LINK;
+            operation == APP_MEDIA_DEVICE_DETAILS || operation == APP_MEDIA_DEVICE_PAGE || operation == APP_MEDIA_DEVICE_LINK ||
+            operation == APP_MEDIA_DEVICE_REFRESH;
     if (controls.context.mode != INPUT_AUDIO) return false;
     if (operation == APP_MEDIA_LIVE_START || operation == APP_MEDIA_LIVE_STOP) return panel == APP_OVERLAY_NONE;
     if (operation == APP_MEDIA_SELECT_CONNECTION) return panel == APP_OVERLAY_NONE || panel == APP_OVERLAY_MEDIA_OPTIONS;
@@ -1147,10 +1160,16 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
         break;
     case APP_MEDIA_DEVICE_DETAILS:
         if (request->object_revision == controls.bonds.revision &&
-            saved_bond(request->value.peer_id.bytes + 10) >= 0 &&
+            cached_bond(request->value.peer_id.bytes + 10) >= 0 &&
             same_ui_id(request->value.peer_id, peer_id(request->value.peer_id.bytes + 10))) {
             memcpy(controls.selected_peer, request->value.peer_id.bytes + 10, 6); controls.selected_peer_known = true;
             increase(&controls.revision); open_panel(effect, APP_OVERLAY_AUDIO_DEVICE, APP_CONFIRM_NONE); result = AE_OK;
+        }
+        break;
+    case APP_MEDIA_DEVICE_REFRESH:
+        if (controls.view.devices.can_refresh) {
+            result = bt_audio_refresh_bonds() == ESP_OK ? AE_AGAIN : AE_UNAVAILABLE;
+            bt_audio_copy_bond_list(&controls.bonds);
         }
         break;
     case APP_MEDIA_DEVICE_LINK: {

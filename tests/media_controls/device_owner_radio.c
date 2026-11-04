@@ -21,3 +21,10 @@ void device_radio_hfp(bool foreign)
 }
 void device_radio_speaker(void) { music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3); }
 void device_radio_voice(void) { voice(ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC); }
+void device_radio_auth(bool success) { auth_result(peer, success); }
+void device_radio_catalogue(esp_err_t error, bool empty)
+{
+    bond_list_error = error;
+    bond_count = shared_count = empty ? 0 : 2;
+}
+unsigned device_radio_discoveries(void) { return discoverable_writes; }

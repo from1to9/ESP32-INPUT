@@ -22,7 +22,7 @@ static lv_obj_t *s_connection_actions[4], *s_connection_pages[2], *s_connection_
 static lv_obj_t *s_saved_names[4], *s_saved_actions[4][3];
 static lv_obj_t *s_device_tabs[2], *s_device_rows[4], *s_device_labels[4];
 static lv_obj_t *s_device_name, *s_device_status, *s_device_empty, *s_device_page;
-static lv_obj_t *s_device_pages[2], *s_device_add, *s_device_stop;
+static lv_obj_t *s_device_pages[2], *s_device_add, *s_device_stop, *s_device_refresh;
 
 static bool api_digest_valid(const char digest[65])
 {
@@ -169,10 +169,11 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         s_device_pages[0] = button(body, "Previous", 0, 308, 144, 44, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_BLUETOOTH_PAGE, -1);
         s_device_page = label(body, "", 156, 318, 144, MUTED);
         s_device_pages[1] = button(body, "Next", 312, 308, 144, 44, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_BLUETOOTH_PAGE, 1);
-        int width = s_view.bluetooth_audio_devices ? 224 : 144;
-        s_device_add = button(body, "Add device", 0, 360, width, 48, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_PAIRING_REQUEST, APP_PAIR_OPEN);
-        s_device_stop = button(body, "Stop pairing", s_view.bluetooth_audio_devices ? 232 : 156, 360, width, 48, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_PAIRING_REQUEST, APP_PAIR_CLOSE);
-        if (!s_view.bluetooth_audio_devices)
+        s_device_add = button(body, "Add device", 0, 360, 144, 48, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_PAIRING_REQUEST, APP_PAIR_OPEN);
+        s_device_stop = button(body, "Stop pairing", 156, 360, 144, 48, s_view.bluetooth_audio_devices ? APP_MEDIA_CONTROL : APP_PAIRING_REQUEST, APP_PAIR_CLOSE);
+        if (s_view.bluetooth_audio_devices)
+            s_device_refresh = button(body, "Refresh", 312, 360, 144, 48, APP_MEDIA_CONTROL, 0);
+        else
             button(body, "More", 312, 360, 144, 48, APP_MENU, APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS);
     } else if (kind == APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS) {
         label_text(title, "Input device options");
@@ -316,7 +317,7 @@ static void render_connection_panel(void)
         if (!pages) pages = 1;
         unsigned page = audio ? devices->page : s_view.bluetooth_page;
         label_format(s_device_page, "%u / %u", page + 1, pages);
-        visible(s_device_empty, !known || !count);
+        visible(s_device_empty, audio ? !count : !known || !count);
         label_text(s_device_empty, audio && devices->refreshing ? "Refreshing saved audio devices." :
             !known ? "Saved devices unavailable." : "No saved devices. Choose Add device to pair.");
         label_format(s_device_name, "Search name: %.64s", audio ? s_view.media.pairing.name_known ?
@@ -331,18 +332,25 @@ static void render_connection_panel(void)
                 pairing->state == APP_MEDIA_PAIR_EXPIRED ? "Pairing expired" :
                 pairing->state == APP_MEDIA_PAIR_CLOSING ? "Closing pairing" :
                 pairing->state == APP_MEDIA_PAIR_CLOSED ? "Pairing closed" : "Pairing unavailable";
-            if (pairing->state == APP_MEDIA_PAIR_ERROR) label_format(s_device_status, "Pairing failed: %.85s", pairing->reason);
+            if (devices->refreshing) label_format(s_device_status, "%s\nChecking saved devices", state);
+            else if (!known) label_format(s_device_status, "%s\nSaved state unknown; use Refresh", state);
+            else if (devices->pending) label_format(s_device_status, "%s\nWaiting for the link request", state);
+            else if (devices->request_failed) label_format(s_device_status, "%s\nLink request failed or uncertain", state);
+            else if (pairing->state == APP_MEDIA_PAIR_ERROR) label_format(s_device_status, "Pairing failed: %.85s", pairing->reason);
+            else if (pairing->state == APP_MEDIA_PAIR_CLOSED && count) label_text(s_device_status, "Pairing closed\nSaved devices can reconnect");
             else if (pairing->remaining_seconds) label_format(s_device_status, "%s / %us", state, pairing->remaining_seconds);
             else label_text(s_device_status, state);
         } else if (s_view.bluetooth_management.remaining_known)
             label_format(s_device_status, "%s / %us", s_view.bluetooth_management.status, s_view.bluetooth_management.remaining_seconds);
         else label_text(s_device_status, s_view.bluetooth_management.status);
         for (unsigned i = 0; i < 4; ++i) {
-            unsigned index = page * 4U + i; bool show = known && index < count;
+            unsigned index = page * 4U + i; bool show = (audio || known) && index < count;
             visible(s_device_rows[i], show); if (!show) continue;
             if (audio) {
                 const app_media_device_row_t *row = &devices->rows[i];
-                label_format(s_device_labels[i], "%s   %s", row->identity, row->connected ? "Connected" : "Saved");
+                const char *status = devices->refreshing ? row->connected ? "Connected / checking" : "Checking saved state" :
+                    !known ? row->connected ? "Connected / unverified" : "Saved state unknown" : row->connected ? "Connected" : "Saved";
+                label_format(s_device_labels[i], "%s   %s", row->identity, status);
                 app_media_request_t request = media_request(APP_MEDIA_DEVICE_DETAILS);
                 request.object_revision = devices->revision; request.value.peer_id = row->id;
                 media_bind(s_device_rows[i], request, !devices->pending);
@@ -353,7 +361,7 @@ static void render_connection_panel(void)
             }
         }
         for (unsigned i = 0; i < 2; ++i) {
-            bool available = known && (i ? page + 1 < pages : page > 0);
+            bool available = (audio || known) && (i ? page + 1 < pages : page > 0);
             if (audio) {
                 app_media_request_t request = media_request(APP_MEDIA_DEVICE_PAGE);
                 request.object_revision = devices->revision; request.value.page_delta = (int)(i ? page + 1 : page ? page - 1 : 0);
@@ -363,6 +371,7 @@ static void render_connection_panel(void)
         if (audio) {
             media_bind(s_device_add, media_request(APP_MEDIA_PAIR_AUDIO_OPEN), s_view.media.pairing.can_open);
             media_bind(s_device_stop, media_request(APP_MEDIA_PAIR_AUDIO_CLOSE), s_view.media.pairing.can_close);
+            media_bind(s_device_refresh, media_request(APP_MEDIA_DEVICE_REFRESH), devices->can_refresh);
         } else {
             enabled(s_device_add, s_view.bluetooth_management.can_add);
             enabled(s_device_stop, s_view.bluetooth_management.can_stop);

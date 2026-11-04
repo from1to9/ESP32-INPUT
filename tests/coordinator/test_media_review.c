@@ -8,9 +8,10 @@
 #include "../../firmware/main/board_recording_flash.h"
 
 static bt_audio_snapshot_t classic;
-static unsigned opens, closes;
+static unsigned opens, closes, refreshes;
 board_recording_flash_status_t board_recording_flash_status(void) { return (board_recording_flash_status_t){0}; }
 bt_audio_snapshot_t bt_audio_snapshot(void) { return classic; }
+esp_err_t bt_audio_refresh_bonds(void) { ++refreshes; test_classic_bonds.refreshing = true; return ESP_OK; }
 bool app_media_runtime_pairing_current(uint64_t generation, uint64_t revision)
 {
     return test_media_snapshot.audio.audio_generation == generation && test_media_snapshot.audio.revision == revision &&
@@ -152,7 +153,18 @@ int main(void)
     deliver(navigation); present(); /* The SDK seam above aborts if a mutation reaches it. */
     update_control_tap(805, APP_BLUETOOTH_DEVICES, 1); present();
     assert(test_view.overlay == APP_OVERLAY_BLUETOOTH_DEVICES);
+    navigation = make_intent(APP_MEDIA_CONTROL, 0, 0, NULL);
+    navigation.media.operation = APP_MEDIA_DEVICE_REFRESH;
+    navigation.gesture = 807; navigation.surface = APP_SURFACE_CONTROL; local_control_contact(807);
+    unsigned before_refresh = refreshes;
+    deliver(navigation); present();
+    assert(refreshes == before_refresh + 1 && test_view.media.devices.refreshing && test_view.media.devices.count == 5);
+    test_classic_bonds.refreshing = false; present();
     test_update_busy = true; remote_update_service();
+    navigation = make_intent(APP_MEDIA_CONTROL, 0, 0, NULL);
+    navigation.media.operation = APP_MEDIA_DEVICE_REFRESH;
+    navigation.gesture = 808; navigation.surface = APP_SURFACE_CONTROL; local_control_contact(808);
+    deliver(navigation); present(); assert(refreshes == before_refresh + 1);
     navigation = make_intent(APP_MEDIA_CONTROL, 0, 0, NULL);
     navigation.media.operation = APP_MEDIA_DEVICE_DETAILS;
     navigation.media.object_revision = test_view.media.devices.revision;

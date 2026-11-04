@@ -46,6 +46,7 @@ bool app_media_runtime_pairing_current(uint64_t generation, uint64_t revision)
         owner.audio.hardware_off_confirmed && owner.audio.audio_generation == generation && owner.audio.revision == revision;
 }
 #ifndef TEST_MEDIA_REAL_BLUETOOTH
+esp_err_t bt_audio_refresh_bonds(void) { bonds.refreshing = true; return ESP_OK; }
 esp_err_t bt_audio_pairing_open_reviewed(uint32_t duration, const bt_audio_snapshot_t *expected, uint64_t revision,
                                         bool (*resources_current)(void))
 {
@@ -1146,6 +1147,10 @@ static void test_shared_devices(void)
     handle(page); poll_at(1060);
     assert(view.media.devices.page == 1 && view.media.devices.rows[0].id.bytes[15] == 5 &&
         view.media.devices.rows[1].id.bytes[15] == 6);
+    bonds.known = false; bonds.refreshing = true; poll_at(1061);
+    assert(view.media.devices.page == 1 && view.media.devices.pages == 2 && view.media.devices.count == 6 &&
+        view.media.devices.rows[1].id.bytes[15] == 6);
+    bonds.known = true; bonds.refreshing = false; poll_at(1062);
     choose = intent(APP_MEDIA_DEVICE_DETAILS); choose.media.object_revision = bonds.revision;
     choose.media.value.peer_id = view.media.devices.rows[1].id;
     ++bonds.revision; bonds.count = 1; poll_at(1070);

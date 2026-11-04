@@ -32,5 +32,6 @@ with tempfile.TemporaryDirectory(prefix="esp32-device-owner-") as directory:
     subprocess.run(media + [str(SUITE / "test_device_owner.c"), str(ROOT / "components/audio_engine/audio_media.c"),
                            *objects, "-lm", "-o", str(binary)], check=True)
     for case in ([args.case] if args.case else ["normal", "same-before-sdk", "other-before-submit", "other-before-sdk",
-                                               "lock", "leave", "maintenance", "voice", "voice-existing", "voice-lock", "voice-second-lock", "refresh"]):
+                                               "lock", "leave", "maintenance", "voice", "voice-existing", "voice-lock", "voice-second-lock", "refresh",
+                                               "catalogue-refresh", "catalogue-auth-failure", "catalogue-error", "catalogue-empty", "catalogue-inbound"]):
         subprocess.run([str(binary), case], check=True)

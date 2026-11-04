@@ -10,6 +10,67 @@ unsigned device_radio_calls(void);
 void device_radio_hfp(bool foreign);
 void device_radio_speaker(void);
 void device_radio_voice(void);
+void device_radio_auth(bool success);
+void device_radio_catalogue(esp_err_t error, bool empty);
+unsigned device_radio_discoveries(void);
+
+static void catalogue_transition(const char *scenario)
+{
+    assert(view.media.devices.known && view.media.devices.count == 2);
+    app_media_id_t retained = view.media.devices.rows[0].id;
+    bool inbound = !strcmp(scenario, "catalogue-inbound");
+    if (inbound) device_radio_speaker();
+    device_radio_auth(strcmp(scenario, "catalogue-auth-failure") != 0);
+    poll_at(1011);
+    assert(!view.media.devices.known && view.media.devices.refreshing);
+    assert(view.media.devices.count == 2 && same_ui_id(view.media.devices.rows[0].id, retained));
+    assert(view.media.devices.rows[0].connected == inbound);
+    app_intent_t choose = intent(APP_MEDIA_DEVICE_DETAILS);
+    choose.media.object_revision = view.media.devices.revision;
+    choose.media.value.peer_id = retained;
+    apply_effect(handle(choose));
+    assert(view.media.devices.identity[0] && !view.media.devices.selected_saved);
+    assert(!view.media.devices.can_connect[0] && !view.media.devices.can_connect[1] &&
+        !view.media.devices.can_disconnect[0] && !view.media.devices.can_disconnect[1]);
+    bool failed = !strcmp(scenario, "catalogue-error");
+    bool empty = !strcmp(scenario, "catalogue-empty");
+    device_radio_catalogue(failed ? ESP_FAIL : ESP_OK, empty);
+    bt_audio_service(); poll_at(1012);
+    assert(view.media.devices.identity[0] && view.media.devices.connected[1] == inbound);
+    assert(view.media.devices.known == !failed && !view.media.devices.refreshing);
+    assert(view.media.devices.count == (empty ? 0U : 2U));
+    assert(view.media.devices.selected_saved == (!failed && !empty));
+    if (failed || empty) {
+        app_intent_t link = intent(APP_MEDIA_DEVICE_LINK);
+        link.media.object_revision = view.media.devices.revision;
+        link.media.object_id = retained; link.media.value.page_delta = 2;
+        handle(link); bt_audio_service(); device_radio_dispatch();
+        assert(!device_radio_calls());
+    }
+    if (failed) {
+        assert(view.media.devices.can_refresh);
+        device_radio_catalogue(ESP_OK, false);
+        context.local_access = APP_LOCAL_BROWSE; app_media_controls_context(&context);
+        app_intent_t refresh = intent(APP_MEDIA_DEVICE_REFRESH);
+        handle(refresh); app_media_controls_fill(&view);
+        assert(view.media.devices.refreshing && view.media.devices.count == 2 && !view.media.devices.can_refresh);
+        assert(!view.media.devices.can_connect[1]);
+        bt_audio_service(); poll_at(1013);
+        assert(view.media.devices.known && view.media.devices.selected_saved);
+        context.local_access = APP_LOCAL_NORMAL; poll_at(1014);
+        app_intent_t link = intent(APP_MEDIA_DEVICE_LINK);
+        link.media.object_revision = view.media.devices.revision;
+        link.media.object_id = retained; link.media.value.page_delta = 2;
+        handle(link); bt_audio_service(); device_radio_dispatch();
+        assert(device_radio_calls() == 1);
+        app_media_controls_fill(&view); assert(!view.media.devices.can_refresh);
+        device_radio_speaker(); poll_at(1015);
+        assert(view.media.devices.connected[1]);
+    }
+    assert(!device_radio_discoveries() && !bt_audio_snapshot().pairing_requested && !submissions);
+    assert(owner.audio.route == AE_ROUTE_USB_UAC);
+    printf("PASS: shared device owner %s\n", scenario);
+}
 
 int main(int argc, char **argv)
 {
@@ -20,10 +81,12 @@ int main(int argc, char **argv)
     context.bluetooth_audio_devices = true; owner.audio.route = AE_ROUTE_USB_UAC;
     if (!strcmp(scenario, "voice-existing")) device_radio_hfp(false);
     poll_at(1010);
+    if (!strncmp(scenario, "catalogue-", 10)) { catalogue_transition(scenario); return 0; }
     app_intent_t choose = intent(APP_MEDIA_DEVICE_DETAILS);
     choose.media.object_revision = view.media.devices.revision;
     choose.media.value.peer_id = view.media.devices.rows[0].id;
     apply_effect(handle(choose)); poll_at(1020);
+    assert(!bt_audio_snapshot().pairing_requested && !device_radio_discoveries());
     if (!strcmp(scenario, "refresh")) {
         device_radio_speaker(); poll_at(1021);
         assert(view.media.devices.connected[1]);
@@ -65,6 +128,7 @@ int main(int argc, char **argv)
         } else assert(device_radio_calls() == 0);
     }
     assert(!submissions && owner.audio.route == AE_ROUTE_USB_UAC);
+    assert(!bt_audio_snapshot().pairing_requested && !device_radio_discoveries());
     printf("PASS: shared device owner %s\n", scenario);
     return 0;
 }

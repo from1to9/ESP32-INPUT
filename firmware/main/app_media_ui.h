@@ -61,12 +61,13 @@ typedef enum {
     APP_MEDIA_SPEECH_REJECT, APP_MEDIA_SPEECH_CONFIRM,
     APP_MEDIA_LIVE_START, APP_MEDIA_LIVE_STOP, APP_MEDIA_SELECT_PEER,
     APP_MEDIA_SELECT_CONNECTION, APP_MEDIA_PAIR_AUDIO_OPEN, APP_MEDIA_PAIR_AUDIO_CLOSE,
-    APP_MEDIA_DEVICE_DETAILS, APP_MEDIA_DEVICE_PAGE, APP_MEDIA_DEVICE_LINK
+    APP_MEDIA_DEVICE_DETAILS, APP_MEDIA_DEVICE_PAGE, APP_MEDIA_DEVICE_LINK, APP_MEDIA_DEVICE_REFRESH
 } app_media_operation_t;
 
 static inline bool app_media_device_navigation(app_media_operation_t operation)
 {
-    return operation == APP_MEDIA_DEVICE_DETAILS || operation == APP_MEDIA_DEVICE_PAGE;
+    /* These operations read saved state; none grants link or pairing authority. */
+    return operation == APP_MEDIA_DEVICE_DETAILS || operation == APP_MEDIA_DEVICE_PAGE || operation == APP_MEDIA_DEVICE_REFRESH;
 }
 
 typedef struct {
@@ -175,7 +176,7 @@ typedef struct {
     bool connected, selected;
 } app_media_device_row_t;
 typedef struct {
-    bool known, pending, refreshing, selected_saved, voice_connected;
+    bool known, pending, refreshing, selected_saved, voice_connected, can_refresh, request_failed;
     unsigned page, pages, count;
     uint64_t revision;
     app_media_device_row_t rows[APP_MEDIA_ROWS];

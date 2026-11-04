@@ -51,8 +51,7 @@ static void media_bind(lv_obj_t *object, app_media_request_t request, bool admit
     if (index == s_media_binding_count) ++s_media_binding_count;
     bool navigation = app_media_device_navigation(request.operation);
     lv_obj_set_flag(object, UI_BROWSE_CONTROL, navigation);
-    s_media_bindings[index] = (media_binding_t){object, request, admitted &&
-        (navigation ? s_view.media.devices.known : media_identity_valid())};
+    s_media_bindings[index] = (media_binding_t){object, request, admitted && (navigation || media_identity_valid())};
     enabled(object, s_media_bindings[index].admitted);
 }
 
