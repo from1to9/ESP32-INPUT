@@ -50,6 +50,14 @@ does not justify dropping chunks, bypassing TE or weakening redraw checks.
 Match the intended display host and chip select so unrelated devices retain
 their own policy. Keep the wrapper's exact SDK/BSP source anchor checked.
 
+A bus request is not necessarily the LCD color-chunk bound. The pinned SPI
+allocator rounds descriptor capacity upward, and the LCD IO factory caches the
+reported maximum. Apply a color ceiling at that consumed query boundary, after
+rounding, and test the real LCD chunker with independent total-byte, largest-block
+and alignment constraints. Preserve errors, byte continuity and final completion.
+A later largest-block sample can be taken while a successful transfer holds its
+bounce buffer; it cannot establish the heap geometry at submission time.
+
 Measure both free totals and largest blocks for internal 8-bit and DMA memory.
 Moving a failed allocation into PSRAM avoids a future peak; it does not reclaim
 memory that was never allocated. A stopped or failed worker also cannot stand

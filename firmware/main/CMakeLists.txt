@@ -38,5 +38,7 @@ add_dependencies(${COMPONENT_LIB} input_build_identity)
 target_link_options(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=spi_bus_initialize"
     "-Wl,--undefined=__wrap_spi_bus_initialize"
+    "-Wl,--wrap=spi_bus_get_max_transaction_len"
+    "-Wl,--undefined=__wrap_spi_bus_get_max_transaction_len"
     "-Wl,--wrap=esp_lcd_new_panel_io_spi"
     "-Wl,--undefined=__wrap_esp_lcd_new_panel_io_spi")

@@ -17,6 +17,31 @@ static const spi_bus_config_t *received_config_pointer;
 static spi_host_device_t received_host;
 static spi_dma_chan_t received_dma;
 static esp_err_t bus_error;
+static size_t native_max;
+static esp_err_t max_error;
+esp_err_t __real_spi_bus_get_max_transaction_len(spi_host_device_t host, size_t *bytes)
+{
+    received_host = host;
+    if (!bytes) return ESP_ERR_INVALID_ARG;
+    if (max_error != ESP_OK) return max_error;
+    *bytes = native_max;
+    return ESP_OK;
+}
+static void chunk_boundary(void)
+{
+    const size_t limits[] = {0, 128, 2048, 3072, 4095, 8160};
+    for (size_t i = 0; i < sizeof(limits) / sizeof(limits[0]); ++i) {
+        native_max = limits[i]; size_t bytes = SIZE_MAX;
+        assert(__wrap_spi_bus_get_max_transaction_len(BSP_LCD_SPI_HOST, &bytes) == ESP_OK);
+        assert(received_host == BSP_LCD_SPI_HOST && bytes == (native_max > 2048 ? 2048 : native_max));
+        assert(__wrap_spi_bus_get_max_transaction_len(SPI3_HOST, &bytes) == ESP_OK);
+        assert(received_host == SPI3_HOST && bytes == native_max);
+    }
+    max_error = ESP_ERR_INVALID_STATE; size_t bytes = 123;
+    assert(__wrap_spi_bus_get_max_transaction_len(BSP_LCD_SPI_HOST, &bytes) == ESP_ERR_INVALID_STATE && bytes == 123);
+    assert(__wrap_spi_bus_get_max_transaction_len(BSP_LCD_SPI_HOST, NULL) == ESP_ERR_INVALID_ARG);
+    max_error = ESP_OK;
+}
 esp_err_t __real_spi_bus_initialize(spi_host_device_t host, const spi_bus_config_t *config, spi_dma_chan_t dma)
 {
     received_host = host; received_config_pointer = config; received_dma = dma;
@@ -82,6 +107,7 @@ esp_err_t __real_esp_lcd_new_panel_io_spi(esp_lcd_spi_bus_handle_t bus,
 int main(void)
 {
     bus_boundary();
+    chunk_boundary();
     esp_lcd_panel_io_spi_config_t original = {.cs_gpio_num = BSP_LCD_CS, .dc_gpio_num = -1,
         .spi_mode = 3, .pclk_hz = 40000000, .trans_queue_depth = 10,
         .on_color_trans_done = color_done, .user_ctx = &context, .lcd_cmd_bits = 32,

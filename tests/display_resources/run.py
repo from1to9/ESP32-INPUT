@@ -35,6 +35,7 @@ with tempfile.TemporaryDirectory(prefix="esp32-display-resources-") as temp:
         subprocess.run([binary], check=True)
         sdk_object = str(build / "sdk_transport.o")
         subprocess.run(configured + ["-Desp_lcd_new_panel_io_spi=__real_esp_lcd_new_panel_io_spi",
+                                    "-Dspi_bus_get_max_transaction_len=__wrap_spi_bus_get_max_transaction_len",
                                     "-c", str(transport), "-o", sdk_object], check=True)
         binary = str(build / "sdk_transport")
         subprocess.run(configured + [policy, str(suite / "test_sdk_transport.c"), sdk_object,

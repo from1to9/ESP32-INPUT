@@ -11,6 +11,19 @@
 esp_err_t __real_esp_lcd_new_panel_io_spi(esp_lcd_spi_bus_handle_t,
     const esp_lcd_panel_io_spi_config_t *, esp_lcd_panel_io_handle_t *);
 esp_err_t __real_spi_bus_initialize(spi_host_device_t, const spi_bus_config_t *, spi_dma_chan_t);
+esp_err_t __real_spi_bus_get_max_transaction_len(spi_host_device_t, size_t *);
+
+esp_err_t __wrap_spi_bus_get_max_transaction_len(spi_host_device_t host, size_t *bytes)
+{
+    esp_err_t result = __real_spi_bus_get_max_transaction_len(host, bytes);
+    /* SPI2 is the dedicated panel bus. The LCD IO factory caches this query,
+     * not the BSP's unrounded request, as its actual per-color chunk size.
+     * Bound that size without reserving heap or changing the SPI DMA geometry.
+     * Smaller hardware limits and errors retain the SDK's result. */
+    if (result == ESP_OK && host == BSP_LCD_SPI_HOST && *bytes > BOARD_DISPLAY_SPI_COLOR_CHUNK_BYTES)
+        *bytes = BOARD_DISPLAY_SPI_COLOR_CHUNK_BYTES;
+    return result;
+}
 
 esp_err_t __wrap_spi_bus_initialize(spi_host_device_t host,
     const spi_bus_config_t *config, spi_dma_chan_t dma)

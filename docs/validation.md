@@ -16,6 +16,53 @@ IMU samples but still failed the error-log and physical Motion gates.
 This checkpoint is not a qualified release. Reusable findings are indexed in
 the [engineering lessons](../.agent/shared/ENGINEERING_LESSONS.md).
 
+### Classic connection display DMA failure and chunk repair: 2026-11-04
+
+Clean `cf2c8daff4bfb529e5f90ed8c4c44a7699afde64` booted with a reported
+4095-byte display transaction limit. After the first successful Classic audio
+pairing/connection, the user observed frozen screen pixels and unusable touch.
+BLE keyboard/mouse, LAN replies and periodic health logs continued. The first
+retained `Draw bitmap failed: ESP_ERR_NO_MEM` was at uptime 120639 ms, with
+184 such errors in that capture. The retained failed request was 4095 internal
+DMA bytes; later samples reported about 5463 free DMA bytes and a 3072-byte
+largest block, compared with 6912 before connection. Those samples do not
+measure the free heap at the exact allocation attempt or prove a leak.
+
+The user disconnected audio on the host, retained pairing and did not restart.
+Menu/touch recovered. The subsequent capture had no new bitmap errors; health
+samples at 263/273 seconds reported 7643 free DMA bytes, a 2048-byte largest
+block and HID ready. This is a connected/disconnected control observation,
+not evidence that a 4095-byte free block had returned. A periodic sample can
+follow a successful submission while its transfer buffer is still retained.
+
+The preceding bus-request cap cannot guarantee a smaller color allocation:
+the pinned LCD IO factory caches the SPI driver's descriptor-rounded maximum.
+The follow-up source repair caps that query to 2048 bytes on the dedicated
+panel bus, so the unchanged LCD driver splits full frames at the actual owning
+boundary. It preserves native errors, smaller limits, other buses, TE and final
+completion. It adds no reserved buffer or startup allocation. The diagnostic
+log now identifies the effective color-chunk limit rather than hardware capacity.
+
+The native SDK transport regression first failed at a 3072-byte contiguous
+limit, then passed full-frame, tail, queue-depth and alignment cases with the
+repair. Real allocation failure still returns an error without final completion.
+These are software checks; the repaired image has not been device-tested in
+this record. Acceptance still requires visible Menu/touch transitions during
+Classic connection, disconnection and reconnection with pairing retained,
+plus concurrent BLE HID and authorized HFP/A2DP/USB audio workloads without
+new display allocation errors. Indicator confirmation and update self-test
+requirements and deadlines are unchanged.
+
+At the default queue ceiling, retained color payload falls from 4095 to 2048
+bytes, a 2047-byte reduction; depth two can retain 4096 payload bytes. Allocator
+metadata and other live buffers remain additional costs. This is a payload bound,
+not a guarantee from the sampled free totals. Both Classic profiles can be
+connected, but the application renders one selected audio route. Their SDK
+connection/codec buffers and I2S internal descriptors remain outside this bound.
+I2S payloads use PSRAM under the existing supported configuration; no audio or
+radio capacities are reduced by this repair. Simultaneous profile connections
+and active voice/music/USB transitions still need measured device headroom.
+
 ### USB transport deployment and capture startup investigation: 2026-10-26
 
 The separately authorized application-only deployment used clean source

@@ -1181,12 +1181,12 @@ esp_err_t board_init(void (*lock_callback)(void))
         ESP_LOGE(TAG, "Required display/touch unavailable");
         return ESP_ERR_NOT_FOUND;
     }
-    /* The BSP requests ten transactions; the board IO factory caps that
-     * queue. Query the driver's actual DMA-rounded transfer limit. */
+    /* Report the effective color limit queried by the LCD IO factory, after
+     * board policy. The hardware's descriptor-rounded capacity can be larger. */
     size_t spi_max_bytes = 0;
     const esp_err_t spi_limit_result = spi_bus_get_max_transaction_len(BSP_LCD_SPI_HOST, &spi_max_bytes);
     if (spi_limit_result == ESP_OK) {
-        ESP_LOGI(TAG, "Display SPI max_transaction_bytes=%zu pinned_requested_queue_depth=10 effective_queue_ceiling=%u",
+        ESP_LOGI(TAG, "Display SPI color_chunk_limit_bytes=%zu pinned_requested_queue_depth=10 effective_queue_ceiling=%u",
                  spi_max_bytes, (unsigned)CONFIG_APP_DISPLAY_SPI_QUEUE_DEPTH);
     } else {
         ESP_LOGW(TAG, "Display SPI transfer limit unavailable: %s (pinned_requested_queue_depth=10 effective_queue_ceiling=%u)",
