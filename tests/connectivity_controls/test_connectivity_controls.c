@@ -30,6 +30,12 @@ bool ble_hid_management_reserve(uint64_t generation, uint64_t bond_revision,
     *reservation = 1; return true;
 }
 void ble_hid_management_release(uint64_t reservation) { (void)reservation; }
+bool ble_hid_management_select_reserve(uint64_t generation, uint64_t bond_revision,
+    uint64_t preference_revision, const ble_hid_target_t *target, uint64_t *reservation)
+{ assert(target && target->bond_id_known); return ble_hid_management_reserve(generation, bond_revision, preference_revision, reservation); }
+esp_err_t ble_hid_management_select_current(uint64_t reservation, uint64_t generation,
+    const ble_hid_target_preferences_request_t *request, uint64_t *id)
+{ assert(reservation && generation == bluetooth.generation); return ble_hid_target_preferences_request(request, id); }
 void ble_hid_management_resume(uint64_t reservation, const ble_hid_target_t *target) { (void)reservation; (void)target; }
 void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *target) { (void)reservation; (void)target; }
 bool ble_hid_management_ready(uint64_t reservation) { return reservation && !bluetooth.connected && !bluetooth.advertising; }

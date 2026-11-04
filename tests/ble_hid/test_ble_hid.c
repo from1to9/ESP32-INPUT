@@ -2758,6 +2758,8 @@ static void test_quiet_forget_all_and_empty_durable_preferences(void) {
 #include "current_selection_cases.inc"
 
 int main(void) {
+    if (getenv("BLE_CURRENT_REVIEW")) { current_selection_review_cases(); return 0; }
+    current_selection_review_cases();
     if (getenv("BLE_CURRENT_SELECTION")) { current_selection_cases(); return 0; }
     current_selection_cases();
     if (getenv("BLE_MANAGEMENT_EDGES")) { management_edges_cases(); return 0; }

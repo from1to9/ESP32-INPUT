@@ -118,7 +118,10 @@ esp_err_t app_bluetooth_management_begin(app_bluetooth_management_operation_t op
         if (matches != 1) return ESP_ERR_NOT_FOUND;
     }
     uint64_t reservation = 0;
-    if (!ble_hid_management_reserve(host_generation, bond_revision, preference_revision, &reservation)) return ESP_ERR_INVALID_STATE;
+    bool reserved = operation == APP_BT_MANAGE_SELECT ?
+        ble_hid_management_select_reserve(host_generation, bond_revision, preference_revision, target, &reservation) :
+        ble_hid_management_reserve(host_generation, bond_revision, preference_revision, &reservation);
+    if (!reserved) return ESP_ERR_INVALID_STATE;
     uint64_t revision = management.view.revision;
     if (revision == UINT64_MAX) { ble_hid_management_release(reservation); return ESP_ERR_INVALID_STATE; }
     memset(&management, 0, sizeof(management));
@@ -145,7 +148,7 @@ void app_bluetooth_management_cancel(void)
     message(APP_BT_MANAGE_CANCELLED, management.view.irreversible ?
         "Stopped. An accepted change may finish; inspect saved hosts before retrying." : "Bluetooth change cancelled.");
 }
-static esp_err_t submit_policy(const ble_hid_target_snapshot_t *current)
+static esp_err_t submit_policy(const ble_hid_target_snapshot_t *current, bool keep_current)
 {
     memset(&policy_request, 0, sizeof(policy_request));
     policy_request.expected_bond_revision = observed.revision;
@@ -157,7 +160,9 @@ static esp_err_t submit_policy(const ble_hid_target_snapshot_t *current)
     if (policy_request.selected) policy_request.target = management.view.operation == APP_BT_MANAGE_SELECT ?
         management.target : management.original_policy.target;
     for (unsigned i = 0; i < observed.count; ++i) policy_request.order[i] = key(&observed.bonds[i]);
-    esp_err_t error = ble_hid_target_preferences_request(&policy_request, &management.view.policy_request_id);
+    esp_err_t error = keep_current ? ble_hid_management_select_current(management.admission_reservation,
+        management.host_generation, &policy_request, &management.view.policy_request_id) :
+        ble_hid_target_preferences_request(&policy_request, &management.view.policy_request_id);
     memset(&policy_request, 0, sizeof(policy_request));
     return error;
 }
@@ -186,10 +191,9 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
                     finish(ESP_ERR_INVALID_STATE, false, "Saved hosts or target policy changed. Review before retrying."); return;
                 }
                 if (policy.durable && policy.selected && same_target(&policy.target, &management.target)) {
-                    finish(ESP_OK, false, bluetooth.ready ? "Selected host is already connected and ready." :
-                        "Selected host is connected; input is not ready."); return;
+                    finish(ESP_OK, false, "Selected host preference is already saved."); return;
                 }
-                esp_err_t error = submit_policy(&policy);
+                esp_err_t error = submit_policy(&policy, true);
                 if (error != ESP_OK) {
                     finish(error, false, "Current host selection could not be saved."); return;
                 }
@@ -229,7 +233,7 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
         }
         if (management.view.operation == APP_BT_MANAGE_ADD || management.view.operation == APP_BT_MANAGE_SELECT ||
             management.view.operation == APP_BT_MANAGE_RECONNECT) {
-            esp_err_t error = submit_policy(&policy);
+            esp_err_t error = submit_policy(&policy, false);
             if (error != ESP_OK) { finish(error, false, "Target policy could not be cleared; pairing was not opened."); return; }
             management.view.irreversible = true;
             message(APP_BT_MANAGE_POLICY, management.view.operation == APP_BT_MANAGE_SELECT ?
@@ -277,7 +281,7 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
         if (!policy_stable(&policy) || policy.revision != management.preference_revision) {
             finish(ESP_ERR_INVALID_STATE, true, "Removal finished but target policy needs reconciliation."); return;
         }
-        esp_err_t error = submit_policy(&policy);
+        esp_err_t error = submit_policy(&policy, false);
         if (error != ESP_OK) { finish(error, true, "Removal finished; saving the remaining target policy failed."); return; }
         message(APP_BT_MANAGE_POLICY, "Verifying the remaining saved-host target policy.");
         return;
@@ -302,8 +306,7 @@ void app_bluetooth_management_service(const app_bluetooth_management_context_t *
                 if (bluetooth.generation != management.host_generation || !target_is_current()) {
                     finish(ESP_ERR_INVALID_STATE, true, "Current host changed while its selection was saved."); return;
                 }
-                finish(ESP_OK, false, bluetooth.ready ? "Selected host saved. Current input connection remains ready." :
-                    "Selected host saved. Current connection is not ready for input."); return;
+                finish(ESP_OK, false, "Selected host preference saved."); return;
             }
             if (selecting) ble_hid_management_resume(management.admission_reservation, &management.target);
             else ble_hid_management_reconnect(management.admission_reservation, &management.target);

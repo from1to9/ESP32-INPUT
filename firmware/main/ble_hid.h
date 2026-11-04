@@ -394,9 +394,7 @@ esp_err_t ble_hid_target_order(uint64_t bond_revision, const ble_hid_target_t *o
  * without a fingerprint is bound to that fresh row before admission; a supplied
  * fingerprint must match. Duplicate/omitted keys and unsupported identities
  * reject before NVS. An unchanged removed selection may be retained blocked.
- * An active management reservation may select the current authenticated full
- * bond without disconnecting it; the worker rechecks that physical generation
- * and bond before saving. All other live preference edits remain rejected.
+ * Live preference edits are rejected even while another manager is reserved.
  * Rejected calls leave request/status/persistence unchanged. */
 esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_request_t *, uint64_t *request_id);
 
@@ -421,6 +419,15 @@ esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_re
  * provisional ACL churn conveys no authority. */
 bool ble_hid_management_reserve(uint64_t host_generation, uint64_t bond_revision,
     uint64_t preference_revision, uint64_t *reservation);
+/* Select binds its reservation to exactly one complete saved target. Other
+ * operations use the generic reservation and cannot edit a live preference. */
+bool ble_hid_management_select_reserve(uint64_t host_generation, uint64_t bond_revision,
+    uint64_t preference_revision, const ble_hid_target_t *target, uint64_t *reservation);
+/* Only that Select token, approved host generation and full target may submit
+ * once while retaining the current authenticated link. The worker rechecks physical
+ * generation and bond before NVS. Public select/order remain disconnected-only. */
+esp_err_t ble_hid_management_select_current(uint64_t reservation, uint64_t generation,
+    const ble_hid_target_preferences_request_t *request, uint64_t *request_id);
 void ble_hid_management_release(uint64_t reservation);
 bool ble_hid_management_ready(uint64_t reservation);
 /* Consumes only this reservation. A non-null target resumes only its manual

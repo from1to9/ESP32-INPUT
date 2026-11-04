@@ -91,6 +91,11 @@ same physical link. Tests retain the actual CCCD readiness state and cover
 unreserved/stale edits, provisional links, cancellation, NVS failures, link-down
 and same-address key replacement during commit. Other-host selection retains
 the existing release/disconnect and host-initiated reconnect checks below.
+Live submission requires the exact Select reservation, captured host generation
+and approved complete target. An Add reservation, public select/preferences or
+reorder call cannot borrow it. Completion confirms the verified durable target
+preference; input readiness remains a separate live observation, including when
+a CCCD disable overtakes the manager's earlier connection snapshot.
 
 The native `app_bluetooth_management` workflow uses the production worker in
 this suite. Add waits for input release and actual link-down, saves a revisioned

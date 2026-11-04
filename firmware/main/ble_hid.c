@@ -200,6 +200,7 @@ static struct {
     uint64_t target_connection_generation;
     bool classic_pairing_reserved;
     uint64_t management_sequence, management_reservation;
+    ble_hid_target_t management_select_target;
     bool pairing_new_hosts_only;
     bool reconnect_probe, reconnect_probe_link;
     int64_t reconnect_probe_deadline_us;
@@ -2833,9 +2834,9 @@ static bool target_editable_locked(uint64_t revision, bool keep_current)
         state.public.bond_forget_state != BLE_HID_FORGET_FAILED;
 }
 
-static esp_err_t submit_preferences_locked(const ble_hid_target_preferences_request_t *request, uint64_t *request_id)
+static esp_err_t submit_preferences_locked(const ble_hid_target_preferences_request_t *request,
+    uint64_t *request_id, bool keep_current)
 {
-    bool keep_current = state.management_reservation && request->selected && current_target_locked(&request->target);
     if (!target_editable_locked(request->expected_bond_revision, keep_current) || target_blocked_locked() ||
         request->expected_revision != state.target.revision || state.target.revision == UINT64_MAX ||
         state.target.request_id == UINT64_MAX) return ESP_ERR_INVALID_STATE;
@@ -2898,7 +2899,25 @@ esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_re
 {
     if (!request || request->count > BLE_HID_MAX_BONDS) return ESP_ERR_INVALID_ARG;
     portENTER_CRITICAL(&state_lock);
-    esp_err_t error = submit_preferences_locked(request, request_id);
+    esp_err_t error = submit_preferences_locked(request, request_id, false);
+    portEXIT_CRITICAL(&state_lock);
+    return error;
+}
+
+esp_err_t ble_hid_management_select_current(uint64_t reservation, uint64_t generation,
+    const ble_hid_target_preferences_request_t *request, uint64_t *request_id)
+{
+    if (!request || !request->selected || request->count > BLE_HID_MAX_BONDS) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&state_lock);
+    const ble_hid_target_t *approved = &state.management_select_target;
+    bool owned = reservation && reservation == state.management_reservation &&
+        generation == state.public.generation && approved->bond_id_known && request->target.bond_id_known &&
+        approved->address_type == request->target.address_type &&
+        !memcmp(approved->address, request->target.address, ESP_BD_ADDR_LEN) &&
+        !memcmp(approved->bond_id, request->target.bond_id, BLE_HID_BOND_ID_BYTES) &&
+        current_target_locked(&request->target);
+    esp_err_t error = owned ? submit_preferences_locked(request, request_id, true) : ESP_ERR_INVALID_STATE;
+    if (error == ESP_OK) state.management_select_target = (ble_hid_target_t){0};
     portEXIT_CRITICAL(&state_lock);
     return error;
 }
@@ -2919,7 +2938,7 @@ esp_err_t ble_hid_target_select(uint64_t bond_revision, const ble_hid_target_t *
     request->count = state.bond_list.count;
     if (target) request->target = *target;
     for (unsigned int i = 0; i < request->count; ++i) request->order[i] = key_for_bond(&state.bond_list.bonds[i]);
-    esp_err_t error = submit_preferences_locked(request, NULL);
+    esp_err_t error = submit_preferences_locked(request, NULL, false);
     clear_target_request_locked();
     portEXIT_CRITICAL(&state_lock);
     return error;
@@ -2958,7 +2977,7 @@ esp_err_t ble_hid_target_order(uint64_t bond_revision, const ble_hid_target_t *o
     request->target = state.target.target;
     request->count = (uint8_t)count;
     if (count) memmove(request->order, ordered, count * sizeof(*ordered));
-    esp_err_t error = submit_preferences_locked(request, NULL);
+    esp_err_t error = submit_preferences_locked(request, NULL, false);
     clear_target_request_locked();
     portEXIT_CRITICAL(&state_lock);
     return error;
@@ -3003,8 +3022,8 @@ static bool pairing_open_request(uint32_t duration_ms, uint64_t reservation)
     return accepted;
 }
 
-bool ble_hid_management_reserve(uint64_t host_generation, uint64_t bond_revision,
-    uint64_t preference_revision, uint64_t *reservation)
+static bool management_reserve(uint64_t host_generation, uint64_t bond_revision,
+    uint64_t preference_revision, const ble_hid_target_t *target, uint64_t *reservation)
 {
     portENTER_CRITICAL(&state_lock);
     bool accepted = reservation && state.public.initialized && !state.public.failed &&
@@ -3015,8 +3034,16 @@ bool ble_hid_management_reserve(uint64_t host_generation, uint64_t bond_revision
         state.bond_list.known && !state.bond_list.updating &&
         state.bond_list.revision == bond_revision && state.target.revision == preference_revision &&
         state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
+    if (accepted && target) {
+        unsigned matches = 0;
+        for (unsigned i = 0; i < state.bond_list.count; ++i)
+            if (target->bond_id_known && state.bond_list.bonds[i].selection_supported &&
+                target_key_matches(target, &state.bond_list.bonds[i])) ++matches;
+        accepted = matches == 1;
+    }
     if (accepted) {
         state.management_reservation = ++state.management_sequence;
+        state.management_select_target = target ? *target : (ble_hid_target_t){0};
         state.management_peer_known = state.public.connection_admitted;
         if (state.management_peer_known) {
             memcpy(state.management_peer_address, state.address, ESP_BD_ADDR_LEN);
@@ -3027,6 +3054,18 @@ bool ble_hid_management_reserve(uint64_t host_generation, uint64_t bond_revision
     }
     portEXIT_CRITICAL(&state_lock);
     return accepted;
+}
+
+bool ble_hid_management_reserve(uint64_t host_generation, uint64_t bond_revision,
+    uint64_t preference_revision, uint64_t *reservation)
+{
+    return management_reserve(host_generation, bond_revision, preference_revision, NULL, reservation);
+}
+
+bool ble_hid_management_select_reserve(uint64_t host_generation, uint64_t bond_revision,
+    uint64_t preference_revision, const ble_hid_target_t *target, uint64_t *reservation)
+{
+    return target && management_reserve(host_generation, bond_revision, preference_revision, target, reservation);
 }
 
 void ble_hid_management_release(uint64_t reservation)

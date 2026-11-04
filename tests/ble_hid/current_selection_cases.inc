@@ -17,6 +17,76 @@ static void current_selection_replace_bond(void)
     save_sdk_bond(1, active_peer, 0x66);
     authentication_event(true, true);
 }
+static void current_selection_disable_mouse(void) { write_cccd(ATTR_MOUSE_CCCD, false); }
+static void current_selection_review_cases(void)
+{
+    for (unsigned selecting = 0; selecting < 2; ++selecting)
+    for (unsigned operation = 0; operation < 3; ++operation) {
+        ble_hid_target_t target = current_selection_setup(operation == 1, true);
+        const ble_hid_bond_list_t before = ble_hid_bond_list();
+        const unsigned commits = target_commit_calls;
+        native_begin(selecting ? APP_BT_MANAGE_SELECT : APP_BT_MANAGE_ADD, selecting ? &target : NULL);
+        native_context.release_pending = true;
+        app_bluetooth_management_service(&native_context, ++native_now);
+        ble_hid_target_t order[2] = {public_target(&before.bonds[1]), public_target(&before.bonds[0])};
+        ble_hid_target_preferences_request_t request = {.expected_bond_revision = before.revision,
+            .expected_revision = before.preferences_revision, .count = 2, .selected = true, .target = target};
+        memcpy(request.order, order, sizeof(order));
+        esp_err_t error = operation == 0 ? ble_hid_target_select(before.revision, &target) :
+            operation == 1 ? ble_hid_target_order(before.revision, order, 2) :
+            ble_hid_target_preferences_request(&request, NULL);
+        assert(error == ESP_ERR_INVALID_STATE);
+        worker_cycle();
+        assert(target_commit_calls == commits && native_receipt().active && !close_calls);
+        assert(ble_hid_target_snapshot().selected == (operation == 1));
+        app_bluetooth_management_cancel();
+    }
+    ble_hid_target_t target = current_selection_setup(false, true);
+    const ble_hid_bond_list_t before = ble_hid_bond_list();
+    ble_hid_target_preferences_request_t request = {.expected_bond_revision = before.revision,
+        .expected_revision = before.preferences_revision, .count = 2, .selected = true, .target = target};
+    for (unsigned i = 0; i < 2; ++i) request.order[i] = public_target(&before.bonds[i]);
+    const unsigned commits = target_commit_calls;
+    native_begin(APP_BT_MANAGE_ADD, NULL);
+    const uint64_t old_token = state.management_reservation;
+    assert(ble_hid_management_select_current(old_token, state.public.generation, &request, NULL) == ESP_ERR_INVALID_STATE);
+    app_bluetooth_management_cancel();
+    native_begin(APP_BT_MANAGE_SELECT, &target);
+    const uint64_t token = state.management_reservation, request_id = state.target.request_id;
+    const uint64_t rejected_tokens[] = {0, old_token, token + 1U};
+    for (unsigned i = 0; i < 3; ++i)
+        assert(ble_hid_management_select_current(rejected_tokens[i], state.public.generation, &request, NULL) == ESP_ERR_INVALID_STATE);
+    assert(ble_hid_management_select_current(token, state.public.generation - 1U, &request, NULL) == ESP_ERR_INVALID_STATE);
+    request.target.bond_id[0] ^= 1U;
+    assert(ble_hid_management_select_current(token, state.public.generation, &request, NULL) == ESP_ERR_INVALID_STATE);
+    request.target = native_target(0xc2);
+    assert(ble_hid_management_select_current(token, state.public.generation, &request, NULL) == ESP_ERR_INVALID_STATE);
+    worker_cycle();
+    assert(state.target.request_id == request_id && target_commit_calls == commits && !close_calls);
+    app_bluetooth_management_cancel();
+    target = current_selection_setup(false, true);
+    native_begin(APP_BT_MANAGE_SELECT, &target);
+    const uint64_t once = state.management_reservation;
+    native_step(false);
+    const unsigned saved_commits = target_commit_calls;
+    request.target = target; request.expected_revision = state.target.revision;
+    request.expected_bond_revision = state.bond_list.revision;
+    assert(ble_hid_management_select_current(once, state.public.generation, &request, NULL) == ESP_ERR_INVALID_STATE);
+    native_finish();
+    assert(target_commit_calls == saved_commits && state.public.ready && !close_calls);
+    for (unsigned already = 0; already < 2; ++already) {
+        target = current_selection_setup(already != 0, true);
+        native_begin(APP_BT_MANAGE_SELECT, &target);
+        if (!already) native_step(false); /* Commit before racing the final receipt. */
+        model_before_state_lock_count = 3; model_before_state_lock = current_selection_disable_mouse;
+        app_bluetooth_management_service(&native_context, ++native_now);
+        assert(!model_before_state_lock_count && !state.public.ready && !close_calls);
+        assert(native_receipt().phase == APP_BT_MANAGE_COMPLETE);
+        assert(!strstr(native_receipt().message, " ready") && !strstr(native_receipt().message, "connected"));
+        assert(ble_hid_target_snapshot().selected && ble_hid_target_snapshot().durable);
+    }
+    puts("Current selection review: other operations cannot borrow admission; completion reports only the saved preference passed");
+}
 static void current_selection_cases(void)
 {
     for (unsigned ready = 0; ready < 2; ++ready)
