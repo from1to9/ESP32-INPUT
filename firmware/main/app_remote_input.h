@@ -33,7 +33,7 @@ typedef struct {
     /* Read current coordinator-owned state. No clock, UI, network or SDK I/O. */
     bool (*observe)(void *, app_remote_input_state_t *);
     /* Current per-credential authority; absence preserves standalone legacy ports. */
-    bool (*authorize)(void *, const cp_identity_t *);
+    bool (*authorize)(void *, const cp_identity_t *, cp_operation_id_t);
     /* Called after successful model/state changes. Parent increments the shared
      * revisions and updates its native view state, including remote owner.
      * Native edits must update these same revisions. Increments must be checked
@@ -89,6 +89,10 @@ cp_error_t app_remote_input_execute(app_remote_input_t *, const cp_command_t *,
  * sender or step loop is introduced. Expiry/safety cancels via the same engine
  * and preserves the reserved neutral release barrier. */
 void app_remote_input_service(app_remote_input_t *, uint64_t now_ms);
+/* Last ordinary remote-report gate. It never mutates the input engine or writes
+ * storage; rejection lets the engine cancel and run its reserved neutral barrier.
+ * The authority provider may latch expiry in RAM. Never gate the neutral barrier. */
+bool app_remote_input_report_authorized(const app_remote_input_t *, uint64_t now_ms);
 /* Process ONE existing, properly mapped board sample. Returns true when
  * consumed, including calibration/reference tracking with output suppressed.
  * Local ownership uses the native source; an active DEVICE_IMU Mouse lease or

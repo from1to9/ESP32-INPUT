@@ -20,10 +20,10 @@ typedef struct {
     uint8_t permissions;
     app_control_access_duration_t duration;
     uint64_t expires, revision;
-    bool legacy, suspended;
+    bool legacy, suspended, expired;
 } access_record_t;
 typedef struct {
-    bool known, uncertain, queued, processing;
+    bool known, uncertain, queued, processing, expiry_pending;
     esp_err_t error;
     char trust_digest[65];
     uint64_t revision, storage_generation, serial, pending_id, pending_until;
@@ -100,7 +100,23 @@ static uint8_t permissions(cp_scope_mask_t value)
 }
 static bool usable(const access_record_t *r, bool known, uint64_t wall)
 {
-    return r->principal.enabled && !r->suspended && (r->duration == APP_CONTROL_ACCESS_PERMANENT || (known && wall < r->expires));
+    if (!r->principal.enabled || r->suspended || r->expired) return false;
+    if (r->duration == APP_CONTROL_ACCESS_PERMANENT) return true;
+    if (!r->revision) return false;
+    bool expired = known && wall >= r->expires;
+    /* Readers stop authority immediately. Only the management owner persists
+     * the terminal observation, bound to this exact grant revision. */
+    portENTER_CRITICAL(&access_lock);
+    if (access_state) for (unsigned i = 0; i < access_state->count; ++i) {
+        access_record_t *saved = &access_state->saved[i];
+        if (r->revision && r->revision == saved->revision && same(r->principal.id, saved->principal.id, 16)) {
+            if (expired && !saved->expired) { saved->expired = true; access_state->expiry_pending = true; }
+            expired |= saved->expired;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&access_lock);
+    return known && !expired;
 }
 static unsigned records_version(access_record_t out[CP_MAX_PRINCIPALS], uint64_t *revision, bool *coherent)
 {
@@ -150,7 +166,7 @@ static void pack(uint8_t *bank, const access_record_t *r, unsigned count, uint64
         uint8_t *p = bank + 113 + i * RECORD_BYTES;
         memcpy(p, r[i].principal.id, 16); memcpy(p + 16, r[i].principal.credential_sha256, 32);
         memcpy(p + 48, r[i].label, 33); p[81] = r[i].permissions; p[82] = (uint8_t)r[i].duration;
-        p[83] = (uint8_t)((r[i].legacy ? 1 : 0) | (r[i].principal.enabled ? 2 : 0));
+        p[83] = (uint8_t)((r[i].legacy ? 1 : 0) | (r[i].principal.enabled ? 2 : 0) | (r[i].expired ? 4 : 0));
         put64(p + 84, r[i].expires); put64(p + 92, r[i].revision);
     }
     uint8_t hash[32]; cp_sha256(bank, BANK_BYTES, hash); memcpy(bank + 16, hash, 32);
@@ -165,11 +181,11 @@ static bool unpack(uint8_t *bank, access_record_t *out, unsigned *count, uint64_
     for (unsigned i = 0; i < *count; ++i) {
         const uint8_t *p = bank + 113 + i * RECORD_BYTES;
         out[i] = (access_record_t){.permissions = p[81], .duration = (app_control_access_duration_t)p[82],
-            .legacy = (p[83] & 1) != 0, .expires = get64(p+84), .revision = get64(p+92)};
+            .legacy = (p[83] & 1) != 0, .expired = (p[83] & 4) != 0, .expires = get64(p+84), .revision = get64(p+92)};
         memcpy(out[i].principal.id, p, 16); memcpy(out[i].principal.credential_sha256, p+16, 32);
         memcpy(out[i].label, p+48, 33); out[i].principal.enabled = (p[83] & 2) != 0;
         out[i].principal.scopes = scopes(out[i].permissions);
-        if (!label_valid(out[i].label) || p[81] > 7 || p[82] > APP_CONTROL_ACCESS_PERMANENT || p[83] > 3 ||
+        if (!label_valid(out[i].label) || p[81] > 7 || p[82] > APP_CONTROL_ACCESS_PERMANENT || p[83] > 7 || (out[i].expired && out[i].duration == APP_CONTROL_ACCESS_PERMANENT) ||
             !out[i].revision || (out[i].principal.enabled && !out[i].permissions) ||
             (out[i].duration == APP_CONTROL_ACCESS_PERMANENT ? out[i].expires != 0 : out[i].expires == 0)) return false;
         uint8_t nonzero = 0; for (unsigned j = 0; j < 16; ++j) nonzero |= p[j]; if (!nonzero) return false;
@@ -186,6 +202,13 @@ esp_err_t app_control_access_init(void)
     if (!access_state) return ESP_ERR_NO_MEM;
     portENTER_CRITICAL(&access_lock);
     uint64_t previous_revision = access_state->revision;
+    struct { uint8_t id[16]; uint64_t revision; } expired[CP_MAX_PRINCIPALS];
+    unsigned expired_count = 0;
+    if (!strcmp(access_state->trust_digest, trust.active_digest))
+        for (unsigned i = 0; i < access_state->count; ++i) if (access_state->saved[i].expired) {
+            memcpy(expired[expired_count].id, access_state->saved[i].principal.id, 16);
+            expired[expired_count++].revision = access_state->saved[i].revision;
+        }
     access_state->known = false; access_state->uncertain = true;
     if (access_state->queued || access_state->processing) {
         access_state->receipt_state = CP_RESULT_FAILED; access_state->receipt_error = CP_STALE;
@@ -214,14 +237,25 @@ esp_err_t app_control_access_init(void)
                 /* A new locally enrolled trust package starts with its own native
                  * principals. Old browser credentials/grants never cross it. */
                 best_count = memcmp(access_state->bank + 48, trust.active_digest, 64) ? 0 : count;
-                memcpy(access_state->saved, access_state->candidate, sizeof(access_state->saved));
+                memcpy(access_state->verify, access_state->bank, BANK_BYTES);
             }
         }
         nvs_close(nvs);
     }
+    if (error == ESP_OK && best_count) {
+        unsigned count; uint64_t generation;
+        if (!unpack(access_state->verify, access_state->candidate, &count, &generation)) error = ESP_ERR_INVALID_CRC;
+    }
     portENTER_CRITICAL(&access_lock);
-    access_state->known = error == ESP_OK; access_state->uncertain = error != ESP_OK;
-    access_state->error = error; access_state->count = best_count;
+    access_state->known = error == ESP_OK; access_state->uncertain = error != ESP_OK; access_state->error = error;
+    if (error != ESP_OK) { portEXIT_CRITICAL(&access_lock); return error; }
+    if (best_count) memcpy(access_state->saved, access_state->candidate, sizeof(access_state->saved));
+    access_state->count = best_count; access_state->expiry_pending = false;
+    for (unsigned i = 0; i < best_count; ++i) for (unsigned j = 0; j < expired_count; ++j)
+        if (access_state->saved[i].revision == expired[j].revision &&
+            same(access_state->saved[i].principal.id, expired[j].id, 16) && !access_state->saved[i].expired) {
+            access_state->saved[i].expired = true; access_state->expiry_pending = true;
+        }
     access_state->storage_generation = best; access_state->revision = best ? best : 1;
     for (unsigned i = 0; i < best_count; ++i) if (access_state->saved[i].revision > access_state->revision)
         access_state->revision = access_state->saved[i].revision;
@@ -271,8 +305,8 @@ static void describe(const access_record_t *r, app_control_access_client_t *v, b
     *v = (app_control_access_client_t){.permissions = r->permissions, .duration = r->duration,
         .expires_unix_seconds = r->expires, .revision = r->revision, .legacy = r->legacy && !r->revision,
         .enabled = usable(r, known, wall), .revoked = !r->principal.enabled,
-        .clock_unknown = r->duration != APP_CONTROL_ACCESS_PERMANENT && !known,
-        .expired = r->duration != APP_CONTROL_ACCESS_PERMANENT && known && wall >= r->expires};
+        .clock_unknown = !r->expired && r->duration != APP_CONTROL_ACCESS_PERMANENT && !known,
+        .expired = r->expired || (r->duration != APP_CONTROL_ACCESS_PERMANENT && known && wall >= r->expires)};
     memcpy(v->id, r->principal.id, 16); memcpy(v->label, r->label, sizeof(v->label));
     hex(r->principal.credential_sha256, 32, v->fingerprint);
 }
@@ -346,13 +380,70 @@ cp_error_t app_control_access_submit(const app_control_access_request_t *r, uint
     }
     portEXIT_CRITICAL(&access_lock); return error;
 }
+/* Single management owner; no caller holds access_lock during storage I/O. */
+static esp_err_t write_candidate(unsigned count, uint64_t generation, bool *attempted)
+{
+    pack(access_state->bank, access_state->candidate, count, generation, access_state->trust_digest);
+    nvs_handle_t nvs;
+    esp_err_t error = nvs_open_from_partition("control", "ctrl_access", NVS_READWRITE, &nvs);
+    *attempted = error == ESP_OK;
+    if (error == ESP_OK) {
+        const char *key = (generation & 1) ? "access_a" : "access_b";
+        error = nvs_set_blob(nvs, key, access_state->bank, BANK_BYTES);
+        if (error == ESP_OK) error = nvs_commit(nvs);
+        size_t size = BANK_BYTES;
+        if (error == ESP_OK) error = nvs_get_blob(nvs, key, access_state->verify, &size);
+        if (error == ESP_OK && (size != BANK_BYTES || memcmp(access_state->verify, access_state->bank, BANK_BYTES))) error = ESP_ERR_INVALID_CRC;
+        nvs_close(nvs);
+    }
+    return error;
+}
+/* A reader may latch another expiry during the write. Preserve that RAM latch
+ * and persist it on the next service, without changing a locally renewed grant. */
+static void publish_candidate(unsigned count, uint64_t storage_generation, uint64_t revision)
+{
+    bool pending = false;
+    for (unsigned i = 0; i < access_state->count; ++i) for (unsigned j = 0; j < count; ++j)
+        if (access_state->saved[i].expired && !access_state->candidate[j].expired &&
+            access_state->saved[i].revision == access_state->candidate[j].revision &&
+            same(access_state->saved[i].principal.id, access_state->candidate[j].principal.id, 16)) {
+            access_state->candidate[j].expired = true; pending = true;
+        }
+    memcpy(access_state->saved, access_state->candidate, sizeof(access_state->saved)); access_state->count = count;
+    access_state->storage_generation = storage_generation; access_state->revision = revision;
+    access_state->expiry_pending = pending;
+}
+static void persist_expiry(void)
+{
+    portENTER_CRITICAL(&access_lock);
+    if (!access_state->known || access_state->uncertain || access_state->queued || !access_state->expiry_pending) {
+        portEXIT_CRITICAL(&access_lock); return;
+    }
+    if (access_state->revision == UINT64_MAX || access_state->storage_generation == UINT64_MAX) {
+        access_state->known = false; access_state->uncertain = true; access_state->error = ESP_ERR_INVALID_STATE;
+        portEXIT_CRITICAL(&access_lock); return;
+    }
+    unsigned count = access_state->count;
+    uint64_t generation = access_state->storage_generation + 1, revision = access_state->revision + 1;
+    access_state->processing = true;
+    memcpy(access_state->candidate, access_state->saved, sizeof(access_state->candidate));
+    portEXIT_CRITICAL(&access_lock);
+    bool attempted;
+    esp_err_t error = write_candidate(count, generation, &attempted);
+    portENTER_CRITICAL(&access_lock);
+    access_state->error = error;
+    if (error == ESP_OK) publish_candidate(count, generation, revision);
+    else { access_state->known = false; access_state->uncertain = true; }
+    access_state->processing = false;
+    portEXIT_CRITICAL(&access_lock);
+}
 void app_control_access_service(bool unlocked)
 {
     if (!access_state) { (void)app_control_access_init(); return; }
     app_control_trust_snapshot_t trust; app_control_trust_snapshot(&trust);
     if (trust.present && trust.known && strcmp(trust.active_digest, access_state->trust_digest)) { (void)app_control_access_init(); return; }
     portENTER_CRITICAL(&access_lock);
-    if (!access_state->queued) { portEXIT_CRITICAL(&access_lock); return; }
+    if (!access_state->queued) { portEXIT_CRITICAL(&access_lock); persist_expiry(); return; }
     app_control_access_request_t r = access_state->request;
     access_state->queued = false; access_state->processing = true;
     uint64_t generation = access_state->revision + 1;
@@ -381,6 +472,7 @@ void app_control_access_service(bool unlocked)
         if (r.action != APP_CONTROL_ACCESS_REVOKE && r.duration != APP_CONTROL_ACCESS_PERMANENT && !clock) result = CP_UNAVAILABLE;
         if (result == CP_OK) {
             value.suspended = false;
+            if (r.action != APP_CONTROL_ACCESS_REVOKE) value.expired = false;
             value.permissions = r.action == APP_CONTROL_ACCESS_REVOKE ? 0 : r.permissions;
             value.duration = r.action == APP_CONTROL_ACCESS_REVOKE ? value.duration : r.duration;
             value.expires = value.duration == APP_CONTROL_ACCESS_PERMANENT ? 0 :
@@ -389,25 +481,13 @@ void app_control_access_service(bool unlocked)
             value.principal.scopes = scopes(value.permissions); value.revision = generation;
             access_state->candidate[slot] = value; if (slot == count) ++count;
             uint64_t stored_generation = access_state->storage_generation + 1;
-            pack(access_state->bank, access_state->candidate, count, stored_generation, access_state->trust_digest);
-            nvs_handle_t nvs; esp_err_t error = nvs_open_from_partition("control", "ctrl_access", NVS_READWRITE, &nvs);
-            bool attempted = error == ESP_OK;
-            if (error == ESP_OK) {
-                const char *key = (stored_generation & 1) ? "access_a" : "access_b";
-                /* Only the affected principal is quarantined while writing;
-                 * other clients keep their existing authority. */
-                error = nvs_set_blob(nvs, key, access_state->bank, BANK_BYTES);
-                if (error == ESP_OK) error = nvs_commit(nvs);
-                size_t size = BANK_BYTES;
-                if (error == ESP_OK) error = nvs_get_blob(nvs, key, access_state->verify, &size);
-                if (error == ESP_OK && (size != BANK_BYTES || memcmp(access_state->verify, access_state->bank, BANK_BYTES))) error = ESP_ERR_INVALID_CRC;
-                nvs_close(nvs);
-            }
+            bool attempted;
+            esp_err_t error = write_candidate(count, stored_generation, &attempted);
             portENTER_CRITICAL(&access_lock);
             access_state->error = error;
             if (error == ESP_OK) {
-                memcpy(access_state->saved, access_state->candidate, sizeof(access_state->saved)); access_state->count = count;
-                access_state->storage_generation = stored_generation; access_state->revision = generation; access_state->known = true; access_state->uncertain = false;
+                publish_candidate(count, stored_generation, generation);
+                access_state->known = true; access_state->uncertain = false;
                 if (proposal) access_state->pending_id = 0;
             } else if (attempted) {
                 access_state->known = false; access_state->uncertain = true;
@@ -450,7 +530,7 @@ cp_error_t app_control_access_pair_status(const char *client, const char *creden
     }
     uint64_t wall = 0; bool clock = app_clock_wall_time(&wall);
     if (found && value.suspended) return CP_BUSY;
-    if (found) status = !value.principal.enabled ? "rejected" : value.duration != APP_CONTROL_ACCESS_PERMANENT && !clock ? "clock_unknown" :
+    if (found) status = !value.principal.enabled ? "rejected" : value.expired ? "expired" : value.duration != APP_CONTROL_ACCESS_PERMANENT && !clock ? "clock_unknown" :
         usable(&value, clock, wall) ? "approved" : "expired";
     uint64_t request = 0; bool proposal_match = false;
     portENTER_CRITICAL(&access_lock);

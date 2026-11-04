@@ -130,6 +130,11 @@ These are separate identities; no one counter replaces another.
 
 Input operations retain `v`, `boot_id`, `session_id`, `request_id`, `seq`, `epoch`, `target_id`, `lease_id`, `deadline_ms`, `op`, `args`. Encode 64-bit epochs/revisions/device times as unsigned decimal strings; `seq` is an exact integer 1..4,294,967,295. IDs and channel request-prefix construction follow the remote-control contract. The adapter issues target IDs; callers cannot substitute a Bluetooth address. Management operations instead bind device/boot/management generation, resource revision, session authority and expiry; they do not require a selected HID target or null-target input lease. Both authenticated `POST /api/v1/commands` and WSS use the single registry/admission path defined by the matrix; neither is a parallel direct HID endpoint.
 
+`input.recover` retains its management-domain `input.control` contract: an untouched
+legacy principal can establish the recovery barrier without a lease or the legacy
+Allow switch. Current principal, scope, session, management generation and unlock
+checks still apply. A managed controller additionally needs its current INPUT grant.
+
 Renew explicitly about every 1,000 ms, at most 3,000 ms from receipt, with a state sequence received within 1,500 ms. Ping is not renewal. Stale state, blur/hide/pointer-capture loss, channel loss, session revocation or remote disable stops input production and lease renewal. On detected close cancel input immediately; silent loss is bounded by lease expiry plus the proposed, unqualified 50 ms scheduling budget. Reconnect requires a new channel, snapshot and explicit acquisition. No offline gesture queue or restarted job is allowed. Independently authorized update/recording jobs follow their manager cancellation policy; an explicitly approved file-only background recording may finish within its original limits after network/lease loss, while live transmission stops. Lock, privacy Stop, revocation and bounds still terminate capture, and boot never resumes it.
 
 ### Sequence and duplicate decision

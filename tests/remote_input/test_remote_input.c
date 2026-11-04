@@ -22,8 +22,8 @@ typedef struct {
 
 static bool observe(void *p, app_remote_input_state_t *out)
 { fixture_t *f=p; *out=f->state; return !f->observe_failure; }
-static bool authorize(void *p, const cp_identity_t *identity)
-{ fixture_t *f = p; return !f->authorization_revoked && identity->principal_id[0] == 1; }
+static bool authorize(void *p, const cp_identity_t *identity, cp_operation_id_t operation)
+{ fixture_t *f = p; (void)operation; return !f->authorization_revoked && identity->principal_id[0] == 1; }
 static void changed(void *p, unsigned flags)
 {
     fixture_t *f=p;

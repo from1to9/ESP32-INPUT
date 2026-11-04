@@ -345,6 +345,14 @@ static bool target_changed(const app_remote_input_t *m, uint64_t transport, cons
     return !m->state_known || transport != m->state.transport_generation || strcmp(target, m->state.target_id);
 }
 
+bool app_remote_input_report_authorized(const app_remote_input_t *m, uint64_t now_ms)
+{
+    return m && m->view.active && !m->view.pending && now_ms >= m->now_ms &&
+        now_ms < m->view.lease_expires_ms && m->port.engine->state.owner == INPUT_REMOTE &&
+        !m->port.engine->state.locked && m->port.engine->state.epoch == m->lease_epoch &&
+        (!m->port.authorize || m->port.authorize(m->port.user, &m->lease_identity, CP_OP_CONTROL_ACQUIRE));
+}
+
 void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
 {
     if (!m || m->servicing) return;
@@ -355,7 +363,7 @@ void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
     for (size_t i = 0; i < APP_REMOTE_INPUT_JOBS; ++i) sample_text(m, &m->jobs[i]);
     if ((m->view.active || m->view.pending) &&
         (regressed || !known || now_ms >= m->view.lease_expires_ms || m->port.engine->state.locked ||
-         (m->port.authorize && !m->port.authorize(m->port.user, &m->lease_identity)) ||
+         (m->port.authorize && !m->port.authorize(m->port.user, &m->lease_identity, CP_OP_CONTROL_ACQUIRE)) ||
          !m->state.remote_allowed || m->state.local_busy || target_changed(m, m->lease_transport, m->lease_target) ||
          m->port.engine->state.owner != INPUT_REMOTE || m->port.engine->state.epoch != m->lease_epoch))
         revoke(m, now_ms >= m->view.lease_expires_ms ? CP_EXPIRED :
@@ -988,7 +996,7 @@ cp_error_t app_remote_input_execute(app_remote_input_t *m, const cp_command_t *c
     cp_error_t error=CP_OK;
     char unavailable[CP_REASON_CAPACITY];
     if (!op->safety && !app_remote_input_available(m,cmd->operation,unavailable)) error=CP_UNAVAILABLE;
-    else if (!op->safety && m->port.authorize && !m->port.authorize(m->port.user, &cmd->identity)) error=CP_FORBIDDEN;
+    else if (!op->safety && m->port.authorize && !m->port.authorize(m->port.user, &cmd->identity, cmd->operation)) error=CP_FORBIDDEN;
     else if (!op->safety && !m->state_known) error=CP_UNAVAILABLE;
     else if (!op->safety && now_ms >= cmd->deadline_ms) error=CP_EXPIRED;
     else if (!op->safety && op->input && same_target(m,cmd) != CP_OK) error=CP_STALE;

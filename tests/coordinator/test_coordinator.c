@@ -130,6 +130,7 @@ static app_media_controls_effect_t test_media_effect;
 static bool test_media_handle;
 static unsigned test_media_handles;
 static bool test_control_session_alive, test_access_managed, test_access_input_allowed;
+static bool test_access_disabled, test_access_missing, test_access_no_input_scope;
 static cp_device_state_t test_control_state;
 static cp_result_t test_control_result;
 static unsigned test_control_completions;
@@ -208,7 +209,8 @@ bool app_control_runtime_session_alive(const uint8_t session[CP_ID_BYTES], const
 { return test_control_session_alive && session[0] && principal[0]; }
 #ifndef WEB_CONTROLLER_NATIVE
 bool app_control_access_principal(const uint8_t id[16], cp_principal_t *out)
-{ *out = (cp_principal_t){.enabled = true, .scopes = CP_SCOPE_ALL}; memcpy(out->id, id, 16); return true; }
+{ *out = (cp_principal_t){.enabled = !test_access_disabled, .scopes = test_access_no_input_scope ? CP_SCOPE_VIEW : CP_SCOPE_ALL};
+  memcpy(out->id, id, 16); return !test_access_missing; }
 bool app_control_access_managed(const uint8_t id[16]) { return test_access_managed && id[0] == 11; }
 bool app_control_access_input(const cp_identity_t *identity) { return test_access_managed && test_access_input_allowed && identity->principal_id[0] == 11; }
 bool app_control_access_any_input(void) { return test_access_managed && test_access_input_allowed; }
@@ -992,6 +994,7 @@ static void setup(input_mode_t mode)
     s_remote_allowance_generation = 1;
     s_remote_allowed = false;
     test_access_managed = test_access_input_allowed = false;
+    test_access_disabled = test_access_missing = test_access_no_input_scope = false;
     test_control_session_alive = false; test_control_completion_reject = false;
     test_control_completions = 0;
     test_control_state = (cp_device_state_t){0};
@@ -5784,6 +5787,71 @@ static void remote_recenter_uses_shared_owner_and_duplicate_never_restarts_acqui
     assert(s_reference_diagnostics.recenter_resets == 1 && s_interaction.gravity_ready);
 }
 
+
+static void review_last_remote_report_authority(void)
+{
+    for (unsigned transport = APP_INPUT_BLUETOOTH; transport <= APP_INPUT_USB; ++transport)
+    for (unsigned fault = 0; fault < 4; ++fault) {
+        transport_setup(INPUT_MOUSE, (app_input_transport_t)transport); remote_acquire_current_host();
+        test_access_managed = test_access_input_allowed = true; s_remote_allowed = false;
+        cp_command_t click = remote_test_command(CP_OP_MOUSE_CLICK, 2, "{\"button\":\"left\"}");
+        cp_result_t result; assert(app_command_bridge_submit(s_command_bridge, &click, &result) == CP_OK);
+        remote_control_service(); assert(s_engine.count && s_engine.state.owner == INPUT_REMOTE);
+        if (fault == 0) test_access_input_allowed = false; /* Expiry or removed INPUT. */
+        if (fault == 1) test_access_disabled = true; /* Principal revoked after admission. */
+        if (fault == 2) test_control_session_alive = false;
+        if (fault == 3) { test_clock_override = true; test_clock_ms = s_now_ms + 3000; }
+        const size_t before = trace_count;
+        const unsigned attempts = test_ble_send_attempts + test_usb_send_attempts;
+        assert(step() == HID_ENGINE_STEP_SEND_FAILED);
+        assert(trace_count == before && attempts == test_ble_send_attempts + test_usb_send_attempts);
+        assert(s_engine.state.release_pending && !s_engine.count);
+        remote_control_service(); release_barrier(); remote_control_service();
+        assert(s_engine.state.owner == INPUT_LOCAL);
+        /* A fresh local action and the forced releases need no network grant. */
+        assert(hid_engine_enqueue_mouse_click(&s_engine, s_engine.state.epoch, INPUT_LOCAL, 1) == HID_ENGINE_ENQUEUE_OK);
+        const uint8_t down[] = {1,0,0,0}, up[] = {0,0,0,0};
+        expect_report(2, down, sizeof down); expect_report(2, up, sizeof up);
+    }
+    /* Losing authority between a real down and its queued up still submits
+     * the shared engine's forced neutral reports and never repeats the down. */
+    setup(INPUT_MOUSE); remote_acquire_current_host();
+    test_access_managed = test_access_input_allowed = true;
+    cp_command_t click = remote_test_command(CP_OP_MOUSE_CLICK, 2, "{\"button\":\"left\"}"); cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &click, &result) == CP_OK); remote_control_service();
+    const uint8_t down[] = {1,0,0,0}; expect_report(2, down, sizeof down);
+    test_access_input_allowed = false; size_t before = trace_count;
+    assert(step() == HID_ENGINE_STEP_SEND_FAILED && trace_count == before);
+    remote_control_service(); release_barrier(); assert(!s_engine.mouse_buttons && !s_engine.count);
+}
+
+static void review_legacy_recovery(void)
+{
+    for (unsigned fault = 0; fault < 8; ++fault) {
+        setup(INPUT_MOUSE); remote_control_init(false); test_control_session_alive = true;
+        assert(!s_remote_allowed && !s_engine.state.locked); remote_control_service();
+        cp_command_t command = remote_test_command(CP_OP_INPUT_RECOVER, 1, "{}");
+        command.identity.scopes = CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL;
+        memset(command.lease_id, 0, sizeof(command.lease_id)); command.input_epoch = 0;
+        command.transport_generation = 0; command.target_id[0] = 0; command.ui_revision = 0;
+        if (fault == 1) test_control_session_alive = false;
+        if (fault == 2) test_access_disabled = true;
+        if (fault == 3) test_access_no_input_scope = true;
+        if (fault == 4) ++command.management_generation;
+        if (fault == 5) hid_engine_set_locked(&s_engine, true);
+        if (fault == 6) { test_access_managed = true; test_access_input_allowed = false; }
+        if (fault == 7) test_access_managed = test_access_input_allowed = true;
+        cp_result_t result; assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+        remote_control_service();
+        if (fault == 0 || fault == 7) {
+            assert(test_control_result.state == CP_RESULT_APPLIED && test_control_result.error == CP_OK && s_engine.state.release_pending);
+        } else {
+            assert(test_control_result.state == CP_RESULT_REJECTED && test_control_result.error != CP_OK);
+            if (fault != 5) assert(!s_engine.state.release_pending);
+        }
+    }
+}
+
 static void remote_commands_share_actual_hid_queue_and_physical_takeover(void)
 {
     setup(INPUT_MOUSE); remote_acquire_current_host();
@@ -6321,6 +6389,8 @@ int main(int argc, char **argv)
     RUN(native_connection_review_and_back_navigation_reach_owner);
     RUN(remote_transport_rechecks_authority_at_effect_boundary);
     RUN(remote_device_routes_and_state_survive_missing_media);
+    RUN(review_legacy_recovery);
+    RUN(review_last_remote_report_authority);
     RUN(remote_commands_share_actual_hid_queue_and_physical_takeover);
     RUN(remote_imu_uses_the_single_board_sample_and_hid_queue);
     RUN(remote_recenter_uses_shared_owner_and_duplicate_never_restarts_acquisition);

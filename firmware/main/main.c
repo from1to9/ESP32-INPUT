@@ -539,6 +539,11 @@ static bool send_report(void *context, uint8_t report_id,
                          const uint8_t *data, size_t length)
 {
     const uint64_t *generation = context;
+    /* This callback runs on the coordinator before either transport takes its
+     * own lock. Check only ordinary remote reports; the engine's forced neutral
+     * release must remain admissible after permission/session/lease loss. */
+    if (s_engine.state.owner == INPUT_REMOTE && !s_engine.state.release_pending &&
+        !app_remote_input_report_authorized(s_remote_input, (uint64_t)esp_timer_get_time() / 1000U)) return false;
     const bool movement = report_id == HID_ENGINE_MOUSE_REPORT_ID &&
         length == HID_ENGINE_MOUSE_REPORT_LENGTH && (data[1] || data[2]);
     if (movement) motion_trace_count(&s_motion_trace.move_attempts);

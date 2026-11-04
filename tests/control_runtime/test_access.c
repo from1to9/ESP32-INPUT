@@ -9,7 +9,8 @@
 #include "weak_heap.h"
 
 static uint64_t clock_ms = 100, wall = 1800000000;
-static bool clock_known = true, owner_alive = true;
+static bool clock_known = true, owner_alive = true, apply_write = true;
+static void (*during_write)(void);
 static cp_principal_t native[CP_MAX_PRINCIPALS];
 static size_t native_count;
 static app_control_trust_snapshot_t trusted;
@@ -67,7 +68,9 @@ esp_err_t nvs_get_blob(nvs_handle_t n, const char *key, void *out, size_t *size)
 esp_err_t nvs_set_blob(nvs_handle_t n, const char *key, const void *p, size_t size)
 {
     assert(n == 1 && size == BANK_BYTES && !critical); ++writes;
-    unsigned i = bank_index(key); memcpy(banks[i], p, size); sizes[i] = size;
+    unsigned i = bank_index(key);
+    if (apply_write) { memcpy(banks[i], p, size); sizes[i] = size; }
+    if (during_write) { void (*run)(void) = during_write; during_write = NULL; run(); }
     return write_error; /* A failed call can still have reached flash. */
 }
 esp_err_t nvs_commit(nvs_handle_t n) { assert(n == 1 && !critical); return commit_error; }
@@ -89,7 +92,7 @@ static void reset(void)
     native_count = 1; memset(native, 0, sizeof(native));
     native[0] = (cp_principal_t){.enabled = true, .native_only = true, .scopes = CP_SCOPE_ALL};
     memset(native[0].id, 0x11, 16); memset(native[0].credential_sha256, 0x22, 32);
-    clock_known = owner_alive = true; wall = 1800000000; clock_ms = 100;
+    clock_known = owner_alive = apply_write = true; during_write = NULL; wall = 1800000000; clock_ms = 100;
     boot();
 }
 static void proposal(unsigned tag, char id[33], char secret[65], char hash[65], uint64_t *request)
@@ -142,6 +145,16 @@ static void pairing_duration_and_storage(void)
     clock_known = false; assert(app_control_access_principal(client, &p) && !p.enabled && view().clients[1].clock_unknown);
     clock_known = true; wall += 21600;
     assert(app_control_access_principal(client, &p) && !p.enabled && view().clients[1].expired);
+    uint64_t expired_at = wall;
+    --wall;
+    assert(app_control_access_principal(client, &p) && !p.enabled);
+    assert(app_control_access_pair_status(id, secret, json, sizeof(json), &length) == CP_OK && strstr(json, "expired"));
+    app_control_access_service(true);
+    printf("Fixed: six-hour grant expired at %llu, remains expired at %llu after a -1s anchor change.\n",
+        (unsigned long long)expired_at, (unsigned long long)wall);
+    boot();
+    assert(app_control_access_principal(client, &p) && !p.enabled);
+    wall = expired_at;
     s = view(); app_control_access_request_t edit = {.action = APP_CONTROL_ACCESS_EDIT,
         .expected_revision = s.revision, .permissions = APP_CONTROL_ACCESS_INPUT, .duration = APP_CONTROL_ACCESS_DAY};
     memcpy(edit.client_id, client, 16); apply(edit); assert(sizes[0] && sizes[1]);
@@ -237,6 +250,89 @@ static void runtime_update_and_capture(void)
     cp_capture_authority_t capture_authority;
     assert(app_control_runtime_capture_authority(&request, &capture_authority) == CP_FORBIDDEN && !capture_authority.allowed);
 }
+static void finite_expiry_is_terminal_and_renewal_is_explicit(void)
+{
+    for (unsigned duration = APP_CONTROL_ACCESS_SIX_HOURS; duration <= APP_CONTROL_ACCESS_DAY; ++duration) {
+        reset(); char client[33], secret[65], digest[65], json[2048]; size_t length; uint64_t request;
+        proposal(0x33, client, secret, digest, &request);
+        apply(approval(APP_CONTROL_ACCESS_INPUT, (app_control_access_duration_t)duration));
+        uint8_t id[16]; memset(id, 0x33, 16); cp_principal_t p;
+        access_record_t previous = access_state->saved[0];
+        wall = previous.expires; unsigned before = writes;
+        assert(app_control_access_principal(id, &p) && !p.enabled && writes == before);
+        --wall; clock_known = false;
+        assert(app_control_access_principal(id, &p) && !p.enabled);
+        assert(app_control_access_pair_status(client, secret, json, sizeof(json), &length) == CP_OK && strstr(json, "expired"));
+        clock_known = true;
+        assert(app_control_access_principal(id, &p) && !p.enabled);
+        /* A locally queued renewal owns the next write. No old pending expiry
+         * transaction can overwrite its newly approved grant revision. */
+        app_control_access_request_t edit = {.action = APP_CONTROL_ACCESS_EDIT,
+            .expected_revision = view().revision, .permissions = APP_CONTROL_ACCESS_INPUT,
+            .duration = (app_control_access_duration_t)duration}; memcpy(edit.client_id, id, 16);
+        apply(edit); assert(app_control_access_principal(id, &p) && p.enabled);
+        assert(!usable(&previous, true, previous.expires));
+        assert(app_control_access_principal(id, &p) && p.enabled);
+        assert(!access_state->expiry_pending); before = writes; app_control_access_service(true); assert(writes == before);
+        wall = access_state->saved[0].expires;
+        assert(app_control_access_principal(id, &p) && !p.enabled);
+        app_control_access_service(true); assert(writes == before + 1);
+        --wall; boot(); assert(app_control_access_principal(id, &p) && !p.enabled && view().clients[1].expired);
+        clock_known = false; assert(view().clients[1].expired && !view().clients[1].clock_unknown);
+        clock_known = true;
+    }
+    /* A permanent grant neither expires nor causes expiry writes. */
+    reset(); char client[33], secret[65], digest[65]; uint64_t request;
+    proposal(0x33, client, secret, digest, &request); apply(approval(APP_CONTROL_ACCESS_INPUT, APP_CONTROL_ACCESS_PERMANENT));
+    unsigned before = writes; wall += 1000000; clock_known = false;
+    cp_principal_t p; uint8_t id[16]; memset(id, 0x33, 16);
+    assert(app_control_access_principal(id, &p) && p.enabled); app_control_access_service(true);
+    assert(writes == before && !access_state->expiry_pending); boot();
+    assert(app_control_access_principal(id, &p) && p.enabled);
+}
+static void expiry_write_failures_keep_this_boot_closed(void)
+{
+    for (unsigned phase = 0; phase < 4; ++phase) {
+        reset(); char client[33], secret[65], digest[65]; uint64_t request;
+        proposal(0x33, client, secret, digest, &request); apply(approval(APP_CONTROL_ACCESS_INPUT, APP_CONTROL_ACCESS_DAY));
+        wall += 86400; uint8_t id[16]; memset(id, 0x33, 16); cp_principal_t p;
+        unsigned before = writes; assert(app_control_access_principal(id, &p) && !p.enabled && writes == before); --wall;
+        if (phase == 0) open_error = ESP_FAIL;
+        if (phase == 1) { write_error = ESP_FAIL; apply_write = false; }
+        if (phase == 2) commit_error = ESP_FAIL;
+        if (phase == 3) read_error = ESP_FAIL;
+        app_control_access_service(true); assert(!view().known && view().uncertain && view().error == ESP_FAIL);
+        before = writes; app_control_access_service(true); assert(writes == before); /* No periodic retry writes. */
+        /* A failed explicit reload must also retain this boot's expiry latch. */
+        read_error = ESP_FAIL; assert(app_control_access_init() == ESP_FAIL);
+        open_error = write_error = commit_error = read_error = ESP_OK; apply_write = true;
+        assert(app_control_access_init() == ESP_OK);
+        assert(app_control_access_principal(id, &p) && !p.enabled);
+        app_control_access_service(true); boot();
+        assert(app_control_access_principal(id, &p) && !p.enabled && view().clients[1].expired);
+    }
+}
+static uint8_t expire_during_write_id[16];
+static void observe_other_expiry(void)
+{
+    cp_principal_t p;
+    assert(app_control_access_principal(expire_during_write_id, &p) && !p.enabled);
+}
+static void concurrent_expiry_is_not_lost_during_storage(void)
+{
+    reset(); char client[33], secret[65], digest[65]; uint64_t request;
+    proposal(0x33, client, secret, digest, &request); apply(approval(APP_CONTROL_ACCESS_INPUT, APP_CONTROL_ACCESS_SIX_HOURS));
+    ++wall; proposal(0x44, client, secret, digest, &request); apply(approval(APP_CONTROL_ACCESS_INPUT, APP_CONTROL_ACCESS_SIX_HOURS));
+    uint8_t first[16]; memset(first, 0x33, 16); memset(expire_during_write_id, 0x44, 16); cp_principal_t p;
+    wall += 21600; assert(app_control_access_principal(first, &p) && !p.enabled);
+    during_write = observe_other_expiry; app_control_access_service(true);
+    assert(access_state->expiry_pending); --wall;
+    assert(app_control_access_principal(expire_during_write_id, &p) && !p.enabled);
+    app_control_access_service(true); assert(!access_state->expiry_pending); boot();
+    assert(app_control_access_principal(first, &p) && !p.enabled);
+    assert(app_control_access_principal(expire_during_write_id, &p) && !p.enabled);
+}
+
 static unsigned random_value, revoked_sessions, input_revocations, dispatch_count;
 static cp_command_t dispatched;
 static bool random_source(void *user, uint8_t *out, size_t n)
@@ -325,6 +421,8 @@ static void protocol_pairing_and_live_revocation(void)
 }
 int main(void)
 {
+    finite_expiry_is_terminal_and_renewal_is_explicit(); expiry_write_failures_keep_this_boot_closed();
+    concurrent_expiry_is_not_lost_during_storage();
     pairing_duration_and_storage(); races_expiry_and_faults(); runtime_update_and_capture(); protocol_pairing_and_live_revocation();
     heap_caps_free(access_state); access_state = NULL; assert(!test_heap_live && !critical);
     puts("PASS: production credential pairing, durable duration/revoke, coherent snapshots, native policy migration and runtime update/capture authority");

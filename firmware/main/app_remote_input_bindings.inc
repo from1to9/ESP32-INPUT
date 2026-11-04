@@ -2,14 +2,15 @@
 /* Included once by main.c after native semantic helpers. This is the shared
  * coordinator composition: no second engine, event loop or transport sender. */
 #include "app_control_access.h"
-static bool remote_authorize(void *context, const cp_identity_t *identity)
+static bool remote_authorize(void *context, const cp_identity_t *identity, cp_operation_id_t operation)
 {
     (void)context;
     cp_principal_t current;
     if (!identity || !app_control_access_principal(identity->principal_id, &current) || !current.enabled ||
         !(current.scopes & CP_SCOPE_INPUT_CONTROL) ||
         !app_control_runtime_session_alive(identity->session_id, identity->principal_id)) return false;
-    return app_control_access_managed(identity->principal_id) ? app_control_access_input(identity) : s_remote_allowed;
+    return app_control_access_managed(identity->principal_id) ? app_control_access_input(identity) :
+        operation == CP_OP_INPUT_RECOVER || s_remote_allowed;
 }
 static cp_device_state_t s_published_control_state;
 static bool s_control_state_published;
@@ -39,7 +40,7 @@ static bool remote_transport_admit(void)
     if (s_now_ms >= s_remote_transport_deadline || s_now_ms >= view.lease_expires_ms) {
         remote_transport_cancel(CP_EXPIRED); return false;
     }
-    if (!remote_authorize(NULL, &s_remote_transport_identity) || s_engine.state.locked || s_engine.state.owner != INPUT_REMOTE ||
+    if (!remote_authorize(NULL, &s_remote_transport_identity, CP_OP_INPUT_TRANSPORT_SELECT) || s_engine.state.locked || s_engine.state.owner != INPUT_REMOTE ||
         s_engine.state.epoch != s_remote_transport_epoch || s_management_generation != s_remote_transport_management ||
         memcmp(view.lease_id, s_remote_transport_lease, CP_ID_BYTES) ||
         memcmp(view.owner_session, s_remote_transport_identity.session_id, CP_ID_BYTES)) {

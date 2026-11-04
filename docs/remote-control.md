@@ -90,6 +90,12 @@ They grant no permission by themselves and cannot approve another controller.
 Local Web/API settings choose independent INPUT, MANAGE and UPDATE groups. Approval
 defaults to INPUT for 6 hours, with 24 hours and permanent-until-revoked options.
 Finite grants require known trusted wall time and fail closed if time is unknown.
+An observed expiry is terminal for that credential and grant revision in the current
+boot, even if trusted wall time later moves backward. The management worker writes
+and verifies that terminal marker once; it never writes from a HID callback. Only
+an explicit local reauthorization can create a new valid revision. Storage failures
+remain unknown/denied. Before that marker reaches durable storage, a reset loses
+the RAM observation; persistence alone cannot prove expiry across that window.
 The bounded client table includes native/API identities from the existing local
 trust package. Editing one migrates it to these groups; untouched native identities
 retain their original scopes, capture grants and OTA policy.
@@ -114,8 +120,9 @@ receipt. An uncertain write disables the store until a verified reload; no impli
 erase or success fallback occurs. A concurrent save cannot publish an old client
 list under a new revision. UI admission and pending receipts are not durable success.
 
-Every login, active protocol session, cached execution identity, input admission and
-active input service checks current authority. Revocation/expiry stops old sessions
+Every login, active protocol session, cached execution identity, input admission,
+active input service and final ordinary remote HID report checks current authority.
+Required neutral releases and local input do not depend on remote permission. Revocation/expiry stops old sessions
 and uses the common neutral release barrier for held input. Browser re-login replaces
 only that credential's previous browser session. Boots and visits restore permission,
 never a lease, queued input, held key or job. Local takeover releases the old lease;

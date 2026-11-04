@@ -1227,7 +1227,7 @@ ACCESS_PATHS = {
         ("control_runtime", "app_control_runtime_session_alive"),
         ("server", "app_control_server_session_alive")] + ACCESS_CACHE),
     "access_save_records": ("control_runtime", ACCESS_SERVICE + ACCESS_RECORDS),
-    "access_save_hash": ("control_runtime", ACCESS_SERVICE + [("controller_access", "pack")] + ACCESS_HASH),
+    "access_save_hash": ("control_runtime", ACCESS_SERVICE + [("controller_access", "write_candidate"), ("controller_access", "pack")] + ACCESS_HASH),
     "access_load_hash": ("control_runtime", ACCESS_SERVICE + [("controller_access", "app_control_access_init"),
         ("controller_access", "unpack")] + ACCESS_HASH),
     "access_pair_request": ("https", ACCESS_HTTP + [("server", "pairing"), ("control_runtime", "pairing"),
@@ -1261,6 +1261,18 @@ ACCESS_PATHS = {
         ("remote_media", "start_request"), ("remote_media", "source_grants"), ("main", "remote_media_authority"),
         ("control_runtime", "app_control_runtime_capture_authority")] + ACCESS_PRINCIPAL),
 }
+# Ordinary remote reports recheck current authority on the coordinator before
+# USB/BLE admission; forced neutral releases skip this ordinary-report gate.
+ACCESS_REPORT = CORE + [("hid_engine", "hid_engine_step"), ("main", "send_report"),
+    ("remote_input", "app_remote_input_report_authorized"), ("main", "remote_authorize")]
+ACCESS_PATHS.update({
+    "access_report_principal": ("main", ACCESS_REPORT + ACCESS_PRINCIPAL),
+    "access_report_input": ("main", ACCESS_REPORT + [("controller_access", "app_control_access_input")] + ACCESS_RECORDS),
+    "access_report_identity": ("main", ACCESS_REPORT + [("control_runtime", "app_control_runtime_session_alive"),
+        ("server", "app_control_server_session_alive")] + ACCESS_CACHE),
+    "access_expiry_hash": ("control_runtime", ACCESS_SERVICE + [("controller_access", "persist_expiry"),
+        ("controller_access", "write_candidate"), ("controller_access", "pack")] + ACCESS_HASH),
+})
 for _label, (_owner, _steps) in ACCESS_PATHS.items():
     PATHS[_label] = _steps
     PATH_OWNERS[_label] = _owner
