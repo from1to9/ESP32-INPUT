@@ -93,6 +93,22 @@ def generate():
                 route['parameters']=[{'name':key,'in':'query','required':True,'schema':schema} for key,schema in operation['arguments']['properties'].items()]
             openapi['paths'][operation['resource']]={'get':route}
     openapi['paths']['/api/v1/ws-ticket']={'post':{'description':'Browser cookie, exact Origin and X-CSRF-Token required. Empty JSON-content-type POST issues one random ticket, replacing the previous ticket for this session. Consume once before WSS upgrade within 10000 ms.','parameters':[{'name':'X-CSRF-Token','in':'header','required':True,'schema':{'type':'string','pattern':'^[0-9a-f]{32}$'}}],'responses':{'200':{'description':'Single-use ticket; never log or put in URL','content':{'application/json':{'schema':O({'ticket':{'type':'string','pattern':'^[0-9a-f]{64}$'},'expires_in_ms':{'const':10000}},['ticket','expires_in_ms'])}}},'401':{'description':'Session or CSRF rejected'},'503':{'description':'WSS unavailable'}}}}
+    client_id={'type':'string','pattern':'^[0-9a-f]{32}$'}
+    credential={'type':'string','pattern':'^[0-9a-f]{64}$'}
+    pairing_status=O({'state':{'enum':['pending','approved','rejected','expired','clock_unknown']},
+                      'client_id':client_id,'fingerprint':credential,'permissions':{'type':'integer','minimum':0,'maximum':7},
+                      'scopes':{'type':'array','items':{'enum':scopes}},'duration':{'enum':['6h','24h','permanent']},
+                      'expires_unix_seconds':{'type':['string','null'],'format':'uint64'},'request_id':{'type':'string','format':'uint64'}},
+                     ['state','client_id','fingerprint','permissions','scopes','duration','expires_unix_seconds','request_id'])
+    for route,properties,code,response_schema in [
+        ('requests',{'client_id':client_id,'credential_sha256':credential,'label':{'type':'string','minLength':1,'maxLength':32,'pattern':'^[ -~]+$'}},'202',
+         O({'state':{'const':'pending'},'request_id':{'type':'string','format':'uint64'},'fingerprint':credential},['state','request_id','fingerprint'])),
+        ('status',{'client_id':client_id,'credential':credential},'200',pairing_status)]:
+        openapi['paths']['/api/v1/pairing/'+route]={'post':{'security':[],
+            'description':'Exact same-origin HTTPS JSON only. Proposals expire after 120 seconds and require physical device approval. Status proves this browser credential; wrong/unknown credentials are rejected. This endpoint never starts an input lease.',
+            'requestBody':{'required':True,'content':{'application/json':{'schema':O(properties,list(properties))}}},
+            'responses':{code:{'description':'Pending proposal or credential-proved status','content':{'application/json':{'schema':response_schema}}},
+                         '400':{'description':'Invalid schema'},'401':{'description':'Credential not proved'},'403':{'description':'Origin or existing identity rejected'},'409':{'description':'Another proposal or local save is busy'},'503':{'description':'Trusted storage unavailable'}}}}
     tools=[]
     context=O({k:v for k,v in envelope.items() if k in ['management_generation','resource_revision','epoch','transport_generation','target_id','ui_revision']})
     for o in data['operations']:

@@ -129,7 +129,7 @@ static bool test_media_speech_context;
 static app_media_controls_effect_t test_media_effect;
 static bool test_media_handle;
 static unsigned test_media_handles;
-static bool test_control_session_alive;
+static bool test_control_session_alive, test_access_managed, test_access_input_allowed;
 static cp_device_state_t test_control_state;
 static cp_result_t test_control_result;
 static unsigned test_control_completions;
@@ -204,6 +204,13 @@ esp_err_t app_control_runtime_complete(uint64_t key, const cp_result_t *result)
 void app_control_runtime_physical_override(bool locked) { (void)locked; }
 bool app_control_runtime_session_alive(const uint8_t session[CP_ID_BYTES], const uint8_t principal[CP_ID_BYTES])
 { return test_control_session_alive && session[0] && principal[0]; }
+#ifndef WEB_CONTROLLER_NATIVE
+bool app_control_access_principal(const uint8_t id[16], cp_principal_t *out)
+{ *out = (cp_principal_t){.enabled = true, .scopes = CP_SCOPE_ALL}; memcpy(out->id, id, 16); return true; }
+bool app_control_access_managed(const uint8_t id[16]) { return test_access_managed && id[0] == 11; }
+bool app_control_access_input(const cp_identity_t *identity) { return test_access_managed && test_access_input_allowed && identity->principal_id[0] == 11; }
+bool app_control_access_any_input(void) { return test_access_managed && test_access_input_allowed; }
+#endif
 bool app_control_runtime_wall_time(uint64_t *seconds) { (void)seconds; return false; }
 cp_error_t app_control_runtime_update_authority(const cp_command_t *command, app_update_authority_t *out)
 { (void)command; *out = test_update_authority; return test_update_authority_error; }
@@ -979,6 +986,7 @@ static void setup(input_mode_t mode)
     s_management_generation = s_state_sequence = 1;
     s_remote_allowance_generation = 1;
     s_remote_allowed = false;
+    test_access_managed = test_access_input_allowed = false;
     test_control_session_alive = false; test_control_completion_reject = false;
     test_control_completions = 0;
     test_control_state = (cp_device_state_t){0};
@@ -5823,6 +5831,36 @@ static void remote_allowance_requires_local_restore_after_takeover(void)
     assert(!test_control_state.remote_allowed && test_control_state.allowance_generation == UINT64_MAX);
 }
 
+static void saved_client_input_has_own_allowance_and_immediate_revocation(void)
+{
+    setup(INPUT_MOUSE); remote_control_init(false); test_control_session_alive = true;
+    test_access_managed = test_access_input_allowed = true;
+    remote_control_service(); assert(!test_control_state.remote_allowed && !s_remote_allowed);
+    app_remote_input_state_t observed; assert(remote_observe(NULL, &observed) && observed.remote_allowed);
+    char args[96]; snprintf(args, sizeof(args), "{\"state_sequence\":\"%llu\"}", (unsigned long long)s_state_sequence);
+    cp_command_t command = remote_test_command(CP_OP_CONTROL_ACQUIRE, 1, args); cp_result_t result;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service(); assert(s_engine.state.owner == INPUT_REMOTE);
+    release_barrier(); remote_control_service();
+    remote_local_override(false); release_barrier(); remote_control_service();
+    assert(s_engine.state.owner == INPUT_LOCAL && !s_remote_allowed && !test_control_state.remote_allowed);
+    snprintf(args, sizeof(args), "{\"state_sequence\":\"%llu\"}", (unsigned long long)s_state_sequence);
+    command = remote_test_command(CP_OP_CONTROL_ACQUIRE, 2, args);
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service(); release_barrier(); remote_control_service();
+    assert(s_engine.state.owner == INPUT_REMOTE);
+    test_access_input_allowed = false; remote_control_service();
+    assert(s_engine.state.owner == INPUT_LOCAL && s_engine.state.release_pending);
+    release_barrier(); remote_control_service(); assert(!test_control_state.remote_allowed);
+    /* A different, unmanaged native identity cannot borrow another grant. */
+    test_access_managed = test_access_input_allowed = true;
+    snprintf(args, sizeof(args), "{\"state_sequence\":\"%llu\"}", (unsigned long long)s_state_sequence);
+    command = remote_test_command(CP_OP_CONTROL_ACQUIRE, 3, args);
+    command.identity.principal_id[0] = 21;
+    assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+    remote_control_service(); assert(s_engine.state.owner == INPUT_LOCAL && test_control_result.error == CP_FORBIDDEN);
+}
+
 static void remote_allowance_ui_checks_identity_and_returns_core(void)
 {
     setup(INPUT_MOUSE); remote_control_init(false);
@@ -6262,6 +6300,7 @@ int main(int argc, char **argv)
     RUN(remote_imu_uses_the_single_board_sample_and_hid_queue);
     RUN(remote_recenter_uses_shared_owner_and_duplicate_never_restarts_acquisition);
     RUN(remote_allowance_requires_local_restore_after_takeover);
+    RUN(saved_client_input_has_own_allowance_and_immediate_revocation);
     RUN(remote_allowance_ui_checks_identity_and_returns_core);
     RUN(capture_display_permission_requires_actual_receipt_and_brightness);
     RUN(capture_keeps_display_awake_until_confirmed_off_without_activity);

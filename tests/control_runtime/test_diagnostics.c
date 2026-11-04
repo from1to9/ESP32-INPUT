@@ -70,6 +70,8 @@ cp_error_t app_sensor_api_read(const char *resource, char *out, size_t capacity,
 /* Other existing read resources remain at their named owning boundaries. */
 bool app_control_trust_update_policy(const uint8_t principal[16], app_update_policy_t *out)
 { (void)principal; (void)out; return false; }
+static bool update_policy(const uint8_t principal[16], app_update_policy_t *out)
+{ return app_control_trust_update_policy(principal, out); }
 void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out) { memset(out, 0, sizeof(*out)); }
 void app_clock_snapshot(app_clock_snapshot_t *out) { *out = owners.control.clock; }
 void app_control_trust_snapshot(app_control_trust_snapshot_t *out) { *out = owners.control.trust; }

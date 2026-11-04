@@ -16,7 +16,7 @@ HEADERS = ["esp_err.h", "esp_heap_caps.h", "esp_random.h", "esp_timer.h", "esp_p
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case",choices=["trust","update","clock","server","work","stack","usb","diagnostics"])
+    parser.add_argument("--case",choices=["trust","access","access_cache","update","clock","server","work","stack","usb","diagnostics"])
     selected=parser.parse_args().case
     compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
     with tempfile.TemporaryDirectory(prefix="control-adapters-") as directory:
@@ -25,9 +25,24 @@ def main():
             path = temporary / header
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('#include "control_test_sdk.h"\n')
-        for name in ("trust", "update", "clock", "server"):
+        for name in ("trust", "access", "access_cache", "update", "clock", "server"):
             if selected and selected!=name:
                 continue
+            if name == "access_cache":
+                source = (ROOT / "firmware/main/app_control_server.c").read_text()
+                begin = source.index("static bool cached_authority(")
+                (temporary / "access_cache_fixture.inc").write_text(source[begin:source.index("static uint64_t now_ms", begin)])
+            if name == "access":
+                source = (ROOT / "firmware/main/app_control_runtime.c").read_text()
+                def section(first, after):
+                    begin = source.index(first)
+                    return source[begin:source.index(after, begin)]
+                fixture = section("static bool update_policy(", "static cp_error_t pairing(")
+                fixture += section("static cp_error_t pairing(", "static cp_error_t read_resource(")
+                fixture += section("static bool argument_u64(", "static esp_err_t start_native(")
+                fixture += section("static bool matches(", "esp_err_t app_control_runtime_access_request(")
+                fixture += source[source.index("cp_error_t app_control_runtime_update_authority("):]
+                (temporary / "access_authority_fixture.inc").write_text(fixture)
             if name == "clock":
                 source = (ROOT / "firmware/main/app_wifi.c").read_text()
                 first = source.index("#define NETWORK_ENTRY_RETRY_MS")
@@ -59,7 +74,7 @@ def main():
                            str(ROOT / "components/control_protocol/control_json.c"),
                            str(ROOT / "components/control_protocol/control_sha256.c"),
                            str(ROOT / "components/control_protocol/control_registry.c"),
-                           *([str(ROOT / "components/control_protocol/control_protocol.c")] if name=="server" else []), "-lm", "-o", str(binary)]
+                           *([str(ROOT / "components/control_protocol/control_protocol.c")] if name in ("access", "server") else []), "-lm", "-o", str(binary)]
                 command += defines
                 subprocess.run(command, check=True)
                 subprocess.run([str(binary)], check=True)

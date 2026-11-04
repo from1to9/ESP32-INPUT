@@ -879,6 +879,20 @@ esp_err_t app_control_trust_start_server(const cp_callbacks_t *callbacks)
     heap_caps_free(p);
     return error;
 }
+size_t app_control_trust_principals(cp_principal_t out[CP_MAX_PRINCIPALS], char digest[65])
+{
+    size_t count = 0;
+    if (digest) digest[0] = 0;
+    if (!trust || !out || !digest) return 0;
+    portENTER_CRITICAL(&trust_lock);
+    if (trust->view.known && trust->view.present && !trust->view.uncertain) {
+        memcpy(digest, trust->view.active_digest, 65);
+        count = trust->current.principal_count;
+        memcpy(out, trust->current.principals, count * sizeof(*out));
+    }
+    portEXIT_CRITICAL(&trust_lock);
+    return count;
+}
 size_t app_control_trust_grants(const uint8_t principal[16],
                                 cp_capture_grant_t out[CP_MAX_CAPTURE_GRANTS])
 {

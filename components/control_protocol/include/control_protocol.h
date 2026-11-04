@@ -115,7 +115,7 @@ typedef struct {
     bool input_ready;
     bool release_pending;
     bool local_busy;
-    bool remote_allowed;
+    bool remote_allowed; /* Unmigrated legacy allowance; input_authorized adds per-client grants. */
     bool remote_owner;
     uint8_t owner_session[CP_ID_BYTES];
 } cp_device_state_t;
@@ -153,6 +153,7 @@ typedef void (*cp_safety_fn)(void *, cp_safety_reason_t, const cp_identity_t *);
 typedef cp_error_t (*cp_read_fn)(void *, const cp_identity_t *, const char *resource, char *json,
                                  size_t capacity, size_t *length);
 typedef bool (*cp_random_fn)(void *, uint8_t *, size_t);
+struct cp_principal;
 
 typedef struct {
     void *user;
@@ -161,6 +162,12 @@ typedef struct {
     cp_dispatch_fn dispatch;
     cp_safety_fn safety;
     cp_read_fn read;
+    /* Optional current protected principal provider. False is unavailable or
+     * revoked, never fallback to an older loaded principal. Pure, bounded. */
+    bool (*principal)(void *, const uint8_t id[CP_ID_BYTES], struct cp_principal *);
+    bool (*input_authorized)(void *, const cp_identity_t *);
+    cp_error_t (*pairing)(void *, bool status, const char *client, const char *proof,
+                         const char *label, char *json, size_t capacity, size_t *length);
 } cp_callbacks_t;
 
 const cp_operation_info_t *cp_operation_find(const char *name);
@@ -188,6 +195,7 @@ void cp_shutdown(cp_context_t *, uint64_t now_ms);
 typedef struct {
     cp_identity_t identity;
     uint64_t last_authenticated_ms;
+    uint8_t credential_sha256[32]; /* Credential proved when this session opened. */
     bool authenticated;
 } cp_session_view_t;
 size_t cp_sessions_snapshot(const cp_context_t *, cp_session_view_t out[CP_MAX_SESSIONS]);
@@ -196,7 +204,7 @@ cp_error_t cp_complete(cp_context_t *, uint64_t command_key, const cp_result_t *
 
 /* Trust material is injected only by a protected local enrollment/storage
  * provider. No HTTP request can call this API or assert physical presence. */
-typedef struct {
+typedef struct cp_principal {
     uint8_t id[CP_ID_BYTES];
     uint8_t credential_sha256[CP_SECRET_BYTES];
     cp_scope_mask_t scopes;

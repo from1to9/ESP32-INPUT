@@ -79,3 +79,4 @@ bool app_control_trust_grant(const uint8_t id[CP_ID_BYTES], cp_capture_grant_t *
 size_t app_control_trust_clock_servers(char out[2][129]);
 bool app_control_trust_update_config(app_update_provisioned_config_t *);
 bool app_control_trust_update_policy(const uint8_t principal[16], app_update_policy_t *);
+size_t app_control_trust_principals(cp_principal_t out[CP_MAX_PRINCIPALS], char digest[65]);

@@ -237,6 +237,7 @@ size_t cp_sessions_snapshot(const cp_context_t *c, cp_session_view_t out[CP_MAX_
         out[count++] = (cp_session_view_t){.identity = identity((cp_context_t *)c, i),
                                            .last_authenticated_ms = c->sessions[i].last_seen,
                                            .authenticated = true};
+        memcpy(out[count - 1].credential_sha256, c->principals[c->sessions[i].principal].credential_sha256, 32);
     }
     return count;
 }
@@ -296,12 +297,11 @@ cp_error_t cp_load_principal(cp_context_t *c, const cp_principal_t *p)
     c->principal_used[slot] = true;
     return CP_OK;
 }
-cp_error_t cp_revoke_principal(cp_context_t *c, const uint8_t id[16], uint64_t now)
+static cp_error_t revoke_loaded_principal(cp_context_t *c, const uint8_t id[16])
 {
     if (!c || !id) {
         return CP_INVALID;
     }
-    cp_tick(c, now);
     for (unsigned i = 0; i < CP_MAX_PRINCIPALS; ++i) {
         if (c->principal_used[i] && equal(c->principals[i].id, id, 16)) {
             c->principals[i].enabled = false;
@@ -314,6 +314,29 @@ cp_error_t cp_revoke_principal(cp_context_t *c, const uint8_t id[16], uint64_t n
         }
     }
     return CP_UNAVAILABLE;
+}
+cp_error_t cp_revoke_principal(cp_context_t *c, const uint8_t id[16], uint64_t now)
+{
+    if (!c || !id) return CP_INVALID;
+    cp_tick(c, now);
+    return revoke_loaded_principal(c, id);
+}
+static bool refresh_principal(cp_context_t *c, const uint8_t id[16])
+{
+    if (!c->callbacks.principal) return true;
+    cp_principal_t p = {0};
+    if (!c->callbacks.principal(c->callbacks.user, id, &p) || !equal(id, p.id, 16)) {
+        (void)revoke_loaded_principal(c, id);
+        return false;
+    }
+    for (unsigned i = 0; i < CP_MAX_PRINCIPALS; ++i) if (c->principal_used[i] && equal(id, c->principals[i].id, 16)) {
+        cp_principal_t *old = &c->principals[i];
+        if (old->scopes == p.scopes && old->enabled == p.enabled && old->native_only == p.native_only &&
+            equal(old->credential_sha256, p.credential_sha256, 32)) return p.enabled;
+        (void)revoke_loaded_principal(c, id);
+        break;
+    }
+    return cp_load_principal(c, &p) == CP_OK && p.enabled;
 }
 void cp_tick(cp_context_t *c, uint64_t now)
 {
@@ -330,6 +353,7 @@ void cp_tick(cp_context_t *c, uint64_t now)
     c->now = now;
     for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i) {
         session_t *s = &c->sessions[i];
+        if (s->used) (void)refresh_principal(c, c->principals[s->principal].id);
         if (s->used &&
             (now - s->opened_at >= SESSION_ABSOLUTE_MS || now - s->last_seen >= SESSION_IDLE_MS ||
              !c->principals[s->principal].enabled)) {
@@ -589,6 +613,7 @@ static cp_error_t login(cp_context_t *c, const cp_http_security_t *security, con
     }
     cp_sha256(secret, 32, digest);
     wipe(secret, sizeof(secret));
+    (void)refresh_principal(c, client);
     unsigned principal = CP_MAX_PRINCIPALS;
     for (unsigned i = 0; i < CP_MAX_PRINCIPALS; ++i) {
         if (c->principal_used[i] && c->principals[i].enabled &&
@@ -615,6 +640,11 @@ static cp_error_t login(cp_context_t *c, const cp_http_security_t *security, con
         wipe(c->challenge, 16);
         c->challenge_until = 0;
     }
+    /* A browser reload proves the same credential, replaces only its own
+     * browser session and releases its old lease. No lease/job is restored. */
+    if (browser) for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i)
+        if (c->sessions[i].used && c->sessions[i].browser && c->sessions[i].principal == principal)
+            close_session(c, i, CP_SAFETY_SESSION_LOST);
     unsigned slot = CP_MAX_SESSIONS;
     for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i) {
         if (!c->sessions[i].used) {
@@ -660,7 +690,13 @@ static cp_error_t login(cp_context_t *c, const cp_http_security_t *security, con
     } else {
         append(out->body, sizeof(out->body), &used, ",\"session_token\":\"%s\"", token_hex);
     }
-    append(out->body, sizeof(out->body), &used, "}");
+    append(out->body, sizeof(out->body), &used, ",\"scopes\":[");
+    bool separator = false;
+    for (size_t i = 0; cp_scope_name(i) != NULL; ++i) if (c->principals[principal].scopes & (UINT64_C(1) << i)) {
+        append(out->body, sizeof(out->body), &used, "%s\"%s\"", separator ? "," : "", cp_scope_name(i));
+        separator = true;
+    }
+    append(out->body, sizeof(out->body), &used, "]}");
     out->length = used;
     wipe(token_hex, sizeof(token_hex));
     return CP_OK;
@@ -864,7 +900,9 @@ static cp_error_t gates(cp_context_t *c, unsigned session, const cp_operation_in
             if (c->lease.pending || c->lease.active) {
                 return CP_OWNER_BUSY;
             }
-            if (!c->state.remote_allowed || c->blocked_allowance == c->state.allowance_generation) {
+            bool client_allowed = c->callbacks.input_authorized &&
+                c->callbacks.input_authorized(c->callbacks.user, &cmd->identity);
+            if (!client_allowed && (!c->state.remote_allowed || c->blocked_allowance == c->state.allowance_generation)) {
                 return CP_FORBIDDEN;
             }
             if (c->state.local_busy) {
@@ -1381,6 +1419,7 @@ static cp_error_t state_response(cp_context_t *c, unsigned session, cp_http_resp
     }
     session_t *s = &c->sessions[session];
     size_t used = 0;
+    cp_identity_t viewer = identity(c, session);
     char boot[33], target[CP_TARGET_CAPACITY * 6 + 3], mode[80];
     encode(c->boot, 16, boot);
     if (!cj_escape(c->state.target_id, target, sizeof(target)) ||
@@ -1398,7 +1437,8 @@ static cp_error_t state_response(cp_context_t *c, unsigned session, cp_http_resp
            c->state.transport_generation, c->state.ui_revision, c->state.state_sequence, target,
            mode, c->state.locked ? "true" : "false", c->state.release_pending ? "true" : "false",
            c->state.input_ready ? "true" : "false",
-           c->state.remote_allowed && c->blocked_allowance != c->state.allowance_generation
+           ((c->state.remote_allowed && c->blocked_allowance != c->state.allowance_generation) ||
+            (c->callbacks.input_authorized && c->callbacks.input_authorized(c->callbacks.user, &viewer)))
                ? "true"
                : "false");
     if ((c->lease.active || c->lease.pending) && c->lease.session == session &&
@@ -1669,6 +1709,24 @@ static cp_error_t http_inner(cp_context_t *c, const char *method, const char *re
     }
     if (length > CP_MAX_FRAME_BYTES) {
         return failure(out, CP_TOO_LARGE);
+    }
+    if (!strcmp(resource, "/api/v1/pairing/requests") || !strcmp(resource, "/api/v1/pairing/status")) {
+        if (strcmp(method, "POST") || !security->origin || !c->callbacks.pairing) return failure(out, CP_FORBIDDEN);
+        bool status = !strcmp(resource, "/api/v1/pairing/status");
+        cj_document_t *d = &c->document;
+        if (!cj_parse(d, body, length) || d->nodes[0].type != CJ_OBJECT) return failure(out, CP_INVALID);
+        const char *client = cj_string(d, cj_get(d, 0, "client_id"));
+        const char *proof = cj_string(d, cj_get(d, 0, status ? "credential" : "credential_sha256"));
+        const char *label = status ? "" : cj_string(d, cj_get(d, 0, "label"));
+        unsigned members = 0;
+        for (uint16_t t = d->nodes[0].child; t != CJ_NONE; t = d->nodes[t].next) ++members;
+        uint8_t id[16], hash[32];
+        if (members != (status ? 2U : 3U) || !decode(client, id, 16) || !decode(proof, hash, 32) || !label) return failure(out, CP_INVALID);
+        cp_error_t error = c->callbacks.pairing(c->callbacks.user, status, client, proof, label, out->body, sizeof(out->body), &out->length);
+        wipe(hash, sizeof(hash));
+        if (error != CP_OK) return failure(out, error);
+        out->status = status ? 200 : 202;
+        return CP_OK;
     }
     if (strcmp(resource, "/api/v1/login-challenge") == 0 && strcmp(method, "GET") == 0) {
         if (c->now >= c->challenge_until || !nonzero(c->challenge, 16)) {

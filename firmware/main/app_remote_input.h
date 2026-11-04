@@ -32,6 +32,8 @@ typedef struct {
     void *user;
     /* Read current coordinator-owned state. No clock, UI, network or SDK I/O. */
     bool (*observe)(void *, app_remote_input_state_t *);
+    /* Current per-credential authority; absence preserves standalone legacy ports. */
+    bool (*authorize)(void *, const cp_identity_t *);
     /* Called after successful model/state changes. Parent increments the shared
      * revisions and updates its native view state, including remote owner.
      * Native edits must update these same revisions. Increments must be checked

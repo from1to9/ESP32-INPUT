@@ -396,6 +396,14 @@ static void test_browser_csrf_and_private_read(void)
     char ticket[65];
     field(response.body, "ticket", ticket, sizeof(ticket));
     cp_identity_t upgraded;
+    cp_principal_t other_principal = {.enabled = true, .scopes = CP_SCOPE_ALL};
+    memset(other_principal.id, 0x42, 16);
+    uint8_t other_secret[32];
+    for (unsigned i = 0; i < 32; ++i) other_secret[i] = (uint8_t)(i + 11);
+    cp_sha256(other_secret, 32, other_principal.credential_sha256);
+    assert(cp_load_principal(context, &other_principal) == CP_OK);
+    char other_id[33], other_body[180]; hex(other_principal.id, 16, other_id);
+    snprintf(other_body, sizeof(other_body), "{\"client_id\":\"%s\",\"credential\":\"%s\"}", other_id, credential);
     cp_http_security_t other = security;
     assert(cp_http(context, "GET", "/api/v1/login-challenge", &other, NULL, 0, clock_ms,
                    &response) == CP_OK);
@@ -404,7 +412,7 @@ static void test_browser_csrf_and_private_read(void)
     strcpy(cookie2, response.set_cookie);
     other.cookie = cookie2;
     other.csrf = challenge2;
-    assert(cp_http(context, "POST", "/api/v1/sessions", &other, body, strlen(body), clock_ms,
+    assert(cp_http(context, "POST", "/api/v1/sessions", &other, other_body, strlen(other_body), clock_ms,
                    &response) == CP_OK);
     strcpy(cookie2, response.set_cookie);
     assert(cp_transport_upgrade(context, &other, ticket, clock_ms, &upgraded) ==

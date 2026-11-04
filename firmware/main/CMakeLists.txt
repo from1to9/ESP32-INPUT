@@ -4,7 +4,7 @@ idf_component_register(SRCS "main.c" "app_ui.c" "ble_hid.c" "board_mosaico.c" "u
                            "app_audio.c" "app_media_runtime.c" "app_audio_diagnostics.c" "board_display_transfer.c" "board_display_resources.c" "bt_audio.c" "board_audio_mosaico.c"
                            "board_recording_flash.c" "board_recording_nand.c" "app_spoken_letters.c"
                            "app_recording_store.c" "ble_hid_store.c" "app_command_bridge.c" "app_remote_input.c"
-                           "app_media_controls.c" "app_control_runtime.c" "app_control_server.c" "app_control_trust.c" "app_clock.c" "app_firmware_update.c"
+                           "app_media_controls.c" "app_control_runtime.c" "app_control_server.c" "app_control_trust.c" "app_control_access.c" "app_clock.c" "app_firmware_update.c"
                            "app_connectivity_controls.c" "app_bluetooth_management.c" "board_imu_queue.c" "motion_capture.c"
                            "board_sensor_journal.c" "sensor_wire.c" "app_sensor_api.c" "app_runtime_diagnostics.c"
                            "app_remote_device.c" "app_device_restart.c"

@@ -66,6 +66,8 @@ UNITS = {
     "touch": "firmware/main/board_touch_mosaico.c",
     "ui": "firmware/main/app_ui.c",
     "control_trust": "firmware/main/app_control_trust.c",
+    "controller_access": "firmware/main/app_control_access.c",
+    "control_sha256": "components/control_protocol/control_sha256.c",
     "usb_hid": "firmware/main/usb_hid.c",
     "vendor_button": "firmware/managed_components/espressif__button/iot_button.c",
     "vendor_lvgl_adapter": "firmware/managed_components/espressif__esp_lvgl_adapter/src/adapter/esp_lv_adapter.c",
@@ -1172,6 +1174,69 @@ PATHS["update_coordinator_authority"] = CORE + [("main", "remote_update_service"
     ("control_trust", "app_control_trust_update_policy")]
 PATH_OWNERS["update_coordinator_authority"] = "main"
 
+# Per-controller authority shares the existing coordinator, HTTPS and management
+# owners. UI-owned snapshot/intent composition is listed with its caller.
+ACCESS_RECORDS = [("controller_access", "records"), ("controller_access", "records_version"),
+    ("control_trust", "app_control_trust_principals")]
+ACCESS_PRINCIPAL = [("controller_access", "app_control_access_principal")] + ACCESS_RECORDS
+ACCESS_CACHE = [("server", "cached_session"), ("server", "cached_authority"),
+    ("control_runtime", "principal_source")] + ACCESS_PRINCIPAL
+ACCESS_INPUT = [("main", "remote_authorize"), ("controller_access", "app_control_access_input")] + ACCESS_RECORDS
+ACCESS_SERVICE = [("control_runtime", "worker"), ("controller_access", "app_control_access_service")]
+ACCESS_HTTP = [("server", "handle_request"), ("protocol", "cp_http"), ("protocol", "http_inner")]
+ACCESS_HASH = [("control_sha256", "cp_sha256"), ("control_sha256", "block")]
+ACCESS_PATHS = {
+    "access_input_observe": ("main", CORE + [("main", "remote_control_service"),
+        ("remote_input", "app_remote_input_service"), ("remote_input", "observe"),
+        ("main", "remote_observe"), ("controller_access", "app_control_access_any_input")] + ACCESS_RECORDS),
+    "access_input_live": ("main", CORE + [("main", "remote_control_service"),
+        ("remote_input", "app_remote_input_service")] + ACCESS_INPUT),
+    "access_input_admit": ("main", CORE + [("main", "remote_control_service"),
+        ("bridge", "app_command_bridge_service"), ("bridge", "execute_flight"),
+        ("main", "command_execute"), ("remote_input", "app_remote_input_execute")] + ACCESS_INPUT),
+    "access_input_identity": ("main", CORE + [("main", "remote_control_service"),
+        ("remote_input", "app_remote_input_service"), ("main", "remote_authorize"),
+        ("control_runtime", "app_control_runtime_session_alive"),
+        ("server", "app_control_server_session_alive")] + ACCESS_CACHE),
+    "access_save_records": ("control_runtime", ACCESS_SERVICE + ACCESS_RECORDS),
+    "access_save_hash": ("control_runtime", ACCESS_SERVICE + [("controller_access", "pack")] + ACCESS_HASH),
+    "access_load_hash": ("control_runtime", ACCESS_SERVICE + [("controller_access", "app_control_access_init"),
+        ("controller_access", "unpack")] + ACCESS_HASH),
+    "access_pair_request": ("https", ACCESS_HTTP + [("server", "pairing"), ("control_runtime", "pairing"),
+        ("controller_access", "app_control_access_pair"), ("controller_access", "records_version"),
+        ("control_trust", "app_control_trust_principals")]),
+    "access_pair_status": ("https", ACCESS_HTTP + [("server", "pairing"), ("control_runtime", "pairing"),
+        ("controller_access", "app_control_access_pair_status")] + ACCESS_RECORDS),
+    "access_login": ("https", ACCESS_HTTP + [("protocol", "login"), ("protocol", "refresh_principal"),
+        ("server", "principal_source"), ("control_runtime", "principal_source")] + ACCESS_PRINCIPAL),
+    "access_server_tick": ("control_server", [("server", "worker"), ("protocol", "cp_tick"),
+        ("protocol", "refresh_principal"), ("server", "principal_source"),
+        ("control_runtime", "principal_source")] + ACCESS_PRINCIPAL),
+    "access_session_tick": ("https", [("server", "handle_request"), ("protocol", "cp_http"),
+        ("protocol", "cp_tick"), ("protocol", "refresh_principal"), ("server", "principal_source"),
+        ("control_runtime", "principal_source")] + ACCESS_PRINCIPAL),
+    "access_policy_http": ("https", HTTP_READ[:-1] + [("control_runtime", "update_policy"),
+        ("controller_access", "app_control_access_update_policy")] + ACCESS_RECORDS),
+    "access_queued_identity": ("control_runtime", [("control_runtime", "worker"),
+        ("control_runtime", "process_work"), ("control_runtime", "queued_authority"),
+        ("server", "app_control_server_identity_alive")] + ACCESS_CACHE),
+    "access_update_policy": ("main", CORE + [("main", "remote_update_service"),
+        ("control_runtime", "app_control_runtime_update_authority"), ("control_runtime", "update_policy"),
+        ("controller_access", "app_control_access_update_policy")] + ACCESS_RECORDS),
+    "access_capture_live_policy": ("audio_manager", [("audio_manager", "worker"),
+        ("audio_engine", "ae_poll"), ("audio_engine", "validate_jobs"), ("audio_engine", "ae_authorize"),
+        ("media_runtime", "authority"), ("media_runtime", "remote_grant_authority"),
+        ("main", "remote_media_authority"), ("control_runtime", "app_control_runtime_capture_authority")] + ACCESS_PRINCIPAL),
+    "access_capture_authority": ("main", CORE + [("main", "remote_control_service"),
+        ("bridge", "app_command_bridge_service"), ("bridge", "execute_flight"),
+        ("main", "command_execute"), ("remote_media", "app_remote_media_execute"),
+        ("remote_media", "start_request"), ("remote_media", "source_grants"), ("main", "remote_media_authority"),
+        ("control_runtime", "app_control_runtime_capture_authority")] + ACCESS_PRINCIPAL),
+}
+for _label, (_owner, _steps) in ACCESS_PATHS.items():
+    PATHS[_label] = _steps
+    PATH_OWNERS[_label] = _owner
+
 # This header function is file-static inline, despite its public-looking name.
 # Missing emission is charged to log_codec/poll; emitted bodies/clones still count.
 INLINABLE_HEADER_HELPERS = {("audio_diagnostics", "board_audio_sdk_operation_name")}
@@ -1385,6 +1450,7 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         match("board", rf"xTaskCreate\s*\(\s*{entry}\s*,\s*\"{name}\"\s*,\s*{symbol}\s*,")
         board[owner] = (size, symbol)
     runtime = integer_expression(single("runtime", r"xTaskCreate\s*\(\s*worker\s*,\s*\"control_runtime\"\s*,\s*(\d+)\s*,")[1])
+    control_server_stack = integer_expression(single("server", r'app_network_task_create\s*\(\s*worker\s*,\s*"control_server"\s*,\s*(\d+)\s*,')[1])
     update_stack = integer_expression(single("firmware_update", r"xTaskCreate\s*\(\s*worker\s*,\s*\"firmware_update\"\s*,\s*(\d+)\s*,")[1])
     clock_stack = integer_expression(single("network_clock", r"app_network_task_create\s*\(\s*worker\s*,\s*\"network_clock\"\s*,\s*(\d+)\s*,")[1])
     for allocator in ("xTaskCreateWithCaps", "xTaskCreate"):
@@ -1457,6 +1523,8 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
         "sensor": budget("board_sensor", board["sensor"][0], ["board"], [board["sensor"][1]]),
         "power": budget("board_power (brightness)", board["power"][0], ["board"], [board["power"][1]]),
         "control_runtime": budget("control_runtime", runtime, ["runtime"], ["xTaskCreate(worker, control_runtime)"]),
+        "control_server": budget("control_server", control_server_stack, ["server", "network_task"],
+            ["app_network_task_create(worker, control_server)"]),
         "firmware_update": budget("firmware_update", update_stack, ["firmware_update"],
             ["xTaskCreate(worker, firmware_update)"]),
         "wifi_worker": budget("app_wifi", wifi_stack, ["wifi"], ["xTaskCreate(worker, app_wifi)"]),

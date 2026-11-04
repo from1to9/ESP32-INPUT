@@ -5266,6 +5266,233 @@
           }
         }
       }
+    },
+    "/api/v1/pairing/requests": {
+      "post": {
+        "security": [],
+        "description": "Exact same-origin HTTPS JSON only. Proposals expire after 120 seconds and require physical device approval. Status proves this browser credential; wrong/unknown credentials are rejected. This endpoint never starts an input lease.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "client_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "credential_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "pattern": "^[ -~]+$"
+                  }
+                },
+                "required": [
+                  "client_id",
+                  "credential_sha256",
+                  "label"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Pending proposal or credential-proved status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "const": "pending"
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "format": "uint64"
+                    },
+                    "fingerprint": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "request_id",
+                    "fingerprint"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid schema"
+          },
+          "401": {
+            "description": "Credential not proved"
+          },
+          "403": {
+            "description": "Origin or existing identity rejected"
+          },
+          "409": {
+            "description": "Another proposal or local save is busy"
+          },
+          "503": {
+            "description": "Trusted storage unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/pairing/status": {
+      "post": {
+        "security": [],
+        "description": "Exact same-origin HTTPS JSON only. Proposals expire after 120 seconds and require physical device approval. Status proves this browser credential; wrong/unknown credentials are rejected. This endpoint never starts an input lease.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "client_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "credential": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "required": [
+                  "client_id",
+                  "credential"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pending proposal or credential-proved status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "pending",
+                        "approved",
+                        "rejected",
+                        "expired",
+                        "clock_unknown"
+                      ]
+                    },
+                    "client_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{32}$"
+                    },
+                    "fingerprint": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "permissions": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 7
+                    },
+                    "scopes": {
+                      "type": "array",
+                      "items": {
+                        "enum": [
+                          "view",
+                          "input.control",
+                          "input.configure",
+                          "config.write",
+                          "connections.manage",
+                          "wifi.configure",
+                          "audio.control",
+                          "audio.capture",
+                          "audio.playback",
+                          "recording.control",
+                          "recording.configure",
+                          "recording.read",
+                          "recording.export",
+                          "recording.delete",
+                          "capture.consent",
+                          "admin.clients",
+                          "admin.policy",
+                          "admin.privacy",
+                          "update.check",
+                          "update.stage",
+                          "update.activate",
+                          "diagnostics.read",
+                          "diagnostics.control",
+                          "system.restart",
+                          "system.reset"
+                        ]
+                      }
+                    },
+                    "duration": {
+                      "enum": [
+                        "6h",
+                        "24h",
+                        "permanent"
+                      ]
+                    },
+                    "expires_unix_seconds": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uint64"
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "format": "uint64"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "client_id",
+                    "fingerprint",
+                    "permissions",
+                    "scopes",
+                    "duration",
+                    "expires_unix_seconds",
+                    "request_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid schema"
+          },
+          "401": {
+            "description": "Credential not proved"
+          },
+          "403": {
+            "description": "Origin or existing identity rejected"
+          },
+          "409": {
+            "description": "Another proposal or local save is busy"
+          },
+          "503": {
+            "description": "Trusted storage unavailable"
+          }
+        }
+      }
     }
   },
   "components": {

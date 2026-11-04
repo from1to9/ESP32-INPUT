@@ -72,47 +72,49 @@ static void cache_sessions(server_t *s)
     s_session_count = count;
     portEXIT_CRITICAL(&s_lock);
 }
-bool app_control_server_session_alive(const uint8_t session[CP_ID_BYTES],
-                                      const uint8_t principal[CP_ID_BYTES])
+static bool cached_authority(const cp_session_view_t *v, const cp_callbacks_t *callbacks)
 {
-    if (!session || !principal) {
-        return false;
-    }
+    if (!callbacks->principal) return true; /* Original standalone/legacy provider. */
+    cp_principal_t current;
+    return callbacks->principal(callbacks->user, v->identity.principal_id, &current) &&
+        current.enabled && current.scopes == v->identity.scopes &&
+        !memcmp(current.id, v->identity.principal_id, CP_ID_BYTES) &&
+        !memcmp(current.credential_sha256, v->credential_sha256, 32);
+}
+static bool cached_session(const uint8_t *session, const uint8_t *principal,
+                            const cp_identity_t *identity)
+{
+    cp_session_view_t view = {0}; cp_callbacks_t callbacks = {0};
     uint64_t now = (uint64_t)esp_timer_get_time() / 1000U;
     bool alive = false;
     portENTER_CRITICAL(&s_lock);
-    for (size_t i = 0; i < s_session_count; ++i) {
-        const cp_session_view_t *v = &s_sessions[i];
-        if (v->authenticated && now >= v->last_authenticated_ms &&
-            now - v->last_authenticated_ms < 5000U &&
-            memcmp(session, v->identity.session_id, CP_ID_BYTES) == 0 &&
-            memcmp(principal, v->identity.principal_id, CP_ID_BYTES) == 0) {
-            alive = true;
+    if (s_server && !s_server->stop_requested) {
+        callbacks = s_server->callbacks;
+        for (size_t i = 0; i < s_session_count; ++i) {
+            const cp_session_view_t *v = &s_sessions[i];
+            if (v->authenticated && now >= v->last_authenticated_ms &&
+                now - v->last_authenticated_ms < 5000U &&
+                (!session || !memcmp(session, v->identity.session_id, CP_ID_BYTES)) &&
+                !memcmp(principal, v->identity.principal_id, CP_ID_BYTES) &&
+                (!identity || (identity->scopes == v->identity.scopes && identity->browser == v->identity.browser))) {
+                view = *v; alive = true; break;
+            }
         }
     }
     portEXIT_CRITICAL(&s_lock);
-    return alive;
+    return alive && cached_authority(&view, &callbacks);
+}
+bool app_control_server_session_alive(const uint8_t session[CP_ID_BYTES], const uint8_t principal[CP_ID_BYTES])
+{
+    return session && principal && cached_session(session, principal, NULL);
 }
 bool app_control_server_identity_alive(const cp_identity_t *identity)
 {
-    if (!identity) {
-        return false;
-    }
-    uint64_t now = (uint64_t)esp_timer_get_time() / 1000U;
-    bool alive = false;
-    portENTER_CRITICAL(&s_lock);
-    for (size_t i = 0; i < s_session_count; ++i) {
-        const cp_session_view_t *v = &s_sessions[i];
-        if (v->authenticated && now >= v->last_authenticated_ms &&
-            now - v->last_authenticated_ms < 5000U && v->identity.scopes == identity->scopes &&
-            v->identity.browser == identity->browser &&
-            !memcmp(v->identity.session_id, identity->session_id, CP_ID_BYTES) &&
-            !memcmp(v->identity.principal_id, identity->principal_id, CP_ID_BYTES)) {
-            alive = true;
-        }
-    }
-    portEXIT_CRITICAL(&s_lock);
-    return alive;
+    return identity && cached_session(identity->session_id, identity->principal_id, identity);
+}
+bool app_control_server_client_connected(const uint8_t principal[CP_ID_BYTES])
+{
+    return principal && cached_session(NULL, principal, NULL);
 }
 static uint64_t now_ms(void) { return (uint64_t)esp_timer_get_time() / 1000U; }
 static void clear(void *memory, size_t length)
@@ -142,6 +144,22 @@ static bool random_source(void *user, uint8_t *output, size_t length)
     }
     esp_fill_random(output, length);
     return true;
+}
+static bool principal_source(void *user, const uint8_t id[16], cp_principal_t *out)
+{
+    server_t *s = user;
+    return s->callbacks.principal(s->callbacks.user, id, out);
+}
+static bool input_authorized(void *user, const cp_identity_t *identity)
+{
+    server_t *s = user;
+    return s->callbacks.input_authorized(s->callbacks.user, identity);
+}
+static cp_error_t pairing(void *user, bool status, const char *client, const char *proof,
+                           const char *label, char *json, size_t capacity, size_t *length)
+{
+    server_t *s = user;
+    return s->callbacks.pairing(s->callbacks.user, status, client, proof, label, json, capacity, length);
 }
 static bool available(void *user, cp_operation_id_t op, char reason[CP_REASON_CAPACITY])
 {
@@ -333,7 +351,10 @@ static esp_err_t initialize(server_t *s)
                                 .available = available,
                                 .dispatch = dispatch,
                                 .safety = safety,
-                                .read = read_state};
+                                .read = read_state,
+                                .principal = s->callbacks.principal ? principal_source : NULL,
+                                .input_authorized = s->callbacks.input_authorized ? input_authorized : NULL,
+                                .pairing = s->callbacks.pairing ? pairing : NULL};
     cp_error_t result =
         cp_initialize(s->protocol_memory, cp_context_size(), &callbacks, &s->protocol);
     if (result != CP_OK || cp_http_configure(s->protocol, s->host, s->origin) != CP_OK) {
@@ -638,6 +659,7 @@ void app_control_server_physical_override(bool locked)
     portEXIT_CRITICAL(&s_lock);
 }
 #else
+bool app_control_server_client_connected(const uint8_t id[CP_ID_BYTES]) { (void)id; return false; }
 bool app_control_server_identity_alive(const cp_identity_t *who)
 {
     (void)who;

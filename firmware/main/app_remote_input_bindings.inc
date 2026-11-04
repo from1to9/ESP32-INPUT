@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 /* Included once by main.c after native semantic helpers. This is the shared
  * coordinator composition: no second engine, event loop or transport sender. */
+#include "app_control_access.h"
+static bool remote_authorize(void *context, const cp_identity_t *identity)
+{
+    (void)context;
+    cp_principal_t current;
+    if (!identity || !app_control_access_principal(identity->principal_id, &current) || !current.enabled ||
+        !(current.scopes & CP_SCOPE_INPUT_CONTROL) ||
+        !app_control_runtime_session_alive(identity->session_id, identity->principal_id)) return false;
+    return app_control_access_managed(identity->principal_id) ? app_control_access_input(identity) : s_remote_allowed;
+}
 static cp_device_state_t s_published_control_state;
 static bool s_control_state_published;
 static portMUX_TYPE s_command_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -29,11 +39,10 @@ static bool remote_transport_admit(void)
     if (s_now_ms >= s_remote_transport_deadline || s_now_ms >= view.lease_expires_ms) {
         remote_transport_cancel(CP_EXPIRED); return false;
     }
-    if (!s_remote_allowed || s_engine.state.locked || s_engine.state.owner != INPUT_REMOTE ||
+    if (!remote_authorize(NULL, &s_remote_transport_identity) || s_engine.state.locked || s_engine.state.owner != INPUT_REMOTE ||
         s_engine.state.epoch != s_remote_transport_epoch || s_management_generation != s_remote_transport_management ||
         memcmp(view.lease_id, s_remote_transport_lease, CP_ID_BYTES) ||
-        memcmp(view.owner_session, s_remote_transport_identity.session_id, CP_ID_BYTES) ||
-        !app_control_runtime_session_alive(s_remote_transport_identity.session_id, s_remote_transport_identity.principal_id)) {
+        memcmp(view.owner_session, s_remote_transport_identity.session_id, CP_ID_BYTES)) {
         remote_transport_cancel(CP_STALE); return false;
     }
     return true;
@@ -56,8 +65,9 @@ static bool remote_observe(void *context, app_remote_input_state_t *state)
         .management_generation = s_management_generation, .ui_revision = s_ui_revision,
         .draft_revision = s_ui_revision, .selection_revision = s_ui_revision,
         .state_sequence = s_state_sequence,
-        .remote_allowed = s_remote_allowed && !s_engine.state.locked && !remote_update_maintenance() &&
-            s_state_sequence != UINT64_MAX && s_remote_allowance_generation != UINT64_MAX,
+        .remote_allowed = ((s_remote_allowed && s_remote_allowance_generation != UINT64_MAX) ||
+            app_control_access_any_input()) && !s_engine.state.locked && !remote_update_maintenance() &&
+            s_state_sequence != UINT64_MAX,
         .local_busy = busy, .screen_awake = awake,
         .overlay_open = s_overlay != APP_OVERLAY_NONE,
         .transition_busy = s_transport_switch_pending || s_pair_operation != APP_CONFIRM_NONE,
@@ -91,7 +101,7 @@ static bool remote_publish(void)
         .allowance_generation = s_remote_allowance_generation,
         .locked = s_engine.state.locked, .input_ready = s_engine.ready,
         .release_pending = s_engine.state.release_pending, .local_busy = observed.local_busy,
-        .remote_allowed = observed.remote_allowed, .remote_owner = s_engine.state.owner == INPUT_REMOTE};
+        .remote_allowed = s_remote_allowed && observed.remote_allowed, .remote_owner = s_engine.state.owner == INPUT_REMOTE};
     memcpy(state.target_id, observed.target_id, sizeof(state.target_id));
     memcpy(state.owner_session, remote.owner_session, sizeof(state.owner_session));
     (void)snprintf(state.mode, sizeof(state.mode), "%s", s_engine.state.mode == INPUT_MOUSE ? "mouse" :
@@ -327,7 +337,7 @@ static void remote_control_init(bool usb_available)
     void *bridge = heap_caps_aligned_calloc(app_command_bridge_alignment(), 1,
         app_command_bridge_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     app_remote_input_port_t input_port = {.engine = &s_engine, .interaction = &s_interaction,
-        .observe = remote_observe, .changed = remote_changed, .complete = remote_complete,
+        .observe = remote_observe, .authorize = remote_authorize, .changed = remote_changed, .complete = remote_complete,
         .delegate_available = remote_delegate_available, .delegate = remote_delegate};
     app_command_bridge_port_t bridge_port = {.lock = command_lock, .unlock = command_unlock,
         .now_ms = command_clock, .available = command_available, .execute = command_execute,

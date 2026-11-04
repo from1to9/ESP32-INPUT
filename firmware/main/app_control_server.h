@@ -56,6 +56,8 @@ bool app_control_server_session_alive(const uint8_t session_id[CP_ID_BYTES],
                                       const uint8_t principal_id[CP_ID_BYTES]);
 /* Exact identity includes the current enrolled scopes, not only two IDs. */
 bool app_control_server_identity_alive(const cp_identity_t *);
+/* Authenticated activity within 5 seconds and a currently valid credential. */
+bool app_control_server_client_connected(const uint8_t principal_id[CP_ID_BYTES]);
 /* Network media callbacks are pure bounded owner-cache checks / copied ingress.
  * The audio owner validates every immutable job/generation/format/sequence and
  * current grant. Missing hooks keep binary live media unavailable. */

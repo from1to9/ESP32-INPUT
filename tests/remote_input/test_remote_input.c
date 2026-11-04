@@ -16,12 +16,14 @@ typedef struct {
     uint64_t now, next_key;
     cp_result_t completions[512]; size_t completions_count;
     uint8_t reports[512][8], report_ids[512]; size_t reports_count;
-    bool block_completion, observe_failure, delegate_enabled;
+    bool block_completion, observe_failure, delegate_enabled, authorization_revoked;
     size_t fail_report, delegated, recentered;
 } fixture_t;
 
 static bool observe(void *p, app_remote_input_state_t *out)
 { fixture_t *f=p; *out=f->state; return !f->observe_failure; }
+static bool authorize(void *p, const cp_identity_t *identity)
+{ fixture_t *f = p; return !f->authorization_revoked && identity->principal_id[0] == 1; }
 static void changed(void *p, unsigned flags)
 {
     fixture_t *f=p;
@@ -95,7 +97,7 @@ static void setup(fixture_t *f, input_mode_t mode)
     interaction_sync(&f->model,&f->engine.state,true,f->now);
     f->memory=calloc(1,app_remote_input_bytes()); assert(f->memory);
     const app_remote_input_port_t port={.engine=&f->engine,.interaction=&f->model,.user=f,
-        .observe=observe,.changed=changed,.complete=complete,.delegate_available=available,.delegate=delegate};
+        .observe=observe,.authorize=authorize,.changed=changed,.complete=complete,.delegate_available=available,.delegate=delegate};
     assert(app_remote_input_init(f->memory,app_remote_input_bytes(),&port,&f->remote)==CP_OK);
     step(f);step(f); assert(!f->engine.state.release_pending);
 }
@@ -639,8 +641,34 @@ static void recenter_rejects_authority_mode_and_held_work(void)
     }
 }
 
+static void current_authority_stops_held_and_queued_input(void)
+{
+    fixture_t f; setup(&f, INPUT_MOUSE); acquire(&f, NULL);
+    execute(&f, CP_OP_MOUSE_DRAG_BEGIN, "{\"button\":\"left\"}"); step(&f);
+    assert(f.engine.mouse_buttons == 1);
+    f.authorization_revoked = true;
+    app_remote_input_service(f.remote, f.now);
+    assert(f.engine.state.owner == INPUT_LOCAL && f.engine.state.release_pending);
+    step(&f); step(&f);
+    assert(!f.engine.mouse_buttons && !f.engine.count);
+    cp_command_t click = command(&f, CP_OP_MOUSE_CLICK, "{\"button\":\"left\"}"); cp_result_t result;
+    assert(app_remote_input_execute(f.remote, &click, f.now, &result) == CP_FORBIDDEN);
+    finish(&f);
+    setup(&f, INPUT_MOUSE);
+    char args[96]; snprintf(args, sizeof(args), "{\"state_sequence\":\"%" PRIu64 "\"}", f.state.state_sequence);
+    cp_command_t command_value = command(&f, CP_OP_CONTROL_ACQUIRE, args); memset(command_value.lease_id, 7, 16);
+    assert(app_remote_input_execute(f.remote, &command_value, f.now, &result) == CP_OK);
+    f.authorization_revoked = true; step(&f); step(&f);
+    app_remote_input_view_t v; app_remote_input_snapshot(f.remote, &v);
+    assert(!v.active && !v.pending && f.engine.state.owner == INPUT_LOCAL);
+    for (size_t i = 0; i < f.completions_count; ++i)
+        assert(f.completions[i].state != CP_RESULT_APPLIED);
+    finish(&f);
+}
+
 int main(void)
 {
+    current_authority_stops_held_and_queued_input();
     recenter_applies_once_without_claiming_acquisition();
     recenter_rejects_authority_mode_and_held_work();
     storage_alignment_rejects_without_mutation_and_recovers();

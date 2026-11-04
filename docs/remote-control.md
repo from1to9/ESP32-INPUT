@@ -75,12 +75,58 @@ The shared configuration family stages inert bounded candidates, then rechecks s
 
 Wi-Fi provisioning, application-client enrollment and Bluetooth target pairing are three different trust relationships. None authorizes the other two implicitly.
 
+### Per-controller permissions
+
+The browser generates a random 128-bit client ID and 256-bit credential. Same-origin
+`POST /api/v1/pairing/requests` submits the ID, SHA-256 credential fingerprint and
+1..32 printable ASCII label. The device displays that exact fingerprint for physical
+approval; names and addresses are not identity. One proposal lasts 120 seconds;
+repeating it does not extend its lifetime. `POST /api/v1/pairing/status` proves the
+raw credential over HTTPS. Both endpoints have bounded schemas in [OpenAPI](../api/openapi.json).
+They grant no permission by themselves and cannot approve another controller.
+
+Local Web/API settings choose independent INPUT, MANAGE and UPDATE groups. Approval
+defaults to INPUT for 6 hours, with 24 hours and permanent-until-revoked options.
+Finite grants require known trusted wall time and fail closed if time is unknown.
+The bounded client table includes native/API identities from the existing local
+trust package. Editing one migrates it to these groups; untouched native identities
+retain their original scopes, capture grants and OTA policy.
+
+| Group | Effective scopes and limits |
+| --- | --- |
+| INPUT | `view`, `input.control`; explicit short input lease and all existing local/target/release gates |
+| MANAGE | `view`, `input.configure`, `config.write`, `connections.manage`, `wifi.configure`, `diagnostics.read` |
+| UPDATE | `view`, `update.check`, `update.stage`, `update.activate`, `system.restart`; enrolled signed releases only, at most 600 seconds and one existing 6 MiB OTA slot per job, no continuation after owner loss |
+
+Groups never imply capture, recording, playback, policy/source editing or client
+administration. Permanent UPDATE authorization removes the old expiring delegated
+policy dependency; release signatures, source trust, known release time, health and
+maintenance checks still apply. The generated per-controller update policy ID and
+revision must match the actual request. Network permission does not verify firmware.
+
+A separate dual-bank `ctrl_access` namespace in the existing protected `control`
+partition stores credential hashes and grants, bound to the enrolled trust-package
+digest. A replacement package starts with its own native identities; old browser
+authorizations never transfer to it. Commit and exact readback precede an APPLIED
+receipt. An uncertain write disables the store until a verified reload; no implicit
+erase or success fallback occurs. A concurrent save cannot publish an old client
+list under a new revision. UI admission and pending receipts are not durable success.
+
+Every login, active protocol session, cached execution identity, input admission and
+active input service checks current authority. Revocation/expiry stops old sessions
+and uses the common neutral release barrier for held input. Browser re-login replaces
+only that credential's previous browser session. Boots and visits restore permission,
+never a lease, queued input, held key or job. Local takeover releases the old lease;
+a still-authorized controller may later explicitly take a new lease. Lock, maintenance
+and active local interaction still block it. The old Allow/Block switch applies only
+to unmigrated legacy API input; it is not an extra boot allowance for saved grants.
+
 ### Practical HTTPS choices
 
 | Deployment | Trust and browser path | Tradeoff |
 | --- | --- | --- |
 | Initial Mac bridge, recommended | Native stdio bridge verifies the enrolled CA/name and exact certificate pin, authenticating directly over TLS; no human web frontend is bundled | Avoids browser-to-device certificate provisioning. Mac is required for this remote path; standalone BLE still works without it |
-| Direct device browser, later | Device HTTPS/WSS uses a certificate trusted by the browser for the exact configured hostname/SAN, provisioned through a managed local CA or explicitly installed trust | Requires real certificate issuance, installation, renewal and hostname handling on each browser/OS; mDNS does not confer trust |
+| Direct device browser, integration candidate | Device HTTPS/WSS uses a certificate trusted by the browser for the exact configured hostname/SAN, provisioned through a managed local CA or explicitly installed trust | Requires real certificate issuance, installation, renewal and hostname handling on each browser/OS; mDNS does not confer trust |
 | LAN UI hosted by Mac, later | Browser trusts the Mac's HTTPS hostname/certificate; Mac independently pins device TLS and authenticates both sides | Adds another server, session boundary and certificate lifecycle; do not expose a loopback HTTP service by changing its bind address |
 
 Do not make users bypass TLS warnings, disable certificate verification, or send credentials over ordinary LAN HTTP/WS. Public CA issuance for private names/IPs is not automatic. Browser mixed-content and private-network policies also need actual Safari/Chrome testing. If direct browser trust cannot be installed, offer the Mac bridge or keep the feature unavailable; do not downgrade security. Private-LAN placement is an exposure limit, not authentication. No default Internet forwarding, cloud relay, UPnP or WAN listener is proposed.
@@ -88,8 +134,8 @@ Do not make users bypass TLS warnings, disable certificate verification, or send
 ### Runtime authentication and browser boundaries
 
 - Use the scopes in the [function matrix](api-function-matrix.md): view, input.control/configure, config.write, connections.manage, wifi.configure, audio/recording scopes, update.check/stage/activate, and separate admin.clients/policy/privacy authority. Private draft/media access is separately granted. Every command rechecks its effective scope; an input lease grants no extra authority.
-- Native clients exchange their enrolled random credential through `POST /api/v1/sessions` over verified TLS. Browser login uses a separate locally enrolled browser credential or a one-time browser enrollment approved by an administrator; never expose the Mac's device credential to browser JavaScript. Reject login with an unexpected Origin or Host as well as authenticated mutations.
-- Browser sessions use a random, host-only `Secure; HttpOnly; SameSite=Strict; Path=/` cookie, proposed 15-minute idle and 8-hour absolute expiry. No long-lived bearer token in localStorage or a URL. Logout/expiry close input channels and revoke their leases. A finite background job may outlive its initiating browser session only through explicit policy-bound delegation; principal/policy revocation and local stop still win. Capture defaults session-bound and needs its own explicit privacy consent.
+- Native clients exchange their enrolled random credential through `POST /api/v1/sessions` over verified TLS. Browser login uses its own credential approved on the physical device; never expose the Mac's device credential to browser JavaScript. Reject login with an unexpected Origin or Host as well as authenticated mutations.
+- Browser sessions use a random, host-only `Secure; HttpOnly; SameSite=Strict; Path=/` cookie, proposed 15-minute idle and 8-hour absolute expiry. Session tokens stay in the HttpOnly cookie. The browser retains only its own random client credential in same-origin localStorage for later proof; never put credentials in a URL. Same-origin script integrity is therefore part of that credential boundary. Logout/expiry close input channels and revoke their leases. A finite background job may outlive its initiating browser session only through explicit policy-bound delegation; principal/policy revocation and local stop still win. Capture defaults session-bound and needs its own explicit privacy consent.
 - Mutating HTTP bootstrap endpoints require same-origin JSON, an unpredictable session-bound CSRF token in a custom header, exact Origin and allowed Host checks. Before login, a same-origin challenge endpoint issues a restricted pre-authentication cookie/nonce usable only for login; login requires both that nonce and the credential and rotates the session. GET does not mutate product/configuration/input state. Deny wildcard CORS, arbitrary reflected origins, `Origin: null`, unexpected proxy hosts and `file://` use. Serve UI and browser API from one origin. Apply a restrictive CSP with local assets, `frame-ancestors 'none'` and no third-party scripts; insert preview/error text as text, never HTML.
 - Browser WSS upgrade requires the session cookie, an exact Origin/Host match and a single-use 10-second upgrade ticket obtained via CSRF-protected `POST /api/v1/ws-ticket`. Use an empty JSON-content-type POST and pass the returned 64-hex ticket as `ticket.<ticket>` alongside `esp32-control-v1` in `Sec-WebSocket-Protocol`, never a query string; redact it from handshake logs and consume it once. This is necessary because browser WebSocket constructors cannot freely set Authorization headers. Negotiate the ordinary protocol subprotocol separately. Do not send commands before authorized upgrade and channel initialization.
 - Native WSS uses an Authorization header and a native-only enrolled principal. Missing Origin is accepted only on this authenticated native path; supplying an invalid Origin is always rejected. Origin checks complement authentication and are not a credential.
@@ -106,7 +152,7 @@ Input guards are an authenticated input.control scope, exclusive short lease, un
 | Explicit input acquire | Require locally authorized remote allowance and safe local idle state. Increment epoch, stop prior producer and complete neutral reports; lease default 3,000 ms, renewal about 1,000 ms, within configured ceilings |
 | Competing input owner | owner_busy; no preemption, queued acquisition or borrowed lease |
 | Renew | Same authenticated input session/lease and fresh state acknowledgement; ping alone does not renew |
-| Fresh local gesture after wake routing | A whole asleep wake-only gesture changes no ownership/lock/input. After its guard, fresh AI down/touch immediately revokes remote input, invalidates epoch, cancels/releases and is consumed for takeover. Continued fresh hold may lock. Close remote allowance until explicitly restored; never auto-resume |
+| Fresh local gesture after wake routing | A whole asleep wake-only gesture changes no ownership/lock/input. After its guard, fresh AI down/touch immediately revokes remote input, invalidates epoch, cancels/releases and is consumed for takeover. Continued fresh hold may lock. Close the unmigrated legacy allowance until explicitly restored; saved INPUT permission still requires a new explicit acquisition, never auto-resume |
 | Mode/producer/output-setting transition | Cancel residual input, clear carry, release and increment input epoch. Old envelopes cannot cross the transition |
 | Input socket loss/lease expiry/stale input state | Cancel that input producer, release and clear motion intent; no replay. Independent audio/recording jobs follow their own authenticated owner-channel/session liveness and grants, never the HID lease. HTTP-polling input stops by lease expiry; closing an ordinary HTTP response socket is not a management outcome |
 | Selected HID disconnect/transport/target replacement | Invalidate input state and revoke lease; do not alter Wi-Fi profiles or silently reroute to the other transport |

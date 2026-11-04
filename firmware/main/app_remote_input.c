@@ -36,6 +36,7 @@ struct app_remote_input {
     app_remote_input_state_t state;
     bool state_known, clock_seen, servicing;
     uint64_t now_ms, highest_key, lease_epoch, lease_transport;
+    cp_identity_t lease_identity;
     char lease_target[CP_TARGET_CAPACITY];
     uint64_t drag_started_ms, drag_expires_ms;
     bool drag_requested;
@@ -354,6 +355,7 @@ void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
     for (size_t i = 0; i < APP_REMOTE_INPUT_JOBS; ++i) sample_text(m, &m->jobs[i]);
     if ((m->view.active || m->view.pending) &&
         (regressed || !known || now_ms >= m->view.lease_expires_ms || m->port.engine->state.locked ||
+         (m->port.authorize && !m->port.authorize(m->port.user, &m->lease_identity)) ||
          !m->state.remote_allowed || m->state.local_busy || target_changed(m, m->lease_transport, m->lease_target) ||
          m->port.engine->state.owner != INPUT_REMOTE || m->port.engine->state.epoch != m->lease_epoch))
         revoke(m, now_ms >= m->view.lease_expires_ms ? CP_EXPIRED :
@@ -556,6 +558,7 @@ static cp_error_t acquire(app_remote_input_t *m, const cp_command_t *cmd, cp_res
     if (!j) return CP_BUSY;
     if (!hid_engine_set_owner(m->port.engine, INPUT_REMOTE)) { secure_zero(j,sizeof *j); return CP_UNAVAILABLE; }
     m->view.pending = true; m->view.active = false; m->view.producer = selected;
+    m->lease_identity = cmd->identity;
     m->view.lease_expires_ms = cmd->lease_expires_ms;
     memcpy(m->view.lease_id,cmd->lease_id,CP_ID_BYTES);
     memcpy(m->view.owner_session,cmd->identity.session_id,CP_ID_BYTES);
@@ -985,6 +988,7 @@ cp_error_t app_remote_input_execute(app_remote_input_t *m, const cp_command_t *c
     cp_error_t error=CP_OK;
     char unavailable[CP_REASON_CAPACITY];
     if (!op->safety && !app_remote_input_available(m,cmd->operation,unavailable)) error=CP_UNAVAILABLE;
+    else if (!op->safety && m->port.authorize && !m->port.authorize(m->port.user, &cmd->identity)) error=CP_FORBIDDEN;
     else if (!op->safety && !m->state_known) error=CP_UNAVAILABLE;
     else if (!op->safety && now_ms >= cmd->deadline_ms) error=CP_EXPIRED;
     else if (!op->safety && op->input && same_target(m,cmd) != CP_OK) error=CP_STALE;

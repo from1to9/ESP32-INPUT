@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_control_runtime.h"
+#include "app_control_access.h"
 #include "control_json.h"
 #include "usb_hid.h"
 #include "app_sensor_api.h"
@@ -216,6 +217,32 @@ static bool unhex(const char *s, size_t n, uint8_t *out)
     }
     return true;
 }
+static bool principal_source(void *unused, const uint8_t id[16], cp_principal_t *out)
+{
+    (void)unused; return app_control_access_principal(id, out);
+}
+static bool input_authorized(void *unused, const cp_identity_t *identity)
+{
+    (void)unused; return app_control_access_input(identity);
+}
+static bool update_policy(const uint8_t id[16], app_update_policy_t *out)
+{
+    return app_control_access_managed(id) ? app_control_access_update_policy(id, out) :
+        app_control_trust_update_policy(id, out);
+}
+static cp_error_t pairing(void *unused, bool status, const char *client, const char *proof,
+                           const char *label, char *json, size_t capacity, size_t *length)
+{
+    (void)unused;
+    if (status) return app_control_access_pair_status(client, proof, json, capacity, length);
+    uint64_t request;
+    cp_error_t error = app_control_access_pair(client, proof, label, &request);
+    if (error != CP_OK) return error;
+    int n = snprintf(json, capacity, "{\"state\":\"pending\",\"request_id\":\"%llu\",\"fingerprint\":\"%s\"}",
+        (unsigned long long)request, proof);
+    if (n < 0 || (size_t)n >= capacity) return CP_TOO_LARGE;
+    *length = (size_t)n; return CP_OK;
+}
 static cp_error_t read_resource(void *unused, const cp_identity_t *who, const char *resource,
                                 char *json, size_t capacity, size_t *length)
 {
@@ -233,7 +260,7 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
     }
     if (!strcmp(resource, "/api/v1/firmware/policy")) {
         app_update_policy_t p;
-        if (!app_control_trust_update_policy(who->principal_id, &p)) {
+        if (!update_policy(who->principal_id, &p)) {
             return CP_UNAVAILABLE;
         }
         char id[33];
@@ -1064,7 +1091,11 @@ static void worker(void *unused)
                                 .available = available,
                                 .dispatch = submit,
                                 .safety = safety,
-                                .read = read_resource};
+                                .read = read_resource,
+                                .principal = principal_source,
+                                .input_authorized = input_authorized,
+                                .pairing = pairing};
+    (void)app_control_access_init();
     app_clock_config_t clock_config = {0};
     (void)app_clock_init(&clock_config);
     (void)app_update_init(NULL);
@@ -1127,6 +1158,7 @@ static void worker(void *unused)
         bool state_known = runtime->state_known;
         cp_device_state_t state = runtime->state;
         portEXIT_CRITICAL(&runtime_lock);
+        app_control_access_service(state_known && !state.locked && !app_update_flash_busy());
         if (trust_view.import_window || !wifi.lan_ready) {
             if (server.state == APP_CONTROL_READY || server.state == APP_CONTROL_STARTING) {
                 (void)app_control_server_stop();
@@ -1279,7 +1311,9 @@ cp_error_t app_control_runtime_capture_authority(const cp_capture_authority_requ
     }
     cp_scope_mask_t needed =
         r->purpose == CP_CAPTURE_RECORDING ? CP_SCOPE_RECORDING_CONTROL : CP_SCOPE_AUDIO_CAPTURE;
-    if ((r->identity.scopes & needed) != needed) {
+    cp_principal_t current;
+    if (!app_control_access_principal(r->identity.principal_id, &current) || !current.enabled ||
+        (current.scopes & needed) != needed || (r->identity.scopes & needed) != needed) {
         return CP_FORBIDDEN;
     }
     uint64_t now = now_ms(), remaining = grant.expires_unix_seconds - wall;
@@ -1308,6 +1342,15 @@ cp_error_t app_control_runtime_capture_authority(const cp_capture_authority_requ
             now + (remaining > UINT64_C(86400) ? UINT64_C(86400) : remaining) * 1000;
     }
     return CP_OK;
+}
+esp_err_t app_control_runtime_access_request(const app_control_access_request_t *request, uint64_t *id)
+{
+    if (!runtime || !request || !id) return ESP_ERR_INVALID_ARG;
+    if ((request->action == APP_CONTROL_ACCESS_APPROVE || request->action == APP_CONTROL_ACCESS_EDIT) &&
+        (!usb_local_unlocked() || app_update_flash_busy())) return ESP_ERR_INVALID_STATE;
+    cp_error_t error = app_control_access_submit(request, id);
+    return error == CP_OK ? ESP_OK : error == CP_BUSY ? ESP_ERR_NO_MEM :
+        error == CP_INVALID ? ESP_ERR_INVALID_ARG : ESP_ERR_INVALID_STATE;
 }
 esp_err_t app_control_runtime_open_commissioning(void)
 {
@@ -1395,8 +1438,11 @@ cp_error_t app_control_runtime_update_authority(const cp_command_t *command,
     if ((command->identity.scopes & scope) != scope) {
         return CP_FORBIDDEN;
     }
+    cp_principal_t current;
+    if (!app_control_access_principal(command->identity.principal_id, &current) || !current.enabled ||
+        (current.scopes & scope) != scope) return CP_FORBIDDEN;
     app_update_policy_t policy;
-    if (!app_control_trust_update_policy(command->identity.principal_id, &policy)) {
+    if (!update_policy(command->identity.principal_id, &policy)) {
         return CP_FORBIDDEN;
     }
     char id[33], expected[65];

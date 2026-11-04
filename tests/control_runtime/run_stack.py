@@ -18,8 +18,9 @@ def main():
     code=fixture.split('/* TYPES */')[0]
     code+=section('#define CERT_BYTES','static portMUX_TYPE s_lock')
     code+=fixture.split('/* PORTS */')[1].split('/* OWNER */')[0]
-    code+=section('static void cache_sessions(', 'bool app_control_server_session_alive(')
+    code+=section('static void cache_sessions(', 'static bool cached_authority(')
     code+=section('static void publish(', 'static bool random_source(')
+    code+=section('static bool principal_source(', 'static bool available(')
     code+=section('static esp_err_t initialize(', 'esp_err_t app_control_server_start(')
     code+=section('esp_err_t app_control_server_start(', 'esp_err_t app_control_server_stop(')
     code+=fixture.split('/* TESTS */')[1]
