@@ -9,6 +9,11 @@ Target frame and nested callback budgets are checked separately with
 Run `python3 tests/coordinator/run.py` from the repository root. The runner builds with strict C11 diagnostics, conversion/shadow warnings and address/undefined-behavior sanitizers, using a temporary output directory. It includes the actual [production coordinator](../../firmware/main/main.c) and links production `interaction`, `hid_engine`, `input_core` and `device_settings`; no coordinator decisions, gesture classification, idle policy or safety transitions are reimplemented in the harness. To diagnose one case, use `python3 tests/coordinator/run.py --case touch_release_has_one_freeze_interval`. The default always runs every case.
 
 The normal-profile configuration stub keeps the optional startup tone disabled.
+Keyboard entry tests cover local and leased remote transitions from Mouse and
+Audio, including previously selected Motion, Touch, Spoken and Shortcuts.
+Real entry selects Touch and preserves the draft; same-session panel visits and
+repeated Keyboard selection retain the chosen submode. Synthetic board samples
+leave Touch focus still and move it only after explicit Motion selection.
 A media-notice regression exercises the actual global status owner: handled
 empty notices clear old audio text, unhandled effects leave it alone, and an
 unrelated newer status survives audio-notice expiry.

@@ -1329,10 +1329,16 @@
         ) {
           state.panel = name;
         } else if (name.startsWith("mode:")) {
-          state.mode = name.split(":")[1];
+          const mode = name.split(":")[1];
           state.panel = null;
-          state.motion = state.drag = state.sending = false;
-          log("Mode changed. Previous input cancelled; preview preserved.");
+          if (mode !== state.mode) {
+            if (mode === "keyboard") state.submode = "touch";
+            state.mode = mode;
+            state.group = -1;
+            state.focus = 0;
+            state.motion = state.drag = state.sending = false;
+            log("Mode changed. Previous input cancelled; preview preserved.");
+          }
         } else if (name.startsWith("submode:")) {
           state.submode = name.split(":")[1];
           state.panel = null;

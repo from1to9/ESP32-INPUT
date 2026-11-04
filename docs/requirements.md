@@ -128,6 +128,7 @@ drag, lock, sleep, modal, maintenance or target/transport boundaries. See the
 
 ### Keyboard behavior
 
+- First entry and re-entry from Mouse or Audio default to Touch. Menu, Settings, Keys and repeated selection of the current Keyboard mode preserve the current submode and draft; Motion remains explicitly selectable.
 - The device displays a two-level, three-column by three-row character grid; the host needs no custom input method. This user-requested nine-cell update supersedes the original six-cell layout while retaining the original preview and explicit-send workflow. Empty character cells cannot receive motion focus or confirm a character.
 - Motion changes local focus; AI single-click confirms. Touch uses the same grid and buffer.
 - Integrate relative angular movement, reset the center after confirmation, apply boundary hysteresis and never auto-confirm from dwell or jitter.

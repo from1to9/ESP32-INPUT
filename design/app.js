@@ -8,7 +8,7 @@
   const symbolGroups = ['.,!?;:', '-_+=/*', '()[]{}', '@#$%&', '\\|<>', '"\'`~^'];
   const s = { mode: 'mouse', target: 'iPad Pro', connected: true, gyro: false,
     locked: false, remote: false, menu: '', fine: 1, drag: false, epoch: 1,
-    x: 50, y: 50, sub: 'motion', group: -1, focus: 0, lower: false, symbols: false,
+    x: 50, y: 50, sub: 'touch', group: -1, focus: 0, lower: false, symbols: false,
     draft: '', sending: false, sent: '', voice: 'idle', candidate: '', word: 'Alpha',
     audioKind: 'voice', audioOn: false, muted: true, coexist: false, volume: 50 };
   let sendTimer, touch = null, frozenUntil = 0;
@@ -34,6 +34,7 @@
     if (!guard()) return;
     if (s.mode !== mode) {
       boundary(); s.mode = mode; s.group = -1; s.focus = 0;
+      if (mode === 'keyboard') s.sub = 'touch';
       if (!s.coexist && mode !== 'audio') s.audioOn = false;
       log(`Entered ${labels[mode]} mode; keys released and stale input cancelled.`);
     }

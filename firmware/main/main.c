@@ -144,7 +144,7 @@ static interaction_multitouch_t s_multitouch;
 static bool s_multitouch_available, s_multitouch_consuming, s_multitouch_eligible;
 static const char *s_message = "Keep still to calibrate. Select an input connection.";
 static app_overlay_t s_overlay;
-static app_keyboard_submode_t s_keyboard_submode;
+static app_keyboard_submode_t s_keyboard_submode = APP_KEYBOARD_TOUCH;
 static app_host_os_t s_host_os;
 static app_audio_kind_t s_audio_kind;
 static bool s_dark_theme = true;
@@ -1406,6 +1406,10 @@ static bool select_mode(input_mode_t mode)
     }
     update_send(true);
     if (!hid_engine_set_mode(&s_engine, mode)) return false;
+    if (mode == INPUT_KEYBOARD) {
+        s_keyboard_submode = APP_KEYBOARD_TOUCH;
+        interaction_set_keyboard_motion(&s_interaction, false);
+    }
     s_drag_requested = false; s_overlay = APP_OVERLAY_NONE; ++s_ui_revision;
     sync_interaction();
     s_message = mode == INPUT_AUDIO ? "Audio routing is independent of the input connection." :
@@ -3012,6 +3016,7 @@ void app_main(void)
     configASSERT(s_intents);
     hid_engine_init(&s_engine);
     interaction_init(&s_interaction);
+    interaction_set_keyboard_motion(&s_interaction, s_keyboard_submode == APP_KEYBOARD_MOTION);
     interaction_reference_diagnostics_bind(&s_interaction, &s_reference_diagnostics);
     interaction_multitouch_init(&s_multitouch);
     s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;

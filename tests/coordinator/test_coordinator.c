@@ -1008,7 +1008,7 @@ static void setup(input_mode_t mode)
     memset(s_touch_emergency, 0, sizeof s_touch_emergency);
     memset(s_touch_emergency_pending, 0, sizeof s_touch_emergency_pending);
     s_overlay = APP_OVERLAY_NONE;
-    s_keyboard_submode = APP_KEYBOARD_MOTION;
+    s_keyboard_submode = APP_KEYBOARD_TOUCH;
     s_host_os = APP_HOST_CTRL;
     s_audio_kind = APP_AUDIO_VOICE;
     s_dark_theme = true;
@@ -1074,6 +1074,7 @@ static void setup(input_mode_t mode)
     memset(s_button_edges, 0, sizeof s_button_edges);
     hid_engine_init(&s_engine);
     interaction_init(&s_interaction);
+    interaction_set_keyboard_motion(&s_interaction, s_keyboard_submode == APP_KEYBOARD_MOTION);
     interaction_reference_diagnostics_bind(&s_interaction, &s_reference_diagnostics);
     assert(configure_motion_preferences(&s_settings));
     test_link = (ble_hid_snapshot_t){
@@ -1129,7 +1130,7 @@ static void setup(input_mode_t mode)
     test_publish_count = 0;
     trace_count = 0;
     hid_engine_set_link(&s_engine, true, true);
-    assert(hid_engine_set_mode(&s_engine, mode));
+    assert(select_mode(mode));
     release_barrier();
     sync_interaction();
     trace_count = 0;
@@ -1685,6 +1686,12 @@ static void motion_gates_and_local_keyboard_focus(void)
 
     setup(INPUT_KEYBOARD);
     calibrate();
+    const unsigned focus = s_interaction.view.focus;
+    for (unsigned i = 0; i < 20; ++i) { sample_after(10, 50, 0); expect_idle(); }
+    assert(s_interaction.view.focus == focus && s_interaction.view.preview_length == 0);
+    action(APP_KEYBOARD_SUBMODE, APP_KEYBOARD_MOTION);
+    release_barrier(); sync_interaction();
+    trace_count = 0;
     for (unsigned i = 0; i < 20; ++i) { sample_after(10, 50, 0); expect_idle(); }
     assert(s_interaction.view.focus != 0 && s_interaction.view.preview_length == 0);
     assert(trace_count == 0); /* Selection motion never reaches host or confirms. */
@@ -4310,6 +4317,9 @@ static void expect_neutral_navigation_trace(void)
 static void navigation_with_draft(input_mode_t mode)
 {
     setup(INPUT_KEYBOARD);
+    action(APP_KEYBOARD_SUBMODE, APP_KEYBOARD_MOTION);
+    release_barrier(); sync_interaction();
+    trace_count = 0;
     fill_preview(4);
     assert(strcmp(s_interaction.view.preview, "ABAB") == 0);
     if (mode != INPUT_KEYBOARD) {
@@ -6086,6 +6096,86 @@ static void sensor_observers_preserve_input_queue_and_redact_non_pad_context(voi
 #include "ble_advertising_diagnostics_cases.inc"
 #include "ble_admission_diagnostics_cases.inc"
 
+static void keyboard_test_select_mode(bool remote, input_mode_t mode, uint64_t key)
+{
+    if (remote) {
+        const char *args = mode == INPUT_KEYBOARD ? "{\"mode\":\"keyboard\"}" :
+            mode == INPUT_MOUSE ? "{\"mode\":\"mouse\"}" : "{\"mode\":\"audio\"}";
+        cp_command_t command = remote_test_command(CP_OP_MODE_SELECT, key, args);
+        cp_result_t result;
+        assert(app_command_bridge_submit(s_command_bridge, &command, &result) == CP_OK);
+        remote_control_service();
+        assert(test_control_result.command_key == key && test_control_result.state == CP_RESULT_APPLIED);
+    } else {
+        action(APP_MENU, APP_OVERLAY_MODES);
+        action(APP_MODE, (int)mode);
+    }
+    if (s_engine.state.release_pending) release_barrier();
+    sync_interaction();
+    assert(s_engine.state.mode == mode);
+}
+
+static void keyboard_entry_defaults_to_touch_for_local_and_remote_modes(void)
+{
+    const input_mode_t origins[] = {INPUT_MOUSE, INPUT_AUDIO};
+    for (unsigned remote = 0; remote < 2; ++remote) {
+        for (size_t origin = 0; origin < sizeof origins / sizeof origins[0]; ++origin) {
+            for (int previous = APP_KEYBOARD_MOTION; previous <= APP_KEYBOARD_SHORTCUTS; ++previous) {
+                setup(INPUT_KEYBOARD);
+                fill_preview(4);
+                action(APP_KEYBOARD_SUBMODE, previous);
+                release_barrier(); sync_interaction();
+                if (remote) remote_acquire_current_host();
+                keyboard_test_select_mode(remote != 0, origins[origin], 2);
+                keyboard_test_select_mode(remote != 0, INPUT_KEYBOARD, 3);
+                assert(s_keyboard_submode == APP_KEYBOARD_TOUCH && !s_interaction.view.keyboard_motion);
+                assert(s_interaction.view.group == -1 && !s_engine.state.gyro_enabled);
+                assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+                render_view(&test_link, ESP_OK);
+                assert(test_view.keyboard_submode == APP_KEYBOARD_TOUCH && test_view.keyboard_group == -1);
+                if (!remote) {
+                    action(APP_GRID, 0);
+                    action(APP_GRID, 1);
+                    assert(strcmp(s_interaction.view.preview, "ABABB") == 0);
+                }
+                expect_idle();
+                expect_neutral_navigation_trace();
+            }
+        }
+    }
+}
+
+static void keyboard_session_navigation_preserves_explicit_submode_and_draft(void)
+{
+    const app_overlay_t panels[] = {APP_OVERLAY_MODES, APP_OVERLAY_SETTINGS,
+        APP_OVERLAY_COMMON_KEYS, APP_OVERLAY_KEYBOARD, APP_OVERLAY_TARGET};
+    for (int submode = APP_KEYBOARD_MOTION; submode <= APP_KEYBOARD_SHORTCUTS; ++submode) {
+        setup(INPUT_KEYBOARD);
+        fill_preview(4);
+        action(APP_KEYBOARD_SUBMODE, submode);
+        release_barrier(); sync_interaction();
+        for (size_t panel = 0; panel < sizeof panels / sizeof panels[0]; ++panel) {
+            action(APP_MENU, (int)panels[panel]);
+            assert(s_overlay == panels[panel]);
+            action(APP_CLOSE, 0);
+            release_barrier(); sync_interaction();
+            assert(s_overlay == APP_OVERLAY_NONE && s_keyboard_submode == (app_keyboard_submode_t)submode);
+            assert(s_interaction.view.keyboard_motion == (submode == APP_KEYBOARD_MOTION));
+            assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+        }
+        keyboard_test_select_mode(false, INPUT_KEYBOARD, 0);
+        assert(s_keyboard_submode == (app_keyboard_submode_t)submode);
+        assert(s_interaction.view.keyboard_motion == (submode == APP_KEYBOARD_MOTION));
+        remote_acquire_current_host();
+        keyboard_test_select_mode(true, INPUT_KEYBOARD, 2);
+        assert(s_keyboard_submode == (app_keyboard_submode_t)submode);
+        assert(s_interaction.view.keyboard_motion == (submode == APP_KEYBOARD_MOTION));
+        assert(strcmp(s_interaction.view.preview, "ABAB") == 0 && !s_send_token);
+        expect_idle();
+        expect_neutral_navigation_trace();
+    }
+}
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -6094,6 +6184,8 @@ int main(int argc, char **argv)
     test_case = #test; test(); ++passed; } } while (0)
     RUN(advertising_failure_replay_preserves_domains_and_input);
     RUN(admission_failure_replay_is_bounded_repeatable_and_observation_only);
+    RUN(keyboard_entry_defaults_to_touch_for_local_and_remote_modes);
+    RUN(keyboard_session_navigation_preserves_explicit_submode_and_draft);
     REMOTE_UPDATE_CASES(RUN);
     NAVIGATION_CASES(RUN);
 #if defined(CONFIG_APP_IMU_CAPTURE) && CONFIG_APP_IMU_CAPTURE

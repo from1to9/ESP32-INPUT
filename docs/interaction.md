@@ -64,6 +64,12 @@ Motion-enabled admission. Calibrate sensor remains a separate bias operation.
 
 ### Keyboard
 
+First entry and every transition from Mouse or Audio into Keyboard select
+**Touch** on the nine-cell grid, preserving the draft. Opening or closing Menu,
+Settings, Keys or the entry chooser, and selecting the current Keyboard mode
+again, preserve the current submode and draft. Motion remains an explicit entry
+choice. Local and authorized remote mode selection use the same transition.
+
 One compact chooser opens **Motion**, **Touch**, **Spoken letters** and **Shortcuts**; four persistent submode tabs are unnecessary. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. The nine-cell layout is an explicit user revision of the original six-cell prototype. Motion moves local focus only; empty cells never receive focus or confirm input.
 
 A persistent **Keys** button in the Keyboard header opens the live-host panel in one tap from Motion, Touch, Spoken and Shortcuts. Its fifteen buttons form a symmetric five-row, three-column grid: Copy, Paste, Undo; Backspace, forward Delete, Enter; Esc, Tab, Select all; Home, Up, End; Left, Down, Right. The panel names the selected input host and shows the acknowledged Ctrl/Command shortcut setting. Its keys act on the host without changing the draft. Copy/Paste/Undo/Select all use Ctrl+C/V/Z/A for Windows or Command+C/V/Z/A for Apple hosts; Paste asks the host to paste its own clipboard and never reads clipboard contents. **Delete draft** removes a local preview character only; Send remains an explicit, separate action with no appended Enter. The existing chooser and six-button Shortcuts entry remain available, with no sticky modifiers. The nine-cell grid and preview controls keep their original geometry.
