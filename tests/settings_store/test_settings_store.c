@@ -172,7 +172,7 @@ static void assert_defaults(const device_settings_t *settings)
     assert(settings->host_modifier == DEVICE_HOST_CTRL && settings->haptics_enabled);
     assert(settings->brightness_percent == 50 && settings->idle_timeout == DEVICE_IDLE_5_MIN);
     assert(settings->preferred_transport == DEVICE_TRANSPORT_BLUETOOTH);
-    assert(settings->tap_to_click && strcmp(settings->bluetooth_name, "ESP32-INPUT") == 0);
+    assert(settings->tap_to_click && strcmp(settings->bluetooth_name, "ESP32") == 0);
 }
 
 static device_settings_t alternative(void)

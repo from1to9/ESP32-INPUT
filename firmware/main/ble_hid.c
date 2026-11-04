@@ -38,8 +38,8 @@
 #define PAIRING_BOND_CAPACITY CONFIG_BT_SMP_MAX_BONDS
 _Static_assert(PAIRING_BOND_CAPACITY > 0 && PAIRING_BOND_CAPACITY <= BLE_HID_MAX_BONDS,
                "Configured bond capacity must fit the bounded cache");
-_Static_assert(BLE_HID_NAME_MAX_BYTES + 13U <= 31U,
-               "Complete name plus HID advertising fields must fit legacy advertising");
+enum { ADV_COMPLETE_NAME_MAX = 31 - 13 }; /* flags, appearance, HID UUID and name header */
+_Static_assert(BLE_HID_NAME_MAX_BYTES + 2U <= 31U, "Complete HID name must fit the scan response");
 
 enum {
     ATTR_SERVICE,
@@ -1566,6 +1566,8 @@ static void service_device_name(void)
         device_name.ack = NAME_ACK_GET;
         action = NAME_SET;
     } else if (device_name.phase == NAME_ADV) {
+        advertising_data.include_name = strlen(device_name.rollback ? device_name.previous :
+            device_name.public.requested) <= ADV_COMPLETE_NAME_MAX;
         state.adv_configured = false;
         device_name.phase = NAME_WAIT_ADV;
         device_name.ack = NAME_ACK_ADV;
@@ -2661,7 +2663,7 @@ ble_hid_snapshot_t ble_hid_snapshot(void)
 
 bool ble_hid_name_valid(const char *utf8, size_t length)
 {
-    return device_settings_bluetooth_name_valid(utf8, length);
+    return device_settings_input_name_valid(utf8, length);
 }
 
 esp_err_t ble_hid_name_request(const char *utf8, size_t length, uint64_t *request_id)
@@ -3451,6 +3453,7 @@ esp_err_t ble_hid_init(void)
         bool pending_name = name_busy_locked();
         if (pending_name) memcpy(initial_name, device_name.public.requested, sizeof(initial_name));
         portEXIT_CRITICAL(&state_lock);
+        advertising_data.include_name = strlen(initial_name) <= ADV_COMPLETE_NAME_MAX;
         error = esp_ble_gap_set_device_name(initial_name);
         if (error == ESP_OK && pending_name) {
             portENTER_CRITICAL(&state_lock);

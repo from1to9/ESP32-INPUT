@@ -3,13 +3,24 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define DEVICE_SETTINGS_RECORD_SIZE 56U
 #define DEVICE_SETTINGS_V3_RECORD_SIZE 40U
 #define DEVICE_SETTINGS_LEGACY_RECORD_SIZE 16U
 #define DEVICE_SETTINGS_SCHEMA_VERSION 5U
 #define DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES 18U
-#define DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME "ESP32-INPUT"
+#define DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME "ESP32"
+#define DEVICE_SETTINGS_V5_DEFAULT_NAME "ESP32-INPUT"
+#define DEVICE_INPUT_NAME_SUFFIX "-IN"
+#define DEVICE_AUDIO_NAME_SUFFIX "-AUD"
+#define DEVICE_INPUT_NAME_MAX (DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES + sizeof(DEVICE_INPUT_NAME_SUFFIX) - 1U)
+#define DEVICE_AUDIO_NAME_MAX (DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES + sizeof(DEVICE_AUDIO_NAME_SUFFIX) - 1U)
+/* The sole legacy alias. All other valid base names remain literal. */
+static inline const char *device_base_name(const char *name)
+{
+    return !strcmp(name, DEVICE_SETTINGS_V5_DEFAULT_NAME) ? DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME : name;
+}
 #define DEVICE_SETTINGS_MIN_BRIGHTNESS 10U
 #define DEVICE_SETTINGS_MAX_BRIGHTNESS 100U
 #define DEVICE_SETTINGS_BRIGHTNESS_STEP 10U
@@ -56,7 +67,7 @@ typedef enum {
 } device_settings_apply_t;
 
 /* Defaults: Dark, Ctrl, haptics enabled, brightness 50%, timeout five minutes,
- * preferred transport Bluetooth, tap-to-click enabled, name ESP32-INPUT;
+ * preferred transport Bluetooth, tap-to-click enabled, base device name ESP32;
  * motion X/Y gain 4, deadzone 0.5 dps, filter 30 ms, freeze 150 ms, no inversion;
  * optional Navigation layout disabled.
  * Actual switching/name application belongs to the coordinator/adapters.
@@ -67,6 +78,7 @@ bool device_settings_validate(const device_settings_t *settings);
 /* Shared BLE/settings validator: explicit 1..18 UTF-8 bytes, excluding NUL.
  * Reject malformed/overlong UTF-8, surrogates, NUL/C0/C1 controls and outer
  * ASCII space. Input need not be terminated; this never reads beyond length. */
+bool device_settings_input_name_valid(const char *utf8, size_t length);
 bool device_settings_bluetooth_name_valid(const char *utf8, size_t length);
 bool device_settings_equal(const device_settings_t *a, const device_settings_t *b);
 /* Only CHANGED should schedule a coalesced save in the external NVS adapter.

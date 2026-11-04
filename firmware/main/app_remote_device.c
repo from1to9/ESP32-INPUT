@@ -284,7 +284,7 @@ static cp_error_t setting(app_remote_device_t *d, const char *key, uint16_t node
         field = APP_REMOTE_SETTING_TAP; candidate->tap_to_click = reset ? defaults.tap_to_click : value->value.boolean;
     } else if (!strcmp(key, "bluetooth.device_name")) {
         field = APP_REMOTE_SETTING_BLUETOOTH_NAME;
-        (void)snprintf(candidate->bluetooth_name, sizeof(candidate->bluetooth_name), "%s", reset ? defaults.bluetooth_name : text);
+        (void)snprintf(candidate->bluetooth_name, sizeof(candidate->bluetooth_name), "%s", reset ? defaults.bluetooth_name : device_base_name(text));
     } else if (!strcmp(key, "pointer.gain_hid_per_degree")) {
         field = APP_REMOTE_SETTING_POINTER_GAIN;
         uint16_t gain = defaults.motion_gain_x_centi;
@@ -699,26 +699,30 @@ cp_error_t app_remote_device_read(app_remote_device_t *d, const cp_identity_t *i
     const device_settings_t *s = &state.settings;
     char name[6U * DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES + 3U];
     char scalar_gain[32];
-    if (!cj_escape(s->bluetooth_name, name, sizeof(name))) return CP_INTERNAL;
+    if (!cj_escape(device_base_name(s->bluetooth_name), name, sizeof(name))) return CP_INTERNAL;
+    /* Each suffix is fixed ASCII. Reuse the escaped base for all three JSON strings. */
+    name[strlen(name) - 1U] = 0;
+    const char *base = name + 1;
     bool equal_gains = s->motion_gain_x_centi == s->motion_gain_y_centi;
     if (equal_gains) (void)snprintf(scalar_gain, sizeof(scalar_gain), "%.2f", (double)s->motion_gain_x_centi / 100);
     else (void)snprintf(scalar_gain, sizeof(scalar_gain), "%s", "null");
     int used = snprintf(json, capacity,
         "{\"revision\":\"%" PRIu64 "\",\"values\":{\"display.theme\":\"%s\",\"display.brightness_percent\":%u,"
         "\"display.idle_timeout_seconds\":%u,\"haptics.enabled\":%s,\"keyboard.shortcut_modifier\":\"%s\","
-        "\"input.preferred_transport\":\"%s\",\"touch.tap_to_click\":%s,\"bluetooth.device_name\":%s,"
+        "\"input.preferred_transport\":\"%s\",\"touch.tap_to_click\":%s,\"bluetooth.device_name\":\"%s\","
         "\"pointer.gain_hid_per_degree\":%s,\"pointer.deadzone_dps\":%.3f,\"pointer.filter_seconds\":%.3f,"
         "\"pointer.gain_x_hid_per_degree\":%.2f,\"pointer.gain_y_hid_per_degree\":%.2f,\"pointer.invert_x\":%s,"
         "\"pointer.invert_y\":%s,\"pointer.freeze_ms\":%u},"
+        "\"configured_bluetooth_names\":{\"input\":\"%s" DEVICE_INPUT_NAME_SUFFIX "\",\"audio\":\"%s" DEVICE_AUDIO_NAME_SUFFIX "\"},"
         "\"pointer_gain_axes_equal\":%s,\"pointer_gain_axes\":{\"x\":%.2f,\"y\":%.2f},\"durability\":\"owner_status_required\"}",
         state.settings_revision, s->theme == DEVICE_THEME_DARK ? "dark" : "light", s->brightness_percent,
         (unsigned)s->idle_timeout * 60U, s->haptics_enabled ? "true" : "false",
         s->host_modifier == DEVICE_HOST_COMMAND ? "command" : "ctrl",
-        s->preferred_transport == DEVICE_TRANSPORT_USB ? "usb" : "bluetooth", s->tap_to_click ? "true" : "false", name,
+        s->preferred_transport == DEVICE_TRANSPORT_USB ? "usb" : "bluetooth", s->tap_to_click ? "true" : "false", base,
         scalar_gain, (double)s->motion_deadzone_mdps / 1000, (double)s->motion_filter_ms / 1000,
         (double)s->motion_gain_x_centi / 100, (double)s->motion_gain_y_centi / 100,
         s->motion_invert_x ? "true":"false", s->motion_invert_y ? "true":"false", s->motion_freeze_ms,
-        equal_gains ? "true" : "false", (double)s->motion_gain_x_centi / 100, (double)s->motion_gain_y_centi / 100);
+        base, base, equal_gains ? "true" : "false", (double)s->motion_gain_x_centi / 100, (double)s->motion_gain_y_centi / 100);
     if (used < 0 || (size_t)used >= capacity) { json[0] = 0; return CP_TOO_LARGE; }
     *length = (size_t)used; return CP_OK;
 }

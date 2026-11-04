@@ -1537,6 +1537,7 @@ int main(int argc, char **argv)
             continue;
         }
         if (bluetooth_only) {
+            bluetooth_name_editor_checks();
             bluetooth_management_checks();
             continue;
         }

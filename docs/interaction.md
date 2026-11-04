@@ -242,7 +242,7 @@ Recovery hotspot option. Its passcode and local browser URL appear only on the
 setup page; leaving, Stop, expiry or locking closes it. Forget still requires
 local confirmation. Failed setup never enables remote-control/MCP authority.
 
-Bluetooth settings can edit this device's local name without renaming a host.
+Settings > Device name edits the shared base and previews the full mouse/keyboard and audio search names. The Bluetooth device options link opens the same settings page.
 Name and Wi-Fi password entry share a local-only editor with separate bounded
 buffers and purpose/session identity. Passwords are masked, never prefilled and
 never sent into the HID preview, ordinary intents, labels or diagnostics. Only

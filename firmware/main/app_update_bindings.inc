@@ -248,7 +248,7 @@ static void __attribute__((noinline)) remote_update_service(void)
         app_wifi_get_snapshot(&wifi);
         app_wifi_scan_snapshot_t scan;
         app_wifi_get_scan_snapshot(&scan);
-        ble_hid_name_snapshot_t name = ble_hid_name_snapshot();
+        base_name_change_t name = paired_name.base;
         static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
         ble_hid_copy_bond_list(&bonds);
         ble_hid_target_snapshot_t target = ble_hid_target_snapshot();

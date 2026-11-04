@@ -56,6 +56,29 @@ static void remote_device_runtime_settings_and_durability_use_real_boundaries(vo
     device_settings_t native = s_settings; native.theme = DEVICE_THEME_LIGHT; assert(update_settings(&native));
     assert(test_saved_request.theme == DEVICE_THEME_LIGHT && test_saved_request.brightness_percent == 50);
 }
+static void remote_device_name_requires_both_radios_and_reports_canonical_base(void)
+{
+    remote_device_case_setup();
+    /* Start from a non-default configuration, then apply the historical alias. */
+    strcpy(s_settings.bluetooth_name, "Desk");
+    cp_result_t stage = remote_device_case_execute(CP_OP_CONFIG_STAGE, 110,
+        "{\"patch\":{\"bluetooth.device_name\":\"ESP32-INPUT\"},\"durable\":false}");
+    char args[80]; snprintf(args, sizeof(args), "{\"transaction_id\":\"%s\"}", stage.object_id);
+    cp_result_t result = remote_device_case_execute(CP_OP_CONFIG_APPLY, 111, args);
+    assert(result.state == CP_RESULT_RUNNING && !strcmp(test_name.requested, "ESP32-IN"));
+    test_name.status = BLE_HID_NAME_APPLIED;
+    test_name.active_known = true; strcpy(test_name.active, test_name.requested);
+    service_bluetooth_name(); remote_device_case_tick();
+    assert(!strcmp(test_classic_name, "ESP32-AUD") && test_classic_change.busy);
+    assert(!strcmp(s_settings.bluetooth_name, "Desk") && !test_control_completions);
+    test_classic_change.busy = false; service_bluetooth_name(); remote_device_case_tick();
+    assert(test_control_result.state == CP_RESULT_APPLIED && !test_storage_requests);
+    char json[2048]; size_t length;
+    cp_identity_t reader = {.scopes = CP_SCOPE_VIEW};
+    assert(remote_device_read(&reader, "/api/v1/config", json, sizeof(json), &length) == CP_OK);
+    assert(strstr(json, "\"bluetooth.device_name\":\"ESP32\"") &&
+        strstr(json, "\"configured_bluetooth_names\":{\"input\":\"ESP32-IN\",\"audio\":\"ESP32-AUD\"}"));
+}
 static void remote_device_haptic_jobs_wait_for_on_and_final_off(void)
 {
     remote_device_case_setup(); test_remote_haptic_accept = true;
@@ -264,6 +287,7 @@ static void remote_device_stale_and_expired_reviews_remain_locally_cancellable(v
     assert(test_control_result.state == CP_RESULT_CANCELLED && !test_restart_requests && s_overlay != APP_OVERLAY_CONFIRM);
 }
 #define REMOTE_DEVICE_CASES(RUN) \
+    RUN(remote_device_name_requires_both_radios_and_reports_canonical_base); \
     RUN(remote_device_runtime_settings_and_durability_use_real_boundaries); \
     RUN(remote_device_haptic_jobs_wait_for_on_and_final_off); \
     RUN(remote_device_sleep_preserves_capture_warning_until_off); \

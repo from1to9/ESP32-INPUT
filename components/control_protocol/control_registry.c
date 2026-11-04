@@ -1619,7 +1619,7 @@ size_t cp_operation_count(void) { return sizeof(operations)/sizeof(operations[0]
 const cp_operation_info_t *cp_operation_at(size_t i) { return i < cp_operation_count() ? &operations[i] : NULL; }
 const cp_operation_info_t *cp_operation_find(const char *name) { for (size_t i=0;i<cp_operation_count();++i) if (strcmp(name,operations[i].name)==0) return &operations[i]; return NULL; }
 const cs_node_t *cp_argument_schema(cp_operation_id_t id) { return id && id <= cp_operation_count() ? argument_schemas[id-1] : NULL; }
-const char *cp_catalog_sha256(void) { return "516ae0e41f2f9ec8802548ac4001727d6ab75675ea5739b72433619a1619a87d"; }
+const char *cp_catalog_sha256(void) { return "710dec8aba327351796d628e6bfd416ef04cf13851e04eda2801cd749238845c"; }
 static const char *const scopes[] = {"view", "input.control", "input.configure", "config.write", "connections.manage", "wifi.configure", "audio.control", "audio.capture", "audio.playback", "recording.control", "recording.configure", "recording.read", "recording.export", "recording.delete", "capture.consent", "admin.clients", "admin.policy", "admin.privacy", "update.check", "update.stage", "update.activate", "diagnostics.read", "diagnostics.control", "system.restart", "system.reset"};
 const char *cp_scope_name(size_t i) { return i < sizeof(scopes)/sizeof(scopes[0]) ? scopes[i] : NULL; }
 cp_scope_mask_t cp_scope_from_name(const char *name) { for(size_t i=0;i<sizeof(scopes)/sizeof(scopes[0]);++i) if(strcmp(name,scopes[i])==0) return UINT64_C(1)<<i; return 0; }
@@ -1631,7 +1631,7 @@ static const cp_config_info_t config_fields[] = {
     {"keyboard.shortcut_modifier", &schema_549, CP_SCOPE_CONFIG_WRITE, "\"ctrl\"", "release", "durable", false},
     {"input.preferred_transport", &schema_550, CP_SCOPE_INPUT_CONFIGURE, "\"bluetooth\"", "link", "durable", false},
     {"touch.tap_to_click", &schema_551, CP_SCOPE_INPUT_CONFIGURE, "true", "release", "durable", false},
-    {"bluetooth.device_name", &schema_552, CP_SCOPE_CONNECTIONS_MANAGE, "\"ESP32-INPUT\"", "link", "durable", false},
+    {"bluetooth.device_name", &schema_552, CP_SCOPE_CONNECTIONS_MANAGE, "\"ESP32\"", "link", "durable", false},
     {"touch.gain_divisor", &schema_553, CP_SCOPE_CONFIG_WRITE, "1", "release", "volatile", false},
     {"input.motion_enabled", &schema_554, CP_SCOPE_INPUT_CONTROL, "false", "release", "volatile", false},
     {"input.producer", &schema_555, CP_SCOPE_INPUT_CONTROL, "\"script\"", "release", "volatile", false},

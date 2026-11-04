@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
+#include "device_settings.h"
 /* LVGL owner data only; never DMA, ISR, or cache-disabled access. */
 #ifdef ESP_PLATFORM
 #include "esp_attr.h"
@@ -74,6 +75,7 @@ static lv_obj_t *s_mic_level, *s_mic_level_label;
 static char s_mic_level_text[32];
 static lv_obj_t *s_overlay, *s_overlay_target, *s_overlay_critical;
 static lv_obj_t *s_telemetry, *s_overlay_state;
+static lv_obj_t *s_names_base, *s_names_input, *s_names_audio, *s_names_state;
 static lv_obj_t *s_settings_title, *s_settings_back, *s_save_status;
 static lv_obj_t *s_transports[2], *s_transport_status, *s_wifi_summary, *s_wifi_ssid, *s_wifi_note;
 static lv_obj_t *s_bluetooth_state, *s_bluetooth_pairing, *s_pairing_buttons[3];
@@ -998,7 +1000,7 @@ static bool name_valid(const char *name, size_t length)
 static void name_label(char *output, size_t capacity, const char *name)
 {
     size_t out = 0;
-    for (size_t i = 0; i < APP_UI_BLUETOOTH_NAME_CAPACITY - 1 && name[i]; ++i) {
+    for (size_t i = 0; name[i]; ++i) {
         unsigned char byte = (unsigned char)name[i];
         if (byte >= 0x20 && byte < 0x7f) {
             if (out + 1 >= capacity) break;
@@ -1091,8 +1093,9 @@ static void on_editor_action(lv_event_t *event)
             request.value.wifi.length = length;
             memcpy(request.value.wifi.password, buffer, length + 1);
         } else {
-            request.value.bluetooth.length = length;
-            memcpy(request.value.bluetooth.name, buffer, length + 1);
+            const char *base = device_base_name(buffer);
+            request.value.bluetooth.length = strlen(base);
+            memcpy(request.value.bluetooth.name, base, request.value.bluetooth.length + 1);
         }
         app_local_edit_result_t result = s_local_submit(&request);
         secure_clear(&request, sizeof(request));
@@ -1126,17 +1129,17 @@ static void render_editor(void)
         memset(preview, '*', masks);
         preview[masks] = '\0';
         if (length > masks) memcpy(preview + masks, "...", 4);
-    } else name_label(preview, sizeof(preview), s_bluetooth_name);
+    } else name_label(preview, sizeof(preview), device_base_name(s_bluetooth_name));
     label_text(s_editor_preview, *preview ? preview : wifi ? "Password hidden" : "Enter device name");
     if (wifi) label_text(s_editor_source, s_view.wifi_selection.network.label);
     else {
-        char effective[APP_UI_BLUETOOTH_NAME_CAPACITY * 4];
-        name_label(effective, sizeof(effective), s_view.bluetooth_name.effective);
-        label_format(s_editor_source, "Effective device name: %s",
-            s_view.bluetooth_name.effective_valid ? effective : "unavailable");
+        if (*s_bluetooth_name) label_format(s_editor_source, "Input: %s%s\nAudio: %s%s",
+            preview, DEVICE_INPUT_NAME_SUFFIX, preview, DEVICE_AUDIO_NAME_SUFFIX);
+        else label_text(s_editor_source, "Mouse / keyboard and Bluetooth audio names");
     }
-    label_format(s_editor_context, wifi ? "%u / 63 bytes / %s" : "%u / 18 bytes / %s", (unsigned)length,
-        wifi ? s_view.local_editor.wifi_remember ? "Remember and join" : "Join once" : "This device / not the host");
+    label_format(s_editor_context, wifi ? "%u / 63 bytes / %s" : "%u / 18 bytes / %s",
+        (unsigned)(wifi ? length : strlen(device_base_name(s_bluetooth_name))),
+        wifi ? s_view.local_editor.wifi_remember ? "Remember and join" : "Join once" : device_base_name(s_bluetooth_name) != s_bluetooth_name ? "Legacy alias for ESP32" : "This device / not the host");
     label_text(s_editor_status, s_editor_feedback ? s_editor_feedback : *s_view.local_editor.message ?
         s_view.local_editor.message : !live ? "Editor unavailable / draft cleared" :
         !s_local_submit || !s_view.local_editor.submit_available ? "Submission unavailable. Close and retry." :
@@ -1313,7 +1316,16 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
     if (page == APP_SETTINGS_HOME) {
         const char *names[] = {"Connectivity", "Display", "Input", "About"};
         for (int i = 0; i < 4; ++i)
-            button(settings, names[i], 0, i * 80, 456, 68, APP_SETTINGS_PAGE, i + 1);
+            button(settings, names[i], 0, i * 64, 456, 56, APP_SETTINGS_PAGE, i + 1);
+        button(settings, "Device name", 0, 256, 456, 56, APP_SETTINGS_PAGE, APP_SETTINGS_DEVICE_NAME);
+        return;
+    }
+    if (page == APP_SETTINGS_DEVICE_NAME) {
+        s_names_base = label(settings, "", 0, 0, 456, INK);
+        s_names_input = label(settings, "", 0, 60, 456, INK);
+        s_names_audio = label(settings, "", 0, 120, 456, INK);
+        s_names_state = label(settings, "", 0, 190, 456, MUTED);
+        s_name_edit = button(settings, "Edit base name", 0, 280, 456, 48, APP_BLUETOOTH_NAME_EDIT, 0);
         return;
     }
     if (page == APP_SETTINGS_CONNECTIVITY) {
@@ -1395,7 +1407,7 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         s_pairing_buttons[2] = button(bluetooth, "Forget all", 312, 280, 144, 44, APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL);
         lv_obj_set_width(s_settings_back, 224);
         lv_obj_set_width(lv_obj_get_child(s_settings_back, 0), 216);
-        s_name_edit = button(bluetooth, "Device name", 232, 360, 224, 48, APP_BLUETOOTH_NAME_EDIT, 0);
+        button(bluetooth, "Device name", 232, 360, 224, 48, APP_SETTINGS_PAGE, APP_SETTINGS_DEVICE_NAME);
         return;
     }
     if (page == APP_SETTINGS_DISPLAY) {
@@ -1532,6 +1544,7 @@ static void clear_panel_bindings(void)
     memset(s_editor_grid, 0, sizeof(s_editor_grid));
     s_scan_state = s_scan_empty = s_scan_previous = s_scan_next = s_scan_page = s_scan_refresh = NULL;
     s_network_name = s_network_detail = s_network_note = NULL;
+    s_names_base = s_names_input = s_names_audio = s_names_state = NULL;
     s_wifi_find = s_wifi_saved = s_wifi_backend = s_name_edit = s_tap_click = NULL;
     s_motion_detail = s_common_context = s_common_modifiers = NULL;
     s_navigation = s_reset_grip = NULL;
@@ -1659,16 +1672,23 @@ static void create_extension(lv_obj_t *body, lv_obj_t *title, app_overlay_t kind
     } else if (kind == APP_OVERLAY_LOCAL_EDITOR) {
         bool wifi = s_view.local_editor.purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE;
         label_text(title, wifi ? "Wi-Fi password" : "Device name");
-        lv_obj_t *preview = box(body, 0, 0, 456, 64, SOFT);
+        lv_obj_t *preview = box(body, 0, 0, 456, wifi ? 64 : 168, SOFT);
         s_editor_source = metadata(preview, "", 12, 4, 432);
-        s_editor_preview = label(preview, "", 12, 24, 432, INK);
-        single_line(s_editor_preview);
-        s_editor_context = metadata(preview, "", 12, 46, 432);
+        s_editor_preview = label(preview, "", 12, wifi ? 24 : 106, 432, INK);
+        if (wifi) single_line(s_editor_preview);
+        else {
+            lv_obj_set_height(s_editor_source, 100);
+            lv_label_set_long_mode(s_editor_source, LV_LABEL_LONG_WRAP);
+            lv_obj_set_style_text_font(s_editor_preview, META_FONT, 0);
+            lv_obj_set_height(s_editor_preview, 36);
+        }
+        s_editor_context = metadata(preview, "", 12, wifi ? 46 : 144, 432);
+        int top = wifi ? 76 : 172, stride = wifi ? 84 : 52, height = wifi ? 76 : 48;
         for (unsigned i = 0; i < 9; ++i)
-            s_editor_grid[i] = editor_button(body, "", (int)(i % 3) * 120, 76 + (int)(i / 3) * 84, 112, 76, i);
-        s_editor_back = editor_button(body, "Groups", 360, 76, 96, 76, 9);
-        s_editor_case = editor_button(body, "ABC", 360, 160, 96, 76, 10);
-        s_editor_symbol = editor_button(body, "Symbols", 360, 244, 96, 76, 11);
+            s_editor_grid[i] = editor_button(body, "", (int)(i % 3) * 120, top + (int)(i / 3) * stride, 112, height, i);
+        s_editor_back = editor_button(body, "Groups", 360, top, 96, height, 9);
+        s_editor_case = editor_button(body, "ABC", 360, top + stride, 96, height, 10);
+        s_editor_symbol = editor_button(body, "Symbols", 360, top + 2 * stride, 96, height, 11);
         s_editor_status = metadata(body, "", 0, 328, 456);
         s_editor_delete = editor_button(body, "Delete", 0, 360, 144, 48, 12);
         s_editor_space = editor_button(body, "Space", 156, 360, 144, 48, 13);
@@ -2043,17 +2063,19 @@ static void render_device(const app_view_t *view, const char *link)
         label_format(s_telemetry, "%s / Wi-Fi %d dBm", battery, view->wifi_rssi_dbm);
     else label_format(s_telemetry, "%s / Wi-Fi %s", battery, wifi_status);
     const char *titles[] = {"Settings", "Connectivity", "Display", "Input", "About", "Bluetooth hosts", "Wi-Fi",
-        "Motion sensitivity", "Motion tuning", "Touch gestures", "Navigation"};
+        "Motion sensitivity", "Motion tuning", "Touch gestures", "Navigation", "Device name"};
     unsigned page = (unsigned)view->settings_page < sizeof(titles) / sizeof(titles[0]) ? (unsigned)view->settings_page : 0;
     label_text(s_settings_title, titles[page]);
-    const char *saved = view->settings_save_state == APP_SAVE_SAVED ? "Settings saved" :
-        view->settings_save_state == APP_SAVE_PENDING ? "Saving settings..." :
-        view->settings_save_state == APP_SAVE_ERROR ? "Could not save settings. Try again." :
-        view->settings_save_state == APP_SAVE_DEFAULTS ? "Defaults active / not saved yet" :
-        view->settings_save_state == APP_SAVE_VOLATILE ? "Temporary settings / not saved" : "Settings storage unavailable";
+    app_save_state_t save_state = view->settings_page == APP_SETTINGS_DEVICE_NAME ?
+        view->bluetooth_name.save_state : view->settings_save_state;
+    const char *saved = save_state == APP_SAVE_SAVED ? "Settings saved" :
+        save_state == APP_SAVE_PENDING ? "Saving settings..." :
+        save_state == APP_SAVE_ERROR ? "Could not save settings. Try again." :
+        save_state == APP_SAVE_DEFAULTS ? "Defaults active / not saved yet" :
+        save_state == APP_SAVE_VOLATILE ? "Temporary settings / not saved" : "Settings storage unavailable";
     if (view->settings_page != APP_SETTINGS_BLUETOOTH) {
         label_text(s_save_status, saved);
-        foreground(s_save_status, view->settings_save_state == APP_SAVE_ERROR ? WARNING : MUTED, 0);
+        foreground(s_save_status, save_state == APP_SAVE_ERROR ? WARNING : MUTED, 0);
     }
     bool usb_selected = view->input_transport == APP_INPUT_USB;
     selected(s_transports[0], !usb_selected);
@@ -2141,9 +2163,23 @@ static void render_device(const app_view_t *view, const char *link)
     foreground(s_bond_page, pairings_full ? WARNING : MUTED, 0);
     enabled(s_bond_previous, view->bluetooth_hosts_available && host_page > 0);
     enabled(s_bond_next, view->bluetooth_hosts_available && host_page + 1 < page_count);
+    if (view->settings_page == APP_SETTINGS_DEVICE_NAME && s_names_base) {
+        char value[4 * (DEVICE_AUDIO_NAME_MAX + 1)];
+        name_label(value, sizeof(value), view->bluetooth_name.configured);
+        label_format(s_names_base, "Configured base: %s", view->bluetooth_name.configured_valid ? value : "Unavailable");
+        name_label(value, sizeof(value), view->bluetooth_name.effective);
+        label_format(s_names_input, "Mouse & keyboard (SDK): %s", view->bluetooth_name.effective_valid ? value : "Unavailable");
+        name_label(value, sizeof(value), view->media.pairing.device_name);
+        label_format(s_names_audio, "Bluetooth audio (SDK): %s", view->media.pairing.name_known ? value : "Unavailable");
+        if (view->bluetooth_name.pending) {
+            name_label(value, sizeof(value), view->bluetooth_name.requested);
+            label_format(s_names_state, "Applying base: %s", value);
+        } else label_text(s_names_state, view->bluetooth_name.uncertain ? "Radio name uncertain. Restart to restore the saved name." :
+            *view->bluetooth_name.message ? view->bluetooth_name.message : "A host may keep an older name until a fresh Bluetooth scan.");
+    }
     enabled(s_name_edit, view->bluetooth_name.available && !view->bluetooth_name.pending && !view->bluetooth_name.uncertain);
     if (view->overlay == APP_OVERLAY_SETTINGS && view->settings_page == APP_SETTINGS_BLUETOOTH) {
-        char name[APP_UI_BLUETOOTH_NAME_CAPACITY * 4];
+        char name[(DEVICE_INPUT_NAME_MAX + 1U) * 4];
         name_label(name, sizeof(name), view->bluetooth_name.effective);
         label_format(s_save_status, "This device: %s / %s", view->bluetooth_name.effective_valid ? name : "Name unavailable",
             view->bluetooth_name.uncertain ? "outcome unknown" : view->bluetooth_name.pending ? "applying name" :
@@ -2236,7 +2272,7 @@ static void render_device(const app_view_t *view, const char *link)
     case APP_CONFIRM_PAIR_OPEN:
         title = "Disconnect and add host?";
         {
-            char name[APP_UI_BLUETOOTH_NAME_CAPACITY * 4];
+            char name[(DEVICE_INPUT_NAME_MAX + 1U) * 4];
             name_label(name, sizeof(name), view->bluetooth_name.effective);
             snprintf(pairing_detail, sizeof(pairing_detail), "Release input; disconnect current host.\nAllow pairing for 2 minutes. Saved hosts remain.\nDevice: %s",
                 view->bluetooth_name.effective_valid ? name : "unavailable");
@@ -2359,7 +2395,7 @@ void app_ui_render(const app_view_t *view)
         memset(s_view.bluetooth_name.configured, 0, sizeof(s_view.bluetooth_name.configured));
         s_view.bluetooth_name.configured_valid = false;
     }
-    if (bounded_length(s_view.bluetooth_name.effective, APP_UI_BLUETOOTH_NAME_CAPACITY) == APP_UI_BLUETOOTH_NAME_CAPACITY) {
+    if (bounded_length(s_view.bluetooth_name.effective, sizeof(s_view.bluetooth_name.effective)) == sizeof(s_view.bluetooth_name.effective)) {
         memset(s_view.bluetooth_name.effective, 0, sizeof(s_view.bluetooth_name.effective));
         s_view.bluetooth_name.effective_valid = false;
     }

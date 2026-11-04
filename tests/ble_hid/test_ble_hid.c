@@ -314,7 +314,7 @@ esp_err_t esp_ble_gap_config_adv_data(esp_ble_adv_data_t *data) {
      * even when the assigned service is compressed to 16 bits on air. */
     if (!data || (data->service_uuid_len & 0x0fU)) return ESP_ERR_INVALID_ARG;
     if (data->set_scan_rsp) strcpy(configured_scan_name, fake_sdk_name);
-    else strcpy(configured_adv_name, fake_sdk_name);
+    else strcpy(configured_adv_name, data->include_name ? fake_sdk_name : "");
     return data->set_scan_rsp ? scan_data_result : adv_data_result;
 }
 esp_err_t esp_ble_gatts_app_register(uint16_t app_id) {
@@ -2078,7 +2078,7 @@ static void name_begin_runtime(const char *name, bool advertising) {
 static void test_name_validation_submission_and_copy(void) {
     reset_startup();
     const char *invalid[] = {"", " leading", "trailing ", "line\nname", "\x7f", "\xc0\xaf", "\xed\xa0\x80",
-        "1234567890123456789"};
+        "1234567890123456789012"};
     uint64_t id = 99;
     assert(ble_hid_name_request(NULL, 1, &id) == ESP_ERR_INVALID_ARG);
     for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
@@ -2161,10 +2161,57 @@ static void test_name_connected_apply_preserves_hid_and_bonds(void) {
     worker_cycle(); assert(sets == name_set_calls && gets == name_get_calls && configs == adv_config_calls);
 }
 
+/* Encode the configured fields in the order used by pinned
+ * btm_ble_build_adv_data: flags, appearance, local name, 16-bit services. */
+static size_t name_ad_bytes(const esp_ble_adv_data_t *config, uint8_t packet[31])
+{
+    size_t at = 0;
+    if (config->flag) {
+        packet[at++] = 2; packet[at++] = 1; packet[at++] = (uint8_t)config->flag;
+    }
+    if (config->appearance) {
+        packet[at++] = 3; packet[at++] = 0x19;
+        packet[at++] = (uint8_t)config->appearance; packet[at++] = (uint8_t)(config->appearance >> 8);
+    }
+    if (config->include_name) {
+        size_t n = strlen(fake_sdk_name);
+        assert(at + n + 2 <= 31);
+        packet[at++] = (uint8_t)(1U + n); packet[at++] = 9;
+        memcpy(packet + at, fake_sdk_name, n); at += n;
+    }
+    if (config->service_uuid_len) {
+        assert(config->service_uuid_len == 16 && at + 4 <= 31);
+        packet[at++] = 3; packet[at++] = 3;
+        packet[at++] = config->p_service_uuid[12]; packet[at++] = config->p_service_uuid[13];
+    }
+    return at;
+}
+
+static void test_dual_name_advertisement_boundaries(void)
+{
+    reset();
+    const char *names[] = {"123456789012345-IN", "1234567890123456-IN", "123456789012345678-IN", "ESP32-IN"};
+    for (size_t i = 0; i < 4; ++i) {
+        name_begin_runtime(names[i], true); name_finish_payloads();
+        assert(ble_hid_name_snapshot().status == BLE_HID_NAME_APPLIED);
+        size_t n = strlen(names[i]);
+        uint8_t primary[31] = {0}, scan[31] = {0};
+        size_t bytes = name_ad_bytes(&advertising_data, primary);
+        assert(bytes == (n <= 18 ? 13 + n : 11));
+        assert(primary[0] == 2 && primary[1] == 1 && primary[3] == 3 && primary[4] == 0x19 &&
+            primary[5] == 0xc0 && primary[6] == 3 && !memcmp(primary + bytes - 4, "\x03\x03\x12\x18", 4));
+        if (n <= 18) assert(primary[7] == n + 1 && primary[8] == 9 && !memcmp(primary + 9, names[i], n));
+        assert(name_ad_bytes(&scan_data, scan) == n + 2 && scan[0] == n + 1 && scan[1] == 9 &&
+            !memcmp(scan + 2, names[i], n));
+        printf("HID name %s: ADV", names[i]);
+        for (size_t j = 0; j < bytes; ++j) printf(" %02x", primary[j]);
+        printf(" SCAN"); for (size_t j = 0; j < n + 2; ++j) printf(" %02x", scan[j]); puts("");
+    }
+}
 static void test_name_utf8_full_advertisement_and_rollback(void) {
     reset();
     const char utf8[] = "\xe6\x88\x91\xe6\x88\x91\xe6\x88\x91\xe6\x88\x91\xe6\x88\x91\xe6\x88\x91";
-    assert(sizeof(utf8) - 1U == BLE_HID_NAME_MAX_BYTES);
+    assert(sizeof(utf8) - 1U == ADV_COMPLETE_NAME_MAX);
     name_begin_runtime(utf8, true);
     name_finish_payloads();
     assert(ble_hid_name_snapshot().status == BLE_HID_NAME_APPLIED && state.advertising);
@@ -2792,6 +2839,7 @@ int main(void) {
     test_durable_target_reboot_replay_and_identity(); test_durable_target_storage_failures();
     test_durable_target_stale_request_and_schema(); test_durable_target_commit_race_and_old_record();
     test_saved_target_selection_and_order(); test_shared_classic_pairing_guard();
+    test_dual_name_advertisement_boundaries();
     test_name_validation_submission_and_copy(); test_name_preinit_and_startup_callback_ownership();
     test_name_connected_apply_preserves_hid_and_bonds(); test_name_utf8_full_advertisement_and_rollback();
     test_name_readback_and_rollback_failures(); test_name_timeout_and_late_callbacks();

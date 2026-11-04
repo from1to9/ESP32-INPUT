@@ -125,6 +125,10 @@ MEDIA_INTENT = CORE + [("main", "handle_intent"),
 # Private helpers may be inlined; an omitted private frame is already charged to
 # its emitted caller. Public entries and the lifetime boundaries are required.
 PATHS = {
+    "radio_name_submit": DEVICE_SUBMIT + [("main", "remote_device_settings_progress"),
+        ("main", "request_device_base"), ("main", "request_input_name"), ("ble", "ble_hid_name_request")],
+    "radio_name_restore": CORE + [("main", "service_bluetooth_name"), ("main", "service_device_base"),
+        ("main", "device_name_failure"), ("main", "request_input_name"), ("ble", "ble_hid_name_request")],
     "raw_motion_capture": CORE + [("main", "service_motion_capture"),
         ("main", "capture_observation"), ("motion_capture", "motion_capture_append")],
     "raw_motion_drain": CORE + [("main", "service_motion_capture"),
@@ -575,6 +579,8 @@ MEDIA_PROCESS = [("media_runtime", "worker"), ("media_runtime", "media_step"),
 MEDIA_START = MEDIA_PROCESS + [("media_runtime", "start_job")]
 MEDIA_SEND = [("media_runtime", "send_audio"), ("audio_manager", "app_audio_submit")]
 AUDIO_RUNTIME_PATHS = {
+    "classic_radio_name": ("media_control", [("media_runtime", "worker"), ("media_runtime", "media_step"),
+        ("classic", "bt_audio_service"), ("classic", "service_classic_name")]),
     "audio_manager_prepare_busy": ("audio_manager", [("audio_manager", "worker"),
         ("audio_engine", "ae_poll"), ("audio_engine", "prepare_source"),
         ("audio_engine", "ae_end_job"), ("audio_helpers", "ae_ring_reset")]),

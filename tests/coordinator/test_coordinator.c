@@ -537,10 +537,21 @@ esp_err_t app_wifi_join(const app_wifi_join_request_t *request)
     test_join_request = *request;
     return test_join_error;
 }
+static bt_audio_name_change_t test_classic_change;
+static char test_classic_name[DEVICE_AUDIO_NAME_MAX + 1U];
+esp_err_t bt_audio_name_request(const char *target, uint64_t *id)
+{
+    strcpy(test_classic_name, target);
+    *id = ++test_classic_change.request_id;
+    test_classic_change.busy = true;
+    test_classic_change.error = ESP_OK;
+    return ESP_OK;
+}
+bt_audio_name_change_t bt_audio_name_change(void) { return test_classic_change; }
 ble_hid_name_snapshot_t ble_hid_name_snapshot(void) { return test_name; }
 esp_err_t ble_hid_name_request(const char *name, size_t length, uint64_t *request_id)
 {
-    assert(device_settings_bluetooth_name_valid(name, length));
+    assert(device_settings_input_name_valid(name, length));
     ++test_name_requests;
     if (test_name_error != ESP_OK) return test_name_error;
     ++test_name.request_id;
@@ -1067,6 +1078,8 @@ static void setup(input_mode_t mode)
     memset(&s_local_submission, 0, sizeof s_local_submission);
     s_local_submission_pending = false;
     s_editor_sequence = s_editor_deadline_ms = 0;
+    memset(&paired_name, 0, sizeof(paired_name));
+    test_classic_change = (bt_audio_name_change_t){.available = true};
     s_name_request_id = 0;
     s_name_should_persist = false;
     s_pair_operation = APP_CONFIRM_NONE;
@@ -5057,7 +5070,7 @@ static app_local_edit_request_t editor_request(uint32_t gesture, const char *val
 static void open_name_editor(void)
 {
     setup(INPUT_MOUSE);
-    settings_page(APP_SETTINGS_BLUETOOTH);
+    settings_page(APP_SETTINGS_DEVICE_NAME);
     action(APP_BLUETOOTH_NAME_EDIT, 0);
     release_barrier(); sync_interaction();
     assert(s_overlay == APP_OVERLAY_LOCAL_EDITOR && s_local_editor.purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME);
@@ -5095,25 +5108,56 @@ static void open_network_editor(bool remember)
 static void local_name_persists_only_matching_verified_acknowledgement(void)
 {
     open_name_editor(); local_control_contact(2501);
+    s_settings.brightness_percent = 80; /* Unrelated temporary API override. */
     app_local_edit_request_t request = editor_request(2501, "Desk Pad");
     assert(submit_local_edit(&request) == APP_LOCAL_EDIT_ACCEPTED);
     assert(submit_local_edit(&request) == APP_LOCAL_EDIT_BUSY);
     memset(request.value.bluetooth.name, 'X', request.value.bluetooth.length);
     service_local_editor();
-    assert(test_name_requests == 1 && strcmp(test_name.requested, "Desk Pad") == 0);
-    assert(s_name_should_persist && test_storage_requests == 0 && strcmp(s_settings.bluetooth_name, "ESP32-INPUT") == 0);
+    assert(test_name_requests == 1 && strcmp(test_name.requested, "Desk Pad-IN") == 0);
+    assert(s_name_should_persist && test_storage_requests == 0 && strcmp(s_settings.bluetooth_name, "ESP32") == 0);
     expect_cleared_submission();
-    const uint64_t id = test_name.request_id;
-    test_name.status = BLE_HID_NAME_APPLIED; ++test_name.request_id;
-    strcpy(test_name.active, "Desk Pad"); service_bluetooth_name();
-    assert(test_storage_requests == 0);
-    test_name.request_id = id; test_name.active_known = false; service_bluetooth_name();
-    assert(test_storage_requests == 0);
-    test_name.active_known = true; service_bluetooth_name();
+    test_name.status = BLE_HID_NAME_APPLIED;
+    strcpy(test_name.active, "Desk Pad-IN"); service_bluetooth_name();
+    assert(test_storage_requests == 0 && !strcmp(test_classic_name, "Desk Pad-AUD"));
+    service_bluetooth_name(); assert(!test_storage_requests && s_name_should_persist);
+    test_classic_change.busy = false; service_bluetooth_name();
     assert(test_storage_requests == 1 && !s_name_should_persist && strcmp(s_settings.bluetooth_name, "Desk Pad") == 0);
     service_bluetooth_name();
     assert(test_storage_requests == 1 && strcmp(test_saved_request.bluetooth_name, "Desk Pad") == 0);
+    assert(test_saved_request.brightness_percent == 50 && s_settings.brightness_percent == 80);
     release_barrier(); expect_idle();
+}
+
+static void partial_radio_rename_restores_the_previous_verified_pair(void)
+{
+    for (unsigned fault = 0; fault < 3; ++fault) {
+        open_name_editor();
+        /* Boot applies the stored base without a settings write. */
+        assert(request_device_base("ESP32", 5, NULL) == ESP_OK);
+        test_name.status = BLE_HID_NAME_APPLIED; strcpy(test_name.active, test_name.requested);
+        service_bluetooth_name(); test_classic_change.busy = false; service_bluetooth_name();
+        assert(paired_name.base.active_known && !test_storage_requests);
+        local_control_contact(2591);
+        app_local_edit_request_t request = editor_request(2591, "Desk Pad");
+        assert(submit_local_edit(&request) == APP_LOCAL_EDIT_ACCEPTED); service_local_editor();
+        test_name.status = BLE_HID_NAME_APPLIED; strcpy(test_name.active, test_name.requested);
+        service_bluetooth_name(); assert(!strcmp(test_classic_name, "Desk Pad-AUD"));
+        test_classic_change.busy = false; test_classic_change.error = ESP_FAIL;
+        if (fault == 1) ++test_classic_change.request_id;
+        service_bluetooth_name();
+        if (fault != 1) {
+            assert(paired_name.restoring && !strcmp(test_name.requested, "ESP32-IN"));
+            test_name.status = BLE_HID_NAME_APPLIED; strcpy(test_name.active, test_name.requested);
+            service_bluetooth_name(); assert(!strcmp(test_classic_name, "ESP32-AUD"));
+            test_classic_change.busy = false;
+            if (fault == 2) test_classic_change.error = ESP_FAIL;
+            service_bluetooth_name();
+        }
+        assert(paired_name.base.status == (fault ? BLE_HID_NAME_UNCERTAIN : BLE_HID_NAME_FAILED));
+        assert(paired_name.base.active_known == !fault);
+        assert(!s_name_should_persist && !test_storage_requests && !strcmp(s_settings.bluetooth_name, "ESP32"));
+    }
 }
 
 static void failed_or_stale_local_names_cannot_change_preferences(void)
@@ -5134,7 +5178,7 @@ static void failed_or_stale_local_names_cannot_change_preferences(void)
             test_name.status = BLE_HID_NAME_APPLIED;
             strcpy(test_name.active, "Desk Pad"); service_bluetooth_name();
         }
-        assert(!s_name_should_persist && test_storage_requests == 0 && strcmp(s_settings.bluetooth_name, "ESP32-INPUT") == 0);
+        assert(!s_name_should_persist && test_storage_requests == 0 && strcmp(s_settings.bluetooth_name, "ESP32") == 0);
         expect_cleared_submission();
         release_barrier(); expect_idle();
     }
@@ -6352,7 +6396,10 @@ static void shared_bluetooth_input_options_reaches_owners(void)
     action(APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL);
     assert(s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == APP_CONFIRM_PAIR_FORGET_ALL && !test_pair_forgets);
     action(APP_CONFIRM, 0); assert(s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES && !test_native_management_starts);
-    action(APP_MENU, APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS); action(APP_BLUETOOTH_NAME_EDIT, 0);
+    action(APP_MENU, APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS);
+    action(APP_SETTINGS_PAGE, APP_SETTINGS_DEVICE_NAME);
+    assert(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_DEVICE_NAME);
+    action(APP_BLUETOOTH_NAME_EDIT, 0);
     assert(s_overlay == APP_OVERLAY_LOCAL_EDITOR && s_local_editor.purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME);
     assert(!strcmp(s_interaction.view.preview, "AB") && !s_send_token && !test_pair_forgets);
 }
@@ -6513,6 +6560,7 @@ int main(int argc, char **argv)
     RUN(common_keys_include_host_edit_shortcuts_in_each_keyboard_submode);
     RUN(local_name_persists_only_matching_verified_acknowledgement);
     RUN(failed_or_stale_local_names_cannot_change_preferences);
+    RUN(partial_radio_rename_restores_the_previous_verified_pair);
     RUN(private_wifi_submission_waits_for_touch_fifo_and_cancel);
     RUN(wifi_editor_uses_reserved_identity_after_scan_expiry);
     RUN(private_editor_deadline_and_lock_clear_secret_and_ticket);

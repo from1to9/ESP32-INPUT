@@ -19,6 +19,7 @@
 #include "app_command_bridge.h"
 #include "esp_random.h"
 #include "ble_hid.h"
+#include "bt_audio.h"
 #include "board_port.h"
 #include "hid_engine.h"
 #include "interaction.h"
@@ -1046,6 +1047,8 @@ static bool selected_wifi_record(app_wifi_scan_record_t *record)
         record->availability == APP_WIFI_JOIN_AVAILABLE;
 }
 
+#include "app_device_name.inc"
+
 static void open_local_editor(app_local_edit_purpose_t purpose, bool remember)
 {
     if (s_editor_sequence == UINT64_MAX) {
@@ -1122,36 +1125,43 @@ static void service_local_editor(void)
     } else if (current && request.purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME) {
         if (!s_name_should_persist) {
             uint64_t request_id = 0;
-            result = ble_hid_name_request(request.value.bluetooth.name,
+            result = request_device_base(request.value.bluetooth.name,
                 request.value.bluetooth.length, &request_id);
             if (result == ESP_OK) {
                 s_name_request_id = request_id;
                 s_name_should_persist = true;
             }
         }
-        s_message = result == ESP_OK ? "Bluetooth name queued; waiting for radio acknowledgement." :
+        s_message = result == ESP_OK ? "Device name pending on both radios." :
             "Bluetooth name rejected; current settings are preserved.";
-        s_settings_page = APP_SETTINGS_BLUETOOTH;
+        s_settings_page = APP_SETTINGS_DEVICE_NAME;
     } else {
         s_message = "Local edit expired or changed; open a new editor.";
     }
     bool bluetooth_name = request.purpose == APP_LOCAL_EDIT_BLUETOOTH_NAME;
     clear_private(&request, sizeof(request));
     if (bluetooth_name) s_bluetooth_audio_devices = false;
-    open_overlay(bluetooth_name ? APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS : APP_OVERLAY_SETTINGS);
+    open_overlay(APP_OVERLAY_SETTINGS);
 }
 
 static void service_bluetooth_name(void)
 {
+    service_device_base();
     if (!s_name_should_persist) return;
-    ble_hid_name_snapshot_t name = ble_hid_name_snapshot();
+    base_name_change_t name = paired_name.base;
     if (name.request_id != s_name_request_id) return;
     if (name.status == BLE_HID_NAME_APPLIED && name.active_known) {
         device_settings_t candidate = s_settings;
         (void)snprintf(candidate.bluetooth_name, sizeof(candidate.bluetooth_name), "%s", name.active);
         s_name_should_persist = false;
-        (void)update_settings(&candidate);
-        s_message = "Bluetooth name applied; hosts may retain a cached name.";
+        bool applied = update_settings_internal(&candidate, false);
+        if (applied && (strcmp(s_durable_settings.bluetooth_name, name.active) || settings_store_status().error != ESP_OK)) {
+            device_settings_t durable = s_durable_settings;
+            strcpy(durable.bluetooth_name, name.active);
+            applied = persist_settings(&durable);
+        }
+        s_message = applied ? "Both radio names applied. Hosts may cache the old names." :
+            "Radio names applied. Could not update settings.";
     } else if (name.status == BLE_HID_NAME_FAILED || name.status == BLE_HID_NAME_UNCERTAIN) {
         s_name_should_persist = false;
         s_message = name.status == BLE_HID_NAME_UNCERTAIN ?
@@ -1173,7 +1183,7 @@ static bool allowed_in_overlay(app_action_t action)
     if (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES) return s_bluetooth_audio_devices ? action == APP_MEDIA_CONTROL :
         action == APP_BLUETOOTH_TARGET_CONTROL || action == APP_PAIRING_REQUEST || action == APP_BLUETOOTH_PAGE || action == APP_MENU;
     if (s_overlay == APP_OVERLAY_AUDIO_DEVICE) return action == APP_MEDIA_CONTROL;
-    if (s_overlay == APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS) return action == APP_PAIRING_REQUEST || action == APP_BLUETOOTH_NAME_EDIT;
+    if (s_overlay == APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS) return action == APP_PAIRING_REQUEST || action == APP_SETTINGS_PAGE;
     if (action == APP_MENU)
         return s_overlay == APP_OVERLAY_MODES || s_overlay == APP_OVERLAY_TARGET ||
             s_overlay == APP_OVERLAY_SETTINGS || s_overlay == APP_OVERLAY_WIFI_SETUP ||
@@ -1212,6 +1222,8 @@ static bool allowed_in_overlay(app_action_t action)
     if (s_overlay != APP_OVERLAY_SETTINGS) return false;
     if (action == APP_SETTINGS_PAGE) return true;
     switch (s_settings_page) {
+    case APP_SETTINGS_DEVICE_NAME:
+        return action == APP_BLUETOOTH_NAME_EDIT;
     case APP_SETTINGS_INPUT:
         return action == APP_HAPTICS || action == APP_HOST_OS || action == APP_CALIBRATE ||
             action == APP_TAP_TO_CLICK || action == APP_MOTION_CONFIG || action == APP_RECENTER;
@@ -1229,7 +1241,7 @@ static bool allowed_in_overlay(app_action_t action)
         return action == APP_TRANSPORT_SELECT;
     case APP_SETTINGS_BLUETOOTH:
         return action == APP_PAIRING_REQUEST || action == APP_BLUETOOTH_PAGE ||
-            action == APP_BLUETOOTH_NAME_EDIT || action == APP_BLUETOOTH_TARGET_CONTROL;
+            action == APP_BLUETOOTH_TARGET_CONTROL;
     case APP_SETTINGS_WIFI:
         return action == APP_WIFI_SETUP || action == APP_WIFI_FORGET_REQUEST || action == APP_WIFI_SCAN;
     default: return false;
@@ -1715,7 +1727,8 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         if ((s_overlay == APP_OVERLAY_API_CONNECTION || s_overlay == APP_OVERLAY_WIFI_PROFILES) &&
             intent->x != APP_SETTINGS_WIFI) return;
         if (s_overlay == APP_OVERLAY_BLUETOOTH_TARGET && intent->x != APP_SETTINGS_BLUETOOTH) return;
-        if (intent->x < APP_SETTINGS_HOME || intent->x > APP_SETTINGS_NAVIGATION) return;
+        if (s_overlay == APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS && intent->x != APP_SETTINGS_DEVICE_NAME) return;
+        if (intent->x < APP_SETTINGS_HOME || intent->x > APP_SETTINGS_DEVICE_NAME) return;
         s_settings_page = (app_settings_page_t)intent->x;
         open_overlay(APP_OVERLAY_SETTINGS);
         return;
@@ -1735,10 +1748,10 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         return;
     }
     case APP_BLUETOOTH_NAME_EDIT: {
-        if (s_overlay != APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS &&
-            !(s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_BLUETOOTH)) return;
-        ble_hid_name_snapshot_t name = ble_hid_name_snapshot();
-        if (!link->initialized || link->failed || s_name_should_persist ||
+        if (s_overlay != APP_OVERLAY_SETTINGS ||
+            s_settings_page != APP_SETTINGS_DEVICE_NAME) return;
+        base_name_change_t name = paired_name.base;
+        if (!link->initialized || link->failed || !bt_audio_name_change().available || s_name_should_persist ||
             name.status == BLE_HID_NAME_PENDING || name.status == BLE_HID_NAME_APPLYING ||
             name.status == BLE_HID_NAME_UNCERTAIN) {
             s_message = "Bluetooth name editing is temporarily unavailable.";
@@ -2701,13 +2714,14 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
     view->wifi_lan_service = APP_UI_LAN_SERVICE_UNAVAILABLE;
     (void)snprintf(view->wifi_lan_service_message, sizeof(view->wifi_lan_service_message),
                    "LAN service state is not available.");
-    ble_hid_name_snapshot_t name = ble_hid_name_snapshot();
+    ble_hid_name_snapshot_t input_name = ble_hid_name_snapshot();
+    base_name_change_t name = paired_name.base;
     view->bluetooth_name.pending = name.status == BLE_HID_NAME_PENDING || name.status == BLE_HID_NAME_APPLYING;
     view->bluetooth_name.uncertain = name.status == BLE_HID_NAME_UNCERTAIN;
-    view->bluetooth_name.available = link->initialized && !link->failed &&
+    view->bluetooth_name.available = bt_audio_name_change().available && link->initialized && !link->failed &&
         !view->bluetooth_name.pending && !view->bluetooth_name.uncertain && !s_name_should_persist;
     view->bluetooth_name.configured_valid = true;
-    view->bluetooth_name.effective_valid = name.active_known;
+    view->bluetooth_name.effective_valid = input_name.active_known;
     view->bluetooth_name.save_state = view->settings_save_state;
     if (view->settings_save_state == APP_SAVE_VOLATILE &&
         !strcmp(s_settings.bluetooth_name, s_durable_settings.bluetooth_name)) {
@@ -2716,10 +2730,12 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
     }
     (void)snprintf(view->bluetooth_name.configured, sizeof(view->bluetooth_name.configured), "%s", s_settings.bluetooth_name);
     (void)snprintf(view->bluetooth_name.requested, sizeof(view->bluetooth_name.requested), "%s", name.requested);
-    if (name.active_known)
-        (void)snprintf(view->bluetooth_name.effective, sizeof(view->bluetooth_name.effective), "%s", name.active);
+    if (input_name.active_known)
+        snprintf(view->bluetooth_name.effective, sizeof(view->bluetooth_name.effective), "%s", input_name.active);
     if (name.error != ESP_OK)
-        (void)snprintf(view->bluetooth_name.message, sizeof(view->bluetooth_name.message), "Name: %s", esp_err_to_name(name.error));
+        (void)snprintf(view->bluetooth_name.message, sizeof(view->bluetooth_name.message),
+            "Name change failed: %s%s", esp_err_to_name(name.error),
+            paired_name.restoring && name.status == BLE_HID_NAME_FAILED ? ". Previous names restored." : "");
     view->tap_to_click_available = true;
     view->tap_to_click_enabled = s_settings.tap_to_click;
     /* Queue occupancy is rechecked on admission, not rendered per report. */
@@ -3151,7 +3167,7 @@ void app_main(void)
     else (void)snprintf(s_device_id, sizeof(s_device_id), "Unavailable");
     service_display();
     present_boot(APP_BOOT_UI_STARTING, "Starting Bluetooth", "Preparing local input");
-    (void)ble_hid_name_request(s_settings.bluetooth_name,
+    (void)request_device_base(s_settings.bluetooth_name,
         strlen(s_settings.bluetooth_name), NULL);
     error = ble_hid_init();
     if (error != ESP_OK) {

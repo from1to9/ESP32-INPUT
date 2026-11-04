@@ -14,8 +14,8 @@ extern "C" {
 #define BLE_HID_PAIRING_DEFAULT_MS 120000U
 #define BLE_HID_PAIRING_MAX_MS 300000U
 #define BLE_HID_MAX_BONDS 32U
-#define BLE_HID_NAME_MAX_BYTES DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES
-#define BLE_HID_DEFAULT_NAME DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME
+#define BLE_HID_NAME_MAX_BYTES DEVICE_INPUT_NAME_MAX
+#define BLE_HID_DEFAULT_NAME DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME DEVICE_INPUT_NAME_SUFFIX
 #define BLE_HID_NAME_TIMEOUT_MS 5000U
 #define BLE_HID_BOND_ID_BYTES 32U
 
@@ -42,10 +42,10 @@ typedef struct {
     esp_err_t rollback_error;
 } ble_hid_name_snapshot_t;
 
-/* Pure shared validation: 1..18 UTF-8 bytes, no malformed/overlong encodings,
- * surrogates, NUL/C0/C1 controls or leading/trailing ASCII space. The complete
- * name fits the existing 31-byte primary advertisement with HID UUID/flags/
- * appearance. length excludes NUL; the input need not be NUL-terminated. */
+/* Pure shared validation: 1..21 UTF-8 bytes, no malformed/overlong encodings,
+ * surrogates, NUL/C0/C1 controls or leading/trailing ASCII space. Above 18
+ * bytes the complete name appears in the scan response. The primary retains
+ * HID UUID, flags and appearance. length excludes NUL and no terminator is needed. */
 bool ble_hid_name_valid(const char *utf8, size_t length);
 
 /* Task-only, bounded copy and submission; no Bluetooth/NVS calls or allocation.

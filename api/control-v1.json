@@ -5624,7 +5624,7 @@
         "minLength": 1
       },
       "scope": "connections.manage",
-      "default": "ESP32-INPUT",
+      "default": "ESP32",
       "apply_policy": "link",
       "persistence": "durable"
     },

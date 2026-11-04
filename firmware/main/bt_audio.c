@@ -90,6 +90,7 @@ static struct {
     .first_failure_stage = "none"}};
 
 static uint64_t now_us(void) { return (uint64_t)esp_timer_get_time(); }
+#include "bt_audio_name.inc"
 static void count_one(uint32_t *value) { if (*value != UINT32_MAX) ++*value; }
 
 static void clear_ring(pcm_ring_t *ring)
@@ -311,6 +312,9 @@ static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
                 audio.public.device_name_known = true; audio.public.device_name_error = ESP_OK;
             } else audio.public.device_name_error = ESP_ERR_INVALID_SIZE;
         }
+        classic_name_read_locked();
+    } else if (event == ESP_BT_GAP_CONFIG_EIR_DATA_EVT) {
+        classic_name_eir_locked(parameter);
     } else if (event == ESP_BT_GAP_AUTH_CMPL_EVT || event == ESP_BT_GAP_REMOVE_BOND_DEV_COMPLETE_EVT) {
         bool auth = event == ESP_BT_GAP_AUTH_CMPL_EVT;
         const uint8_t *peer = auth ? parameter->auth_cmpl.bda : parameter->remove_bond_dev_cmpl.bda;
@@ -373,7 +377,7 @@ static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
 static void request_device_name(void)
 {
     portENTER_CRITICAL(&audio_lock);
-    bool request = !audio.name_pending;
+    bool request = !audio.name_pending && !classic_name.result.busy;
     if (request) {
         audio.name_pending = true; audio.name_started_us = now_us();
         audio.public.device_name_known = false; audio.public.device_name_error = ESP_OK;
@@ -1154,6 +1158,7 @@ void bt_audio_service(void)
 #if AUDIO_PROFILES_SUPPORTED
     watchdog(NULL);
     service_classic_pairing();
+    service_classic_name();
     portENTER_CRITICAL(&audio_lock);
     uint64_t now = now_us();
     expire_ring_locked(&audio.music, now); expire_ring_locked(&audio.voice, now);

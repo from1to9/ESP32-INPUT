@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.18)
 project(esp32_input_ui_host C)
+include_directories("${CMAKE_CURRENT_LIST_DIR}/../../components/device_settings/include")
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 get_filename_component(REPOSITORY_ROOT "../.." ABSOLUTE BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")

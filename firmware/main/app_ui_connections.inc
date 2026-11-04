@@ -180,7 +180,7 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         s_connection_state = connection_label(body, 0, 72, MUTED);
         s_connection_actions[0] = button(body, "Resume", 0, 96, 456, 56, APP_PAIRING_REQUEST, APP_PAIR_RESUME);
         s_connection_actions[1] = button(body, "Forget all", 0, 168, 456, 56, APP_PAIRING_REQUEST, APP_PAIR_FORGET_ALL);
-        s_connection_actions[2] = button(body, "Device name", 0, 240, 456, 56, APP_BLUETOOTH_NAME_EDIT, 0);
+        s_connection_actions[2] = button(body, "Device name", 0, 240, 456, 56, APP_SETTINGS_PAGE, APP_SETTINGS_DEVICE_NAME);
         button(body, "Back to devices", 0, 360, 456, 48, APP_BLUETOOTH_DEVICES, 0);
     } else if (kind == APP_OVERLAY_AUDIO_DEVICE) {
         label_text(title, "Audio device");
@@ -381,7 +381,7 @@ static void render_connection_panel(void)
         enabled(s_connection_actions[0], s_view.bluetooth_reconnect_paused);
         enabled(s_connection_actions[1], s_view.bluetooth_hosts_available && s_view.bluetooth_host_count > 0 &&
             !s_view.bluetooth_management.pending);
-        enabled(s_connection_actions[2], s_view.bluetooth_name.available && !s_view.bluetooth_name.pending && !s_view.bluetooth_name.uncertain);
+        enabled(s_connection_actions[2], true);
     } else if (s_view.overlay == APP_OVERLAY_AUDIO_DEVICE) {
         const app_media_devices_view_t *devices = &s_view.media.devices;
         label_text(s_connection_state, *devices->identity ? devices->identity : "Selected device unavailable");

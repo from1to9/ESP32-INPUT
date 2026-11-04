@@ -73,6 +73,13 @@ static esp_err_t submit(void) { return ++calls == fail_call ? ESP_FAIL : ESP_OK;
 esp_err_t esp_bt_gap_register_callback(esp_bt_gap_cb_t callback) { gap = callback; return submit(); }
 esp_err_t esp_bt_gap_set_security_param(unsigned int parameter, void *value, uint8_t bytes)
 { assert(parameter == ESP_BT_SP_IOCAP_MODE && bytes == 1 && *(uint8_t *)value == ESP_BT_IO_CAP_NONE); return submit(); }
+static char set_classic_name[65];
+static esp_err_t set_name_error, eir_error;
+static unsigned eir_requests;
+esp_err_t esp_bt_gap_set_device_name(const char *name)
+{ strcpy(set_classic_name, name); return set_name_error; }
+esp_err_t esp_bt_gap_config_eir_data(esp_bt_eir_data_t *eir)
+{ assert(eir->include_name && eir->include_uuid); ++eir_requests; return eir_error; }
 esp_err_t esp_bt_gap_get_device_name(void) { ++name_requests; return name_error; }
 int esp_bt_gap_get_bond_device_num(void) { return bond_count; }
 int btc_storage_get_num_all_bond_devices(void)
@@ -1055,6 +1062,41 @@ static void reviewed_handoff(void)
     bt_audio_service(); assert(discoverable_writes == 1 && bt_audio_snapshot().discoverable);
     bt_audio_pairing_close(); bt_audio_service(); assert(!pairing_claim && !bt_audio_snapshot().discoverable);
 }
+static void rename_test(const char *scenario)
+{
+    initialized(); bt_audio_service();
+    uint64_t id;
+    assert(bt_audio_name_request("Mosaico-AUD", &id) == ESP_OK);
+    bt_audio_service(); assert(!*set_classic_name); /* Initial informational GET owns its callback. */
+    esp_bt_gap_cb_param_t read = {.get_dev_name_cmpl = {.status = ESP_BT_STATUS_SUCCESS, .name = "Old audio"}};
+    gap(ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT, &read);
+    if (!strcmp(scenario, "rename-set-fail")) set_name_error = ESP_FAIL;
+    bt_audio_service();
+    assert(!strcmp(set_classic_name, "Mosaico-AUD"));
+    if (set_name_error) { assert(bt_audio_name_change().error == ESP_FAIL && !eir_requests); return; }
+    read.get_dev_name_cmpl.name = !strcmp(scenario, "rename-mismatch") ? "Other" : "Mosaico-AUD";
+    esp_bt_gap_cb_param_t eir = {.config_eir_data = {.stat = ESP_BT_STATUS_SUCCESS,
+        .eir_type_num = 1, .eir_type = {ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME}}};
+    gap(ESP_BT_GAP_CONFIG_EIR_DATA_EVT, &eir); assert(bt_audio_name_change().busy);
+    gap(ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT, &read);
+    if (!strcmp(scenario, "rename-mismatch")) {
+        assert(bt_audio_name_change().error != ESP_OK && !bt_audio_name_change().busy && !eir_requests); return;
+    }
+    bt_audio_service(); assert(eir_requests == 1 && bt_audio_name_change().busy);
+    if (!strcmp(scenario, "rename-timeout")) {
+        clock_us += BT_AUDIO_INIT_TIMEOUT_US; bt_audio_service();
+        gap(ESP_BT_GAP_CONFIG_EIR_DATA_EVT, &eir);
+        assert(bt_audio_name_change().uncertain && bt_audio_name_change().error == ESP_ERR_TIMEOUT);
+        assert(bt_audio_name_request("Retry", &id) == ESP_ERR_INVALID_STATE); return;
+    }
+    if (!strcmp(scenario, "rename-short-eir")) eir.config_eir_data.eir_type[0] = 8;
+    gap(ESP_BT_GAP_CONFIG_EIR_DATA_EVT, &eir);
+    assert(bt_audio_name_change().busy);
+    gap(ESP_BT_GAP_GET_DEV_NAME_CMPL_EVT, &read);
+    assert(!bt_audio_name_change().busy && (bt_audio_name_change().error == ESP_OK) == !strcmp(scenario, "rename-good"));
+    assert(bt_audio_snapshot().device_name_known && !strcmp(bt_audio_snapshot().device_name, "Mosaico-AUD"));
+}
+
 static void device_name_test(const char *scenario)
 {
     assert(name_requests == 1 && !bt_audio_snapshot().device_name_known);
@@ -1184,6 +1226,7 @@ int main(int argc, char **argv)
         else if (!strcmp(scenario, "retry-capacity")) pairing_retry_capacity();
         else if (!strcmp(scenario, "reviewed-handoff")) reviewed_handoff();
         else if (!strcmp(scenario, "audio-exclusion")) pairing_audio_exclusion();
+        else if (!strncmp(scenario, "rename-", 7)) rename_test(scenario);
         else if (!strncmp(scenario, "name-", 5)) device_name_test(scenario);
         else if (strcmp(scenario, "normal") == 0) normal();
         else if (strcmp(scenario, "expiry-observation") == 0) expiry_observation_race();

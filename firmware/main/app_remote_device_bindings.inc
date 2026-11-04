@@ -121,7 +121,8 @@ static bool remote_device_owner_available(void *context, cp_operation_id_t opera
     if (operation >= CP_OP_CONFIG_STAGE && operation <= CP_OP_CONFIG_RESET) {
         if (fields & APP_REMOTE_SETTING_BRIGHTNESS) available = available && board.brightness;
         if (fields & APP_REMOTE_SETTING_HAPTICS) available = available && board.haptics;
-        if (fields & APP_REMOTE_SETTING_BLUETOOTH_NAME) available = available && bluetooth.initialized && !bluetooth.failed && !s_name_should_persist;
+        if (fields & APP_REMOTE_SETTING_BLUETOOTH_NAME) available = available && bluetooth.initialized && !bluetooth.failed && bt_audio_name_change().available &&
+            !s_name_should_persist && !device_name_busy() && paired_name.base.status != BLE_HID_NAME_UNCERTAIN;
     } else if (operation >= CP_OP_UI_NAVIGATE && operation <= CP_OP_UI_MODE_PANEL_OPEN) available = available && board.display;
     else if (operation == CP_OP_IMU_CALIBRATE) available = available && board.imu;
     else if (operation >= CP_OP_BLUETOOTH_PAIRING_OPEN && operation <= CP_OP_BLUETOOTH_TARGET_REQUEST) {
@@ -205,7 +206,7 @@ static void remote_device_settings_progress(remote_device_binding_job_t *job)
     if (!job->applied) {
         if (job->cancelling) {
             if (job->name_id) {
-                ble_hid_name_snapshot_t name = ble_hid_name_snapshot();
+                base_name_change_t name = paired_name.base;
                 if (name.request_id == job->name_id && (name.status == BLE_HID_NAME_PENDING || name.status == BLE_HID_NAME_APPLYING)) return;
             }
             if (s_transport_switch_pending) return;
@@ -217,11 +218,11 @@ static void remote_device_settings_progress(remote_device_binding_job_t *job)
         if (!job->name_done && (request->settings_fields & APP_REMOTE_SETTING_BLUETOOTH_NAME) &&
             strcmp(request->settings.bluetooth_name, job->before.bluetooth_name)) {
             if (!job->name_id) {
-                esp_err_t error = ble_hid_name_request(request->settings.bluetooth_name, strlen(request->settings.bluetooth_name), &job->name_id);
+                esp_err_t error = request_device_base(request->settings.bluetooth_name, strlen(request->settings.bluetooth_name), &job->name_id);
                 if (error != ESP_OK) remote_device_failed(job, CP_UNAVAILABLE, false);
                 return;
             }
-            ble_hid_name_snapshot_t name = ble_hid_name_snapshot();
+            base_name_change_t name = paired_name.base;
             if (name.request_id != job->name_id) { remote_device_failed(job, CP_STALE, true); return; }
             if (name.status == BLE_HID_NAME_FAILED || name.status == BLE_HID_NAME_UNCERTAIN) {
                 remote_device_failed(job, CP_STORAGE_UNCERTAIN, name.status == BLE_HID_NAME_UNCERTAIN); return;

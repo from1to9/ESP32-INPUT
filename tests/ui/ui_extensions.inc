@@ -33,7 +33,8 @@ static void assert_secret_not_public(const char *secret)
 static void editor_cell(unsigned cell)
 {
     assert(cell < 9);
-    tap(68 + (int)(cell % 3) * 120, 178 + (int)(cell / 3) * 84);
+    bool wifi = s_state.local_editor.purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE;
+    tap(68 + (int)(cell % 3) * 120, (wifi ? 178 : 260) + (int)(cell / 3) * (wifi ? 84 : 52));
 }
 
 static void editor_type(char character)
@@ -43,14 +44,14 @@ static void editor_type(char character)
     else {
         bool letter = (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z');
         if (s_test_editor_symbols == letter) {
-            tap(420, 346);
+            tap(420, s_state.local_editor.purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE ? 346 : 364);
             s_test_editor_symbols = !letter;
         }
         unsigned group = 0, index = 0;
         if (letter) {
             bool lower = character >= 'a' && character <= 'z';
             if (lower != s_test_editor_lowercase) {
-                tap(420, 262);
+                tap(420, s_state.local_editor.purpose == APP_LOCAL_EDIT_WIFI_PASSPHRASE ? 262 : 312);
                 s_test_editor_lowercase = lower;
             }
             unsigned offset = (unsigned)(character - (lower ? 'a' : 'A'));
@@ -456,18 +457,30 @@ static void private_editor_cleanup_checks(void)
 
 static void bluetooth_name_editor_checks(void)
 {
+    app_ui_set_local_edit_submit(capture_private);
     app_view_t original = s_state;
     ui_fixture_native_networks(&s_state);
-    s_state.overlay = APP_OVERLAY_SETTINGS; s_state.settings_page = APP_SETTINGS_BLUETOOTH;
+    s_state.overlay = APP_OVERLAY_SETTINGS; s_state.settings_page = APP_SETTINGS_HOME;
     ++s_state.ui_revision; render(); clear_intents(); tap_control("Device name");
+    assert(last_action(APP_SETTINGS_PAGE)->x == APP_SETTINGS_DEVICE_NAME);
+    s_state.settings_page = APP_SETTINGS_DEVICE_NAME; ++s_state.ui_revision;
+    strcpy(s_state.bluetooth_name.configured, "Mosaico"); strcpy(s_state.bluetooth_name.effective, "Mosaico-IN");
+    s_state.media.pairing.name_known = true; strcpy(s_state.media.pairing.device_name, "Mosaico-AUD");
+    screenshot("device-name-radio-status");
+    clear_intents(); tap_control("Edit base name");
     assert(action_count(APP_BLUETOOTH_NAME_EDIT) == 1 && s_state.overlay == APP_OVERLAY_SETTINGS);
-    s_state.bluetooth_name.available = false; render(); clear_intents(); tap_control("Device name");
+    s_state.bluetooth_name.available = false; render(); clear_intents(); tap_control("Edit base name");
     assert(action_count(APP_BLUETOOTH_NAME_EDIT) == 0);
     s_state.bluetooth_name.available = true;
     s_state.overlay = APP_OVERLAY_CONFIRM; s_state.confirmation = APP_CONFIRM_PAIR_OPEN;
     screenshot("native-bluetooth-effective-pairing-name");
-    assert(has_visible_label(lv_screen_active(), "Effective name"));
+    assert(has_visible_label(lv_screen_active(), "Mosaico-IN"));
     assert(!has_visible_label(lv_screen_active(), "Configured name"));
+    open_editor(APP_LOCAL_EDIT_BLUETOOTH_NAME, "ESP32-INPUT");
+    screenshot("device-name-default-alias");
+    assert(has_visible_label(lv_screen_active(), "Input: ESP32-IN\nAudio: ESP32-AUD"));
+    tap_control("Apply"); assert(!strcmp(s_private_request.value.bluetooth.name, "ESP32"));
+    finish_editor();
     open_editor(APP_LOCAL_EDIT_BLUETOOTH_NAME, "Cafe\xC3\xA9");
     screenshot("native-bluetooth-name-utf8-prefill");
     clear_intents(); tap_control("Delete"); assert_local_events_only();
@@ -476,6 +489,20 @@ static void bluetooth_name_editor_checks(void)
     assert(s_private_request.value.bluetooth.length == 4);
     assert(strcmp(s_private_request.value.bluetooth.name, "Cafe") == 0);
     assert(ui_private_buffers_cleared()); finish_editor();
+    const char *wide = "\xe7\x95\x8c\xe7\x95\x8c\xe7\x95\x8c\xe7\x95\x8c\xe7\x95\x8c\xe7\x95\x8c";
+    open_editor(APP_LOCAL_EDIT_BLUETOOTH_NAME, wide);
+    screenshot("device-name-max-utf8");
+    lv_obj_t *names = find_visible_label(lv_screen_active(), "Input:");
+    assert(names && strstr(lv_label_get_text(names), "-AUD"));
+    lv_point_t extent;
+    lv_text_get_size(&extent, lv_label_get_text(names), lv_obj_get_style_text_font(names, 0),
+        lv_obj_get_style_text_letter_space(names, 0), lv_obj_get_style_text_line_space(names, 0),
+        lv_obj_get_content_width(names), LV_TEXT_FLAG_NONE);
+    assert(extent.y <= lv_obj_get_content_height(names));
+    tap_control("Apply");
+    assert(s_private_count == 1 && s_private_request.value.bluetooth.length == 18);
+    assert(!strcmp(s_private_request.value.bluetooth.name, wide));
+    finish_editor();
     open_editor(APP_LOCAL_EDIT_BLUETOOTH_NAME, "");
     assert(lv_obj_has_state(control("Apply"), LV_STATE_DISABLED));
     editor_type_text(" Device");
@@ -489,6 +516,7 @@ static void bluetooth_name_editor_checks(void)
     open_editor(APP_LOCAL_EDIT_BLUETOOTH_NAME, NULL);
     editor_type_text("ABCDEFGHIJKLMNOPQRS"); /* 19th byte must not replace the 18th. */
     screenshot("native-bluetooth-name-full");
+    assert(has_visible_label(lv_screen_active(), "Input: ABCDEFGHIJKLMNOPQR-IN\nAudio: ABCDEFGHIJKLMNOPQR-AUD"));
     clear_intents(); tap_control("Apply");
     assert(s_private_count == 1 && s_private_request.value.bluetooth.length == 18);
     assert(strcmp(s_private_request.value.bluetooth.name, "ABCDEFGHIJKLMNOPQR") == 0);

@@ -49,7 +49,7 @@ static void settings_codec_and_changes(void)
     assert(settings.haptics_enabled && settings.brightness_percent == 50);
     assert(settings.idle_timeout == DEVICE_IDLE_5_MIN && settings.tap_to_click);
     assert(settings.preferred_transport == DEVICE_TRANSPORT_BLUETOOTH && !settings.navigation);
-    assert(strcmp(settings.bluetooth_name, "ESP32-INPUT") == 0);
+    assert(strcmp(settings.bluetooth_name, "ESP32") == 0);
     uint8_t record[DEVICE_SETTINGS_RECORD_SIZE];
     assert(device_settings_encode(&settings, record, sizeof record) == DEVICE_SETTINGS_OK);
     assert(memcmp(record, default_v5_record, sizeof record) == 0);

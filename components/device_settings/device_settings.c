@@ -27,9 +27,9 @@ void device_settings_defaults(device_settings_t *settings)
     };
 }
 
-bool device_settings_bluetooth_name_valid(const char *utf8, size_t length)
+static bool valid_name(const char *utf8, size_t length, size_t maximum)
 {
-    if (!utf8 || !length || length > DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES ||
+    if (!utf8 || !length || length > maximum ||
         utf8[0] == ' ' || utf8[length - 1] == ' ') return false;
     const unsigned char *bytes = (const unsigned char *)utf8;
     for (size_t i = 0; i < length;) {
@@ -56,6 +56,16 @@ bool device_settings_bluetooth_name_valid(const char *utf8, size_t length)
             (point >= 0x7fU && point <= 0x9fU)) return false;
     }
     return true;
+}
+
+bool device_settings_bluetooth_name_valid(const char *utf8, size_t length)
+{
+    return valid_name(utf8, length, DEVICE_SETTINGS_BLUETOOTH_NAME_MAX_BYTES);
+}
+
+bool device_settings_input_name_valid(const char *utf8, size_t length)
+{
+    return valid_name(utf8, length, DEVICE_INPUT_NAME_MAX);
 }
 
 static size_t bluetooth_name_length(const char *name)
@@ -98,7 +108,7 @@ bool device_settings_equal(const device_settings_t *a, const device_settings_t *
         a->motion_filter_ms == b->motion_filter_ms && a->motion_freeze_ms == b->motion_freeze_ms &&
         a->motion_invert_x == b->motion_invert_x && a->motion_invert_y == b->motion_invert_y &&
         a->navigation == b->navigation &&
-        strcmp(a->bluetooth_name, b->bluetooth_name) == 0;
+        strcmp(device_base_name(a->bluetooth_name), device_base_name(b->bluetooth_name)) == 0;
 }
 
 device_settings_apply_t device_settings_apply(device_settings_t *current,
@@ -107,6 +117,10 @@ device_settings_apply_t device_settings_apply(device_settings_t *current,
     if (!current || !device_settings_validate(candidate)) return DEVICE_SETTINGS_APPLY_INVALID;
     if (device_settings_equal(current, candidate)) return DEVICE_SETTINGS_APPLY_UNCHANGED;
     *current = *candidate;
+    if (device_base_name(current->bluetooth_name) != current->bluetooth_name) {
+        memset(current->bluetooth_name, 0, sizeof(current->bluetooth_name));
+        strcpy(current->bluetooth_name, DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME);
+    }
     return DEVICE_SETTINGS_APPLY_CHANGED;
 }
 
@@ -138,14 +152,16 @@ device_settings_status_t device_settings_encode(const device_settings_t *setting
     if (!settings || !record) return DEVICE_SETTINGS_INVALID_ARGUMENT;
     if (length != DEVICE_SETTINGS_RECORD_SIZE) return DEVICE_SETTINGS_INVALID_LENGTH;
     if (!device_settings_validate(settings)) return DEVICE_SETTINGS_INVALID_VALUE;
+    const char *base = device_base_name(settings->bluetooth_name);
+    if (!strcmp(base, DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME)) base = DEVICE_SETTINGS_V5_DEFAULT_NAME; /* v5 default on disk */
     uint8_t encoded[DEVICE_SETTINGS_RECORD_SIZE] = {
         'D', 'S', 'E', 'T', DEVICE_SETTINGS_SCHEMA_VERSION, DEVICE_SETTINGS_RECORD_SIZE,
         (uint8_t)settings->theme, (uint8_t)settings->host_modifier,
         settings->haptics_enabled ? 1U : 0U, settings->brightness_percent,
         (uint8_t)settings->idle_timeout, (uint8_t)settings->preferred_transport,
-        settings->tap_to_click ? 1U : 0U, (uint8_t)bluetooth_name_length(settings->bluetooth_name)
+        settings->tap_to_click ? 1U : 0U, (uint8_t)strlen(base)
     };
-    memcpy(encoded + 14, settings->bluetooth_name, encoded[13]);
+    memcpy(encoded + 14, base, encoded[13]);
     put_u16(encoded + 36, settings->motion_gain_x_centi);
     put_u16(encoded + 38, settings->motion_gain_y_centi);
     put_u16(encoded + 40, settings->motion_deadzone_mdps);
@@ -197,7 +213,10 @@ device_settings_status_t device_settings_decode(const uint8_t *record, size_t le
             if (record[i]) return DEVICE_SETTINGS_INVALID_VALUE;
         decoded.tap_to_click = record[12] != 0;
         memset(decoded.bluetooth_name, 0, sizeof decoded.bluetooth_name);
-        memcpy(decoded.bluetooth_name, record + 14, record[13]);
+        if (record[13] == sizeof(DEVICE_SETTINGS_V5_DEFAULT_NAME) - 1U &&
+            !memcmp(record + 14, DEVICE_SETTINGS_V5_DEFAULT_NAME, record[13]))
+            strcpy(decoded.bluetooth_name, DEVICE_SETTINGS_BLUETOOTH_DEFAULT_NAME);
+        else memcpy(decoded.bluetooth_name, record + 14, record[13]);
     }
     if (record[4] >= 4) {
         if (record[46] & ~3U) return DEVICE_SETTINGS_INVALID_VALUE;

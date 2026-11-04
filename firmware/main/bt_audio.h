@@ -136,7 +136,7 @@ void bt_audio_a2dp_rx_snapshot(bt_audio_a2dp_rx_t *out);
 
 /* Call once from a task AFTER the shared owner has enabled a Classic-capable
  * BTDM controller and Bluedroid. This module never initializes/enables/disables
- * either singleton, changes names, automatically pairs,
+ * either singleton, automatically pairs,
  * opens a codec/I2S device, records, or starts microphone capture.
  *
  * Requires Classic A2DP Sink and HFP HF over HCI, using pinned SDK built-in
@@ -151,6 +151,11 @@ void bt_audio_a2dp_rx_snapshot(bt_audio_a2dp_rx_t *out);
  * Audio starts OFF with both gates muted. Profile connection/format changes
  * invalidate queued PCM; reconnection never authorizes microphone egress. */
 esp_err_t bt_audio_init(void);
+/* A matching terminal receipt covers the BR/EDR local-name readback and
+ * complete-name EIR configuration. Fresh discovery is a separate observation. */
+typedef struct { uint64_t request_id; bool available, busy, uncertain; esp_err_t error; } bt_audio_name_change_t;
+esp_err_t bt_audio_name_request(const char *target, uint64_t *id);
+bt_audio_name_change_t bt_audio_name_change(void);
 
 /* One manager/control task calls at least every 10 ms. Posts at most one
  * control item to the BTC owner and a bounded microphone-ready notification.

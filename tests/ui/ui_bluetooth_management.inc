@@ -78,7 +78,7 @@ static void bluetooth_management_checks(void)
     s_state.local_access = APP_LOCAL_NORMAL; ++s_state.ui_revision; screenshot("bluetooth-input-options");
     clear_intents(); tap_control("Resume"); assert(last_action(APP_PAIRING_REQUEST)->x == APP_PAIR_RESUME);
     clear_intents(); tap_control("Forget all"); assert(last_action(APP_PAIRING_REQUEST)->x == APP_PAIR_FORGET_ALL);
-    clear_intents(); tap_control("Device name"); assert(action_count(APP_BLUETOOTH_NAME_EDIT) == 1);
+    clear_intents(); tap_control("Device name"); assert(last_action(APP_SETTINGS_PAGE)->x == APP_SETTINGS_DEVICE_NAME);
     clear_intents(); tap_control("Back to devices"); assert(last_action(APP_BLUETOOTH_DEVICES)->x == 0);
     s_state = original; render();
     s_state.mode = INPUT_MOUSE; s_state.locked = s_state.screen_off = false;
