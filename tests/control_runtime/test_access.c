@@ -10,7 +10,7 @@
 
 static uint64_t clock_ms = 100, wall = 1800000000;
 static bool clock_known = true, owner_alive = true, apply_write = true;
-static void (*during_write)(void);
+static void (*during_write)(void), (*during_open)(void);
 static cp_principal_t native[CP_MAX_PRINCIPALS];
 static size_t native_count;
 static app_control_trust_snapshot_t trusted;
@@ -54,7 +54,9 @@ void app_update_snapshot(app_update_snapshot_t *out) { *out = update; }
 esp_err_t nvs_open_from_partition(const char *partition, const char *ns, int mode, nvs_handle_t *out)
 {
     assert(!strcmp(partition, "control") && !strcmp(ns, "ctrl_access") && mode == NVS_READWRITE);
-    assert(!critical); *out = 1; return open_error;
+    assert(!critical);
+    if (during_open) { void (*run)(void) = during_open; during_open = NULL; run(); }
+    *out = 1; return open_error;
 }
 static unsigned bank_index(const char *key)
 { assert(!strcmp(key, "access_a") || !strcmp(key, "access_b")); return !strcmp(key, "access_b"); }
@@ -92,7 +94,7 @@ static void reset(void)
     native_count = 1; memset(native, 0, sizeof(native));
     native[0] = (cp_principal_t){.enabled = true, .native_only = true, .scopes = CP_SCOPE_ALL};
     memset(native[0].id, 0x11, 16); memset(native[0].credential_sha256, 0x22, 32);
-    clock_known = owner_alive = apply_write = true; during_write = NULL; wall = 1800000000; clock_ms = 100;
+    clock_known = owner_alive = apply_write = true; during_write = during_open = NULL; wall = 1800000000; clock_ms = 100;
     boot();
 }
 static void proposal(unsigned tag, char id[33], char secret[65], char hash[65], uint64_t *request)
@@ -336,6 +338,62 @@ static void concurrent_expiry_is_not_lost_during_storage(void)
     assert(app_control_access_principal(expire_during_write_id, &p) && !p.enabled);
 }
 
+static bool edit_observer_expects_expiry;
+static unsigned edit_observations;
+static void observe_suspended_edit(void)
+{
+    ++wall;
+    unsigned before = writes;
+    app_control_access_snapshot_t s = view();
+    assert(s.known && s.count == 2 && !s.clients[1].enabled);
+    assert(s.clients[1].expired == edit_observer_expects_expiry);
+    cp_principal_t p;
+    assert(app_control_access_principal(s.clients[1].id, &p) && !p.enabled);
+    assert(writes == before); /* The observer never performs storage I/O. */
+    ++edit_observations;
+}
+static void suspended_expiry_survives_failed_edit_but_not_explicit_renewal(void)
+{
+    for (unsigned duration = APP_CONTROL_ACCESS_SIX_HOURS; duration <= APP_CONTROL_ACCESS_PERMANENT; ++duration)
+    for (unsigned crosses_expiry = 0; crosses_expiry < (duration == APP_CONTROL_ACCESS_PERMANENT ? 1U : 2U); ++crosses_expiry)
+    for (unsigned succeeds = 0; succeeds < 2; ++succeeds) {
+        reset(); char client[33], secret[65], digest[65], json[2048]; uint64_t request; size_t length;
+        proposal(0x33, client, secret, digest, &request);
+        apply(approval(APP_CONTROL_ACCESS_INPUT, (app_control_access_duration_t)duration));
+        app_control_access_snapshot_t initial = view();
+        access_record_t previous = access_state->saved[0];
+        app_control_access_request_t edit = {.action = APP_CONTROL_ACCESS_EDIT,
+            .expected_revision = initial.revision, .permissions = APP_CONTROL_ACCESS_MANAGE,
+            .duration = APP_CONTROL_ACCESS_DAY};
+        memcpy(edit.client_id, initial.clients[1].id, 16);
+        if (duration != APP_CONTROL_ACCESS_PERMANENT)
+            wall = previous.expires - (crosses_expiry ? 1U : 2U);
+        unsigned before = writes;
+        assert(app_control_access_submit(&edit, &request) == CP_OK);
+        edit_observations = 0; edit_observer_expects_expiry = crosses_expiry != 0;
+        during_open = observe_suspended_edit; open_error = succeeds ? ESP_OK : ESP_FAIL;
+        app_control_access_service(true); open_error = ESP_OK;
+        assert(edit_observations == 1);
+        --wall; /* Same boot, no reload, no successful renewal in failure cases. */
+        app_control_access_snapshot_t s = view(); cp_principal_t p;
+        assert(s.known && !s.uncertain && app_control_access_principal(edit.client_id, &p));
+        assert(app_control_access_pair_status(client, secret, json, sizeof(json), &length) == CP_OK);
+        if (succeeds) {
+            assert(s.receipt_state == CP_RESULT_APPLIED && s.clients[1].revision > previous.revision);
+            assert(p.enabled && !s.clients[1].expired && strstr(json, "approved"));
+            assert((p.scopes & CP_SCOPE_CONFIG_WRITE) && !(p.scopes & CP_SCOPE_INPUT_CONTROL));
+            if (crosses_expiry) assert(!usable(&previous, true, previous.expires));
+            assert(app_control_access_principal(edit.client_id, &p) && p.enabled && !access_state->expiry_pending);
+            assert(writes == before + 1);
+        } else {
+            assert(s.receipt_state == CP_RESULT_FAILED && s.receipt_error == CP_UNAVAILABLE);
+            assert(s.clients[1].revision == previous.revision && writes == before);
+            assert(p.enabled == !crosses_expiry && s.clients[1].expired == (crosses_expiry != 0));
+            assert(strstr(json, crosses_expiry ? "expired" : "approved"));
+        }
+    }
+}
+
 static unsigned random_value, revoked_sessions, input_revocations, dispatch_count;
 static cp_command_t dispatched;
 static bool random_source(void *user, uint8_t *out, size_t n)
@@ -424,6 +482,7 @@ static void protocol_pairing_and_live_revocation(void)
 }
 int main(void)
 {
+    suspended_expiry_survives_failed_edit_but_not_explicit_renewal();
     finite_expiry_is_terminal_and_renewal_is_explicit(); expiry_write_failures_keep_this_boot_closed();
     concurrent_expiry_is_not_lost_during_storage();
     pairing_duration_and_storage(); races_expiry_and_faults(); runtime_update_and_capture(); protocol_pairing_and_live_revocation();

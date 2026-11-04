@@ -100,8 +100,8 @@ static uint8_t permissions(cp_scope_mask_t value)
 }
 static bool usable(const access_record_t *r, bool known, uint64_t wall)
 {
-    if (!r->principal.enabled || r->suspended || r->expired) return false;
-    if (r->duration == APP_CONTROL_ACCESS_PERMANENT) return true;
+    if (!r->principal.enabled || r->expired) return false;
+    if (r->duration == APP_CONTROL_ACCESS_PERMANENT) return !r->suspended;
     if (!r->revision) return false;
     bool expired = known && wall >= r->expires;
     /* Readers stop authority immediately. Only the management owner persists
@@ -116,7 +116,7 @@ static bool usable(const access_record_t *r, bool known, uint64_t wall)
         }
     }
     portEXIT_CRITICAL(&access_lock);
-    return known && !expired;
+    return known && !expired && !r->suspended;
 }
 static unsigned records_version(access_record_t out[CP_MAX_PRINCIPALS], uint64_t *revision, bool *coherent)
 {
