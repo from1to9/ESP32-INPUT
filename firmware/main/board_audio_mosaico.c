@@ -81,6 +81,7 @@ static struct {
     i2s_chan_handle_t rx;
     bool tx_running;
     bool rx_running;
+    int64_t last_write_end_us; /* Worker only. Zero until an unmuted write returns. */
     bool speaker_unmuted;
     bool speaker_mute_known;
     bool tx_initialized;
@@ -343,6 +344,7 @@ static ae_result_t hardware_mute(ae_role_t role)
         }
         if (!s.rx_running && !s.speaker_unmuted && stop_tx_clock() != AE_OK) result = AE_UNCERTAIN;
     } else {
+        s.last_write_end_us = 0;
         bool mute_acknowledged = pa(false) == AE_OK;
         if (dac_mute(true) != AE_OK) mute_acknowledged = false;
         if (mute_acknowledged) {
@@ -626,8 +628,9 @@ static void publish_capture_level(const request_t *request, const capture_measur
         capture_observation.energy = capture_observation.samples = capture_observation.peak = 0;
     }
 }
-static void observe_pcm_write(esp_err_t sdk_result_, size_t requested, size_t reported)
+static void observe_pcm_write(esp_err_t sdk_result_, size_t requested, size_t reported, int64_t started_us)
 {
+    const int64_t ended_us = esp_timer_get_time();
     const bool valid = reported <= requested && reported % 4U == 0;
     uint16_t peak = 0;
     uint64_t samples = 0, nonzero = 0;
@@ -642,7 +645,17 @@ static void observe_pcm_write(esp_err_t sdk_result_, size_t requested, size_t re
             if (magnitude > peak) peak = magnitude;
         }
     }
+    bool interval_known = s.last_write_end_us > 0 && started_us >= s.last_write_end_us;
+    uint64_t idle_us = interval_known ? (uint64_t)(started_us - s.last_write_end_us) : 0;
+    uint32_t dma_duration_us = 1000000U * DMA_DESCRIPTORS * DMA_FRAMES / s.format.sample_rate_hz;
+    s.last_write_end_us = ended_us;
     portENTER_CRITICAL(&s.lock);
+    if (interval_known) {
+        if (pcm_observation.write_intervals < UINT32_MAX) ++pcm_observation.write_intervals;
+        if (idle_us > pcm_observation.max_write_idle_us) pcm_observation.max_write_idle_us = idle_us;
+        if (idle_us > dma_duration_us &&
+            pcm_observation.write_idle_over_dma < UINT32_MAX) ++pcm_observation.write_idle_over_dma;
+    }
     pcm_observation.write_result_known = true;
     pcm_observation.last_write_sdk_result = sdk_result_;
     pcm_observation.last_prefix_valid = valid;
@@ -676,10 +689,15 @@ static ae_result_t hardware_pcm(const request_t *request, size_t *actual)
         }
     }
     size_t transferred = 0;
-    if (!reading) s.tx_dirty = true;
-    esp_err_t error = reading ? i2s_channel_read(s.rx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS) :
-        i2s_channel_write(s.tx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS);
-    if (!reading) observe_pcm_write(error, wire_bytes, transferred);
+    esp_err_t error;
+    if (reading) {
+        error = i2s_channel_read(s.rx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS);
+    } else {
+        s.tx_dirty = true;
+        int64_t started_us = esp_timer_get_time();
+        error = i2s_channel_write(s.tx, buffers.wire, wire_bytes, &transferred, AE_IO_TIMEOUT_MS);
+        observe_pcm_write(error, wire_bytes, transferred, started_us);
+    }
     remember(error, reading ? BOARD_AUDIO_SDK_I2S_READ : BOARD_AUDIO_SDK_I2S_WRITE);
     if (transferred > wire_bytes || transferred % 4U) return AE_INTEGRITY;
     frames = transferred / 4U;

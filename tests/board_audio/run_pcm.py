@@ -49,7 +49,7 @@ environment = dict(os.environ, UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1
 if sys.platform == "darwin":
     environment["ASAN_OPTIONS"] = "detect_leaks=0"
 cases = {}
-for name in ["existing", "signed", "zero", "stereo", "prefix", "invalid", "capture", "generation", "levels", "saturation"]:
+for name in ["existing", "signed", "zero", "stereo", "prefix", "invalid", "capture", "generation", "levels", "saturation", "cadence"]:
     run = subprocess.run([str(binary), name], capture_output=True, text=True, env=environment, timeout=20)
     (args.output_dir / f"{name}.log").write_text(run.stdout + run.stderr)
     print(run.stdout + run.stderr, end="")

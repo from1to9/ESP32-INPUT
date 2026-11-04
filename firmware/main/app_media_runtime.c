@@ -761,6 +761,10 @@ static void media_step(media_state_t *state)
                 if (!app_audio_transport_playback_capacity(audio.route, audio.audio_generation)) break;
                 ae_result_t received = audio.route == AE_ROUTE_USB_UAC ? usb_audio_receive(&state->incoming) :
                     audio.route == AE_ROUTE_HFP_HF || audio.route == AE_ROUTE_A2DP_SINK ? bt_audio_receive(&state->incoming) : AE_AGAIN;
+                /* A2DP reports a discarded stale prefix before any fresh frame
+                 * already queued behind it. Spend one of this pass's four
+                 * polls on the break without renewing the playback deadline. */
+                if (audio.route == AE_ROUTE_A2DP_SINK && received == AE_TIMEOUT) continue;
                 if (received != AE_OK) break;
                 ae_result_t admitted = app_audio_submit_transport_playback(audio.route, &state->incoming);
                 ae_secure_zero(&state->incoming, sizeof state->incoming);

@@ -46,6 +46,7 @@ static portMUX_TYPE audio_lock = portMUX_INITIALIZER_UNLOCKED;
 static struct {
     bt_audio_snapshot_t public;
     bt_audio_a2dp_rx_t a2dp_rx;
+    uint64_t last_bound_callback_us;
     bool started, submitted, init_pending;
     uint64_t init_started_us;
     bt_audio_pcm_t *memory;
@@ -78,7 +79,7 @@ static struct {
         uint8_t roles;
         uint64_t generation, transport_generation, sequence, sample_offset, tx_sequence;
         uint64_t playback_consumer, playback_max_consumer, playback_epoch;
-        bool playback_enabled;
+        bool playback_enabled, gap_pending;
         uint64_t partial_started_us;
         uint16_t partial_frames;
         int16_t partial[BT_AUDIO_PCM_FRAMES * 2U];
@@ -111,6 +112,7 @@ static void invalidate_locked(bool reset_policy)
     audio.microphone_kick = false;
     audio.adapter.partial_frames = 0;
     audio.adapter.playback_enabled = false;
+    audio.adapter.gap_pending = false;
     memset(audio.adapter.partial, 0, sizeof(audio.adapter.partial));
     if (reset_policy) {
         audio.public.route = BT_AUDIO_OFF;
@@ -175,17 +177,33 @@ static void pop_ring(pcm_ring_t *ring)
     --ring->count; ring->offset = 0;
 }
 
+/* A source gap ends the incomplete PCM frame, not the current A2DP grant.
+ * Report it before returning any subsequent complete frame. The manager's
+ * original underrun deadline keeps running until fresh frames arrive. */
+static void a2dp_gap_locked(void)
+{
+    audio.a2dp_rx.gap_discarded_samples += audio.adapter.partial_frames;
+    memset(audio.adapter.partial, 0, audio.adapter.partial_frames * sizeof(int16_t));
+    audio.adapter.partial_frames = 0;
+    audio.adapter.gap_pending = true;
+}
+
 static void expire_ring_locked(pcm_ring_t *ring, uint64_t now)
 {
     while (ring->count != 0) {
         const bt_audio_pcm_t *packet = &ring->slots[ring->head];
         if (packet->generation == audio.public.generation && packet->timestamp_us <= now &&
             now - packet->timestamp_us <= BT_AUDIO_PCM_MAX_AGE_US) break;
+        bool aged_music = ring == &audio.music && audio.public.route == BT_AUDIO_A2DP &&
+            audio.adapter.playback_enabled && packet->consumer_generation == audio.adapter.playback_consumer &&
+            packet->generation == audio.public.generation && packet->timestamp_us <= now;
+        if (aged_music) {
+            audio.a2dp_rx.gap_discarded_samples += packet->frames - ring->offset;
+            a2dp_gap_locked();
+        }
         pop_ring(ring); count_one(&audio.public.expired_packets);
         if (ring == &audio.music) count_one(&audio.a2dp_rx.expired);
-        /* A receive gap must invalidate the manager's stream reservation;
-         * never stitch later PCM onto an apparently contiguous sequence. */
-        if (ring != &audio.microphone) { invalidate_locked(true); refresh_locked(); return; }
+        if (!aged_music && ring != &audio.microphone) { invalidate_locked(true); refresh_locked(); return; }
     }
 }
 
@@ -643,8 +661,17 @@ static void receive_pcm(bt_audio_route_t source, const uint8_t *data, uint32_t b
     portENTER_CRITICAL(&audio_lock);
     bool allowed = audio.public.speaker_read_ready && audio.public.route == source &&
         (!audio.adapter.prepared || (audio.adapter.playback_enabled && audio.adapter.transport_generation == audio.public.generation));
+    if (allowed) packet.timestamp_us = now_us();
     if (source == BT_AUDIO_A2DP) {
         count_one(&audio.a2dp_rx.callbacks);
+        if (allowed && audio.adapter.playback_enabled) {
+            if (audio.last_bound_callback_us && packet.timestamp_us >= audio.last_bound_callback_us) {
+                uint64_t gap = packet.timestamp_us - audio.last_bound_callback_us;
+                count_one(&audio.a2dp_rx.callback_intervals);
+                if (gap > audio.a2dp_rx.max_callback_gap_us) audio.a2dp_rx.max_callback_gap_us = gap;
+            }
+            audio.last_bound_callback_us = packet.timestamp_us;
+        }
         audio.a2dp_rx.callback_bytes += bytes;
         if (bytes > audio.a2dp_rx.largest_callback_bytes) audio.a2dp_rx.largest_callback_bytes = bytes;
         if (!allowed) count_one(&audio.a2dp_rx.gated_callbacks);
@@ -666,7 +693,7 @@ static void receive_pcm(bt_audio_route_t source, const uint8_t *data, uint32_t b
         }
         portEXIT_CRITICAL(&audio_lock); return;
     }
-    packet.timestamp_us = now_us(); packet.source = source;
+    packet.source = source;
     size_t total = bytes / (2U * channels);
     for (size_t offset = 0; offset < total;) {
         size_t frames = total - offset;
@@ -1334,9 +1361,17 @@ static ae_result_t port_bind_playback(void *context, ae_route_t route, uint64_t 
         clear_ring(&audio.music); clear_ring(&audio.voice);
         audio.adapter.partial_frames = 0; memset(audio.adapter.partial, 0, sizeof(audio.adapter.partial));
         audio.adapter.sequence = audio.adapter.sample_offset = 0;
+        audio.adapter.gap_pending = false;
         audio.adapter.playback_enabled = enabled;
         audio.adapter.playback_consumer = consumer;
-        if (enabled) audio.adapter.playback_max_consumer = consumer;
+        if (enabled) {
+            audio.adapter.playback_max_consumer = consumer;
+            if (route == AE_ROUTE_A2DP_SINK) {
+                audio.last_bound_callback_us = 0;
+                audio.a2dp_rx.callback_intervals = 0;
+                audio.a2dp_rx.max_callback_gap_us = 0;
+            }
+        }
     }
     refresh_locked(); portEXIT_CRITICAL(&audio_lock);
     return result;
@@ -1384,14 +1419,25 @@ ae_result_t bt_audio_receive(ae_frame_t *frame)
         if (audio.adapter.partial_frames && (audio.adapter.partial_started_us > now ||
             now - audio.adapter.partial_started_us > BT_AUDIO_PCM_MAX_AGE_US)) {
             count_one(&audio.public.expired_packets);
-            if (audio.adapter.route == AE_ROUTE_A2DP_SINK) count_one(&audio.a2dp_rx.expired);
-            invalidate_locked(true); refresh_locked();
-            portEXIT_CRITICAL(&audio_lock); return AE_TIMEOUT;
+            if (audio.adapter.route == AE_ROUTE_A2DP_SINK) {
+                count_one(&audio.a2dp_rx.expired);
+                count_one(&audio.a2dp_rx.partial_expiries);
+            }
+            if (audio.adapter.route == AE_ROUTE_A2DP_SINK && audio.adapter.partial_started_us <= now) {
+                a2dp_gap_locked();
+            } else {
+                invalidate_locked(true); refresh_locked();
+                portEXIT_CRITICAL(&audio_lock); return AE_TIMEOUT;
+            }
         }
         pcm_ring_t *ring = audio.adapter.route == AE_ROUTE_HFP_HF ? &audio.voice : &audio.music;
         expire_ring_locked(ring, now);
         if (audio.adapter.transport_generation != audio.public.generation) {
             portEXIT_CRITICAL(&audio_lock); return AE_STALE;
+        }
+        if (audio.adapter.gap_pending) {
+            audio.adapter.gap_pending = false;
+            refresh_locked(); portEXIT_CRITICAL(&audio_lock); return AE_TIMEOUT;
         }
         uint16_t wanted = (uint16_t)(audio.adapter.format.sample_rate_hz / 100U);
         uint64_t tail_timestamp_us = audio.adapter.partial_started_us;

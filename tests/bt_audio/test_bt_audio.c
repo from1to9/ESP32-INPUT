@@ -301,7 +301,8 @@ static void normal(void)
     assert(port.stop(NULL, AE_ROUTE_HFP_HF, 100, &h.token) == AE_STALE);
     assert(!bt_audio_snapshot().speaker_muted); /* Old stop cannot mute replacement. */
     a2_rx(pcm, 882); clock_us += BT_AUDIO_PCM_MAX_AGE_US + 1; bt_audio_service();
-    assert(bt_audio_receive(&frame) == AE_STALE); /* Expired receive packet revokes the reservation. */
+    assert(bt_audio_receive(&frame) == AE_TIMEOUT); /* Report the gap once for this live A2DP grant. */
+    assert(bt_audio_receive(&frame) == AE_AGAIN);
     music_format(3, ESP_A2D_SBC_CIE_CH_MODE_MONO, 43);
     assert(!bt_audio_snapshot().a2dp_format_known);
     assert(bt_audio_refresh_bonds() == ESP_OK && observed_bonds().refreshing);
@@ -466,10 +467,19 @@ static void sustained_sbc(void)
     assert(produced > consumed && produced - consumed < 441);
     clock_us += BT_AUDIO_PCM_MAX_AGE_US + 1;
     assert(bt_audio_receive(&frame) == AE_TIMEOUT); /* A genuinely old unconsumed suffix still expires. */
+    uint32_t discarded = produced - consumed;
+    memset(stereo, 0x35, sizeof(stereo));
     a2_rx(stereo, sizeof(stereo));
+    assert(bt_audio_receive(&frame) == AE_OK && frame.consumer_generation == 12 &&
+        frame.sample_offset == consumed && frame.sequence == consumed / 441U + 1U);
+    for (unsigned j = 0; j < frame.bytes; ++j) assert(frame.data[j] == 0x35);
+    consumed += 441;
+    produced += samples_per_packet;
     music_state(ESP_A2D_AUDIO_STATE_SUSPEND, 3);
+    a2_rx(stereo, sizeof(stereo));
     bt_audio_a2dp_rx_snapshot(&rx);
     assert(!rx.bound && !rx.streaming && rx.stops == 1 && rx.expired == 1 && rx.gated_callbacks == 1 &&
+        rx.partial_expiries == 1 && rx.gap_discarded_samples == discarded &&
         rx.enqueued_samples == produced && rx.emitted_samples == consumed && rx.peak_slots <= 8);
 
     /* Three undrained 1024-sample callbacks require nine packet slots.
@@ -484,9 +494,53 @@ static void sustained_sbc(void)
         rx.emitted_samples == consumed && bt_audio_receive(&frame) == AE_STALE);
 }
 
+static void a2dp_queued_gap(void)
+{
+    initialized(); bt_audio_service();
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    music_format(ESP_A2D_SBC_CIE_SF_44K, ESP_A2D_SBC_CIE_CH_MODE_MONO, 3);
+    music_state(ESP_A2D_AUDIO_STATE_STARTED, 3);
+    ae_route_port_t port = bt_audio_route_port();
+    ae_route_capabilities_t route = caps(port, AE_ROUTE_A2DP_SINK);
+    assert(port.prepare(NULL, AE_ROUTE_A2DP_SINK, &route.format, AE_SPEAKER, 11, &route.token) == AE_OK);
+    assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 11, &route.token, 12, true) == AE_OK);
+    ae_frame_t frame;
+    uint8_t pcm[882] = {0};
+    a2_rx(pcm, 128);
+    assert(bt_audio_receive(&frame) == AE_AGAIN); /* 64 old samples in assembly. */
+    a2_rx(pcm, sizeof(pcm));                    /* 441 old samples in the ring. */
+    clock_us += BT_AUDIO_PCM_MAX_AGE_US + 1;
+    memset(pcm, 0x25, sizeof(pcm));
+    a2_rx(pcm, sizeof(pcm));                    /* Fresh packet behind the aged head. */
+    bt_audio_service();
+    assert(bt_audio_receive(&frame) == AE_TIMEOUT);
+    assert(bt_audio_receive(&frame) == AE_OK && frame.sequence == 1 && !frame.sample_offset &&
+        frame.consumer_generation == 12 && frame.bytes == sizeof(pcm) && !memcmp(frame.data, pcm, sizeof(pcm)));
+    bt_audio_a2dp_rx_t rx;
+    bt_audio_a2dp_rx_snapshot(&rx);
+    assert(rx.bound && rx.expired == 1 && !rx.partial_expiries && rx.gap_discarded_samples == 505 &&
+        rx.callback_intervals == 2 && rx.max_callback_gap_us == BT_AUDIO_PCM_MAX_AGE_US + 1);
+
+    a2_rx(pcm, sizeof(pcm));
+    clock_us += BT_AUDIO_PCM_MAX_AGE_US + 1;
+    bt_audio_service(); /* The consumer closes before observing this break. */
+    assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 11, &route.token, 12, false) == AE_OK);
+    a2_rx(pcm, sizeof(pcm));
+    assert(bt_audio_receive(&frame) == AE_UNAVAILABLE);
+    assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 11, &route.token, 12, true) == AE_STALE);
+    assert(port.bind_playback(NULL, AE_ROUTE_A2DP_SINK, 11, &route.token, 13, true) == AE_OK);
+    assert(bt_audio_receive(&frame) == AE_AGAIN);
+    a2_rx(pcm, sizeof(pcm)); --clock_us; /* A future stamp still revokes the binding. */
+    assert(bt_audio_receive(&frame) == AE_STALE);
+    bt_audio_a2dp_rx_snapshot(&rx);
+    assert(!rx.bound && !rx.callback_intervals && !rx.max_callback_gap_us);
+}
+
 static void replace_playback_during_pcm(void) {
     assert(interrupt_port.bind_playback(NULL, AE_ROUTE_HFP_HF, 100, &interrupt_token, 40, true) == AE_OK);
 }
+static void schedule_playback_replacement(void) { before_lock = replace_playback_during_pcm; }
+
 static void playback_binding_test(void)
 {
     initialized(); bt_audio_service(); hf_connection(ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED);
@@ -516,7 +570,7 @@ static void playback_binding_test(void)
     assert(port.bind_playback(NULL, AE_ROUTE_HFP_HF, 100, &current.token, 10, true) == AE_STALE);
     assert(port.bind_playback(NULL, AE_ROUTE_HFP_HF, 100, &current.token, 20, true) == AE_STALE);
     assert(port.bind_playback(NULL, AE_ROUTE_HFP_HF, 100, &current.token, 30, true) == AE_OK);
-    interrupt_port = port; interrupt_token = current.token; clock_hook = replace_playback_during_pcm;
+    interrupt_port = port; interrupt_token = current.token; clock_hook = schedule_playback_replacement;
     hf_rx(pcm, sizeof(pcm)); /* Hook runs after callback captures consumer 30, before commit. */
     assert(!clock_hook && bt_audio_receive(&playback) == AE_AGAIN);
     assert(retained.consumer_generation == 10); /* Returned frames cannot be relabelled. */
@@ -1047,6 +1101,7 @@ int main(int argc, char **argv)
         else if (strcmp(scenario, "expiry-observation") == 0) expiry_observation_race();
         else if (!strcmp(scenario, "hfp-transmit-clock")) hfp_queue_clock(false);
         else if (!strcmp(scenario, "hfp-write-clock")) hfp_queue_clock(true);
+        else if (!strcmp(scenario, "a2dp-queued-gap")) a2dp_queued_gap();
         else if (strcmp(scenario, "sustained-sbc") == 0) sustained_sbc();
         else if (strcmp(scenario, "playback-binding") == 0) playback_binding_test();
         else if (strncmp(scenario, "pairing", 7) == 0 || strcmp(scenario, "discovery-timeout") == 0) pairing_test(scenario);

@@ -245,11 +245,14 @@ static void log_a2dp(const bt_audio_a2dp_rx_t *rx)
     ESP_LOGI(TAG, "Audio diag A2DP RX known=1 link=%" PRIu64 " connected=%d streaming=%d bound=%d starts=%" PRIu32
         " stops=%" PRIu32 " callbacks=%" PRIu32 " bytes=%" PRIu64 " largest=%" PRIu32 " gated=%" PRIu32
         " enqueued_samples=%" PRIu64 " emitted_samples=%" PRIu64 " queued_samples=%u peak_slots=%u"
-        " overruns=%" PRIu32 " expired=%" PRIu32 " malformed=%" PRIu32,
+        " overruns=%" PRIu32 " expired=%" PRIu32 " malformed=%" PRIu32
+        " partial_expiries=%" PRIu32 " gap_discarded_samples=%" PRIu64
+        " callback_intervals=%" PRIu32 " max_callback_gap_us=%" PRIu64,
         rx->link_generation, rx->connected, rx->streaming, rx->bound, rx->starts, rx->stops,
         rx->callbacks, rx->callback_bytes, rx->largest_callback_bytes, rx->gated_callbacks,
         rx->enqueued_samples, rx->emitted_samples, (unsigned)rx->queued_samples, (unsigned)rx->peak_slots,
-        rx->overruns, rx->expired, rx->malformed);
+        rx->overruns, rx->expired, rx->malformed, rx->partial_expiries, rx->gap_discarded_samples,
+        rx->callback_intervals, rx->max_callback_gap_us);
 }
 
 static void log_transport(const usb_audio_transport_snapshot_t *transport)
@@ -317,13 +320,15 @@ static void log_codec_pcm(const board_audio_pcm_snapshot_t *pcm)
         " calls=%" PRIu64 " failed=%" PRIu64 " invalid=%" PRIu64
         " result_known=%d sdk_result=%d prefix_valid=%d"
         " volume_requested_known=%d volume_requested=%u volume_read_known=%d volume_register=%u volume_matches=%d"
-        " mute_read_known=%d mute_requested=%d mute_register=%u mute_matches=%d",
+        " mute_read_known=%d mute_requested=%d mute_register=%u mute_matches=%d"
+        " write_intervals=%" PRIu32 " max_write_idle_us=%" PRIu64 " write_idle_over_dma=%" PRIu32,
         pcm->generation_known, pcm->generation, pcm->pcm_known, pcm->reported_samples,
         pcm->reported_nonzero_samples, pcm->reported_peak_abs, pcm->saturated,
         pcm->write_calls, pcm->failed_writes, pcm->invalid_prefix_writes,
         pcm->write_result_known, pcm->last_write_sdk_result, pcm->last_prefix_valid,
         pcm->volume_requested_known, pcm->volume_requested, pcm->volume_read_known, pcm->volume_register, pcm->volume_matches,
-        pcm->mute_read_known, pcm->mute_requested, pcm->mute_register, pcm->mute_matches);
+        pcm->mute_read_known, pcm->mute_requested, pcm->mute_register, pcm->mute_matches,
+        pcm->write_intervals, pcm->max_write_idle_us, pcm->write_idle_over_dma);
 }
 static void log_job(unsigned slot, const diagnostic_job_t *job)
 {

@@ -33,6 +33,7 @@ static const app_remote_media_request_t *bond_reentrant_request;
 static ae_result_t bond_reentrant_result;
 static size_t ingress_capacity;
 static unsigned transport_frames, transport_reads, ingress_frames;
+static bool a2dp_gap;
 static unsigned playback_bindings;
 static app_control_media_port_t network_port;
 static uint64_t channel_generation=17;
@@ -106,7 +107,12 @@ ae_result_t usb_audio_receive(ae_frame_t *frame)
     if (!transport_frames) return AE_AGAIN;
     --transport_frames; *frame = (ae_frame_t){.sequence = transport_reads}; return AE_OK;
 }
-ae_result_t bt_audio_receive(ae_frame_t *frame) { (void)frame; return AE_AGAIN; }
+ae_result_t bt_audio_receive(ae_frame_t *frame)
+{
+    if (a2dp_gap) { a2dp_gap = false; ++transport_reads; return AE_TIMEOUT; }
+    if (audio.route != AE_ROUTE_A2DP_SINK || !transport_frames) return AE_AGAIN;
+    --transport_frames; *frame = (ae_frame_t){.sequence = ++transport_reads}; return AE_OK;
+}
 void app_control_server_set_media_port(const app_control_media_port_t *port) { network_port=*port; }
 uint64_t app_control_server_channel_generation(const cp_identity_t *identity)
 { assert(!lock_depth); return identity->principal_id[0]==9 && identity->session_id[0]==10 ? channel_generation : 0; }
@@ -604,6 +610,11 @@ int main(int argc, char **argv)
     assert(transport_frames == 4 && ingress_frames == 5 && transport_reads == 5);
     ingress_capacity = 4; media_step(media);
     assert(!transport_frames && ingress_frames == 9 && transport_reads == 9);
+    setup(); audio.route = AE_ROUTE_A2DP_SINK;
+    audio.playback = (ae_job_snapshot_t){.state = AE_JOB_RUNNING, .kind = AE_PLAYBACK_STREAM};
+    a2dp_gap = true; transport_frames = 4; ingress_capacity = 4;
+    media_step(media); /* One break and three fresh frames in the same bounded pass. */
+    assert(!a2dp_gap && transport_frames == 1 && transport_reads == 4 && ingress_frames == 3);
     local_transport_identity(); remote_and_queries(); channel_lifetime_authority(); remote_link_admission();
     assert(!lock_depth);
     heap_caps_free(media); media=NULL;

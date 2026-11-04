@@ -124,6 +124,10 @@ typedef struct {
     uint64_t callback_bytes, enqueued_samples, emitted_samples, link_generation;
     uint32_t callbacks, gated_callbacks, largest_callback_bytes;
     uint32_t starts, stops, overruns, expired, malformed;
+    uint32_t partial_expiries; /* Subset of expired that originated in the frame assembler. */
+    uint64_t gap_discarded_samples; /* Aged packets and incomplete frames discarded at recoverable gaps. */
+    uint64_t max_callback_gap_us; /* Timings restart on a new A2DP grant. */
+    uint32_t callback_intervals;
     uint16_t queued_samples;
     uint8_t peak_slots;
     bool known, connected, streaming, bound;

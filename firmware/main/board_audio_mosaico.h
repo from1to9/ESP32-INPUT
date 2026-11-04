@@ -94,6 +94,10 @@ typedef struct {
     uint64_t generation;
     uint64_t write_calls, failed_writes, invalid_prefix_writes;
     uint64_t reported_samples, reported_nonzero_samples;
+    /* Previous SDK write return to the next write entry while unmuted.
+     * Compared to the configured whole DMA ring at the prepared rate. */
+    uint64_t max_write_idle_us;
+    uint32_t write_intervals, write_idle_over_dma;
     int last_write_sdk_result;
     uint16_t reported_peak_abs; /* 0..32768; INT16_MIN has magnitude 32768. */
     bool generation_known, write_result_known, last_prefix_valid, pcm_known, saturated;

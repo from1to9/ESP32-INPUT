@@ -64,6 +64,22 @@ int main(int argc, char **argv)
         if (!strcmp(name,"zero")) {
             const uint8_t zeros[16]={0};assert(write_pcm_case(zeros,sizeof(zeros),&actual)==AE_OK);
             board_audio_pcm_snapshot_t out=observed();assert(out.pcm_known && out.reported_samples==8 && out.reported_nonzero_samples==0 && out.reported_peak_abs==0);
+        } else if (!strcmp(name,"cadence")) {
+            const uint8_t data[16] = {0};
+            assert(write_pcm_case(data, sizeof(data), &actual) == AE_OK);
+            assert(!observed().write_intervals);
+            board_test_time_us += 30000; /* 6 x 240 frames at 48 kHz. */
+            assert(write_pcm_case(data, sizeof(data), &actual) == AE_OK);
+            assert(observed().write_intervals == 1 && !observed().write_idle_over_dma);
+            board_test_time_us += 30001;
+            assert(write_pcm_case(data, sizeof(data), &actual) == AE_OK);
+            assert(observed().write_idle_over_dma == 1 && observed().max_write_idle_us == 30001);
+            assert(port.mute(NULL, AE_SPEAKER, true, 1) == AE_AGAIN); drain();
+            assert(port.mute(NULL, AE_SPEAKER, true, 1) == AE_OK);
+            board_test_time_us += 1000000;
+            unmute_role(AE_SPEAKER, 1);
+            assert(write_pcm_case(data, sizeof(data), &actual) == AE_OK);
+            assert(observed().write_intervals == 2 && observed().write_idle_over_dma == 1);
         } else if (!strcmp(name,"stereo")) {
             const uint8_t data[]={0xff,0x7f,0,0x80,0,0x80,0,0x80};
             assert(write_pcm_case(data,sizeof(data),&actual)==AE_OK);board_audio_pcm_snapshot_t out=observed();

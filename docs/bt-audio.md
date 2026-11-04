@@ -175,8 +175,14 @@ Transport gates do not prove physical microphone-off or speaker mute.
 There are sixteen fixed 480-sample packet slots (8 SBC RX, 4 voice RX, 4 voice
 TX), allocated once with PSRAM preference and internal-memory fallback. No
 callback allocates or waits on an application queue. Packets expire after
-150 ms; malformed receive PCM, receive overrun or an expired receive packet
-revokes the current reservation instead of stitching PCM across a hidden gap.
+150 ms. For an authorized A2DP speaker, ordinary age expiry discards the aged
+queue prefix and the incomplete frame. The next read reports the gap as
+`AE_TIMEOUT` once before fresh complete frames can pass on the same grant.
+Frame sequence and sample offsets count emitted PCM. Discarded samples are
+counted separately. No silence is inserted and expiry cannot extend the
+manager's underrun deadline. Malformed PCM, receive overflow, future
+timestamps and expired HFP input still invalidate the reservation. Closing
+the grant or replacing the peer, stream or format prevents recovery on it.
 TX underflow returns zero bytes; samples are never fabricated. Full TX queues
 provide backpressure. An old radio packet already copied by the SDK cannot be
 recalled; stop confirms the local producer/queue barrier, not peer buffers or
@@ -191,7 +197,21 @@ samples, peak occupied slots, malformed/overflow/expiry counts, and matching
 SDK stream start/stop events. Compare changes across job states with the job's
 received/delivered bytes and the codec's PCM write receipts. These counters
 begin at the SDK decoded callback. HCI reassembly drops and SBC media
-sequence gaps occur upstream. Codec acceptance does not establish acoustic output.
+sequence gaps occur upstream. `partial_expiries` counts expiries first detected
+in the assembler. The remaining expiries originated in the packet ring.
+`gap_discarded_samples` includes incomplete samples discarded with an aged
+queue head. For each new A2DP grant, `max_callback_gap_us` measures the longest
+interval between admitted decoded callbacks. `callback_intervals` gives the
+number measured.
+
+The codec PCM summary measures idle time from one I2S write return to the next
+write entry. It excludes time spent inside the driver and intervals across
+speaker mute. `write_intervals`, `max_write_idle_us` and `write_idle_over_dma`
+count valid intervals, the maximum, and intervals longer than six configured
+240-frame descriptors at the prepared rate (32.65 ms at 44.1 kHz). Compare
+these with decoded callback gaps and changes in received and delivered bytes.
+Shorter idle intervals can also exhaust a partially filled DMA ring. These
+measurements do not count hardware underruns or establish acoustic output.
 
 One profile command can be pending or in flight. Acceptance mutes and flushes
 the affected route. A change on the other profile preserves active PCM.
