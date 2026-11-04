@@ -20,6 +20,21 @@ void ble_hid_pairing_close(void) { assert(false); }
 bool ble_hid_management_reserve(uint64_t generation, uint64_t bond_revision,
     uint64_t preference_revision, uint64_t *reservation)
 { (void)generation; (void)bond_revision; (void)preference_revision; (void)reservation; assert(false); return false; }
+bool ble_hid_management_select_reserve(uint64_t generation, uint64_t bond_revision,
+    uint64_t preference_revision, const ble_hid_target_t *target, uint64_t *reservation)
+{
+    (void)generation; (void)bond_revision; (void)preference_revision;
+    (void)target; (void)reservation;
+    assert(false);
+    return false;
+}
+esp_err_t ble_hid_management_select_current(uint64_t reservation, uint64_t generation,
+    const ble_hid_target_preferences_request_t *request, uint64_t *request_id)
+{
+    (void)reservation; (void)generation; (void)request; (void)request_id;
+    assert(false);
+    return ESP_FAIL;
+}
 void ble_hid_management_release(uint64_t reservation) { (void)reservation; assert(false); }
 void ble_hid_management_resume(uint64_t reservation, const ble_hid_target_t *target) { (void)reservation; (void)target; assert(false); }
 void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *target)
