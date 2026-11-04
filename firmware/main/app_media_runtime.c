@@ -923,6 +923,17 @@ void app_media_runtime_stop(ae_stop_reason_t reason)
     if (cancel.token) app_spoken_letters_cancel(&cancel.job_id, cancel.consumer_generation);
     app_audio_request_safety_stop(reason);
 }
+bool app_media_runtime_pairing_current(uint64_t generation, uint64_t revision)
+{
+    /* Called under the Classic lock. Keep this bounded read in Classic -> media ->
+     * audio order. No driver calls, allocations or worker waits on this path. */
+    portENTER_CRITICAL(&media_lock);
+    bool current = media && media->view.initialized && media->view.audio_known && !media->view.busy &&
+        (!media->view.result_ready || media->command_remote) && media->view.audio.audio_generation == generation &&
+        media->view.audio.revision == revision && app_audio_idle_at(generation, revision);
+    portEXIT_CRITICAL(&media_lock);
+    return current;
+}
 bool app_media_runtime_snapshot(app_media_snapshot_t *output)
 {
     if (!output) return false;

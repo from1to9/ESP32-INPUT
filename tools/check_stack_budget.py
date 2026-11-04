@@ -460,16 +460,18 @@ AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_format"] = AUDIO_OBSERVER + [
 AUDIO_DIAGNOSTIC_PATHS["audio_diagnostics_codec_operation"] = AUDIO_OBSERVER + [
     ("audio_diagnostics", "log_codec"), ("audio_diagnostics", "board_audio_sdk_operation_name")]
 PATHS.update(AUDIO_DIAGNOSTIC_PATHS)
+PAIRING_OPEN = MEDIA_INTENT + [("media_controls", "confirm_review"), ("classic", "bt_audio_pairing_open_reviewed"),
+                             ("classic", "pairing_open")]
 AUDIO_ADAPTER_PATHS = {
     "audio_pairing_startup_name": [("main", "app_main"), ("media_runtime", "app_media_runtime_init"),
         ("classic", "bt_audio_init"), ("classic", "request_device_name")],
-    "audio_pairing_open_name": MEDIA_INTENT + [("media_controls", "confirm_review"),
-        ("classic", "bt_audio_pairing_open"), ("classic", "request_device_name")],
-    "audio_pairing_open_claim": MEDIA_INTENT + [("media_controls", "confirm_review"),
-        ("classic", "bt_audio_pairing_open"), ("ble", "ble_hid_pairing_claim_classic")],
-    "audio_pairing_open_ready": MEDIA_INTENT + [("media_controls", "confirm_review"),
-        ("classic", "bt_audio_pairing_open"), ("classic", "pairing_ready_locked")],
-    "audio_pairing_le_close": MEDIA_INTENT + [("media_controls", "confirm_review"), ("ble", "ble_hid_pairing_close")],
+    "audio_pairing_open_name": PAIRING_OPEN + [("classic", "request_device_name")],
+    "audio_pairing_open_claim": PAIRING_OPEN + [("ble", "ble_hid_pairing_claim_classic")],
+    "audio_pairing_open_ready": PAIRING_OPEN + [("classic", "pairing_admission_locked"), ("classic", "pairing_ready_locked")],
+    "audio_pairing_open_resources": PAIRING_OPEN + [("classic", "pairing_admission_locked"), ("media_controls", "pairing_resources_current"),
+        ("media_runtime", "app_media_runtime_pairing_current"), ("audio_manager", "app_audio_idle_at")],
+    "audio_pairing_le_close": PAIRING_OPEN + [("ble", "ble_hid_pairing_close"), ("ble", "admission_trace_locked"),
+        ("ble", "admission_flags_locked")],
     "audio_pairing_close": MEDIA_INTENT + [("media_controls", "confirm_review"), ("classic", "bt_audio_pairing_close")],
     "audio_pairing_context_close": CORE + [("main", "handle_intent"), ("main", "refresh_media_context"),
         ("media_controls", "app_media_controls_context"), ("classic", "bt_audio_pairing_close")],

@@ -130,6 +130,8 @@ ae_result_t app_audio_submit_transport_playback(ae_route_t route, const ae_frame
     assert(route == audio.route && ingress_capacity && frame->sequence == transport_reads);
     --ingress_capacity; ++ingress_frames; return AE_OK;
 }
+bool app_audio_idle_at(uint64_t generation, uint64_t revision)
+{ return audio.hardware_off_confirmed && audio.audio_generation == generation && audio.revision == revision; }
 bool app_audio_snapshot(ae_snapshot_t *out) { *out=audio; return true; }
 ae_result_t app_spoken_letters_init(void) { speech=(sl_view_t){.state=SL_IDLE}; return AE_OK; }
 ae_result_t app_spoken_letters_begin(const sl_binding_t *binding)
@@ -275,6 +277,10 @@ static void query_ack(void)
 static void remote_link_admission(void)
 {
     remote_setup();
+    assert(app_media_runtime_pairing_current(audio.audio_generation, audio.revision));
+    ++audio.revision; /* Audio owner changed before the media worker republished its view. */
+    assert(!app_media_runtime_pairing_current(audio.audio_generation, audio.revision - 1));
+    remote_setup();
     app_remote_media_request_t link={.token=4000,.command_key=4001,.deadline_ms=now+2000,
         .identity=remote_identity(),.operation=CP_OP_AUDIO_LINK_CONNECT,.action=APP_REMOTE_MEDIA_LINK,
         .input_epoch=10,.ui_revision=20,.audio_generation=audio.audio_generation,
@@ -303,6 +309,7 @@ static void remote_link_admission(void)
     assert(media->pending && media->remote_command.token==link.token &&
         media->command.bluetooth_generation==7 && media->command.bluetooth_bond_revision==9 &&
         !memcmp(media->command.bluetooth_peer,bluetooth_bonds.bonds[0].address,6));
+    assert(!app_media_runtime_pairing_current(audio.audio_generation, audio.revision));
     const app_media_local_request_t accepted=media->command;
     strcpy(nested.peer_id,link.peer_id);
     assert(app_media_runtime_submit_remote(&nested)==AE_BUSY && !media->remote_bonds_busy);

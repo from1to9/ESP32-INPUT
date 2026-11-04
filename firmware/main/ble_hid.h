@@ -431,12 +431,13 @@ void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *
 bool ble_hid_management_pairing_open(uint64_t reservation, uint32_t duration_ms);
 bool ble_hid_pairing_open(uint32_t duration_ms);
 void ble_hid_pairing_close(void);
-/* Shared Classic pairing owner only. Claim after closing the LE window; fails
+/* Shared Classic pairing owner only. A reviewed handoff may reserve with LE still open.
+ * A failed reservation or release leaves its original deadline untouched. Fails
  * while LE management owns a reservation or an LE handshake is admitted/pending.
  * Prevents simultaneous writes into the SDK's shared eviction domain. Retain
  * through actual Classic auth result;
  * uncertain/missing auth completion retains the claim until stack reset. */
-bool ble_hid_pairing_claim_classic(void);
+bool ble_hid_pairing_claim_classic(bool reviewed_handoff);
 void ble_hid_pairing_release_classic(void);
 
 /* The coordinator owns explicit user confirmation, engine cancellation and

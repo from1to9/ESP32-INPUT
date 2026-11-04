@@ -206,6 +206,10 @@ bt_audio_snapshot_t bt_audio_snapshot(void);
  * handshake retains the guard until actual auth completion or uncertain fault.
  * Existing Classic bonds may reconnect outside the window. No bonds removed. */
 esp_err_t bt_audio_pairing_open(uint32_t duration_ms);
+/* Only a confirmed local handoff may close LE pairing. The resource predicate
+ * reads owner revisions under their locks and must not block or call back into BT. */
+esp_err_t bt_audio_pairing_open_reviewed(uint32_t duration_ms, const bt_audio_snapshot_t *expected,
+                                        uint64_t bonds, bool (*resources_current)(void));
 void bt_audio_pairing_close(void);
 
 /* Audio-manager port. Capabilities identify the actual Classic media peer and

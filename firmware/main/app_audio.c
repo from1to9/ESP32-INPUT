@@ -435,6 +435,15 @@ size_t app_audio_transport_playback_capacity(ae_route_t route, uint64_t generati
     portEXIT_CRITICAL(&app.lock);
     return capacity;
 }
+bool app_audio_idle_at(uint64_t generation, uint64_t revision)
+{
+    portENTER_CRITICAL(&app.lock);
+    const app_state_t *state = app.state;
+    bool current = state && state->view_valid && !state->command_pending && !state->result_pending &&
+        state->view.hardware_off_confirmed && state->view.audio_generation == generation && state->view.revision == revision;
+    portEXIT_CRITICAL(&app.lock);
+    return current;
+}
 bool app_audio_snapshot(ae_snapshot_t *output)
 {
     if (!output) return false;

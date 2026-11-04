@@ -28,7 +28,7 @@ def main():
         subprocess.run(command, check=True)
         for scenario in ("normal", "init-timeout", "init-event-failure", "command-timeout",
                          "command-failure", "allocation-failure", "registration-failure", "stack-unready",
-                         "audio-exclusion", "retry-capacity", "name-normal", "name-invalid", "name-missing", "name-event-failure", "name-submit-failure", "name-timeout",
+                         "audio-exclusion", "reviewed-handoff", "retry-capacity", "name-normal", "name-invalid", "name-missing", "name-event-failure", "name-submit-failure", "name-timeout",
                          "pair-failure", "pair-late", "pair-late-failure", "pair-terminal", "connect-race", "peer-switch", "pair-foreign", "pair-prewindow", "pair-unsaved",
                          "other-profile", "foreign-bonds", "a2dp-reconnect", "observed-disconnect", "dispatch-replace", "dispatch-down", "dispatch-cancel",
                          "dispatch-post-failure", "dispatch-reentrant", "profile-actions", "timeout-hfp", "timeout-a2dp", "pairing", "pairing-expiry", "pairing-timeout", "discovery-timeout", "playback-binding"):

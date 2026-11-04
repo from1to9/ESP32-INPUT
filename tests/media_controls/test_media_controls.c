@@ -40,10 +40,18 @@ bool app_media_runtime_snapshot(app_media_snapshot_t *out) { if (snapshot_availa
 bool app_recording_store_snapshot(app_recording_store_snapshot_t *out)
 { if (store_snapshot_available) *out = disk; return store_snapshot_available; }
 board_recording_flash_status_t board_recording_flash_status(void) { return physical; }
-void ble_hid_pairing_close(void) { ++le_pairing_closes; }
-esp_err_t bt_audio_pairing_open(uint32_t duration)
+bool app_media_runtime_pairing_current(uint64_t generation, uint64_t revision)
 {
-    assert(duration == BT_AUDIO_PAIRING_DEFAULT_MS && le_pairing_closes == pairing_opens + 1U);
+    return snapshot_available && owner.initialized && !owner.busy && !owner.result_ready && owner.audio_known &&
+        owner.audio.hardware_off_confirmed && owner.audio.audio_generation == generation && owner.audio.revision == revision;
+}
+esp_err_t bt_audio_pairing_open_reviewed(uint32_t duration, const bt_audio_snapshot_t *expected, uint64_t revision,
+                                        bool (*resources_current)(void))
+{
+    assert(duration == BT_AUDIO_PAIRING_DEFAULT_MS);
+    if (expected->generation != bluetooth.generation || revision != bonds.revision || !resources_current())
+        return ESP_ERR_INVALID_VERSION;
+    if (pairing_result == ESP_OK) ++le_pairing_closes;
     ++pairing_opens;
     bluetooth.pairing_error = ESP_OK;
     if (pairing_result == ESP_OK) { bluetooth.pairing_busy = bluetooth.pairing_requested = true; bluetooth.pairing_remaining_ms = duration; bluetooth.pairing_completed = bluetooth.pairing_expired = false; }
@@ -126,7 +134,8 @@ static app_media_controls_effect_t handle(app_intent_t request)
 }
 static void apply_effect(app_media_controls_effect_t effect)
 {
-    assert(effect.open_overlay); context.overlay = effect.overlay; ++context.ui_revision;
+    assert(effect.open_overlay); context.overlay = effect.overlay; ++context.epoch; ++context.ui_revision;
+    if (effect.overlay == APP_OVERLAY_CONFIRM) app_media_controls_review_opened(effect.confirmation, context.epoch);
     app_media_controls_context(&context); app_media_controls_fill(&view);
 }
 static void complete(ae_result_t result)
@@ -251,6 +260,26 @@ static void test_review_and_quota(void)
     complete(AE_OK); assert(!controls.pending);
     handle(confirm); assert(submissions == 1); /* Owned expired review never falls through. */
 }
+static void test_discard_review(void)
+{
+    setup(); context.overlay = APP_OVERLAY_RECORDING_START;
+    owner.audio.capture[AE_CAPTURE_RECORDING] = (ae_job_snapshot_t){.kind = AE_CAPTURE_RECORDING,
+        .state = AE_JOB_RUNNING, .job_id = {{61}}, .consumer_generation = 71};
+    ++owner.audio.revision; poll_at(1010);
+    app_intent_t request = intent(APP_MEDIA_RECORD_CANCEL_DISCARD_REQUEST);
+    request.media.job_id = view.media.recording.id; request.media.consumer_generation = 71;
+    apply_effect(handle(request)); assert(view.media_review.valid && !submissions);
+    app_intent_t confirm = {.action = APP_CONFIRM, .epoch = context.epoch, .ui_revision = context.ui_revision,
+        .x = 0, .media = view.media_review.request};
+    apply_effect(handle(confirm)); assert(!submissions && !view.media_review.valid);
+    context.overlay = APP_OVERLAY_RECORDING_START; ++context.ui_revision; poll_at(1020);
+    request.epoch = context.epoch; request.ui_revision = context.ui_revision;
+    apply_effect(handle(request)); assert(view.media_review.valid);
+    confirm.epoch = context.epoch; confirm.ui_revision = context.ui_revision; confirm.x = 1;
+    handle(confirm); assert(submissions == 1 && submitted.action == APP_MEDIA_STOP_JOB &&
+        submitted.stop_reason == AE_STOP_CANCEL_DISCARD && submitted.consumer_generation == 71);
+    handle(confirm); assert(submissions == 1);
+}
 static void test_stale_and_failure(void)
 {
     setup(); app_intent_t old = intent(APP_MEDIA_RECORD_START_REQUEST);
@@ -290,7 +319,11 @@ static void test_list_object_identity(void)
 }
 static void test_storage_prepare(void)
 {
-    setup(); disk.capabilities.available = disk.capabilities.owned_and_provisioned = false;
+    pairing_setup();
+    apply_effect(handle(intent(APP_MEDIA_PAIR_AUDIO_OPEN)));
+    app_intent_t cancel_pair = intent(APP_MEDIA_PAIR_AUDIO_OPEN); cancel_pair.action = APP_CONFIRM;
+    apply_effect(handle(cancel_pair)); assert(!pairing_opens);
+    disk.capabilities.available = disk.capabilities.owned_and_provisioned = false;
     disk.store.mounted = false; disk.byte_region_owned = false; disk.error = AE_UNAVAILABLE;
     physical.state = BOARD_RECORDING_FLASH_ERASED;
     context.overlay = APP_OVERLAY_RECORDING_STORAGE; ++context.ui_revision; poll_at(1010);
@@ -300,7 +333,13 @@ static void test_storage_prepare(void)
     apply_effect(handle(prepare)); assert(!submissions);
     app_intent_t confirm = {.action = APP_CONFIRM, .epoch = context.epoch, .ui_revision = context.ui_revision, .x = 1,
         .recording_storage_generation = view.recording_storage.generation, .recording_storage_revision = view.recording_storage.revision};
-    handle(confirm); assert(submissions == 1 && submitted.action == APP_MEDIA_PREPARE_STORE && submitted.quota_bytes == 524288 && submitted.object_limit == 4);
+    app_intent_t cancel = confirm; cancel.x = 0;
+    apply_effect(handle(cancel));
+    assert(context.overlay == APP_OVERLAY_RECORDING_STORAGE && !submissions);
+    prepare.epoch = context.epoch; prepare.ui_revision = context.ui_revision;
+    apply_effect(handle(prepare)); confirm.epoch = context.epoch; confirm.ui_revision = context.ui_revision;
+    apply_effect(handle(confirm)); assert(context.overlay == APP_OVERLAY_RECORDING_STORAGE);
+    assert(submissions == 1 && submitted.action == APP_MEDIA_PREPARE_STORE && submitted.quota_bytes == 524288 && submitted.object_limit == 4);
     complete(AE_UNCERTAIN); assert(view.recording_storage.state != APP_RECORD_STORE_READY);
     physical.state = BOARD_RECORDING_FLASH_UNKNOWN; poll_at(1030); assert(!view.recording_storage.can_prepare);
 }
@@ -1064,8 +1103,8 @@ static void test_usb_settle_stop_and_clock(void)
 }
 int main(int argc, char **argv)
 {
-    const char *names[] = {"review_and_quota", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "bluetooth_idle_stream", "bluetooth_idle_microphone", "bluetooth_retained_peer", "pairing_close_pending", "pairing_error_origin", "pairing_old_capacity_error", "pairing_new_capacity_error", "pairing_window", "pairing_recovery_and_link", "pairing_outcomes", "pairing_context_and_stale", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "quarantined_profile_start", "link_target_at_touch", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock", "operation_message_lifecycle", "late_success_notice_scope", "microphone_level_values", "microphone_level_validity", "microphone_level_preserves_controls", "microphone_level_clock_order"};
-    void (*cases[])(void) = {test_review_and_quota, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_bluetooth_stream_after_idle_selection, test_bluetooth_microphone_after_idle_selection, test_bluetooth_retained_owner_peer, test_pairing_close_pending, test_pairing_error_origin, test_pairing_old_capacity_error, test_pairing_new_capacity_error, test_pairing_window, test_pairing_recovery_and_link, test_pairing_outcomes, test_pairing_context_and_stale, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_quarantined_profile_start, test_link_target_at_touch, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock, test_operation_message_lifecycle, test_late_success_notice_scope, test_microphone_level_values, test_microphone_level_validity, test_microphone_level_preserves_controls, test_microphone_level_clock_order};
+    const char *names[] = {"review_and_quota", "discard_review", "stale_and_failure", "list_object_identity", "storage_prepare", "speech_once", "targeted_stop_and_idle", "live_and_saved_peer", "connection_observed_completion", "connection_profile_capabilities", "bluetooth_idle_stream", "bluetooth_idle_microphone", "bluetooth_retained_peer", "pairing_close_pending", "pairing_error_origin", "pairing_old_capacity_error", "pairing_new_capacity_error", "pairing_window", "pairing_recovery_and_link", "pairing_outcomes", "pairing_context_and_stale", "connection_stop_and_privacy_barriers", "connection_context_and_stale_requests", "live_start_block_matrix", "live_start_independent_host_roles", "live_start_pending_and_cleanup_reasons", "quarantined_profile_start", "link_target_at_touch", "capture_and_mute_evidence", "voice_connect_sequence", "voice_existing_slc", "voice_async_failure", "voice_replaced_token", "voice_replaced_peer", "voice_catalogue_changed", "voice_locked", "voice_timeout", "voice_snapshot_unavailable", "voice_submit_rejected", "snapshot_reuse", "record_copy_failure", "usb_start_settling", "usb_settle_revoke_and_hint", "usb_settle_stop_and_clock", "operation_message_lifecycle", "late_success_notice_scope", "microphone_level_values", "microphone_level_validity", "microphone_level_preserves_controls", "microphone_level_clock_order"};
+    void (*cases[])(void) = {test_review_and_quota, test_discard_review, test_stale_and_failure, test_list_object_identity, test_storage_prepare, test_speech_once, test_targeted_stop_and_idle, test_live_and_saved_peer, test_connection_observed_completion, test_connection_profile_capabilities, test_bluetooth_stream_after_idle_selection, test_bluetooth_microphone_after_idle_selection, test_bluetooth_retained_owner_peer, test_pairing_close_pending, test_pairing_error_origin, test_pairing_old_capacity_error, test_pairing_new_capacity_error, test_pairing_window, test_pairing_recovery_and_link, test_pairing_outcomes, test_pairing_context_and_stale, test_connection_stop_and_privacy_barriers, test_connection_context_and_stale_requests, test_live_start_block_matrix, test_live_start_independent_host_roles, test_live_start_pending_and_cleanup_reasons, test_quarantined_profile_start, test_link_target_at_touch, test_capture_and_mute_evidence, test_voice_connect_sequence, test_voice_existing_slc, test_voice_async_failure, test_voice_replaced_token, test_voice_replaced_peer, test_voice_catalogue_changed, test_voice_locked, test_voice_timeout, test_voice_snapshot_unavailable, test_voice_submit_rejected, test_snapshot_reuse, test_record_copy_failure, test_usb_start_settling, test_usb_settle_revoke_and_hint, test_usb_settle_stop_and_clock, test_operation_message_lifecycle, test_late_success_notice_scope, test_microphone_level_values, test_microphone_level_validity, test_microphone_level_preserves_controls, test_microphone_level_clock_order};
     assert(argc == 2);
     if (!strcmp(argv[1], "--list")) { for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) puts(names[i]); return 0; }
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: media controls %s\n", names[i]); return 0; }

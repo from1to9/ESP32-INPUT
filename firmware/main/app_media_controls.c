@@ -12,7 +12,6 @@
 #include "board_recording_flash.h"
 #include "audio_media.h"
 #include "bt_audio.h"
-#include "ble_hid.h"
 #include "esp_timer.h"
 #include <limits.h>
 #include <math.h>
@@ -31,11 +30,12 @@ _Static_assert(APP_MEDIA_USB_START_SETTLE_MS > 0, "USB start settling must be po
 
 typedef struct {
     bool initialized, clock_known, clock_failed, runtime_known, store_known;
-    bool list_requested, list_loaded, query_get, pending, prepare_review, confirmation_owned;
+    bool list_requested, list_loaded, query_get, pending, prepare_review;
+    app_confirmation_t confirmation;
     bool capture_obligation;
     bool message_clear_pending, audio_pairing_owned;
     esp_err_t audio_pairing_request_error;
-    uint64_t capture_generation;
+    uint64_t capture_generation, confirmation_epoch;
     uint64_t now_ms, serial, pending_token, revision, store_revision, speech_revision;
     uint64_t old_audio_generation, old_audio_revision, old_speech_token;
     uint64_t consumed_speech_token;
@@ -817,6 +817,7 @@ static void rebuild(void)
      * command message mask current host preparation. Current faults win. */
     if (*controls.message && !(primary_audio && host_preparing))
         snprintf(view->reason, sizeof(view->reason), "%s", controls.message);
+    if (controls.review.valid && !valid_identity(&controls.review.request)) controls.review.valid = false;
 }
 
 bool app_media_controls_init(void)
@@ -826,6 +827,12 @@ bool app_media_controls_init(void)
         .next_cursor = 0};
     return true;
 }
+void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t epoch)
+{
+    /* The coordinator has just completed this review's own input release. */
+    controls.confirmation_epoch = epoch;
+    controls.confirmation = controls.review.valid || controls.prepare_review ? confirmation : APP_CONFIRM_NONE;
+}
 void app_media_controls_context(const app_media_controls_context_t *context)
 {
     if (!context || !controls.initialized) return;
@@ -834,10 +841,10 @@ void app_media_controls_context(const app_media_controls_context_t *context)
     }
     if (controls.voice_link.active && (context->epoch != controls.voice_link.epoch || context->locked ||
         context->screen_off || context->mode != INPUT_AUDIO)) finish_voice_link(NULL, AE_PRIVACY);
-    if (context->epoch != controls.context.epoch || context->locked || context->screen_off ||
-        (controls.context.overlay == APP_OVERLAY_CONFIRM && context->overlay != APP_OVERLAY_CONFIRM)) {
+    if (context->overlay != APP_OVERLAY_CONFIRM) controls.confirmation = APP_CONFIRM_NONE;
+    if (controls.confirmation == APP_CONFIRM_NONE || context->epoch != controls.confirmation_epoch ||
+        context->locked || context->screen_off || context->mode != INPUT_AUDIO) {
         controls.review.valid = false; controls.prepare_review = false;
-        controls.confirmation_owned = false;
     }
     if (context->overlay == APP_OVERLAY_RECORDINGS && controls.context.overlay != APP_OVERLAY_RECORDINGS) controls.list_requested = true;
     controls.context = *context;
@@ -859,7 +866,6 @@ static ae_result_t submit_runtime(app_media_local_request_t request)
 }
 static void open_panel(app_media_controls_effect_t *effect, app_overlay_t overlay, app_confirmation_t confirmation)
 {
-    if (overlay == APP_OVERLAY_CONFIRM) controls.confirmation_owned = true;
     effect->handled = effect->open_overlay = true; effect->overlay = overlay; effect->confirmation = confirmation;
 }
 
@@ -941,10 +947,14 @@ static ae_result_t stop_job(const app_media_request_t *request, ae_stop_reason_t
     return submit_runtime((app_media_local_request_t){.action = APP_MEDIA_STOP_JOB,
         .job_id = engine_id(request->job_id), .consumer_generation = request->consumer_generation, .stop_reason = reason});
 }
+static bool pairing_resources_current(void)
+{
+    return app_media_runtime_pairing_current(controls.runtime.audio.audio_generation, controls.runtime.audio.revision);
+}
 static ae_result_t confirm_review(const app_intent_t *intent)
 {
-    if (controls.prepare_review) {
-        bool valid = controls.storage_view.can_prepare &&
+    if (controls.confirmation == APP_CONFIRM_RECORDING_STORAGE_PREPARE) {
+        bool valid = controls.prepare_review && controls.storage_view.can_prepare &&
             intent->recording_storage_generation == controls.prepare_generation &&
             intent->recording_storage_revision == controls.prepare_revision &&
             controls.prepare_revision == controls.storage_view.revision;
@@ -963,7 +973,7 @@ static ae_result_t confirm_review(const app_intent_t *intent)
     app_media_review_t review = controls.review;
     controls.review.valid = false;
     if (!review.valid || !valid_identity(&intent->media) ||
-        intent->media.operation != review.request.operation ||
+        !same_ui_id(intent->media.peer_id, review.request.peer_id) || intent->media.operation != review.request.operation ||
         intent->media.management_generation != review.request.management_generation ||
         intent->media.audio_generation != review.request.audio_generation ||
         intent->media.resource_revision != review.request.resource_revision ||
@@ -974,8 +984,10 @@ static ae_result_t confirm_review(const app_intent_t *intent)
     switch (review.request.operation) {
     case APP_MEDIA_PAIR_AUDIO_OPEN:
         if (!controls.view.pairing.can_open) return AE_STALE;
-        ble_hid_pairing_close();
-        controls.audio_pairing_request_error = bt_audio_pairing_open(BT_AUDIO_PAIRING_DEFAULT_MS);
+        esp_err_t opened = bt_audio_pairing_open_reviewed(BT_AUDIO_PAIRING_DEFAULT_MS, &controls.bluetooth,
+            controls.bonds.revision, pairing_resources_current);
+        if (opened == ESP_ERR_INVALID_VERSION) return AE_STALE;
+        controls.audio_pairing_request_error = opened;
         controls.bluetooth = bt_audio_snapshot();
         controls.audio_pairing_owned = controls.audio_pairing_request_error == ESP_OK;
         increase(&controls.revision);
@@ -1004,26 +1016,27 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
 {
     if (!intent || !effect || !controls.initialized) return false;
     memset(effect, 0, sizeof(*effect));
-    bool confirmation = intent->action == APP_CONFIRM && controls.confirmation_owned;
+    bool confirmation = intent->action == APP_CONFIRM && controls.confirmation != APP_CONFIRM_NONE;
     if (intent->action != APP_MEDIA_CONTROL && intent->action != APP_RECORDING_STORAGE_PREPARE_REQUEST && !confirmation) return false;
     effect->handled = true;
     if (!local_ready() || intent->epoch != controls.context.epoch || intent->ui_revision != controls.context.ui_revision) {
         effect_result(effect, AE_STALE); return true;
     }
     if (confirmation) {
-        if (controls.context.overlay != APP_OVERLAY_CONFIRM) { effect_result(effect, AE_STALE); return true; }
-        bool pairing = controls.review.request.operation == APP_MEDIA_PAIR_AUDIO_OPEN ||
-            controls.review.request.operation == APP_MEDIA_PAIR_AUDIO_CLOSE;
+        if (controls.context.overlay != APP_OVERLAY_CONFIRM || (intent->x != 0 && intent->x != 1)) {
+            effect_result(effect, AE_STALE); return true;
+        }
+        bool pairing = controls.confirmation == APP_CONFIRM_AUDIO_PAIR;
+        bool storage = controls.confirmation == APP_CONFIRM_RECORDING_STORAGE_PREPARE;
         if (!intent->x) {
             controls.review.valid = controls.prepare_review = false;
-            open_panel(effect, pairing ? APP_OVERLAY_MEDIA_OPTIONS : APP_OVERLAY_AUDIO, APP_CONFIRM_NONE);
+            open_panel(effect, storage ? APP_OVERLAY_RECORDING_STORAGE : pairing ? APP_OVERLAY_MEDIA_OPTIONS : APP_OVERLAY_AUDIO, APP_CONFIRM_NONE);
             return true;
         }
         ae_result_t result = confirm_review(intent);
         effect_result(effect, result);
-        if (pairing) open_panel(effect, APP_OVERLAY_MEDIA_OPTIONS, APP_CONFIRM_NONE);
-        else if (result == AE_OK) open_panel(effect, controls.pending_action == APP_MEDIA_PREPARE_STORE ?
-            APP_OVERLAY_RECORDING_STORAGE : controls.pending_action == APP_MEDIA_QUERY_DELETE ? APP_OVERLAY_RECORDING_DETAIL :
+        if (storage || pairing) open_panel(effect, storage ? APP_OVERLAY_RECORDING_STORAGE : APP_OVERLAY_MEDIA_OPTIONS, APP_CONFIRM_NONE);
+        else if (result == AE_OK) open_panel(effect, controls.pending_action == APP_MEDIA_QUERY_DELETE ? APP_OVERLAY_RECORDING_DETAIL :
             APP_OVERLAY_RECORDING_START, APP_CONFIRM_NONE);
         rebuild(); return true;
     }

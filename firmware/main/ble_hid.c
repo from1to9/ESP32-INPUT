@@ -3094,11 +3094,12 @@ void ble_hid_pairing_close(void)
     portEXIT_CRITICAL(&state_lock);
 }
 
-bool ble_hid_pairing_claim_classic(void)
+bool ble_hid_pairing_claim_classic(bool reviewed_handoff)
 {
     portENTER_CRITICAL(&state_lock);
     bool accepted = state.public.initialized && !state.public.failed && !state.classic_pairing_reserved && !target_blocked_locked() && !single_forget_busy_locked() &&
-        !state.management_reservation && !state.public.pairing_open && !state.pairing_admitted && !state.pairing_admission_pending &&
+        !state.management_reservation && (reviewed_handoff || !state.public.pairing_open) &&
+        !state.pairing_admitted && !state.pairing_admission_pending &&
         (!state.public.connected || (state.auth_complete && state.bond_resolved)) &&
         state.public.bond_forget_state != BLE_HID_FORGET_RUNNING;
     if (accepted) state.classic_pairing_reserved = true;

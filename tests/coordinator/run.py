@@ -57,8 +57,13 @@ def main():
             command += ["-DCONFIG_APP_IMU_CAPTURE=1",
                         str(ROOT / "firmware/main/motion_capture.c"),
                         str(ROOT / "firmware/main/board_imu_queue.c")]
-        subprocess.run(command, check=True)
-        subprocess.run([str(binary)] + ([args.case] if args.case else []), check=True)
+        if args.case != "media_review":
+            subprocess.run(command, check=True)
+            subprocess.run([str(binary)] + ([args.case] if args.case else []), check=True)
+        if args.case in (None, "media_review"):
+            command[command.index(str(SUITE / "test_coordinator.c"))] = str(SUITE / "test_media_review.c")
+            subprocess.run(command + [str(ROOT / "firmware/main/app_media_controls.c")], check=True)
+            subprocess.run([str(binary)], check=True)
 
 
 if __name__ == "__main__":

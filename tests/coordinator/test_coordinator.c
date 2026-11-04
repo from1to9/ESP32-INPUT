@@ -231,7 +231,9 @@ esp_err_t board_haptics_cancel(uint64_t id)
 }
 bt_audio_bond_list_t bt_audio_bond_list(void) { return test_classic_bonds; }
 void bt_audio_copy_bond_list(bt_audio_bond_list_t *out) { if (out) *out = test_classic_bonds; }
+#ifndef TEST_COORDINATOR_MEDIA_REVIEW
 void bt_audio_pairing_close(void) {}
+#endif
 void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out) { *out = test_wifi_profiles; }
 esp_err_t app_wifi_profiles_forget_all(uint64_t revision, bool acknowledge)
 { (void)revision; (void)acknowledge; return ESP_ERR_INVALID_STATE; }
@@ -347,7 +349,9 @@ void app_media_runtime_stop(ae_stop_reason_t reason)
 { assert(reason == AE_STOP_PRIVACY || reason == AE_STOP_MAINTENANCE); ++test_media_stops; }
 esp_err_t app_presenter_bind_display(lv_display_t *display) { (void)display; return ESP_OK; }
 app_presenter_indicator_status_t app_presenter_indicator_status(void) { return test_indicator; }
+#ifndef TEST_COORDINATOR_MEDIA_REVIEW
 bool app_media_controls_init(void) { return true; }
+void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t epoch) { (void)confirmation; (void)epoch; }
 void app_media_controls_context(const app_media_controls_context_t *context) { test_media_context = *context; }
 bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_effect_t *effect)
 {
@@ -358,6 +362,7 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
 void app_media_controls_poll(uint64_t now, app_media_controls_effect_t *effect)
 { (void)now; (void)effect; }
 void app_media_controls_fill(app_view_t *view) { (void)view; }
+#endif
 bool app_connectivity_controls_init(void) { return true; }
 static app_connectivity_controls_context_t test_connectivity_context;
 void app_connectivity_controls_context(const app_connectivity_controls_context_t *context) { test_connectivity_context = *context; }

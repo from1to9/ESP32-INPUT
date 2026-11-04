@@ -202,6 +202,8 @@ int main(void)
     ae_environment_t environment = {.unlocked = true, .screen_visible = true}; app_audio_set_environment(&environment);
     app_audio_command_t request = {.kind = APP_AUDIO_CMD_VOLUME, .expected_generation = view.audio_generation, .expected_revision = view.revision, .level = 35};
     assert(command(&request).result == AE_OK); view = snapshot();
+    assert(view.hardware_off_confirmed && app_audio_idle_at(view.audio_generation, view.revision));
+    assert(!app_audio_idle_at(request.expected_generation, request.expected_revision));
     request = (app_audio_command_t){.kind = APP_AUDIO_CMD_ROUTE, .route = AE_ROUTE_USB_UAC,
         .expected_generation = view.audio_generation, .expected_revision = view.revision};
     assert(command(&request).result == AE_OK); view = snapshot();

@@ -64,6 +64,7 @@ void app_media_runtime_environment(const ae_environment_t *, uint64_t epoch,
                                    uint64_t ui_revision, bool speech_context);
 ae_result_t app_media_runtime_submit_local(const app_media_local_request_t *);
 void app_media_runtime_stop(ae_stop_reason_t);
+bool app_media_runtime_pairing_current(uint64_t generation, uint64_t revision);
 bool app_media_runtime_snapshot(app_media_snapshot_t *);
 /* Copy any returned payload before acknowledging the result. Exact product
  * token prevents a previous caller from reading a replacement query's bytes. */

@@ -720,6 +720,7 @@ static void apply_media_effect(const app_media_controls_effect_t *effect)
     if (effect->open_overlay) {
         s_confirmation = effect->confirmation;
         open_overlay(effect->overlay);
+        if (effect->overlay == APP_OVERLAY_CONFIRM) app_media_controls_review_opened(effect->confirmation, s_engine.state.epoch);
     }
     if (effect->preview_character && s_engine.state.mode == INPUT_KEYBOARD &&
         s_keyboard_submode == APP_KEYBOARD_SPOKEN && !s_engine.state.locked &&

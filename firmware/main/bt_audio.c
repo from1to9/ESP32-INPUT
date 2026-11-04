@@ -796,29 +796,46 @@ static bool pairing_ready_locked(void)
         audio.public.microphone_muted && audio.public.speaker_muted &&
         (!audio.adapter.prepared || audio.adapter.stopped);
 }
+
+static esp_err_t pairing_admission_locked(const bt_audio_snapshot_t *expected, uint64_t bonds,
+                                          bool (*resources_current)(void))
+{
+    if (expected && (audio.public.generation != expected->generation ||
+        audio.public.hfp_link_generation != expected->hfp_link_generation ||
+        audio.public.a2dp_link_generation != expected->a2dp_link_generation ||
+        audio.bond_refresh_pending || audio.classic_list_revision != bonds || !resources_current()))
+        return ESP_ERR_INVALID_VERSION;
+    return pairing_ready_locked() ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
 #endif
 
-esp_err_t bt_audio_pairing_open(uint32_t duration_ms)
+static esp_err_t pairing_open(uint32_t duration_ms, const bt_audio_snapshot_t *expected, uint64_t bonds,
+                              bool (*resources_current)(void))
 {
     if (!AUDIO_PROFILES_SUPPORTED) return ESP_ERR_NOT_SUPPORTED;
     if (!duration_ms || duration_ms > BT_AUDIO_PAIRING_MAX_MS) return ESP_ERR_INVALID_ARG;
 #if AUDIO_PROFILES_SUPPORTED
     portENTER_CRITICAL(&audio_lock);
-    bool ready = pairing_ready_locked();
-    if (!audio.public.failed && !audio.public.pairing_busy) audio.public.pairing_error = ESP_OK;
+    esp_err_t admission = pairing_admission_locked(expected, bonds, resources_current);
+    if (admission != ESP_ERR_INVALID_VERSION && !audio.public.failed && !audio.public.pairing_busy)
+        audio.public.pairing_error = ESP_OK;
     portEXIT_CRITICAL(&audio_lock);
-    if (!ready || !ble_hid_pairing_claim_classic()) return ESP_ERR_INVALID_STATE;
+    if (admission != ESP_OK) return admission;
+    if (!ble_hid_pairing_claim_classic(expected != NULL)) return ESP_ERR_INVALID_STATE;
     int count = btc_storage_get_num_all_bond_devices();
     if (count < 0 || count >= CONFIG_BT_SMP_MAX_BONDS) {
         ble_hid_pairing_release_classic();
         return count < 0 ? ESP_ERR_INVALID_STATE : ESP_ERR_NO_MEM;
     }
     portENTER_CRITICAL(&audio_lock);
-    /* Audio preparation can race the SDK capacity query; both admissions commit
-     * under this lock, so a queued local or remote start cannot cross a window. */
-    if (!pairing_ready_locked()) {
-        portEXIT_CRITICAL(&audio_lock); ble_hid_pairing_release_classic(); return ESP_ERR_INVALID_STATE;
+    /* Capacity was read outside the locks. Revalidate while the shared guard
+     * excludes new admissions. The resource owners only read their current
+     * state under their locks; the LE close makes no Bluetooth-stack call. */
+    admission = pairing_admission_locked(expected, bonds, resources_current);
+    if (admission != ESP_OK) {
+        portEXIT_CRITICAL(&audio_lock); ble_hid_pairing_release_classic(); return admission;
     }
+    if (expected) ble_hid_pairing_close();
     audio.pairing_claimed = true;
     audio.public.pairing_busy = true;
     audio.public.pairing_requested = true; audio.public.pairing_remaining_ms = duration_ms;
@@ -830,8 +847,21 @@ esp_err_t bt_audio_pairing_open(uint32_t duration_ms)
     request_device_name();
     return ESP_OK;
 #else
+    (void)expected; (void)bonds; (void)resources_current;
     return ESP_ERR_NOT_SUPPORTED;
 #endif
+}
+
+esp_err_t bt_audio_pairing_open(uint32_t duration_ms)
+{
+    return pairing_open(duration_ms, NULL, 0, NULL);
+}
+
+esp_err_t bt_audio_pairing_open_reviewed(uint32_t duration_ms, const bt_audio_snapshot_t *expected,
+                                        uint64_t bonds, bool (*resources_current)(void))
+{
+    if (!expected || !resources_current) return ESP_ERR_INVALID_ARG;
+    return pairing_open(duration_ms, expected, bonds, resources_current);
 }
 
 void bt_audio_pairing_close(void)

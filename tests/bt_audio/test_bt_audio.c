@@ -43,7 +43,8 @@ static esp_a2d_cb_t a2;
 static esp_bt_gap_cb_t gap;
 static esp_bt_gap_profile_status_t gap_status;
 static bool pairing_claim, deny_claim, security_accept, drop_scan;
-static unsigned security_replies;
+static unsigned security_replies, claim_calls, le_closes, discoverable_writes;
+static bool le_window, resource_current = true;
 static int bond_count = 1, shared_count = 1;
 static esp_err_t bond_list_error;
 static void (*bond_count_hook)(void);
@@ -79,7 +80,7 @@ int btc_storage_get_num_all_bond_devices(void)
 esp_err_t esp_bt_gap_get_bond_device_list(int *count, esp_bd_addr_t *list)
 { assert(*count >= bond_count); *count = bond_count; if (bond_count >= 1) memcpy(list[0], peer, 6); if (bond_count == 2) memcpy(list[1], other, 6); return bond_list_error; }
 esp_err_t esp_bt_gap_set_scan_mode(esp_bt_connection_mode_t connection, esp_bt_discovery_mode_t discovery)
-{ if (!drop_scan) gap_status = (esp_bt_gap_profile_status_t){.conn_mode = connection, .disc_mode = discovery}; return ESP_OK; }
+{ if (discovery == ESP_BT_GENERAL_DISCOVERABLE) ++discoverable_writes; if (!drop_scan) gap_status = (esp_bt_gap_profile_status_t){.conn_mode = connection, .disc_mode = discovery}; return ESP_OK; }
 esp_err_t esp_bt_gap_get_profile_status(esp_bt_gap_profile_status_t *status) { *status = gap_status; return ESP_OK; }
 esp_err_t esp_bt_gap_pin_reply(esp_bd_addr_t address, bool accept, uint8_t bytes, esp_bt_pin_code_t pin)
 { (void)address; (void)pin; assert(!accept && bytes == 0); security_accept = accept; ++security_replies; return ESP_OK; }
@@ -87,8 +88,9 @@ esp_err_t esp_bt_gap_ssp_confirm_reply(esp_bd_addr_t address, bool accept)
 { assert(memcmp(address, peer, 6) == 0); security_accept = accept; ++security_replies; return ESP_OK; }
 esp_err_t esp_bt_gap_ssp_passkey_reply(esp_bd_addr_t address, bool accept, uint32_t passkey)
 { (void)address; assert(!accept && passkey == 0); security_accept = accept; ++security_replies; return ESP_OK; }
-bool ble_hid_pairing_claim_classic(void)
-{ if (deny_claim || pairing_claim) return false; pairing_claim = true; return true; }
+void ble_hid_pairing_close(void) { assert(pairing_claim); ++le_closes; le_window = false; }
+bool ble_hid_pairing_claim_classic(bool reviewed_handoff)
+{ ++claim_calls; if (deny_claim || pairing_claim || (le_window && !reviewed_handoff)) return false; pairing_claim = true; return true; }
 void ble_hid_pairing_release_classic(void) { assert(pairing_claim); pairing_claim = false; }
 esp_err_t esp_hf_client_register_callback(esp_hf_client_cb_t callback) { hf = callback; return submit(); }
 esp_err_t esp_hf_client_init(void) { return submit(); }
@@ -725,6 +727,36 @@ static void pairing_audio_exclusion(void)
     assert(!bond_count_hook && !pairing_claim && !bt_audio_snapshot().pairing_busy);
 }
 
+static void replace_during_pairing_capacity(void)
+{
+    assert(pairing_claim && le_window && !le_closes);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 4);
+}
+static void change_resource_during_capacity(void) { assert(pairing_claim && le_window); resource_current = false; }
+static bool pairing_current(void) { return resource_current; }
+static void reviewed_handoff(void)
+{
+    initialized(); bt_audio_service(); le_window = true;
+    uint64_t revision = observed_bonds().revision;
+    bt_audio_snapshot_t expected = bt_audio_snapshot();
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 3);
+    assert(bt_audio_pairing_open_reviewed(1000, &expected, revision, pairing_current) == ESP_ERR_INVALID_VERSION);
+    assert(!claim_calls && !le_closes && le_window);
+    expected = bt_audio_snapshot();
+    bond_count_hook = replace_during_pairing_capacity;
+    assert(bt_audio_pairing_open_reviewed(1000, &expected, revision, pairing_current) == ESP_ERR_INVALID_VERSION);
+    assert(!bond_count_hook && expected.a2dp_link_generation != bt_audio_snapshot().a2dp_link_generation);
+    expected = bt_audio_snapshot();
+    bond_count_hook = change_resource_during_capacity;
+    assert(bt_audio_pairing_open_reviewed(1000, &expected, revision, pairing_current) == ESP_ERR_INVALID_VERSION);
+    bt_audio_service();
+    assert(!le_closes && le_window && !pairing_claim && !discoverable_writes && !bt_audio_snapshot().pairing_requested);
+    resource_current = true;
+    assert(bt_audio_pairing_open_reviewed(1000, &expected, revision, pairing_current) == ESP_OK);
+    assert(le_closes == 1 && !le_window && pairing_claim);
+    bt_audio_service(); assert(discoverable_writes == 1 && bt_audio_snapshot().discoverable);
+    bt_audio_pairing_close(); bt_audio_service(); assert(!pairing_claim && !bt_audio_snapshot().discoverable);
+}
 static void device_name_test(const char *scenario)
 {
     assert(name_requests == 1 && !bt_audio_snapshot().device_name_known);
@@ -852,6 +884,7 @@ int main(int argc, char **argv)
         else if (!strcmp(scenario, "observed-disconnect")) observed_disconnect();
         else if (!strcmp(scenario, "a2dp-reconnect")) a2dp_reconnect();
         else if (!strcmp(scenario, "retry-capacity")) pairing_retry_capacity();
+        else if (!strcmp(scenario, "reviewed-handoff")) reviewed_handoff();
         else if (!strcmp(scenario, "audio-exclusion")) pairing_audio_exclusion();
         else if (!strncmp(scenario, "name-", 5)) device_name_test(scenario);
         else if (strcmp(scenario, "normal") == 0) normal();

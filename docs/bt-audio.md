@@ -45,7 +45,8 @@ The audio module must not initialize a second controller or Bluedroid instance.
 
 `bt_audio_pairing_open(ms)` accepts an explicit window up to 300 seconds;
 `bt_audio_pairing_close()` or expiry immediately denies new SSP admission.
-The coordinator closes LE pairing first. An atomic guard rejects simultaneous
+The [local confirmation](#saved-classic-host-ui) transfers pairing admission
+only after validating the reviewed state. An atomic guard rejects simultaneous
 LE/Classic handshakes, and fresh capacity checks use the SDK's exact shared
 address-section count before granting security. Public Classic/LE bond lists
 omit incomplete address sections and cannot prove spare capacity themselves.
@@ -219,6 +220,15 @@ determines the result.
 Saved-host connect and voice requests also require the observed Classic list
 revision and a saved address. The owner rechecks the bond before dispatch.
 Refreshing the list while retaining the same saved peer preserves the request.
+
+When the user confirms a Classic pairing window, the shared guard reserves
+pairing admission while the owner reads bond capacity. The LE window keeps
+its original deadline during this check. At acceptance the Classic owner
+checks the reviewed transport, both profile generations and bond revision.
+The media and audio owners check their current idle state and resource versions.
+A stale review releases the reservation without closing the LE window or
+requesting Classic discoverability. A successful handoff closes the LE window
+before requesting Classic discovery.
 
 After an SDK command times out, its profile remains busy until a matching
 terminal callback. Mic and Speaker can start on a separately negotiated

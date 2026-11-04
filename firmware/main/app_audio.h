@@ -68,6 +68,7 @@ ae_result_t app_audio_submit_transport_playback(ae_route_t, const ae_frame_t *);
  * closed/stale bindings; the producer must not pop a transport frame then.
  * Credit is advisory: push still validates generation/consumer/link identity. */
 size_t app_audio_transport_playback_capacity(ae_route_t, uint64_t audio_generation);
+bool app_audio_idle_at(uint64_t generation, uint64_t revision);
 bool app_audio_snapshot(ae_snapshot_t *);
 /* Explicit shutdown: close gates immediately, then wait for confirmed hardware
  * stop/recording cleanup. AE_AGAIN never frees possibly owned driver buffers. */

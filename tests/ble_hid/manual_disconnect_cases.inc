@@ -138,7 +138,7 @@ static void review_classic_cannot_overtake(app_bluetooth_management_operation_t 
 {
     native_setup(true); ble_hid_target_t target = native_target(0xc2);
     native_begin(operation, operation == APP_BT_MANAGE_FORGET_ONE ? &target : NULL);
-    bool claimed = ble_hid_pairing_claim_classic();
+    bool claimed = ble_hid_pairing_claim_classic(true);
     for (unsigned i = 0; i < 64 && native_receipt().active; ++i) native_step(true);
     app_bluetooth_management_snapshot_t receipt = native_receipt();
     fprintf(stderr, "Shared guard: operation=%u classic_claimed=%u phase=%u error=%d selected=%u removals=%u\n",
@@ -148,10 +148,10 @@ static void review_classic_cannot_overtake(app_bluetooth_management_operation_t 
     assert(fake_bond_count == (operation == APP_BT_MANAGE_ADD ? 2U : 1U));
     assert(remove_calls == (operation == APP_BT_MANAGE_ADD ? 0U : 1U));
     if (operation == APP_BT_MANAGE_ADD) {
-        assert(state.public.pairing_open && !ble_hid_pairing_claim_classic());
+        assert(state.public.pairing_open && !ble_hid_pairing_claim_classic(false));
         ble_hid_pairing_close();
     }
-    assert(ble_hid_pairing_claim_classic()); ble_hid_pairing_release_classic();
+    assert(ble_hid_pairing_claim_classic(false)); ble_hid_pairing_release_classic();
 }
 
 static void review_management_opposite_boundaries(void)
@@ -168,19 +168,19 @@ static void review_management_opposite_boundaries(void)
             for (unsigned i = 0; i < 64 && native_receipt().active; ++i) native_step(true);
             assert(native_receipt().phase == APP_BT_MANAGE_FAILED && native_receipt().error == ESP_ERR_INVALID_STATE);
             assert(ble_hid_target_snapshot().selected && !remove_calls && !state.public.pairing_open);
-            assert(ble_hid_pairing_claim_classic()); ble_hid_pairing_release_classic();
+            assert(ble_hid_pairing_claim_classic(false)); ble_hid_pairing_release_classic();
         }
     }
-    native_setup(true); assert(ble_hid_pairing_claim_classic());
+    native_setup(true); assert(ble_hid_pairing_claim_classic(false));
     assert(app_bluetooth_management_begin(APP_BT_MANAGE_ADD, native_host_generation(),
         ble_hid_bond_list().revision, ble_hid_target_snapshot().revision, NULL, native_now) == ESP_ERR_INVALID_STATE);
     assert(state.classic_pairing_reserved && ble_hid_target_snapshot().selected &&
         fake_bond_count == 2 && !state.management_reservation);
     ble_hid_pairing_release_classic();
-    native_begin(APP_BT_MANAGE_ADD, NULL); assert(!ble_hid_pairing_claim_classic());
+    native_begin(APP_BT_MANAGE_ADD, NULL); assert(!ble_hid_pairing_claim_classic(false));
     app_bluetooth_management_cancel();
     assert(ble_hid_target_snapshot().selected && fake_bond_count == 2 && !remove_calls);
-    assert(ble_hid_pairing_claim_classic()); ble_hid_pairing_release_classic();
+    assert(ble_hid_pairing_claim_classic(false)); ble_hid_pairing_release_classic();
 }
 
 static void manual_disconnect_cases(void)

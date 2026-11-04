@@ -23,6 +23,9 @@ typedef struct {
 } app_media_controls_effect_t;
 
 bool app_media_controls_init(void);
+/* Called synchronously only after applying this owner's open-confirmation effect.
+ * Bind its review to the input epoch produced by opening the modal. */
+void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t epoch);
 void app_media_controls_context(const app_media_controls_context_t *);
 /* Parent must first validate normal physical-touch/current input identity.
  * This layer also validates mode/panel, media/object/candidate identity and

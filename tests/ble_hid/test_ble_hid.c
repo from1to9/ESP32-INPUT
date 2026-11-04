@@ -2387,13 +2387,25 @@ static void test_saved_target_selection_and_order(void) {
     assert(fake_bond_count == 3 && remove_calls == 0 && commit_calls == 0);
 }
 static void test_shared_classic_pairing_guard(void) {
-    reset(); assert(!ble_hid_pairing_claim_classic());
-    ble_hid_pairing_close(); assert(ble_hid_pairing_claim_classic());
-    assert(!ble_hid_pairing_open(1000) && !ble_hid_pairing_claim_classic());
+    reset(); assert(!ble_hid_pairing_claim_classic(false));
+    TickType_t started = state.pairing_started, duration = state.pairing_duration;
+    assert(ble_hid_pairing_claim_classic(true) && state.public.pairing_open && !pairing_allowed_locked(fake_tick));
+    ++fake_tick; ble_hid_pairing_release_classic();
+    assert(state.pairing_started == started && state.pairing_duration == duration && pairing_allowed_locked(fake_tick));
+    assert(ble_hid_pairing_claim_classic(true));
+    fake_tick = started + duration; (void)ble_hid_snapshot();
+    ble_hid_pairing_release_classic(); assert(!ble_hid_snapshot().pairing_open);
+    start_bonded(); write_cccd(ATTR_KEYBOARD_CCCD, true); write_cccd(ATTR_MOUSE_CCCD, true);
+    assert(ble_hid_pairing_claim_classic(true) && ble_hid_snapshot().ready);
+    uint8_t report[8] = {0}; assert(ble_hid_send(1, report, sizeof(report)));
+    ble_hid_pairing_release_classic();
+    reset();
+    ble_hid_pairing_close(); assert(ble_hid_pairing_claim_classic(false));
+    assert(!ble_hid_pairing_open(1000) && !ble_hid_pairing_claim_classic(false));
     active_peer = 0x80; connect_peer(); assert(state.rejected_pending && !state.public.connected);
     drain(); disconnect_peer(); ble_hid_pairing_release_classic();
     assert(ble_hid_pairing_open(1000));
-    connect_peer(); drain(); assert(state.pairing_admission_pending && !ble_hid_pairing_claim_classic());
+    connect_peer(); drain(); assert(state.pairing_admission_pending && !ble_hid_pairing_claim_classic(false) && !ble_hid_pairing_claim_classic(true));
 #if CONFIG_BT_CLASSIC_ENABLED
     shared_bond_count = PAIRING_BOND_CAPACITY;
     service_pairing_admission();
