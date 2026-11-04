@@ -17,6 +17,7 @@ static bool remote_device_maintenance(void) { return s_remote_device_maintenance
 static void remote_device_set_maintenance(bool active)
 {
     app_local_access_t previous = local_access();
+    if (active && !s_remote_device_maintenance_active) app_media_controls_revoke_devices();
     s_remote_device_maintenance_active = active;
     button_access_changed(previous);
 }

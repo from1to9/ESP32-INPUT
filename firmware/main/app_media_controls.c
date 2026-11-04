@@ -892,14 +892,20 @@ void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t 
     controls.confirmation_epoch = epoch;
     controls.confirmation = controls.review.valid || controls.prepare_review ? confirmation : APP_CONFIRM_NONE;
 }
+void app_media_controls_revoke_devices(void)
+{
+    if (controls.device_request_id) {
+        bt_audio_cancel_request(controls.device_request_id); controls.device_request_id = 0;
+    }
+    if (controls.voice_link.active && controls.voice_link.device_management) finish_voice_link(NULL, AE_PRIVACY);
+}
+
 void app_media_controls_context(const app_media_controls_context_t *context)
 {
     if (!context || !controls.initialized) return;
     if (controls.device_request_id && (context->locked || context->screen_off || context->local_access != APP_LOCAL_NORMAL ||
         !context->bluetooth_audio_devices || context->epoch != controls.context.epoch)) {
-        /* Exact owner receipt revokes a queued item at its serialized dispatch
-         * boundary. An already dispatched SDK operation cannot be undone here. */
-        bt_audio_cancel_request(controls.device_request_id); controls.device_request_id = 0;
+        app_media_controls_revoke_devices();
     }
     if (controls.audio_pairing_owned && (context->locked || context->screen_off || (!context->bluetooth_audio_devices && (context->mode != INPUT_AUDIO || controls.context.bluetooth_audio_devices)))) {
         bt_audio_pairing_close(); controls.audio_pairing_owned = false;

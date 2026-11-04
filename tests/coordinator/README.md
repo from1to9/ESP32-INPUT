@@ -77,3 +77,10 @@ acknowledgement. Runtime-only settings, exact reset scope, local review identity
 cancellation, update maintenance exclusion and continuous health observation have
 separate assertions. The actual restart worker has its own host suite. No test
 here restarts, enumerates, pairs, flashes or accesses a physical device.
+
+Run `python3 tests/coordinator/run_device_revocation.py` to compose the real
+coordinator, media controls and Classic dispatcher. The lock, close and pause
+cases restore SDK dispatch after the actual transition and before any media
+poll. Controls retain normal requests, the SCO second phase and a replacement
+owner receipt; opposing injections at the BT lock exercise both commit orders.
+Use `--case lock`, `--case leave` or `--case pause` for an isolated replay.

@@ -29,6 +29,11 @@ bool app_media_controls_init(void);
  * Bind its review to the input epoch produced by opening the modal. */
 void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t epoch);
 void app_media_controls_context(const app_media_controls_context_t *);
+/* Coordinator transition boundary: call before publishing loss of the local
+ * device-management epoch, page or access. Cancels only this owner's receipt
+ * and follow-up voice phase. The BT lock orders revocation against its final
+ * dispatch claim; a claim that already won is not retroactively withdrawn. */
+void app_media_controls_revoke_devices(void);
 /* Parent must first validate normal physical-touch/current input identity.
  * This layer also validates mode/panel, media/object/candidate identity and
  * explicit immutable confirmations. Connection selection uses audio-only

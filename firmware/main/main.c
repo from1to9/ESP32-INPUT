@@ -605,6 +605,7 @@ static void sync_interaction(void)
 
 static void cancel_input(void)
 {
+    app_media_controls_revoke_devices();
     update_send(true);
     hid_engine_cancel(&s_engine);
     interaction_touch_result_t touch = interaction_touch_cancel(&s_interaction);
@@ -1608,6 +1609,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         }
         return;
     case APP_CLOSE:
+        app_media_controls_revoke_devices();
         if (s_overlay == APP_OVERLAY_WIFI_SETUP) (void)app_wifi_stop_setup();
         cancel_local_editor();
         s_overlay = APP_OVERLAY_NONE;
@@ -2156,6 +2158,7 @@ static bool process_priority(void)
     if (!requests) {
         return false;
     }
+    app_media_controls_revoke_devices();
     discard_intents();
     cancel_local_editor();
     s_transport_switch_pending = false;

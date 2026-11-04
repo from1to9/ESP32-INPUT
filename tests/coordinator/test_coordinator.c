@@ -250,8 +250,10 @@ esp_err_t board_haptics_cancel(uint64_t id)
     test_haptic_status.off_confirmed = true;
     return ESP_OK;
 }
+#ifndef TEST_COORDINATOR_REAL_CLASSIC
 bt_audio_bond_list_t bt_audio_bond_list(void) { return test_classic_bonds; }
 void bt_audio_copy_bond_list(bt_audio_bond_list_t *out) { if (out) *out = test_classic_bonds; }
+#endif
 #ifndef TEST_COORDINATOR_MEDIA_REVIEW
 void bt_audio_pairing_close(void) {}
 #endif
@@ -372,6 +374,7 @@ esp_err_t app_presenter_bind_display(lv_display_t *display) { (void)display; ret
 app_presenter_indicator_status_t app_presenter_indicator_status(void) { return test_indicator; }
 #ifndef TEST_COORDINATOR_MEDIA_REVIEW
 bool app_media_controls_init(void) { return true; }
+void app_media_controls_revoke_devices(void) {}
 void app_media_controls_review_opened(app_confirmation_t confirmation, uint64_t epoch) { (void)confirmation; (void)epoch; }
 void app_media_controls_context(const app_media_controls_context_t *context) { test_media_context = *context; }
 bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_effect_t *effect)

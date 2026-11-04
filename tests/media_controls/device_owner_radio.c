@@ -12,6 +12,7 @@ void device_radio_init(void)
 }
 void device_radio_dispatch(void) { if (queued_btc) run_btc(); }
 unsigned device_radio_calls(void) { return dispatch_calls; }
+void device_radio_before_lock(void (*callback)(void)) { before_lock = callback; }
 void device_radio_hfp(bool foreign)
 {
     esp_hf_client_cb_param_t event = {.conn_stat.state = ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED};

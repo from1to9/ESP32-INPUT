@@ -216,6 +216,7 @@ static void __attribute__((noinline)) remote_update_service(void)
     bool requested = next_access != APP_LOCAL_NORMAL;
     /* Do not admit a held or queued action under a later access policy. */
     if (requested && s_update_access == APP_LOCAL_NORMAL) {
+        app_media_controls_revoke_devices();
         cancel_local_editor();
         remote_local_override(false);
         hid_engine_cancel(&s_engine);
