@@ -41,6 +41,7 @@ with tempfile.TemporaryDirectory(prefix="esp32-device-revocation-") as directory
     binary = temporary / "test_device_revocation"
     subprocess.run(command + [str(ROOT / source) for source in sources] + objects + ["-lm", "-o", str(binary)], check=True)
     cases = ["normal", "normal-after-sync", "lock", "leave", "back", "pause", "device-pause", "lock-after-sync", "leave-after-sync", "pause-after-sync",
-             "voice-normal", "voice-lock", "voice-leave", "voice-pause", "replacement-owner", "dispatch-first", "revoke-first"]
+             "voice-normal", "voice-lock", "voice-leave", "voice-pause", "replacement-owner", "dispatch-first", "revoke-first",
+             "expiry", "expiry-after-sync", "expiry-normal", "expiry-dispatch-first", "voice-expiry", "voice-expiry-normal"]
     for case in [args.case] if args.case else cases:
         subprocess.run([str(binary), case], check=True)

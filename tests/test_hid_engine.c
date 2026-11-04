@@ -1181,8 +1181,45 @@ static void mouse_composite_shortcut_uses_existing_release_recovery(void)
     assert(step(&engine, &sink) == HID_ENGINE_STEP_IDLE && !engine.count);
 }
 
+static hid_engine_t *cancel_observed_engine;
+static uint64_t cancel_observed_epoch;
+static unsigned cancel_observations;
+static void observe_cancel_before_epoch(void)
+{
+    assert(cancel_observed_engine->state.epoch == cancel_observed_epoch);
+    ++cancel_observations;
+}
+
+static void cancel_callback_order(void)
+{
+    hid_engine_t engine;
+    sink_t sink = {0};
+    connected(&engine, &sink, INPUT_KEYBOARD);
+    cancel_observed_engine = &engine; cancel_observed_epoch = engine.state.epoch; cancel_observations = 0;
+    hid_engine_set_cancel_callback(&engine, observe_cancel_before_epoch);
+    assert(!hid_engine_observe_transport(&engine, 100, false));
+    assert(!hid_engine_observe_transport(&engine, 110, true));
+    assert(!hid_engine_observe_transport(&engine, 110 + HID_ENGINE_CONGESTION_TIMEOUT_MS - 1, true));
+    assert(cancel_observations == 0 && engine.state.epoch == cancel_observed_epoch);
+    assert(hid_engine_observe_transport(&engine, 110 + HID_ENGINE_CONGESTION_TIMEOUT_MS, true));
+    assert(cancel_observations == 1 && engine.state.epoch == cancel_observed_epoch + 1);
+    assert(!hid_engine_observe_transport(&engine, 370, true));
+    assert(!hid_engine_observe_transport(&engine, 380, false));
+    assert(cancel_observations == 1);
+    cancel_observed_epoch = engine.state.epoch;
+    assert(hid_engine_observe_transport(&engine, 379, false));
+    assert(cancel_observations == 2 && engine.state.epoch == cancel_observed_epoch + 1);
+    hid_engine_set_cancel_callback(&engine, NULL); hid_engine_cancel(&engine);
+    assert(cancel_observations == 2);
+    hid_engine_set_cancel_callback(&engine, observe_cancel_before_epoch);
+    hid_engine_init(&engine); hid_engine_cancel(&engine);
+    assert(cancel_observations == 2); /* Initialization does not retain an old owner. */
+    cancel_observed_engine = NULL;
+}
+
 int main(void)
 {
+    cancel_callback_order();
     initial_and_readiness();
     mouse_sequence();
     drag_sequence();

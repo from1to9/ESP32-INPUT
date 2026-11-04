@@ -22,6 +22,14 @@ An episode shorter than 250 ms preserves queued work and its epoch, including a 
 
 A backward timestamp invalidates work immediately and starts the same release barrier. During continuous congestion that invalidation happens at most once per episode. The supplied timestamp becomes the next baseline, allowing recovery from a clock reset without unsigned deadline arithmetic replaying work. The function returns true only when that observation invalidated the epoch and requested fresh releases. Timely observation is the caller's responsibility; the engine cannot infer unobserved transport transitions or elapsed time by itself.
 
+The coordinator may register one synchronous `hid_engine_set_cancel_callback`
+after initialization. `hid_engine_cancel` invokes it before advancing the input
+epoch, including automatic congestion, clock and send-failure cancellations.
+The callback must not reenter the engine. Ordinary observations do not invoke
+it, and initialization clears the registration. This provides an owning
+qualification boundary for dependent queued work without duplicating timeout
+rules in its consumers. Other state setters retain their explicit boundaries.
+
 ## Failure recovery
 
 A failed normal submission immediately invalidates the epoch, discards remaining actions and starts a zero-report barrier. Only zero reports are retried; failures within that barrier retain its epoch and release progress. Three total send failures before completing both zero reports exhaust recovery, clear `ready` and keep `release_pending` set. Successful completion resets the failure budget. Successful keyboard release followed by a failed mouse release retries the mouse release without spending another key-down.

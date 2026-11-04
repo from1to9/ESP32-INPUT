@@ -61,6 +61,18 @@ int main(int argc, char **argv)
     choose.media.object_revision = test_view.media.devices.revision;
     choose.media.value.peer_id = test_view.media.devices.rows[0].id;
     deliver(choose); present(); assert(s_overlay == APP_OVERLAY_AUDIO_DEVICE);
+    bool expiry = strstr(scenario, "expiry") != NULL;
+    input_link_t observed = input_link_snapshot(&test_link), previous = observed;
+    uint64_t admitted_epoch = s_engine.state.epoch;
+    if (expiry) {
+        assert(observed.connected && observed.ready && !observed.congested);
+        observed.congested = true; observe_input_link(&observed, &previous);
+        uint64_t start = s_now_ms;
+        while (s_now_ms + COORDINATOR_PERIOD_MS < start + HID_ENGINE_CONGESTION_TIMEOUT_MS) {
+            s_now_ms += COORDINATOR_PERIOD_MS; observe_input_link(&observed, &previous); present();
+        }
+        assert(s_engine.state.epoch == admitted_epoch && s_engine.congested && test_view.media.devices.can_connect[1]);
+    }
     bool voice = !strncmp(scenario, "voice", 5);
     app_intent_t connect = make_intent(APP_MEDIA_CONTROL, 0, 0, NULL);
     connect.media = (app_media_request_t){.operation = APP_MEDIA_DEVICE_LINK,
@@ -78,7 +90,7 @@ int main(int argc, char **argv)
     }
     bool normal = strstr(scenario, "normal") != NULL;
     bool replacement = !strcmp(scenario, "replacement-owner");
-    bool dispatch_first = !strcmp(scenario, "dispatch-first");
+    bool dispatch_first = !strcmp(scenario, "dispatch-first") || !strcmp(scenario, "expiry-dispatch-first");
     if (replacement) {
         bt_audio_snapshot_t current = bt_audio_snapshot();
         bt_audio_cancel_request(current.request_id);
@@ -86,7 +98,17 @@ int main(int argc, char **argv)
             test_view.media.devices.revision, BT_AUDIO_CONNECT_A2DP, test_view.media.devices.address, NULL) == ESP_OK);
         device_radio_dispatch(); bt_audio_service(); /* Drain only the retired posted item. */
     }
-    if (!strcmp(scenario, "revoke-first")) {
+    if (expiry) {
+        if (dispatch_first) device_radio_dispatch();
+        if (!normal) {
+            s_now_ms += COORDINATOR_PERIOD_MS; observe_input_link(&observed, &previous);
+            assert(s_engine.state.epoch != admitted_epoch && s_engine.congestion_cancelled && s_overlay == APP_OVERLAY_AUDIO_DEVICE);
+            printf("timeout=%u period=%u epoch %llu -> %llu; ", (unsigned)HID_ENGINE_CONGESTION_TIMEOUT_MS,
+                (unsigned)COORDINATOR_PERIOD_MS, (unsigned long long)admitted_epoch, (unsigned long long)s_engine.state.epoch);
+        }
+        if (strstr(scenario, "after-sync")) service_media();
+        device_radio_dispatch();
+    } else if (!strcmp(scenario, "revoke-first")) {
         device_radio_before_lock(revoke); device_radio_dispatch();
     } else {
         if (dispatch_first) device_radio_before_lock(dispatch_before_revoke);

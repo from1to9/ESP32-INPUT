@@ -26,6 +26,7 @@ extern const size_t hid_engine_report_descriptor_length;
 
 typedef bool (*hid_engine_send_fn)(void *context, uint8_t report_id,
                                   const uint8_t *data, size_t length);
+typedef void (*hid_engine_cancel_fn)(void);
 
 typedef enum {
     HID_ENGINE_ENQUEUE_OK,
@@ -67,6 +68,7 @@ typedef struct {
  * not call back into this engine. Acceptance is not host/UI acknowledgement. */
 typedef struct {
     input_state_t state;
+    hid_engine_cancel_fn before_cancel;
     bool ready;
     bool congested;
     bool congestion_cancelled;
@@ -89,6 +91,11 @@ typedef struct {
 } hid_engine_t;
 
 void hid_engine_init(hid_engine_t *engine);
+/* Optional coordinator callback, registered after init. Runs synchronously
+ * before cancel advances the epoch, including transport expiry and send failure.
+ * It must not reenter this engine. Unchanged observations never call it;
+ * init clears the registration. Other state setters retain their own boundaries. */
+void hid_engine_set_cancel_callback(hid_engine_t *engine, hid_engine_cancel_fn callback);
 /* ready means the transport can accept BOTH input report IDs. Losing readiness
  * invalidates work just like disconnect. ready=true with connected=false is
  * normalized to false. After retry exhaustion, an explicit ready=true call

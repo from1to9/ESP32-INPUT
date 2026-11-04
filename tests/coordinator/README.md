@@ -84,3 +84,9 @@ cases restore SDK dispatch after the actual transition and before any media
 poll. Controls retain normal requests, the SCO second phase and a replacement
 owner receipt; opposing injections at the BT lock exercise both commit orders.
 Use `--case lock`, `--case leave` or `--case pause` for an isolated replay.
+
+The `expiry` replay advances the real transport observer at the coordinator
+period, admits Connect speaker on the last pre-deadline tick, then restores
+Classic dispatch immediately after HID cancellation and before media polling.
+`expiry-after-sync`, `expiry-normal` and `expiry-dispatch-first` preserve the
+control orders; `voice-expiry` also holds the second SCO phase at this boundary.

@@ -58,8 +58,14 @@ void hid_engine_init(hid_engine_t *engine)
     input_init(&engine->state);
 }
 
+void hid_engine_set_cancel_callback(hid_engine_t *engine, hid_engine_cancel_fn callback)
+{
+    engine->before_cancel = callback;
+}
+
 void hid_engine_cancel(hid_engine_t *engine)
 {
+    if (engine->before_cancel) engine->before_cancel();
     input_invalidate(&engine->state);
     clear_queue(engine);
 }

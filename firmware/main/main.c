@@ -608,9 +608,14 @@ static void sync_interaction(void)
     if (transition) interaction_freeze_after(&s_interaction, transition);
 }
 
+static void init_hid_engine(void)
+{
+    hid_engine_init(&s_engine);
+    hid_engine_set_cancel_callback(&s_engine, app_media_controls_revoke_devices);
+}
+
 static void cancel_input(void)
 {
-    app_media_controls_revoke_devices();
     update_send(true);
     hid_engine_cancel(&s_engine);
     interaction_touch_result_t touch = interaction_touch_cancel(&s_interaction);
@@ -3094,7 +3099,7 @@ void app_main(void)
     s_intents = xQueueCreateStatic(INTENT_CAPACITY, sizeof(coordinator_event_t),
                                     s_intent_bytes, &s_intent_storage);
     configASSERT(s_intents);
-    hid_engine_init(&s_engine);
+    init_hid_engine();
     interaction_init(&s_interaction);
     interaction_set_keyboard_motion(&s_interaction, s_keyboard_submode == APP_KEYBOARD_MOTION);
     interaction_reference_diagnostics_bind(&s_interaction, &s_reference_diagnostics);

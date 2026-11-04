@@ -1102,7 +1102,7 @@ static void setup(input_mode_t mode)
     s_button_context_revision = 0;
     s_button_context_epoch = 0;
     memset(s_button_edges, 0, sizeof s_button_edges);
-    hid_engine_init(&s_engine);
+    init_hid_engine();
     interaction_init(&s_interaction);
     interaction_set_keyboard_motion(&s_interaction, s_keyboard_submode == APP_KEYBOARD_MOTION);
     interaction_reference_diagnostics_bind(&s_interaction, &s_reference_diagnostics);
