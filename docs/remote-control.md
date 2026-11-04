@@ -89,13 +89,16 @@ They grant no permission by themselves and cannot approve another controller.
 
 Local Web/API settings choose independent INPUT, MANAGE and UPDATE groups. Approval
 defaults to INPUT for 6 hours, with 24 hours and permanent-until-revoked options.
-Finite grants require known trusted wall time and fail closed if time is unknown.
+The device saves the original expiry time. After a reboot, a 6-hour or 24-hour
+grant remains usable for its remaining time once the device knows the time again.
 An observed expiry is terminal for that credential and grant revision in the current
 boot, even if trusted wall time later moves backward. The management worker writes
-and verifies that terminal marker once; it never writes from a HID callback. Only
-an explicit local reauthorization can create a new valid revision. Storage failures
-remain unknown/denied. Before that marker reaches durable storage, a reset loses
-the RAM observation; persistence alone cannot prove expiry across that window.
+and verifies the expiry marker. Once saved, the marker keeps the grant expired
+across reboots until the user explicitly renews it on Mosaico. If power is lost
+before the marker is saved and the clock then moves back before the original
+deadline, the old grant can become usable again until that deadline. During
+the current boot a failed expiry write leaves the grant denied. Finite grants
+are also denied whenever trusted time is unavailable.
 The bounded client table includes native/API identities from the existing local
 trust package. Editing one migrates it to these groups; untouched native identities
 retain their original scopes, capture grants and OTA policy.

@@ -258,6 +258,9 @@ static void finite_expiry_is_terminal_and_renewal_is_explicit(void)
         apply(approval(APP_CONTROL_ACCESS_INPUT, (app_control_access_duration_t)duration));
         uint8_t id[16]; memset(id, 0x33, 16); cp_principal_t p;
         access_record_t previous = access_state->saved[0];
+        wall = previous.expires - 1;
+        boot();
+        assert(app_control_access_principal(id, &p) && p.enabled);
         wall = previous.expires; unsigned before = writes;
         assert(app_control_access_principal(id, &p) && !p.enabled && writes == before);
         --wall; clock_known = false;
