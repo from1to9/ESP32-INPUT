@@ -32,7 +32,7 @@
 +++ b/components/bt/host/bluedroid/bta/dm/bta_dm_act.c
 @@ -33,0 +34 @@
 +#include "stack/hcimsgs.h"
-@@ -773,0 +775,8 @@
+@@ -773,0 +775,8 @@ void bta_dm_get_dev_name (tBTA_DM_MSG *p_data)
 +#if (CLASSIC_BT_INCLUDED == TRUE)
 +    if (p_data->get_name.name_type == BT_DEVICE_TYPE_BREDR && p_data->get_name.p_cback) {
 +        if (!btsnd_hcic_read_name_checked(p_data->get_name.p_cback)) {
@@ -41,6 +41,27 @@
 +        return;
 +    }
 +#endif
+@@ -3292,0 +3302,17 @@ static UINT8  bta_dm_new_link_key_cback(BD_ADDR bd_addr, DEV_CLASS dev_class,
++/* A Classic authentication failure may retire only the Classic security state.
++ * The same address can still own a saved or connected LE input service. */
++static BOOLEAN bta_dm_remove_bredr_sec_dev_entry(BD_ADDR bd_addr)
++{
++    if (BTM_IsAclConnectionUp(bd_addr, BT_TRANSPORT_BR_EDR)) {
++        for (UINT16 i = 0; i < bta_dm_cb.device_list.count; ++i) {
++            if (bta_dm_cb.device_list.peer_device[i].transport == BT_TRANSPORT_BR_EDR &&
++                !bdcmp(bta_dm_cb.device_list.peer_device[i].peer_bdaddr, bd_addr)) {
++                bta_dm_cb.device_list.peer_device[i].remove_dev_pending = TRUE;
++                break;
++            }
++        }
++        return FALSE;
++    }
++    return BTM_SecDeleteDevice(bd_addr, BT_TRANSPORT_BR_EDR);
++}
++
+@@ -3315 +3341 @@ static UINT8 bta_dm_authentication_complete_cback(BD_ADDR bd_addr, DEV_CLASS dev
+-        if (bta_dm_remove_sec_dev_entry(bd_addr)) {
++        if (bta_dm_remove_bredr_sec_dev_entry(bd_addr)) {
 --- a/components/bt/host/bluedroid/stack/btu/btu_hcif.c
 +++ b/components/bt/host/bluedroid/stack/btu/btu_hcif.c
 @@ -741,0 +742,3 @@

@@ -15,7 +15,7 @@
     },
     "components/bt/host/bluedroid/bta/dm/bta_dm_act.c": {
       "before": "24899ae7ed43461efb24010d9d858454e71daefe85b3ecece96023d5297556d6",
-      "after": "5a3d0322cc363419425ed79d5cb06486536d620f22baef3fe114b0d64afb7b88"
+      "after": "3d8f11bd500bb26e98525f2905b0f1a366db56d05cf0bdab934ff3629fed2847"
     },
     "components/bt/host/bluedroid/stack/btu/btu_hcif.c": {
       "before": "cbadf52ea8ee4fa999d9cd1832d4164c51d1f0b02d468a935372e3c72785ae3b",
@@ -30,5 +30,5 @@
       "after": "03e891dbbc279dcc0c3d1ac0451e41721c787c077ba2230b7ca6fe4101031b78"
     }
   },
-  "patch_sha256": "e9c62f6d119462374c56c2a88a682ebf7fe0ad87872d65d9e20d36391f7785e4"
+  "patch_sha256": "80e9d43dc5ac9de6a5408e58f63786ca7ef29f2dfb5cb20993dfbfd3fb0f8a37"
 }

@@ -2,6 +2,14 @@
 
 Run `python3 tests/ble_hid/run.py` from the repository root. A native C11 compiler and AddressSanitizer/UndefinedBehaviorSanitizer are required; ESP-IDF and a device are not required.
 
+With the pinned SDK present, run `python3 tests/ble_hid/test_sdk_reconnect.py`
+and `python3 tests/ble_hid/test_sdk_classic_failure.py`. The latter compiles the
+production Classic failure callback, security removal and LTK reply functions.
+It checks that Classic cleanup cannot erase or mark a same-address LE bond for
+later deletion, while Classic failure, explicit Forget and new SMP pairing
+remain distinct operations. It accepts `--sdk` for an isolated SDK and `--case`
+for a single reproduction.
+
 The suite compiles production `ble_hid.c`, its internal `ble_hid_store.h` helper, the production portable HID engine and the shared device-settings validator. The only substitutes are Bluetooth/controller, NVS, PSA hashing, clock, task and queue boundaries in `stubs/`. The PSA substitute is a deterministic identity test double, not a SHA implementation. The target uses the SDK's actual PSA SHA-256 implementation. Native checks establish state behavior; the firmware build independently checks actual pinned SDK headers and libraries.
 
 The production `ble_hid_store.c` preference serializer is also linked. Its

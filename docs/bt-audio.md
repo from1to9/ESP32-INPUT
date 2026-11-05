@@ -177,6 +177,16 @@ the patch's header marker. Run `python3 tools/idf_patches.py --check` to inspect
 the applied state without writes. The patch needs separate security review on
 SDK updates; changing the header marker alone does not qualify an SDK.
 
+The patch also limits failed Classic authentication cleanup to BR/EDR. A
+shared peer address does not authorize clearing LE security flags, removing
+its LTK, or attaching a deferred deletion to its live input connection. An
+active Classic connection keeps its own deferred cleanup; failure reporting,
+explicit removal and successful new pairing retain their existing behavior.
+Run `python3 tests/ble_hid/test_sdk_classic_failure.py` against the patched SDK
+for disconnected, LE-active and dual-service cases, including the next LTK
+reply. This source regression does not establish the cause of a physical
+reconnect failure without evidence of that SDK event sequence.
+
 ## Manager integration and safety
 
 `bt_audio_route_port()` implements the shared audio route interface.
