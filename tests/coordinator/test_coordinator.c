@@ -100,6 +100,7 @@ static esp_err_t test_name_error;
 static unsigned test_name_requests;
 static bool test_clock_override;
 static uint64_t test_clock_ms;
+static void (*test_coordinator_delay)(TickType_t ticks);
 static void (*test_update_gate_entry_hook)(void);
 static void coordinator_test_lock_entry(portMUX_TYPE *lock)
 {
@@ -838,11 +839,13 @@ int64_t esp_timer_get_time(void)
 esp_err_t esp_task_wdt_add(void *task)
 {
     (void)task;
+    if (test_coordinator_delay) return ESP_OK;
     unexpected_boot_boundary();
 }
-esp_err_t esp_task_wdt_reset(void) { unexpected_boot_boundary(); }
+esp_err_t esp_task_wdt_reset(void) { if (test_coordinator_delay) return ESP_OK; unexpected_boot_boundary(); }
 void vTaskDelay(TickType_t ticks)
 {
+    if (test_coordinator_delay) { test_coordinator_delay(ticks); return; }
     (void)ticks;
     unexpected_boot_boundary();
 }
@@ -6427,6 +6430,8 @@ static void shared_bluetooth_input_options_reaches_owners(void)
     assert(!strcmp(s_interaction.view.preview, "AB") && !s_send_token && !test_pair_forgets);
 }
 
+#include "mouse_schedule_cases.inc"
+
 int main(int argc, char **argv)
 {
     assert(argc <= 2);
@@ -6590,6 +6595,7 @@ int main(int argc, char **argv)
     RUN(private_editor_deadline_and_lock_clear_secret_and_ticket);
     RUN(mouse_pad_wake_is_consumed_before_fresh_takeover_and_click);
     RUN(queued_expired_pad_and_real_clock_refresh_never_replay);
+    RUN(mouse_schedule_drains_touch_bursts);
     RUN(short_selection_ticket_expires_even_while_scan_is_fresh);
     RUN(common_keys_route_from_keyboard_chooser_rejects_other_origins);
     RUN(network_detail_back_returns_to_list_only_from_valid_origin);

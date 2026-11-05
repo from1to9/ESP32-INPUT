@@ -3135,7 +3135,10 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         sync_interaction();
         (void)process_priority();
         static EXT_RAM_BSS_ATTR coordinator_event_t event;
-        for (unsigned i = 0; i < 4 && xQueueReceive(s_intents, &event, 0) == pdTRUE; ++i) {
+        /* Each touch scan can enqueue contacts and primary movement. Drain a
+         * bounded FIFO capacity so the old four-event limit does not carry a
+         * touch backlog into later turns after a scheduling delay. */
+        for (unsigned i = 0; i < INTENT_CAPACITY && xQueueReceive(s_intents, &event, 0) == pdTRUE; ++i) {
             consume_coordinator_event(&event, &bluetooth);
             if (process_priority()) {
                 break;

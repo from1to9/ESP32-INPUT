@@ -6,6 +6,18 @@ and priority interruption; clearing must preserve the admitted HID reports.
 Target frame and nested callback budgets are checked separately with
 `python3 tools/check_stack_budget.py` using the configured firmware compiler.
 
+`mouse_schedule_drains_touch_bursts` runs the production `coordinator_run` loop.
+Only its RTOS delay/watchdog boundaries are substituted: a separate 15/20 ms
+producer submits complete contacts and matching primary movement while the
+coordinator is scheduled at 10, 40 or 60 ms intervals. Every turn preserves the
+movement prefix, drains the available FIFO, and emits at most one HID report.
+The original four-event limit builds a backlog and eventually overflows/cancels
+an otherwise current contact. Both USB and BLE are covered. At 120 ms, stale
+contacts still suppress movement; at 300 ms, queue overflow still invalidates
+the old generation. No freshness, gesture or congestion threshold is relaxed.
+The test models delayed scheduling; it does not measure the device's task costs,
+radio timing or host arrival, or establish the cause of device scheduling gaps.
+
 Run `python3 tests/coordinator/run.py` from the repository root. The runner builds with strict C11 diagnostics, conversion/shadow warnings and address/undefined-behavior sanitizers, using a temporary output directory. It includes the actual [production coordinator](../../firmware/main/main.c) and links production `interaction`, `hid_engine`, `input_core` and `device_settings`; no coordinator decisions, gesture classification, idle policy or safety transitions are reimplemented in the harness. To diagnose one case, use `python3 tests/coordinator/run.py --case touch_release_has_one_freeze_interval`. The default always runs every case.
 
 The normal-profile configuration stub keeps the optional startup tone disabled.
