@@ -78,6 +78,8 @@ esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t link_generation, 
     if (link_result == ESP_OK) {
         *token = ++next_link_token; links[link_count].token = *token;
         bluetooth.request_id = *token; bluetooth.request_status = BT_AUDIO_JOB_PENDING; ++bluetooth.generation;
+        bluetooth.request_command = command;
+        memcpy(bluetooth.request_peer, peer, sizeof(bluetooth.request_peer));
     }
     ++link_count; return link_result;
 }
@@ -1132,6 +1134,17 @@ static void test_shared_devices(void)
     handle(connect); assert(link_count==1 && links[0].command==BT_AUDIO_CONNECT_A2DP && links[0].peer[5]==2);
     assert(!submissions && owner.audio.route==AE_ROUTE_USB_UAC);
     handle(connect); assert(link_count==1); /* The accepted request revokes its old revision. */
+    bluetooth.request_status=BT_AUDIO_JOB_UNCERTAIN; bluetooth.control_inflight=true;
+    poll_at(1021);
+    assert(view.media.devices.pending && !view.media.devices.can_connect[1]);
+    assert(strstr(view.media.devices.reason, "Connect unconfirmed") && strstr(view.media.devices.reason, "Add device"));
+    bluetooth.control_inflight=false; bluetooth.request_status=BT_AUDIO_JOB_FAILED;
+    poll_at(1022);
+    assert(strstr(view.media.devices.reason, "Connect failed") && strstr(view.media.devices.reason, "Add device"));
+    bluetooth.request_peer[5]=1; poll_at(1023);
+    assert(!strstr(view.media.devices.reason, "Add device"));
+    bluetooth.request_peer[5]=2; ++bluetooth.request_id; poll_at(1024);
+    assert(!strstr(view.media.devices.reason, "Add device"));
     bluetooth.request_status=BT_AUDIO_JOB_SUCCEEDED; bluetooth.a2dp_connected=bluetooth.a2dp_peer_known=true;
     bluetooth.a2dp_peer[5]=2; bonds.bonds[1].a2dp_current=true; poll_at(1030);
     assert(view.media.devices.connected[1] && view.media.devices.can_disconnect[1]);

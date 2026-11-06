@@ -32,7 +32,7 @@ static void audio_pairing_checks(void)
     const app_media_pair_state_t phases[] = {APP_MEDIA_PAIR_PREPARING, APP_MEDIA_PAIR_DISCOVERABLE,
         APP_MEDIA_PAIR_AUTHENTICATING, APP_MEDIA_PAIR_COMPLETED, APP_MEDIA_PAIR_EXPIRED,
         APP_MEDIA_PAIR_CLOSING, APP_MEDIA_PAIR_CLOSED, APP_MEDIA_PAIR_UNAVAILABLE};
-    const char *phase_text[] = {"Preparing pairing / 119s", "Discoverable / 119s", "Authenticating / 119s",
+    const char *phase_text[] = {"Preparing pairing / 119s", "Discoverable / 119s\nPair from your host using the search name", "Authenticating / 119s",
         "Paired", "Pairing expired", "Closing pairing", "Pairing closed", "Pairing unavailable"};
     for (unsigned i = 0; i < sizeof(phases) / sizeof(phases[0]); ++i) {
         s_state.media.pairing.state = phases[i];

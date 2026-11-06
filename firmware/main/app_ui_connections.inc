@@ -334,9 +334,13 @@ static void render_connection_panel(void)
                 pairing->state == APP_MEDIA_PAIR_CLOSED ? "Pairing closed" : "Pairing unavailable";
             if (devices->refreshing) label_format(s_device_status, "%s\nChecking saved devices", state);
             else if (!known) label_format(s_device_status, "%s\nSaved state unknown; use Refresh", state);
-            else if (devices->pending) label_format(s_device_status, "%s\nWaiting for the link request", state);
-            else if (devices->request_failed) label_format(s_device_status, "%s\nLink request failed or uncertain", state);
+            else if (pairing->state == APP_MEDIA_PAIR_DISCOVERABLE)
+                label_format(s_device_status, "%s / %us\nPair from your host using the search name", state, pairing->remaining_seconds);
             else if (pairing->state == APP_MEDIA_PAIR_ERROR) label_format(s_device_status, "Pairing failed: %.85s", pairing->reason);
+            else if ((devices->pending || devices->request_failed) && pairing->state != APP_MEDIA_PAIR_PREPARING &&
+                     pairing->state != APP_MEDIA_PAIR_AUTHENTICATING && pairing->state != APP_MEDIA_PAIR_CLOSING)
+                label_format(s_device_status, "%s\n%s", state, devices->pending ?
+                    "Waiting for the link request" : "Link request failed or uncertain");
             else if (pairing->state == APP_MEDIA_PAIR_CLOSED && count) label_text(s_device_status, "Pairing closed\nSaved devices can reconnect");
             else if (pairing->remaining_seconds) label_format(s_device_status, "%s / %us", state, pairing->remaining_seconds);
             else label_text(s_device_status, state);

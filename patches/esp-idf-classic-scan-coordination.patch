@@ -28,13 +28,18 @@
  #endif
  #if BLE_INCLUDED == TRUE
              && (opcode != HCI_BLE_RAND)
-@@ -1623,6 +1631,14 @@
+@@ -1623,6 +1631,19 @@
      uint8_t *stream = hack->response->data + hack->response->offset + 3; // 2 to skip the event headers, 1 to skip the command credits
      STREAM_TO_UINT16(opcode, stream);
 
 +    if (opcode == HCI_WRITE_SCAN_ENABLE) {
 +        bool accepted = hack->response->len == 6 && *stream == HCI_SUCCESS;
-+        if (!accepted) HCI_TRACE_WARNING("Write Scan Enable failed or returned a malformed reply");
++        const char *lane = hack->context ? "prepare" : "policy";
++        if (hack->response->len != 6) {
++            HCI_TRACE_WARNING("Write Scan Enable (%s) malformed Complete len=%u", lane, hack->response->len);
++        } else if (!accepted) {
++            HCI_TRACE_WARNING("Write Scan Enable (%s) Complete status=0x%02x", lane, *stream);
++        }
 +        bt_classic_scan_complete((uint32_t)(uintptr_t)hack->context, accepted);
 +        osi_free(hack->response);
 +        osi_free(event);
@@ -43,7 +48,7 @@
      if (*stream != HCI_SUCCESS) {
          HCI_TRACE_WARNING("opcode=0x%04x, status= %02x: %s", opcode, *stream, hci_status_code_to_string(*stream));
      }
-@@ -1974,6 +1990,9 @@
+@@ -1974,6 +1995,9 @@
          hack->status,
          stream,
          hack->context);

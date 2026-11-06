@@ -77,7 +77,7 @@ void bt_audio_classic_scan_drained(uint64_t id, bool restore) { (void)id; (void)
         for observer in (0, 1):
             subprocess.run(command + [f'-DCONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS={observer}'], check=True)
             for case in ('drain', 'async', 'async-before-ack', 'no-scan', 'incoming', 'reuse', 'cancel',
-                         'ack-failed', 'alloc-failed', 'queue-full', 'async-queue-full', 'teardown', 'reenable',
+                         'ack-failed', 'policy-reply-warning', 'alloc-failed', 'queue-full', 'async-queue-full', 'teardown', 'reenable',
                          'unsupported-context'):
                 subprocess.run([str(binary), case], check=True)
 

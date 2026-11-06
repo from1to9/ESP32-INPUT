@@ -11,7 +11,9 @@
 #define CLASSIC_BT_INCLUDED TRUE
 #define BLE_INCLUDED 0
 #define HCI_TRACE_ERROR(...) ((void)0)
-#define HCI_TRACE_WARNING(...) ((void)0)
+static char scan_warning[128];
+#define HCI_TRACE_WARNING(...) ((void)snprintf(scan_warning, sizeof(scan_warning), __VA_ARGS__))
+static const char *hci_status_code_to_string(uint8_t status) { (void)status; abort(); }
 #define osi_free free
 
 enum { HOST_TASK, BTU_TASK, CONTROLLER_TASK };
@@ -152,19 +154,25 @@ static void visibility(uint8_t mask)
     context = HOST_TASK;
 }
 
-static void ack(uint32_t token, uint8_t status)
+static void ack_with_length(uint32_t token, uint8_t status, uint16_t len)
 {
     context = BTU_TASK;
     BT_HDR *event = calloc(1, sizeof(*event) + sizeof(command_complete_hack_t));
-    BT_HDR *response = calloc(1, sizeof(*response) + 6);
+    BT_HDR *response = calloc(1, sizeof(*response) + len);
     assert(event && response);
-    response->len = 6;
-    memcpy(response->data, (uint8_t[]){0x0e, 4, 1, 0x1a, 0x0c, status}, 6);
+    response->len = len;
+    assert(len == 5 || len == 6);
+    memcpy(response->data, (uint8_t[]){0x0e, 4, 1, 0x1a, 0x0c, status}, len);
     command_complete_hack_t *hack = (void *)event->data;
     hack->response = response;
     hack->context = (void *)(uintptr_t)token;
     btu_hcif_command_complete_evt_on_task(event);
     context = HOST_TASK;
+}
+
+static void ack(uint32_t token, uint8_t status)
+{
+    ack_with_length(token, status, 6);
 }
 
 static void controller_complete(uint8_t status)
@@ -286,6 +294,20 @@ int main(int argc, char **argv)
         ack(tokens[0], 9);
         step();
         expect(1, 1, ESP_FAIL);
+        assert(strstr(scan_warning, "prepare") && strstr(scan_warning, "0x09"));
+    } else if (!strcmp(test, "policy-reply-warning")) {
+        visibility(2);
+        ack(0, 0x0c);
+        assert(strstr(scan_warning, "policy") && strstr(scan_warning, "0x0c"));
+        visibility(2);
+        ack_with_length(0, 0, 5);
+        assert(strstr(scan_warning, "policy") && strstr(scan_warning, "len=5"));
+        start(1); /* Both failed policy responses drained the previous writes. */
+        assert(commands == 3);
+        controller_complete(0);
+        ack(tokens[2], 0);
+        step();
+        expect(1, 1, ESP_OK);
     } else if (!strcmp(test, "alloc-failed")) {
         fail_alloc = true;
         start(1);

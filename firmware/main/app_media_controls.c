@@ -697,9 +697,18 @@ static void rebuild_devices(void)
         }
         view->voice_connected = view->connected[0] && bt->hfp_audio_connected;
     }
+    bool connect_failed = view->request_failed && controls.device_request_id &&
+        controls.device_request_id == bt->request_id && controls.selected_peer_known &&
+        !memcmp(controls.selected_peer, bt->request_peer, sizeof(bt->request_peer)) &&
+        (bt->request_command == BT_AUDIO_CONNECT_HFP || bt->request_command == BT_AUDIO_CONNECT_A2DP);
     snprintf(view->reason, sizeof(view->reason), "%s", view->refreshing ? "Refreshing saved audio devices." :
-        !view->known ? "Saved state unknown. Back to devices, then Refresh." : controls.selected_peer_known && !view->selected_saved ? "Device is no longer saved." :
-        any_jobs() ? "Stop Mic and Speaker before changing devices." : view->pending ? "Request pending; waiting for Bluetooth." :
+        !view->known ? "Saved state unknown. Back to devices, then Refresh." :
+        controls.selected_peer_known && !view->selected_saved ? "Device no longer saved. Go back and choose Add device." :
+        any_jobs() ? "Stop Mic and Speaker before changing devices." :
+        connect_failed ? (bt->request_status == BT_AUDIO_JOB_UNCERTAIN ?
+            "Connect unconfirmed. Wait. If asked to pair, use Add device." :
+            "Connect failed. Host asks to pair? Go back and use Add device.") :
+        view->pending ? "Request pending; waiting for Bluetooth." :
         view->request_failed ? "Connection request failed or uncertain. Check host Bluetooth settings." :
         "Connect from this device or your host. Connecting does not start audio.");
 }

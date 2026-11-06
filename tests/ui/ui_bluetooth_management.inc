@@ -31,6 +31,12 @@ static void bluetooth_management_checks(void)
     s_state.media.devices.request_failed = true;
     ++s_state.ui_revision; screenshot("bluetooth-audio-link-failed");
     assert(has_visible_label(lv_screen_active(), "Pairing closed\nLink request failed or uncertain"));
+    s_state.media.pairing.state = APP_MEDIA_PAIR_DISCOVERABLE;
+    s_state.media.pairing.remaining_seconds = 97;
+    s_state.media.pairing.name_known = true;
+    strcpy(s_state.media.pairing.device_name, "Mosaico-AUD");
+    ++s_state.ui_revision; screenshot("bluetooth-audio-pair-from-host");
+    audio_assert_text_fits("Discoverable / 97s\nPair from your host using the search name");
     s_state.media.devices.request_failed = false;
     clear_intents(); tap_control("Add device"); tap_control("Stop pairing"); assert(!action_count(APP_MEDIA_CONTROL));
     s_state.media.devices.known = false; s_state.media.devices.refreshing = true;
@@ -51,6 +57,10 @@ static void bluetooth_management_checks(void)
     assert(!has_visible_label(lv_screen_active(), "Device no longer saved"));
     clear_intents(); tap_control("Connect mic"); tap_control("Connect speaker"); assert(!action_count(APP_MEDIA_CONTROL));
     clear_intents(); tap_control("Back to devices"); assert(action_count(APP_BLUETOOTH_DEVICES) == 1);
+    s_state.bluetooth_hosts_available = false;
+    strcpy(s_state.media.devices.reason, "Connect failed. Host asks to pair? Go back and use Add device.");
+    ++s_state.ui_revision; screenshot("bluetooth-audio-connect-help");
+    audio_assert_text_fits("Connect failed. Host asks to pair? Go back and use Add device.\nInput pairing state unknown. Audio Forget unavailable; Disconnect keeps pairing.");
     s_state.media.devices.connected[0] = true;
     ++s_state.ui_revision; screenshot("bluetooth-audio-slctovoice");
     assert(has_visible_label(lv_screen_active(), "Mic: Service connected / Speaker: Connected"));
