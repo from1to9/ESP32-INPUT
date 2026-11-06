@@ -19,6 +19,10 @@ if(CONFIG_APP_TOUCH_LATENCY_DIAGNOSTICS)
     target_sources(${COMPONENT_LIB} PRIVATE "app_touch_trace.c")
 endif()
 
+if(CONFIG_APP_MOUSE_PHASE_DIAGNOSTICS)
+    target_sources(${COMPONENT_LIB} PRIVATE "app_mouse_phase.c")
+endif()
+
 if(CONFIG_APP_LOCAL_SPEAKER_TEST)
     target_sources(${COMPONENT_LIB} PRIVATE "app_local_speaker_test.c")
 endif()

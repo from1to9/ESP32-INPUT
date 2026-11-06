@@ -13,6 +13,8 @@ contacts and unavailable input leave the window unused. The trigger's gesture,
 source time and generation are retained. Its earlier scan/enqueue occurred
 before the window, so source/enqueue counts can be smaller than consumed or
 motion counts by that initial event. Only one window is available per boot.
+With the optional coordinator window below, the same first-movement trigger
+waits until that window is active.
 
 The single tester action is: **once Mouse / Bluetooth shows Input ready, use
 the body touchpad normally for 20 seconds**. Keep that input mode and connection
@@ -92,3 +94,44 @@ hardware boundary substitutes; they do not measure radio or host timing.
 `python3 tools/check_stack_budget.py` includes the observer's main, LVGL and
 BTC paths when this configuration is enabled. Task stack accounting retains
 its SDK reserve and does not qualify interrupts or device timing.
+
+## Coordinator window after audio playback
+
+Enable `CONFIG_APP_MOUSE_PHASE_DIAGNOSTICS=y` in the diagnostic image.
+For a paired Bluetooth retest, also enable `CONFIG_APP_TOUCH_LATENCY_DIAGNOSTICS=y`.
+After boot, start serial and Windows pointer capture. Leave Mouse Motion off.
+Play audio in Audio mode, reproduce any audible interruptions, then stop
+playback and select Mouse locally. Begin moving a finger across the pad as
+soon as Mouse appears and keep moving for 20 seconds. Record the Windows
+time of any stall and keep the recording aligned with the serial timestamps.
+Keep serial capture running for another 15 seconds for both summaries.
+
+`MousePhase armed` indicates that the image is waiting for the first
+successful local Audio to Mouse selection. That selection starts the window
+even if the link is unavailable or no pad event arrives. The diagnostic
+trigger observes mode selection. Verify playback and stop separately.
+One header and ten two-second rows are emitted after the window, one line per
+coordinator turn. The header carries the exact window and the first observed
+boundary at or after its end. If the coordinator never resumes, no summary
+can be printed.
+
+- Phase maxima use monotonic wall time. A duration belongs to the interval
+  containing its start and is clipped at the capture deadline. `pause` is
+  the time from the previous turn's end to the next turn's start, including
+  the normal delay. Phase durations also include preemption and waits.
+- Each row counts consumed contacts and pad events, admission decisions,
+  nonzero buffered movement sends, and observed cancellation paths. Events
+  use the last phase boundary, so a long phase can span more than one row.
+  Several counters can describe the same event. `send` reports the transport
+  adapter's return. Use `TouchTrace` for matched Bluetooth completions and
+  Windows evidence for host arrival and cursor behavior.
+- `states` is the union of bits sampled just before HID service in the row.
+  The header lists bit names from least to most significant. A row with
+  no sampled turns can result from a pause spanning that interval.
+
+The optional observer uses fixed coordinator-owned storage and no additional
+task, timer, lock, queue, or allocation. It adds up to seven clock reads per
+active turn and one clock read at the successful trigger. Default builds
+omit the object and hooks. The target stack checker includes its phase and
+reporting paths when enabled. The focused native check is
+`python3 tests/coordinator/run.py --mouse-phase --case mouse_phase_observes_local_transition_and_stall_once`.

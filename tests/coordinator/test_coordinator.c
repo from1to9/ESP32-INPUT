@@ -84,6 +84,9 @@ static size_t test_usb_enable_trace[32], test_usb_enable_count;
 static input_link_t test_previous_link;
 static void (*test_ble_after_accept)(void), (*test_usb_after_accept)(void);
 static bool test_diagnostic_logs_enabled, test_heap_observation_enabled;
+#if APP_MOUSE_PHASE_ENABLED
+static bool test_mouse_phase_logs_enabled;
+#endif
 static char test_diagnostic_logs[16][2048];
 static size_t test_diagnostic_log_count, test_heap_observation_count;
 static size_t test_heap_free_internal, test_heap_largest_internal;
@@ -668,8 +671,15 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
 
 void coordinator_test_log(const char *tag, const char *format, ...)
 {
-    if (!test_diagnostic_logs_enabled) return;
-    assert(strcmp(tag, "input") == 0);
+#if APP_MOUSE_PHASE_ENABLED
+    if (test_mouse_phase_logs_enabled) {
+        if (strcmp(tag, "MousePhase") != 0) return;
+    } else
+#endif
+    {
+        if (!test_diagnostic_logs_enabled) return;
+        assert(strcmp(tag, "input") == 0);
+    }
     assert(test_diagnostic_log_count < sizeof test_diagnostic_logs / sizeof test_diagnostic_logs[0]);
     va_list arguments;
     va_start(arguments, format);
@@ -854,10 +864,16 @@ void vTaskDelay(TickType_t ticks)
 UBaseType_t uxTaskGetStackHighWaterMark(void *task)
 {
     (void)task;
+#if APP_MOUSE_PHASE_ENABLED
+    if (test_mouse_phase_logs_enabled) return 0;
+#endif
     unexpected_boot_boundary();
 }
 size_t heap_caps_get_free_size(uint32_t capabilities)
 {
+#if APP_MOUSE_PHASE_ENABLED
+    if (test_mouse_phase_logs_enabled) return 0;
+#endif
     if (test_heap_observation_enabled) {
         ++test_heap_observation_count;
         if (capabilities == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)) return test_heap_free_internal;
@@ -868,10 +884,16 @@ size_t heap_caps_get_free_size(uint32_t capabilities)
 size_t heap_caps_get_minimum_free_size(uint32_t capabilities)
 {
     (void)capabilities;
+#if APP_MOUSE_PHASE_ENABLED
+    if (test_mouse_phase_logs_enabled) return 0;
+#endif
     unexpected_boot_boundary();
 }
 size_t heap_caps_get_largest_free_block(uint32_t capabilities)
 {
+#if APP_MOUSE_PHASE_ENABLED
+    if (test_mouse_phase_logs_enabled) return 0;
+#endif
     if (test_heap_observation_enabled) {
         ++test_heap_observation_count;
         if (capabilities == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)) return test_heap_largest_internal;
@@ -6433,6 +6455,9 @@ static void shared_bluetooth_input_options_reaches_owners(void)
 }
 
 #include "mouse_schedule_cases.inc"
+#if APP_MOUSE_PHASE_ENABLED
+#include "mouse_phase_case.inc"
+#endif
 
 int main(int argc, char **argv)
 {
@@ -6599,6 +6624,9 @@ int main(int argc, char **argv)
     RUN(queued_expired_pad_and_real_clock_refresh_never_replay);
     RUN(mouse_schedule_drains_touch_bursts);
     RUN(mouse_buffer_expiry_before_submit);
+#if APP_MOUSE_PHASE_ENABLED
+    RUN(mouse_phase_observes_local_transition_and_stall_once);
+#endif
     RUN(short_selection_ticket_expires_even_while_scan_is_fresh);
     RUN(common_keys_route_from_keyboard_chooser_rejects_other_origins);
     RUN(network_detail_back_returns_to_list_only_from_valid_origin);

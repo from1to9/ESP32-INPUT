@@ -11,6 +11,16 @@ menu "Input device board resources"
             Bluetooth submission/completion timing; the existing health log
             prints the frozen summary once. Completion is not host receipt.
 
+    config APP_MOUSE_PHASE_DIAGNOSTICS
+        bool "Observe one coordinator window after local Audio to Mouse selection"
+        default n
+        help
+            The first successful local Audio to Mouse selection starts 20 seconds
+            of coordinator phase timing and input outcome counts. Data is grouped
+            in ten two-second intervals and printed only after the window. If
+            touch latency diagnostics are also enabled, their first-movement
+            trigger waits for this window. No audio state is inferred.
+
     config APP_LOCAL_SPEAKER_TEST
         bool "One bounded local speaker tone before media startup"
         default n

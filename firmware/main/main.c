@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_ui.h"
+#include "app_mouse_phase.h"
 #include "app_touch_trace.h"
 #include "app_build_identity.h"
 #include "app_sensor_api.h"
@@ -577,6 +578,10 @@ static bool send_report(void *context, uint8_t report_id,
         usb_hid_send_generation(*generation, report_id, data, length) :
         ble_hid_send_generation(*generation, report_id, data, length);
     if (movement) app_touch_trace_send(accepted);
+#if APP_MOUSE_PHASE_ENABLED
+    if (movement && s_engine.count && s_engine.queue[s_engine.head].buffered_motion)
+        app_mouse_phase_event(accepted ? MOUSE_EVENT_SEND_OK : MOUSE_EVENT_SEND_FAIL);
+#endif
     if (movement) motion_trace_count(accepted ? &s_motion_trace.move_admitted : &s_motion_trace.move_rejected);
     return accepted;
 }
@@ -643,6 +648,7 @@ static void init_hid_engine(void)
 
 static void cancel_input(void)
 {
+    app_mouse_phase_event(MOUSE_EVENT_CANCEL_INPUT);
     update_send(true);
     hid_engine_cancel(&s_engine);
     interaction_touch_result_t touch = interaction_touch_cancel(&s_interaction);
@@ -1445,6 +1451,7 @@ static interaction_multitouch_context_t multitouch_context(void)
 static void apply_multitouch(interaction_multitouch_result_t result)
 {
     s_multitouch_consuming = result.consume_pointer;
+    if (result.cancel_single || result.release_required) app_mouse_phase_event(MOUSE_EVENT_MULTI);
     if (result.cancel_single) cancel_touch_recognition();
     if (result.release_required) {
         cancel_input();
@@ -1462,6 +1469,7 @@ static void apply_multitouch(interaction_multitouch_result_t result)
 static void handle_contacts(const coordinator_event_t *event)
 {
     s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
+    app_mouse_phase_event(MOUSE_EVENT_CONTACT);
     const interaction_contact_snapshot_t *sample = &event->value.touch.sample;
     if (sample->epoch != s_engine.state.epoch || sample->ui_revision != s_ui_revision) return;
     s_multitouch_eligible = event->value.touch.eligible;
@@ -1568,9 +1576,31 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
     /* A callback may enqueue after the loop's initial clock sample. Observe the
      * actual clock rather than treating that legitimate event as future input. */
     s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
-    if (!route_touch(intent)) { cancel_touch_recognition(); sync_interaction(); return; }
+#if APP_MOUSE_PHASE_ENABLED
+    const bool pad = intent->surface == APP_SURFACE_TOUCHPAD;
+    if (pad) {
+        switch (intent->action) {
+        case APP_TOUCH_BEGIN: app_mouse_phase_event(MOUSE_EVENT_BEGIN); break;
+        case APP_TOUCH_MOVE: app_mouse_phase_event(MOUSE_EVENT_MOVE); break;
+        case APP_TOUCH_END: app_mouse_phase_event(MOUSE_EVENT_END); break;
+        case APP_TOUCH_CANCEL: app_mouse_phase_event(MOUSE_EVENT_CANCEL); break;
+        default: break;
+        }
+    }
+#endif
+    if (!route_touch(intent)) {
+#if APP_MOUSE_PHASE_ENABLED
+        if (pad) app_mouse_phase_event(MOUSE_EVENT_ROUTE);
+#endif
+        cancel_touch_recognition();
+        sync_interaction();
+        return;
+    }
     if (remote_update_maintenance() && (intent->action == APP_TOUCH_BEGIN ||
         intent->action == APP_TOUCH_END || intent->action == APP_TOUCH_CANCEL)) {
+#if APP_MOUSE_PHASE_ENABLED
+        if (pad) app_mouse_phase_event(MOUSE_EVENT_GATE);
+#endif
         cancel_touch_recognition(); sync_interaction(); return;
     }
     if (intent->action == APP_TOUCH_BEGIN) {
@@ -1596,25 +1626,36 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         return;
     }
     if (intent->epoch != s_engine.state.epoch || intent->ui_revision != s_ui_revision ||
-        (intent->gesture && intent->gesture == s_consumed_gesture)) return;
+        (intent->gesture && intent->gesture == s_consumed_gesture)) {
+#if APP_MOUSE_PHASE_ENABLED
+        if (pad) app_mouse_phase_event(MOUSE_EVENT_STALE);
+#endif
+        return;
+    }
     if (intent->action == APP_LOCK || intent->action == APP_RELEASE) {
         portENTER_CRITICAL(&s_control_lock);
         s_priority_requests |= intent->action == APP_LOCK ? LOCK_REQUEST : RELEASE_REQUEST;
         portEXIT_CRITICAL(&s_control_lock);
         return;
     }
-    if (s_engine.state.locked) return;
-    if (!app_local_intent_allowed(local_access(), intent)) {
+    if (s_engine.state.locked || !app_local_intent_allowed(local_access(), intent) || s_transport_switch_pending) {
+#if APP_MOUSE_PHASE_ENABLED
+        if (pad) app_mouse_phase_event(MOUSE_EVENT_GATE);
+#endif
         return;
     }
-    if (s_transport_switch_pending) return;
     if (s_engine.state.mode != INPUT_KEYBOARD &&
         (intent->action == APP_BACK || intent->action == APP_CASE ||
          intent->action == APP_SYMBOLS || intent->action == APP_DELETE ||
          intent->action == APP_SPACE || intent->action == APP_CLEAR ||
          intent->action == APP_SEND || intent->action == APP_STOP)) return;
     /* A modal and its settings page own focus. */
-    if (!allowed_in_overlay(intent->action)) return;
+    if (!allowed_in_overlay(intent->action)) {
+#if APP_MOUSE_PHASE_ENABLED
+        if (pad) app_mouse_phase_event(MOUSE_EVENT_GATE);
+#endif
+        return;
+    }
     if (intent->action == APP_CONTROLLER_SELECT || intent->action == APP_CONTROLLER_EDIT) {
         handle_controller_intent(intent);
         return;
@@ -1660,6 +1701,12 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         open_overlay(APP_OVERLAY_BLUETOOTH_DEVICES);
         return;
     case APP_MODE:
+#if APP_MOUSE_PHASE_ENABLED
+        if (s_engine.state.mode == INPUT_AUDIO && intent->x == INPUT_MOUSE) {
+            if (select_mode(INPUT_MOUSE)) app_mouse_phase_start();
+            return;
+        }
+#endif
         (void)select_mode((input_mode_t)intent->x);
         return;
     case APP_MENU:
@@ -2050,14 +2097,21 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         portEXIT_CRITICAL(&s_control_lock);
         if (!touch_down || intent->gesture != live_gesture || intent->gesture != s_touch_gesture ||
             intent->surface != APP_SURFACE_TOUCHPAD) {
+#if APP_MOUSE_PHASE_ENABLED
+            if (pad) app_mouse_phase_event(MOUSE_EVENT_LIVE);
+#endif
             if (interaction_touch_holding(&s_interaction)) cancel_input();
             return;
         }
-        if (!allow_motion) return;
+        if (!allow_motion) {
+            app_mouse_phase_event(MOUSE_EVENT_GESTURE);
+            return;
+        }
 #if APP_TOUCH_TRACE_ENABLED
         if ((intent->x || intent->y) && s_input_transport == APP_INPUT_BLUETOOTH &&
             s_engine.ready && s_engine.state.connected && !s_engine.state.release_pending &&
-            s_engine.state.owner == INPUT_LOCAL && link->ready)
+            s_engine.state.owner == INPUT_LOCAL && link->ready &&
+            (!APP_MOUSE_PHASE_ENABLED || app_mouse_phase_active()))
             app_touch_trace_start(s_now_ms * 1000U, link->generation, intent->gesture, intent->event_ms);
         const size_t trace_before = s_engine.count;
 #endif
@@ -2066,6 +2120,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         if (!delta.x && !delta.y) return;
         result = hid_engine_enqueue_mouse_displacement(&s_engine, intent->epoch, INPUT_LOCAL,
             delta.x, delta.y, intent->event_ms, s_now_ms);
+        app_mouse_phase_event(result == HID_ENGINE_ENQUEUE_OK ? MOUSE_EVENT_ENQUEUE : MOUSE_EVENT_REJECT);
         app_touch_trace_displacement(result == HID_ENGINE_ENQUEUE_OK,
             trace_before && s_engine.count <= trace_before, intent->event_ms, s_now_ms);
         if (result != HID_ENGINE_ENQUEUE_OK) {
@@ -2204,6 +2259,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
 
 static void discard_intents(void)
 {
+    app_mouse_phase_event(MOUSE_EVENT_RESET);
     xQueueReset(s_intents);
     portENTER_CRITICAL(&s_control_lock);
     s_touch_emergency_pending[0] = false;
@@ -2251,6 +2307,7 @@ static bool process_priority(void)
     if (!requests) {
         return false;
     }
+    app_mouse_phase_event(MOUSE_EVENT_PRIORITY);
     app_media_controls_revoke_devices();
     discard_intents();
     cancel_local_editor();
@@ -3025,6 +3082,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
 static void observe_input_expiry(bool congested)
 {
     if (!hid_engine_observe_transport(&s_engine, s_now_ms, congested)) return;
+    app_mouse_phase_event(MOUSE_EVENT_EXPIRY);
     update_send(true);
     s_drag_requested = false;
     discard_intents();
@@ -3039,6 +3097,7 @@ static void observe_input_link(const input_link_t *link, input_link_t *previous)
         discard_intents();
     }
     if (replaced || link->connected != previous->connected || link->ready != previous->ready) {
+        app_mouse_phase_event(MOUSE_EVENT_LINK);
         update_send(true);
         hid_engine_set_link(&s_engine, link->connected, link->ready);
         s_drag_requested = false;
@@ -3114,6 +3173,31 @@ static void __attribute__((noinline)) report_touch_diagnostics(void)
 #define report_touch_diagnostics() ((void)0)
 #endif
 
+#if APP_MOUSE_PHASE_ENABLED
+/* Only active captures require fresh clock reads at phase boundaries. */
+#define MOUSE_PHASE_MARK(phase) do { \
+    if (app_mouse_phase_active()) app_mouse_phase_mark(phase, (uint64_t)esp_timer_get_time()); \
+} while (0)
+
+static void observe_mouse_phase_state(const input_link_t *link)
+{
+    app_mouse_phase_state((!link->ready ? MOUSE_STATE_NOT_READY : 0U) |
+        (link->congested ? MOUSE_STATE_CONGESTED : 0U) |
+        (s_engine.state.release_pending ? MOUSE_STATE_RELEASING : 0U) |
+        (s_engine.state.locked ? MOUSE_STATE_LOCKED : 0U) |
+        (s_engine.state.owner == INPUT_REMOTE ? MOUSE_STATE_REMOTE : 0U) |
+        (s_overlay != APP_OVERLAY_NONE ? MOUSE_STATE_OVERLAY : 0U) |
+        (s_idle.asleep || s_idle.wake_capture ? MOUSE_STATE_IDLE : 0U) |
+        (s_multitouch_consuming ? MOUSE_STATE_MULTI : 0U) |
+        (s_engine.state.mode != INPUT_MOUSE ? MOUSE_STATE_NOT_MOUSE : 0U) |
+        (s_transport_switch_pending ? MOUSE_STATE_SWITCHING : 0U) |
+        (s_input_transport == APP_INPUT_USB ? MOUSE_STATE_USB : 0U) |
+        (!s_interaction.touch.active ? MOUSE_STATE_NO_GESTURE : 0U));
+}
+#else
+#define MOUSE_PHASE_MARK(...) ((void)0)
+#endif
+
 /* Runtime snapshots must not inflate the main task frame during board/NVS
  * startup. Keep this lifetime boundary explicit under target optimization. */
 static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
@@ -3123,11 +3207,15 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
     int64_t last_health_us = esp_timer_get_time();
     hid_engine_step_result_t previous_step = HID_ENGINE_STEP_IDLE;
     unsigned ui_tick = 0;
-#if APP_TOUCH_TRACE_ENABLED
+#if APP_MOUSE_PHASE_ENABLED
+    ESP_LOGI("MousePhase", "armed: select Mouse locally from Audio");
+#elif APP_TOUCH_TRACE_ENABLED
     ESP_LOGI(TAG, "TouchTrace armed: first ready local Bluetooth pad movement starts one 20s window");
 #endif
     for (;;) {
-        s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
+        uint64_t turn_start_us = (uint64_t)esp_timer_get_time();
+        app_mouse_phase_mark(MOUSE_PHASE_PAUSE, turn_start_us);
+        s_now_ms = turn_start_us / 1000U;
         remote_update_service();
         process_buttons();
         ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
@@ -3138,6 +3226,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         observe_input_link(&link, &previous);
         sync_interaction();
         (void)process_priority();
+        MOUSE_PHASE_MARK(MOUSE_PHASE_LINK);
         static EXT_RAM_BSS_ATTR coordinator_event_t event;
         /* Each touch scan can enqueue contacts and primary movement. Drain a
          * bounded FIFO capacity so the old four-event limit does not carry a
@@ -3148,6 +3237,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
                 break;
             }
         }
+        MOUSE_PHASE_MARK(MOUSE_PHASE_FIFO);
         remote_control_service();
         service_local_editor();
         service_bluetooth_name();
@@ -3159,6 +3249,10 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         sync_interaction();
         process_motion();
         service_motion_capture();
+        MOUSE_PHASE_MARK(MOUSE_PHASE_INPUT);
+#if APP_MOUSE_PHASE_ENABLED
+        if (app_mouse_phase_active()) observe_mouse_phase_state(&link);
+#endif
         if (!link.congested) {
             /* A turn can stall after admitting movement. Check its age at
              * report service so the engine can choose a neutral release. */
@@ -3180,12 +3274,15 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
             }
             previous_step = step;
         }
+        MOUSE_PHASE_MARK(MOUSE_PHASE_HID);
         app_remote_input_service(s_remote_input, s_now_ms);
         update_send(false);
         service_pair_operation(&bluetooth);
         service_transport_switch();
         service_display();
+        MOUSE_PHASE_MARK(MOUSE_PHASE_SERVICES);
         service_media();
+        MOUSE_PHASE_MARK(MOUSE_PHASE_MEDIA);
         service_connectivity();
         if (s_engine.state.release_pending) s_drag_requested = false;
         if (++ui_tick >= 10) {
@@ -3193,6 +3290,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
             render_view(&bluetooth, error);
         }
         int64_t now = esp_timer_get_time();
+        app_mouse_phase_mark(MOUSE_PHASE_VIEW, (uint64_t)now);
         if (now - last_health_us >= 10000000) {
             last_health_us = now;
             report_touch_diagnostics();
@@ -3238,6 +3336,8 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
             }
         }
         ESP_ERROR_CHECK(esp_task_wdt_reset());
+        MOUSE_PHASE_MARK(MOUSE_PHASE_HEALTH);
+        app_mouse_phase_report();
         /* Never catch up delayed ticks by emitting a burst of stale reports. */
         vTaskDelay(pdMS_TO_TICKS(COORDINATOR_PERIOD_MS));
     }

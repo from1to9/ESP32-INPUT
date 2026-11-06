@@ -1656,8 +1656,11 @@ def digest(path):
 
 def measurement_units(build):
     units = dict(UNITS)
-    if "#define CONFIG_APP_TOUCH_LATENCY_DIAGNOSTICS 1" in (build / "config/sdkconfig.h").read_text():
+    config = (build / "config/sdkconfig.h").read_text()
+    if "#define CONFIG_APP_TOUCH_LATENCY_DIAGNOSTICS 1" in config:
         units["touch_trace"] = "firmware/main/app_touch_trace.c"
+    if "#define CONFIG_APP_MOUSE_PHASE_DIAGNOSTICS 1" in config:
+        units["mouse_phase"] = "firmware/main/app_mouse_phase.c"
     for name, spec in GENERATED_TINYUSB.items():
         generated = build.resolve() / "generated/tinyusb_audio" / spec["filename"]
         units[name] = str(generated.relative_to(ROOT)) if generated.is_relative_to(ROOT) else str(generated)
@@ -1693,6 +1696,29 @@ def touch_trace_paths():
             paths[label + "_close"] = base + [("touch_trace", "in_window"), ("touch_trace", "close_window")]
             owners[label + "_close"] = owner
     return paths, owners, required
+
+
+def mouse_phase_paths():
+    """The observer runs entirely on the coordinator, including its dump."""
+    contacts = CORE + [("main", "consume_coordinator_event"), ("main", "handle_contacts"),
+        ("main", "apply_multitouch")]
+    link = CORE + [("main", "observe_input_link")]
+    entries = {
+        "start": (LOCAL_INTENT, "start"),
+        "mark": (CORE, "mark"),
+        "state": (CORE + [("main", "observe_mouse_phase_state")], "state"),
+        "intent": (LOCAL_INTENT, "event"),
+        "contact_cancel": (contacts + [("main", "cancel_input")], "event"),
+        "link_cancel": (link + [("main", "cancel_input")], "event"),
+        "link_expiry": (link + [("main", "observe_input_expiry"), ("main", "discard_intents")], "event"),
+        "priority": (PATHS["priority"] + [("main", "discard_intents")], "event"),
+        "mode_cancel": (LOCAL_INTENT + [("main", "open_overlay"), ("main", "cancel_input")], "event"),
+        "send": (TOUCH_SEND, "event"),
+        "report": (CORE, "report"),
+    }
+    paths = {"mouse_phase_" + name: prefix + [("mouse_phase", "app_mouse_phase_" + entry)]
+             for name, (prefix, entry) in entries.items()}
+    return paths, dict.fromkeys(paths, "main"), {steps[-1] for steps in paths.values()}
 
 
 def verify_generated_source(build, database, unit):
@@ -1925,6 +1951,9 @@ def main():
     declared_paths, owners, required = dict(PATHS), dict(PATH_OWNERS), set(REQUIRED)
     if "touch_trace" in units:
         extra_paths, extra_owners, extra_required = touch_trace_paths()
+        declared_paths.update(extra_paths); owners.update(extra_owners); required.update(extra_required)
+    if "mouse_phase" in units:
+        extra_paths, extra_owners, extra_required = mouse_phase_paths()
         declared_paths.update(extra_paths); owners.update(extra_owners); required.update(extra_required)
     chains, errors = evaluate_paths(frames, budgets, paths=declared_paths, owners=owners, required=required)
     interrupt_inventory, interrupt_errors = interrupt_frame_inventory(frames, config)
