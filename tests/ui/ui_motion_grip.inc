@@ -15,11 +15,11 @@ static void motion_grip_checks(void)
     s_state.tap_to_click_available = s_state.tap_to_click_enabled = true;
     strcpy(s_state.preview, "Unsent draft");
     const struct { app_motion_reference_t reference; const char *scene, *hint, *caption; } cases[] = {
-        {APP_REFERENCE_READY, "ready", "Grip ready. Touch pauses motion.", "Motion / on"},
-        {APP_REFERENCE_ACQUIRING, "acquiring", "Hold still to set your grip.", "Motion / waiting"},
-        {APP_REFERENCE_UNSTABLE, "restoring", "Hold still to restore your grip.", "Motion / waiting"},
-        {APP_REFERENCE_UNKNOWN, "unknown", "Grip status unavailable. Open Status.", "Motion / unavailable"},
-        {APP_REFERENCE_UNAVAILABLE, "unavailable", "Grip unavailable. Open Status.", "Motion / unavailable"},
+        {APP_REFERENCE_READY, "ready", "Aim ready. Touch pauses motion.", "Motion / on"},
+        {APP_REFERENCE_ACQUIRING, "acquiring", "Hold still to recover aim.", "Motion / waiting"},
+        {APP_REFERENCE_UNSTABLE, "restoring", "Aim unstable. Hold still.", "Motion / waiting"},
+        {APP_REFERENCE_UNKNOWN, "unknown", "Aim status unavailable. Open Status.", "Motion / unavailable"},
+        {APP_REFERENCE_UNAVAILABLE, "unavailable", "Aim unavailable. Open Status.", "Motion / unavailable"},
     };
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
         s_state.motion_settings.reference = cases[i].reference;
@@ -63,7 +63,7 @@ static void motion_grip_checks(void)
     s_state.motion_settings.reference = APP_REFERENCE_READY;
     s_state.motion_enabled = false; s_state.motion_recenter_available = false;
     ++s_state.ui_revision; screenshot("mouse-grip-off");
-    assert(has_visible_label(lv_screen_active(), "Enable Motion to set your grip."));
+    assert(has_visible_label(lv_screen_active(), "Enable Motion to aim."));
     clear_intents(); tap_control("Recenter");
     assert(lv_obj_has_state(control("Recenter"), LV_STATE_DISABLED));
     assert(action_count(APP_RECENTER) == 0 && action_count(APP_MOTION) == 0 && !s_state.motion_enabled);

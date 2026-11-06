@@ -468,7 +468,7 @@ bool app_remote_input_motion_sample(app_remote_input_t *m, const interaction_imu
     if (focus != m->port.interaction->view.focus && revisions_available(m))
         changed(m,APP_REMOTE_CHANGED_SELECTION | APP_REMOTE_CHANGED_UI);
     if (delta.x || delta.y)
-        (void)hid_engine_enqueue_mouse_move(m->port.engine,m->port.engine->state.epoch,source,delta.x,delta.y);
+        (void)hid_engine_enqueue_aim_move(m->port.engine,m->port.engine->state.epoch,source,delta.x,delta.y);
     return true;
 }
 

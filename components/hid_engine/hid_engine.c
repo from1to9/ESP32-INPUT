@@ -242,6 +242,13 @@ hid_engine_enqueue_result_t hid_engine_enqueue_mouse_move(hid_engine_t *engine,
     return enqueue_mouse(engine, epoch, owner, 0, x, y, 0, false, false);
 }
 
+hid_engine_enqueue_result_t hid_engine_enqueue_aim_move(hid_engine_t *engine,
+    uint64_t epoch, input_owner_t owner, int x, int y)
+{
+    if (engine->count) return HID_ENGINE_ENQUEUE_BLOCKED;
+    return hid_engine_enqueue_mouse_move(engine, epoch, owner, x, y);
+}
+
 hid_engine_enqueue_result_t hid_engine_enqueue_mouse_displacement(hid_engine_t *engine,
     uint64_t epoch, input_owner_t owner, int x, int y, uint64_t sample_ms, uint64_t now_ms)
 {

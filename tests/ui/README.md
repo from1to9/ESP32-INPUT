@@ -144,7 +144,7 @@ values; the UI cannot make runtime-only changes durable.
 
 The Navigation selection renders both themes and exercises the two independent
 62 x 48 Home/Back targets inside the original 132 x 48 Mouse header slot,
-AssistiveTouch setup, Input Reset grip, acknowledged preference changes,
+AssistiveTouch setup, Input Recenter aim, acknowledged preference changes,
 header replacement under held touches, disabled/stale admission and the
 unchanged keyboard draft/header. It also runs existing Motion grip, common-key
 and settings checks. These are native LVGL observations, not host mapping or

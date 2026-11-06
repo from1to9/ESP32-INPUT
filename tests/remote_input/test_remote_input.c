@@ -561,7 +561,7 @@ static void prepare_recenter(fixture_t *f)
     assert(f->model.gravity_ready && !f->engine.count);
 }
 
-static void recenter_applies_once_without_claiming_acquisition(void)
+static void recenter_applies_once_without_realigning_duplicates(void)
 {
     fixture_t f; prepare_recenter(&f);
     const uint64_t epoch=f.engine.state.epoch, sample_time=f.model.sample_us;
@@ -575,7 +575,7 @@ static void recenter_applies_once_without_claiming_acquisition(void)
         result.state==CP_RESULT_APPLIED && !strcmp(result.reason,"motion_reference_reset"));
     assert(f.recentered==1 && f.engine.state.epoch==epoch && f.model.sample_us==sample_time &&
         f.engine.state.gyro_enabled && f.model.view.motion_enabled && f.model.view.calibrated &&
-        !f.model.gravity_ready && !f.model.geometry_ready && !f.engine.count &&
+        f.model.gravity_ready && !f.model.aim_aligned && !f.engine.count &&
         f.reports_count==reports && !memcmp(&config,&f.model.config,sizeof(config)) &&
         !memcmp(bias,f.model.bias,sizeof(bias)));
     app_remote_input_view_t after; app_remote_input_snapshot(f.remote, &after);
@@ -584,11 +584,10 @@ static void recenter_applies_once_without_claiming_acquisition(void)
     f.now+=10;
     interaction_imu_sample_t sample={.timestamp_us=f.now*1000,.az_g=1};
     assert(app_remote_input_motion_sample(f.remote,&sample,f.now));
-    const uint64_t acquiring_since=f.model.gravity_acquire_us;
-    const size_t samples=f.model.gravity_acquire_samples;
+    assert(f.model.aim_aligned);
     assert(app_remote_input_execute(f.remote,&cmd,f.now,&result)==CP_OK &&
         result.state==CP_RESULT_APPLIED && f.recentered==1 &&
-        f.model.gravity_acquire_us==acquiring_since && f.model.gravity_acquire_samples==samples);
+        f.model.aim_aligned);
     cp_command_t expired=command(&f,CP_OP_INPUT_MOTION_RECENTER,"{}"); expired.deadline_ms=f.now;
     assert(app_remote_input_execute(f.remote,&expired,f.now,&result)==CP_EXPIRED && f.recentered==1);
     for (unsigned i=0;i<16;++i) {
@@ -669,7 +668,7 @@ static void current_authority_stops_held_and_queued_input(void)
 int main(void)
 {
     current_authority_stops_held_and_queued_input();
-    recenter_applies_once_without_claiming_acquisition();
+    recenter_applies_once_without_realigning_duplicates();
     recenter_rejects_authority_mode_and_held_work();
     storage_alignment_rejects_without_mutation_and_recovers();
     lease_barrier_renewal_and_safety();

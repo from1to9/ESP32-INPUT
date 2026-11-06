@@ -50,36 +50,27 @@ Call `interaction_touch_tick` after ordered queued events. A real stationary 0/0
 
 Board input is already axis-mapped angular velocity in degrees/second and acceleration in g, with monotonic microsecond timestamps. Calibration requires at least 64 consecutive samples spanning 500 ms, acceleration norm within 0.08 g of one, per-axis acceleration change within 0.03 g of the window's first sample, raw gyro no greater than 5 dps, and gyro variance no greater than 0.04 dps squared. It uses online statistics, not stored sample history. Reject nonfinite values, gyro outside +/-2000 dps, acceleration outside +/-16 g, repeated/backward timestamps, and intervals over 50 ms. Invalid/gapped intervals clear residual motion and restart an incomplete calibration window. Users must hold still; a gravity-only stationary check cannot distinguish every constant yaw rotation from bias.
 
-Calibrated rates pass through a deadzone and a first-order filter. The deadzone clears a stopped axis immediately, preventing filter tails from moving a stationary pointer. Mouse integration uses production `input_motion_step` with actual sample intervals and bounded fractional carry. Keyboard Motion integrates local angular focus with configurable boundary hysteresis and returns zero host movement. Audio always returns zero. Touch, button down, menus and haptics suppress gyro output; touch release has a 150 ms freeze. Touch/haptic suppression preserves prior mouse intent; menus and canonical state boundaries clear it. Returning to Mouse requires explicit enabling.
+Mouse Motion uses gyro-propagated quaternion increments projected onto the
+aiming basis established by sensor calibration. Motion toggles and touch
+suppression preserve the basis and continuous attitude. Their output
+boundaries clear filter and carry and discard the first eligible interval.
+Keyboard selection uses its existing signed local angular axes and never
+emits host pointer movement. Audio emits no movement.
 
-A new Mouse motion enable intentionally clears its old orientation reference
-and waits for the current stable grip using the same recovery criteria below.
-Repeated enable is idempotent and does not restart acquisition. Motion remains
-requested while waiting and can always be disabled. `interaction_recenter_owned`
-applies the same reset to already enabled Mouse motion from its current owner;
-it requires calibrated, non-calibrating, unlocked and output-ready state without
-a menu. It preserves gyro bias, tuning, canonical state/epoch, motion intent and
-sample-time continuity checks, while clearing gravity/geometry acquisition and
-filter/fraction carry. Actual fresh stable samples establish the new reference;
-the acquisition frame emits no movement. This is a gravity reference for relative
-rotation, not an absolute heading or moving neutral-angle baseline.
-
-The coordinator rechecks actual sensor, route, epoch/UI revision, release,
-maintenance, wake, overlay and ownership gates. Explicit Recenter is busy with
-queued or held input; it never purges input or cancels mandatory releases. UI
-eligibility excludes per-report queue flicker, with real occupancy rechecked on
-admission. Remote `input.motion.recenter` uses the same owner path under an active
-device-IMU input-control lease. APPLIED acknowledges the reset only; observed
-reference readiness is separate. Duplicate commands cannot restart acquisition.
-Bias calibration remains a distinct operation that disables motion and gathers
-new bias evidence.
+Recenter captures the current aiming direction with a fresh, valid attitude
+and preserves bias, settings, epoch, sample history and Motion intent.
+The local settings action works with Motion off. Remote
+`input.motion.recenter` uses the same owner path under an active device-IMU
+input-control lease, and duplicate requests retain their original result.
+Bias calibration disables Motion and measures new bias and direction.
 
 The existing `imu.state` (`/api/v1/imu`) response adds `motion_requested`,
 `input_ready`, `output_ready` booleans and `reference_state` with values
 `unknown`, `unavailable`, `acquiring`, `unstable` or `ready`. The coordinator
 uses one shared derivation for UI and this encoder: unknown before its model
 clock has been observed, unavailable without actual IMU capability, acquiring
-without gravity, unstable with unavailable/limited geometry, otherwise ready.
+during calibration or attitude recovery, otherwise ready for fresh attitude.
+The existing unstable value remains available to older API consumers.
 Calibration fields remain separate. Reference readiness does not imply route
 readiness, absence of touch/freeze suppression, or host delivery. Input/output
 readiness retain their existing route/model meanings. Too-small responses fail
@@ -89,11 +80,13 @@ Keyboard angular position spans all three rows and columns. Selection compares o
 
 Touch movement accepts finite relative displacements in +/-4096 HID units per call, with gain divisors 1, 4 or 8, fractional carry and output bounded to +/-127. It requires active touch, Mouse mode, a current local owner and output readiness. Invalid/suppressed intervals and gain changes discard residual motion. HID units are not screen pixels. Calibration, axis orientation, default gain, filtering, freeze and selector thresholds still require actual-board tuning; host regressions do not establish physical accuracy.
 
-Mouse samples use a right-handed display body frame: X right, Y top and Z outward, with degrees/second gyro and g specific force rotated by the same proper sensor transform. The board adapter must verify that transform; output inversion never substitutes for a physical rotation. Horizontal velocity projects onto estimated world-up; vertical velocity projects onto display-right after removing its world-up component. Both screen-up and upright grips therefore use the appropriate yaw axis without a posture jump. Keyboard selection instead uses immutable signed axes (`selector_axis_x/y`, +/-1 X, +/-2 Y, +/-3 Z, distinct absolute axes) and retains its grid geometry and confirmation behavior.
+The [orientation design](../../docs/motion-estimation.md) specifies the
+calibrated basis, conditional gravity correction, gyro-only propagation and
+real-loss recovery. The model uses the existing right-handed display body
+frame and the original 50 ms sample interval limit. Keyboard selection keeps
+its immutable signed axes and local grid geometry.
 
-A gyro-propagated gravity reference accepts bounded acceleration correction only near one g with suitable innovation and gyro-compensated jerk. Ordinary acceleration can use prediction for at most 250 ms. Freefall, impact, sensor saturation, invalid samples and sample-time discontinuity invalidate the reference; recovery requires at least eight stable samples spanning 100 ms and discards the recovery sample's output. Haptic intervals use gyro-only prediction without acceleration correction for at most 250 ms; longer vibration invalidates the reference until stable recovery. Touch suppresses output while valid orientation tracking continues. Near vertical display-right, vertical sensitivity fades between projected lengths 0.35 and 0.15; below 0.15 pointer output pauses, with a stable 100 ms geometry reanchor beyond 0.35. These numerical profile bounds are source/host checked and remain physically unqualified.
-
-Configuration accepts independent X/Y gains 0.25..100 HID units/degree, deadzone 0..10 dps, filter time constant 0..1 seconds, settling freeze 0..1000 ms, selector cell width 1..45 degrees and hysteresis from zero up to half a cell (exclusive). Defaults are X=Y=4, no inversion, deadzone 0.5 dps, filter 0.03 seconds, freeze 150 ms, cell width 6 degrees and hysteresis 1 degree. `interaction_freeze_after` applies the configured duration to original event time with saturating arithmetic; `interaction_freeze_until` still accepts an explicit later deadline. Configuration changes clear filters and carry. Status flags distinguish calibrated, gravity ready, gyro-predicted, limited geometry and suppressed output, with a reason for suppression. Calls and snapshots must remain on the coordinator; the model is not thread-safe.
+Configuration accepts independent X/Y gains 0.25..100 HID units/degree, deadzone 0..10 dps, filter time constant 0..1 seconds, settling freeze 0..1000 ms, selector cell width 1..45 degrees and hysteresis from zero up to half a cell (exclusive). Defaults are X=Y=4, no inversion, deadzone 0.5 dps, filter 0.03 seconds, freeze 150 ms, cell width 6 degrees and hysteresis 1 degree. `interaction_freeze_after` applies the configured duration to original event time with saturating arithmetic; `interaction_freeze_until` still accepts an explicit later deadline. Configuration changes clear filters and carry. Status flags distinguish calibrated, gravity ready, gyro-predicted and suppressed output, with a reason for suppression. Calls and snapshots must remain on the coordinator; the model is not thread-safe.
 
 ### Optional reference-loss evidence
 

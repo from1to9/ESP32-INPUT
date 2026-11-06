@@ -46,7 +46,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 | M02 | Touch fine control | Relative single-finger movement; quarter/eighth gain; touch priority and a short release freeze |
 | M03 | Mouse buttons and wheel | Left/right click and explicit drag. Tap either scroll arrow for one wheel step or slide one finger vertically anywhere in the right scroll column. Interruptions release drag. |
 | M04 | Touchpad gestures | Configurable tap-to-click: single tap, double tap and double-tap-and-hold drag; movement-only when disabled |
-| M05 | Automatic grip reference | Establish a stable grip when Motion starts; recover after reference loss without jumps; expose waiting/ready states and a separate Recenter action that preserves sensor bias |
+| M05 | Calibrated aiming reference | Set the aiming direction during sensor calibration, preserve it across Motion toggles and touch pauses, and provide separate manual Recenter |
 | K01 | Composite HID | One stable HID service with separate mouse/keyboard report IDs; no re-pairing when changing modes |
 | K02 | Motion character selection | Group -> character -> explicit confirmation into preview; local focus only |
 | K03 | Character entry | A-Z/a-z, digits, space, delete, common ASCII punctuation and clear-preview action |
@@ -58,36 +58,19 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 
 ### Mouse behavior
 
-The requested behavior uses the accelerometer/gravity and gyro observations to
-estimate handheld movement. Holding orientation compensates gravity and maps
-left/right and up/down. The user specifies the intended interaction, not a raw
-acceleration-to-speed formula or exact absolute displacement. Gyro data may
-contribute to orientation; rotation itself must not directly drive the Mouse
-pointer. Keyboard angular selection is unchanged.
+Rotate the held device to aim the Mouse pointer. Calibrate while holding the
+desired aiming direction. The device tracks orientation and projects observed
+angular increments onto the calibrated axes. It sends relative movement over
+the existing USB or Bluetooth HID connection. Host software and screen
+calibration are unnecessary. Gains remain in HID units per degree, with
+independent X/Y sensitivity, inversion, filtering and touch freeze. Keyboard
+angular selection retains its existing behavior.
 
-Movement should respond continuously to intentional waving, brake without an
-immediate direction reversal, and remain still after the hand stops. Do not
-introduce an arbitrary short movement timeout to conceal estimator drift. Keep
-independent horizontal/vertical sensitivity, inversion, filtering and touch
-freeze configurable with explicit units. A new estimator must migrate old
-HID/degree settings rather than reinterpret them. HID units are not screen pixels.
-
-The [algorithm investigation](motion-estimation.md) records candidate open-source
-libraries, sampling constraints and the validation boundary. The installed
-angular candidate has not passed user acceptance. A replacement remains a local
-prototype until mathematical, causal replay and physical hand tests establish
-usable behavior. Enabling Motion and Recenter retain their acknowledged grip
-acquisition flow; changes in reference must never produce pointer jumps.
-
-Expose manual **Recenter** separately from **Calibrate sensor**. Recenter preserves
-the established gyro bias and settings, clears pending motion carry, and waits
-for valid stable grip evidence before resuming the existing Motion intent.
-It never enables a disabled mode or treats unavailable hardware as calibrated.
-Show waiting while grip acquisition/recovery is pending, and distinguish that
-state from link, sensor, calibration and ownership failures. Ordinary touch
-pauses and zero movement do not indicate failed grip acquisition. The same
-operation must be available through the authenticated Wi-Fi input API with the
-existing ownership, lease, readiness and stale-request checks.
+The [Mouse interaction contract](interaction.md#mouse) defines reference
+retention, recovery and manual **Recenter**. The [orientation
+design](motion-estimation.md) describes the mapping, measured boundaries and
+the earlier translation experiments. Source and bench tests establish the
+implemented behavior. Physical aiming feel requires testing on the device.
 
 Touch start, physical button down, menus, calibration and keyboard selection suppress host pointer output. Entering keyboard/audio clears the motion intent; returning to mouse requires explicit re-enabling. Leaving fine control may restore the previous motion intent. Haptic feedback must also suppress IMU output during vibration.
 
@@ -116,7 +99,7 @@ release/cancel action. Gesture interruption must never leave a host button held.
 Input settings provides a persisted **Navigation** layout, disabled by default.
 It replaces only the Mouse header Recenter rectangle with independent Home and
 Back buttons; pointer, wheel, critical controls, Menu, ordinary layout and keyboard
-draft behavior remain intact. Input settings retains **Reset grip**, distinct
+draft behavior remain intact. Input settings retains **Recenter aim**, distinct
 from sensor calibration and unable to enable Motion by itself.
 
 Home uses the existing third mouse button and requires an explicit AssistiveTouch

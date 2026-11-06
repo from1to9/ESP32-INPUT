@@ -407,14 +407,12 @@ mouse buttons, drag, held touch and virtual contacts are busy; admission never
 purges them to make room for a reset. The coordinator also checks real hardware,
 calibration, maintenance, transport, wake and physical-contact conditions.
 
-The shared reference-reset delegate preserves gyro bias, settings, calibration,
-Motion intent, input epoch and sample-time continuity. It clears the grip
-reference, acquisition state, filters and carry. `APPLIED` acknowledges that
-explicit reset; actual reference readiness follows the existing eight-stable-
-sample and 100 ms acquisition conditions, with no delta on the recovery frame.
-There is no completion timer or additional asynchronous job. Existing command
-identity/replay rules retain the prior result without invoking a second reset;
-stale, expired or foreign requests cannot reset the reference.
+The shared delegate captures the current aiming direction from a fresh, valid
+attitude. It preserves gyro bias, settings, calibration, Motion intent, input
+epoch and sample-time continuity. It clears filters and carry and aligns the
+next eligible output interval. `APPLIED` acknowledges the new basis. Existing
+command identity and replay rules retain the prior result for duplicate
+requests. Stale, expired or foreign requests cannot change the basis.
 
 The existing `imu.state` / `GET /api/v1/imu` observation adds these bounded
 fields, while preserving its availability, calibration, age and error fields:
@@ -422,11 +420,10 @@ fields, while preserving its availability, calibration, age and error fields:
 | Field | Meaning |
 | --- | --- |
 | `motion_requested` | Actual engine Motion intent, shared with the native UI. |
-| `reference_state` | `unknown`, `unavailable`, `acquiring`, `unstable` or `ready`, using the same coarse state as the UI. Unknown means no model clock observation; unavailable means the actual IMU is unavailable; acquiring means gravity is not ready; unstable means gravity is ready but geometry is not ready or is limited. Ready requires acquired gravity and geometry with no limited-reference condition. |
+| `reference_state` | `unknown` before a model clock observation, `unavailable` without the IMU, `acquiring` during calibration or attitude recovery, and `ready` with a fresh valid attitude. The enum retains the older `unstable` value. |
 | `input_ready` | Actual input engine/selected route readiness observation. |
 | `output_ready` | Interaction admission readiness, independently observed from grip/reference acquisition. |
 
-Transient touch, haptic or freeze suppression does not by itself relabel an
-acquired grip reference. A reset result and a later readiness observation are
-distinct evidence; clients observe this resource rather than waiting a success
-timer. Reference readiness alone does not establish host output.
+Touch, haptics and settling can pause output while the aiming reference stays
+ready. Clients can observe sensor and route readiness independently of a
+Recenter result. Host delivery requires separate evidence.

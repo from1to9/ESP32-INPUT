@@ -694,10 +694,10 @@ static void motion_reason_and_tap_setting_checks(void)
     app_view_t original = s_state;
     const struct { app_motion_reason_t reason; const char *name; const char *label; } cases[] = {
         {APP_MOTION_UNKNOWN, "unknown", "Motion status unavailable"},
-        {APP_MOTION_READY, "ready", "Enable Motion to set your grip"},
+        {APP_MOTION_READY, "ready", "Enable Motion to aim"},
         {APP_MOTION_SENSOR_UNAVAILABLE, "sensor-unavailable", "Motion sensor unavailable"},
         {APP_MOTION_CALIBRATION_REQUIRED, "calibration-required", "Calibrate sensor"},
-        {APP_MOTION_CALIBRATING, "calibrating", "Keep the device still"},
+        {APP_MOTION_CALIBRATING, "calibrating", "Hold still in your aiming direction"},
         {APP_MOTION_PROVIDER_UNAVAILABLE, "provider-unavailable", "Selected input provider unavailable"},
         {APP_MOTION_DISCONNECTED, "usb-disconnected", "Connect a USB data host"},
         {APP_MOTION_INPUT_NOT_READY, "input-unready", "Host connected; input is not ready"},

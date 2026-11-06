@@ -15,7 +15,7 @@ separate, explicitly deferred result.
 | Area | Required behavior | Owning boundary | Local evidence required | Deferred physical evidence |
 | --- | --- | --- | --- | --- |
 | Composite input | BLE and USB keyboard/mouse; explicit transport selection, no replay or duplicate host output | HID engine, BLE/USB adapters, coordinator | Descriptor checks; release, congestion, reconnect and switch tests | iPhone/iPad/Windows/macOS input |
-| Motion | Gravity-referenced automatic grip, independent X/Y gain/direction, calibration, no drift backlog | Interaction, board transform | Both grips, transitions, invalid acceleration/time, geometry and suppression tests | Axis signs, comfortable gain and stationary drift |
+| Motion | Calibrated aiming basis, independent X/Y gain and direction, Recenter, no replay after pauses | Interaction, board transform | Rotation increments, varied grips, recovery and suppression | Axis signs, comfortable gain and stationary drift |
 | Touchpad | Default single/double tap and held drag alongside Motion; saved movement-only option; swipe movement | Interaction, touch reader, coordinator | Raw movement paths, missing/up/stale events, refusal and release ownership | Contact behavior and feel |
 | Additional gestures | Two-finger scroll/right tap only with an actual multi-contact provider; clear help and cancel | One touch reader, portable recognizer, UI | Duplicate IDs, overflow, two-to-one transition, timeout and no phantom clicks | Multi-contact sensor accuracy |
 | Keyboard | Nine-cell group/letter selection, preview, explicit Send, punctuation, common keys and shortcuts | Interaction, HID engine, UI | Selection boundaries, interrupted prefix, key pairs, empty cells | Target layout and focus behavior |

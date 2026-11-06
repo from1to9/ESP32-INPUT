@@ -1,4 +1,8 @@
-# Experimental handheld translation observer
+# Historical handheld translation observer
+
+This experimental component records the earlier translation research. Current
+Mouse Motion uses rotational aiming in the [interaction
+component](../interaction/README.md).
 
 Status: unqualified, 2026-10-23. This independent portable component has no caller
 in the production input engine. Do not enable it as a replacement Mouse path.

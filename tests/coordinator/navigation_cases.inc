@@ -91,7 +91,7 @@ static void navigation_failed_release_recovers_without_replaying_action(void)
     }
 }
 
-static void navigation_setting_persists_and_input_reset_grip_keeps_motion_off(void)
+static void navigation_setting_persists_and_input_recenter_keeps_motion_off(void)
 {
     setup(INPUT_MOUSE);
     assert(!s_settings.navigation);
@@ -106,7 +106,7 @@ static void navigation_setting_persists_and_input_reset_grip_keeps_motion_off(vo
     action(APP_CLOSE, 0);
     render_view(&test_link, ESP_OK);
     assert(test_view.navigation_available);
-    calibrate(); action(APP_MOTION, 0); settle_motion_reference();
+    calibrate(); action(APP_MOTION, 0); align_motion_output();
     const float bias = s_interaction.bias[0];
     settings_page(APP_SETTINGS_INPUT);
     assert(!s_engine.state.gyro_enabled);
@@ -114,7 +114,7 @@ static void navigation_setting_persists_and_input_reset_grip_keeps_motion_off(vo
     assert(test_view.motion_recenter_available);
     action(APP_RECENTER, 0);
     assert(!s_engine.state.gyro_enabled && !s_interaction.view.motion_enabled);
-    assert(!s_interaction.gravity_ready && s_interaction.bias[0] == bias && s_interaction.view.calibrated);
+    assert(s_interaction.gravity_ready && s_interaction.bias[0] == bias && s_interaction.view.calibrated);
     assert(!s_engine.count);
 }
 
@@ -122,4 +122,4 @@ static void navigation_setting_persists_and_input_reset_grip_keeps_motion_off(vo
     RUN(navigation_reports_use_both_transports_without_editing_draft); \
     RUN(navigation_admission_rejects_stale_held_and_covered_input); \
     RUN(navigation_failed_release_recovers_without_replaying_action); \
-    RUN(navigation_setting_persists_and_input_reset_grip_keeps_motion_off)
+    RUN(navigation_setting_persists_and_input_recenter_keeps_motion_off)

@@ -823,20 +823,9 @@ static void calibrated_board_grip(interaction_t *model, float tilt)
     float calibrated_bias[3];
     memcpy(calibrated_bias, model->bias, sizeof calibrated_bias);
     assert(interaction_set_motion(model, true));
-    assert(model->view.calibrated && model->view.motion_enabled && !model->gravity_ready);
-    const uint64_t enabled_us = s_imu_sample.timestamp_us;
-    /* Enabling intentionally reacquires the current physical reference. Feed
-     * new matching still frames through the real adapter, rather than setting
-     * reference flags or reusing the calibration result in the fixture. */
-    for (unsigned i = 0; i < 12; ++i) {
-        const bool had_reference = model->gravity_ready;
-        const input_delta_t delta = board_motion_frame(model);
-        assert(delta.x == 0 && delta.y == 0);
-        if (s_imu_sample.timestamp_us - enabled_us < 100000) assert(!model->gravity_ready);
-        if (!had_reference && model->gravity_ready)
-            assert(model->view.motion_block_reason == INTERACTION_MOTION_BLOCK_REFERENCE);
-    }
-    assert(model->gravity_ready && model->geometry_ready && model->view.motion_enabled);
+    assert(model->view.calibrated && model->view.motion_enabled && model->gravity_ready);
+    const input_delta_t aligned = board_motion_frame(model);
+    assert(aligned.x == 0 && aligned.y == 0 && model->aim_aligned);
     assert(model->view.calibrated && !memcmp(calibrated_bias, model->bias, sizeof calibrated_bias));
 }
 
@@ -862,7 +851,7 @@ static void test_board_to_model_flat_inclined_and_upright_axes(void)
                     hw.gyro[2] = pitch ? 0 : rate * cosf(tilt);
                     const input_delta_t delta = board_motion_frame(&model);
                     total_x += delta.x; total_y += delta.y;
-                    assert(model.gravity_ready && model.geometry_ready);
+                    assert(model.gravity_ready);
                 }
                 if (pitch) {
                     assert(abs(total_x) <= 1 && total_y * direction >= 61 && total_y * direction <= 64);

@@ -932,17 +932,17 @@ static const char *motion_reason(const app_view_t *view)
 {
     switch (view->motion_reason) {
     case APP_MOTION_READY:
-        if (!view->motion_enabled) return "Enable Motion to set your grip.";
+        if (!view->motion_enabled) return "Enable Motion to aim.";
         switch (view->motion_settings.reference) {
-        case APP_REFERENCE_READY: return "Grip ready. Touch pauses motion.";
-        case APP_REFERENCE_ACQUIRING: return "Hold still to set your grip.";
-        case APP_REFERENCE_UNSTABLE: return "Hold still to restore your grip.";
-        case APP_REFERENCE_UNAVAILABLE: return "Grip unavailable. Open Status.";
-        default: return "Grip status unavailable. Open Status.";
+        case APP_REFERENCE_READY: return "Aim ready. Touch pauses motion.";
+        case APP_REFERENCE_ACQUIRING: return "Hold still to recover aim.";
+        case APP_REFERENCE_UNSTABLE: return "Aim unstable. Hold still.";
+        case APP_REFERENCE_UNAVAILABLE: return "Aim unavailable. Open Status.";
+        default: return "Aim status unavailable. Open Status.";
         }
     case APP_MOTION_SENSOR_UNAVAILABLE: return "Motion sensor unavailable.";
     case APP_MOTION_CALIBRATION_REQUIRED: return "Calibrate sensor in Input settings.";
-    case APP_MOTION_CALIBRATING: return "Keep the device still to calibrate sensor.";
+    case APP_MOTION_CALIBRATING: return "Hold still in your aiming direction.";
     case APP_MOTION_PROVIDER_UNAVAILABLE: return "Selected input provider unavailable.";
     case APP_MOTION_DISCONNECTED: return view->input_transport == APP_INPUT_USB ?
         "Connect a USB data host." : "Connect a Bluetooth input host.";
@@ -1457,7 +1457,7 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         lv_obj_set_style_text_font(s_motion_detail, META_FONT, 0);
         single_line(s_motion_detail);
         s_calibrate = button(input, "Calibrate sensor", 0, 132, 220, 44, APP_CALIBRATE, 0);
-        s_reset_grip = button(input, "Reset grip", 228, 132, 220, 44, APP_RECENTER, 0);
+        s_reset_grip = button(input, "Recenter aim", 228, 132, 220, 44, APP_RECENTER, 0);
         s_tap_click = button(input, "Tap to click / unavailable", 0, 184, 448, 44, APP_TAP_TO_CLICK, 0);
         button(input, "Motion settings", 0, 236, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_MOTION);
         button(input, "Gesture help", 228, 236, 220, 44, APP_SETTINGS_PAGE, APP_SETTINGS_GESTURES);
@@ -1478,7 +1478,7 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         return;
     }
     if (page == APP_SETTINGS_MOTION) {
-        s_motion_reference = label(settings, "Auto grip unavailable", 0, 0, 448, MUTED);
+        s_motion_reference = label(settings, "Aim reference unavailable", 0, 0, 448, MUTED);
         lv_obj_set_height(s_motion_reference, 36);
         lv_obj_set_style_text_font(s_motion_reference, META_FONT, 0);
         const char *presets[] = {"Slow", "Default", "Fast"};
@@ -2553,11 +2553,11 @@ void app_ui_render(const app_view_t *view)
         label_text(s_motion_detail, motion_reason(view));
         bool settings_known = motion_settings_valid(&view->motion_settings);
         bool settings_editable = settings_known && view->motion_settings.editable;
-        const char *reference = view->motion_settings.reference == APP_REFERENCE_READY ? "Auto grip / ready" :
-            view->motion_settings.reference == APP_REFERENCE_ACQUIRING ? "Auto grip / hold still to set" :
-            view->motion_settings.reference == APP_REFERENCE_UNSTABLE ? "Auto grip / hold still to restore" :
-            view->motion_settings.reference == APP_REFERENCE_UNAVAILABLE ? "Auto grip unavailable" :
-            "Auto grip status unknown";
+        const char *reference = view->motion_settings.reference == APP_REFERENCE_READY ? "Aim reference / ready" :
+            view->motion_settings.reference == APP_REFERENCE_ACQUIRING ? "Aim reference / recovering" :
+            view->motion_settings.reference == APP_REFERENCE_UNSTABLE ? "Aim reference / unstable" :
+            view->motion_settings.reference == APP_REFERENCE_UNAVAILABLE ? "Aim reference unavailable" :
+            "Aim reference unknown";
         label_text(s_motion_reference, reference);
         for (unsigned field = 0; field < 5; ++field) {
             int value = motion_setting((app_motion_field_t)field);

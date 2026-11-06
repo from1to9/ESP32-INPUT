@@ -63,7 +63,7 @@ static void navigation_checks(void)
     assert(action_count(APP_SETTINGS_PAGE) == 1 && last_action(APP_SETTINGS_PAGE)->x == APP_SETTINGS_INPUT);
     s_state.settings_page = APP_SETTINGS_INPUT; ++s_state.ui_revision;
     screenshot("input-navigation-reset-grip");
-    clear_intents(); tap_control("Reset grip");
+    clear_intents(); tap_control("Recenter aim");
     assert(action_count(APP_RECENTER) == 1 && action_count(APP_CALIBRATE) == 0);
     clear_intents(); tap_control("Navigation / on");
     assert(action_count(APP_SETTINGS_PAGE) == 1 && last_action(APP_SETTINGS_PAGE)->x == APP_SETTINGS_NAVIGATION);
@@ -73,7 +73,7 @@ static void navigation_checks(void)
         s_state.navigation_enabled = navigation != 0; ++s_state.ui_revision;
         screenshot(navigation ? "input-navigation-sensor-unavailable" : "input-ordinary-sensor-unavailable");
         assert(has_visible_label(lv_screen_active(), "Motion sensor unavailable."));
-        assert(lv_obj_has_state(control("Reset grip"), LV_STATE_DISABLED));
+        assert(lv_obj_has_state(control("Recenter aim"), LV_STATE_DISABLED));
     }
     s_state.navigation_enabled = true;
     s_state.overlay = APP_OVERLAY_NONE; s_state.mode = INPUT_KEYBOARD;

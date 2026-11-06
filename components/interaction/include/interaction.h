@@ -12,6 +12,7 @@
 #define INTERACTION_HOLD_MS 900U
 #define INTERACTION_FREEZE_MS 150U
 #define INTERACTION_CALIBRATION_SAMPLES 64U
+#define INTERACTION_IMU_MAX_INTERVAL_US 50000U
 
 typedef enum {
     /* DIGITS is reserved; the combined Letters page already contains 0..9. */
@@ -182,6 +183,8 @@ typedef struct {
     uint64_t send_token;
 } interaction_view_t;
 
+typedef struct { float w, x, y, z; } interaction_quaternion_t;
+
 /* Single coordinator owns mutations; UI/board/transport only exchange values.
  * No HID, board, heap, threads or clock access is performed by this model. */
 typedef struct {
@@ -200,9 +203,11 @@ typedef struct {
     float bias[3], calibration_mean[3], calibration_m2[3];
     float calibration_accel_ref[3];
     uint64_t calibration_start_us;
+    interaction_quaternion_t attitude;
+    float world_up[3], aim_pitch[3];
     float gravity[3], previous_accel[3], acquire_accel[3];
-    bool gravity_ready, gravity_predicted, accel_seen, geometry_ready;
-    uint64_t gravity_trusted_us, gravity_acquire_us, geometry_acquire_us;
+    bool gravity_ready, gravity_predicted, accel_seen, aim_aligned;
+    uint64_t gravity_trusted_us, gravity_acquire_us;
     size_t gravity_acquire_samples;
     float filtered[2], selector_angle[2], touch_carry[2];
     int selector_cell[2];
@@ -234,13 +239,13 @@ void interaction_set_touch_motion_ready(interaction_t *model, bool ready);
 bool interaction_configure(interaction_t *model, const interaction_config_t *config);
 bool interaction_set_motion(interaction_t *model, bool enabled);
 bool interaction_set_motion_owned(interaction_t *model, input_owner_t source, bool enabled);
-/* Intentional current-grip reference reset, distinct from gyro bias calibration.
- * Requires enabled Mouse intent, matching owner/source, calibration and output
- * readiness. Preserves bias/config/intent/sample-time guards and fault history.
- * Next real stable samples use ordinary acquisition; recovery emits no delta. */
+/* A calibrated, continuous attitude whose latest sample is still fresh. */
+bool interaction_aim_reference_ready(const interaction_t *model);
+/* Capture the current direction with valid attitude and enabled Mouse intent.
+ * Preserves bias, settings, sample timing and intent; discards pending deltas. */
 bool interaction_recenter_owned(interaction_t *model, input_owner_t source);
 /* Explicit local Input-setting reset while Mouse output is paused by a menu.
- * Clears the grip reference without enabling Motion or changing calibration. */
+ * Captures the current direction without enabling Motion. */
 bool interaction_reset_grip_owned(interaction_t *model, input_owner_t source);
 void interaction_set_keyboard_motion(interaction_t *model, bool enabled);
 void interaction_set_suppressed(interaction_t *model, bool touch, bool menu,

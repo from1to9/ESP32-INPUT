@@ -5,7 +5,7 @@
 
 static void invalidate_reference(interaction_t *m, interaction_reference_reason_t reason);
 static void reset_calibration(interaction_t *m);
-static void recenter_reference(interaction_t *m, interaction_reference_reset_t reason);
+static void recenter_reference(interaction_t *m);
 
 static interaction_reference_diagnostics_t *reference_diagnostics(interaction_t *m)
 {
@@ -132,12 +132,18 @@ static void refresh_grid(interaction_t *m)
     }
 }
 
+static void reset_pointer_output(interaction_t *m)
+{
+    m->aim_aligned = false;
+    input_motion_reset(&m->pointer_motion);
+    memset(m->filtered, 0, sizeof m->filtered);
+}
+
 static void reset_motion(interaction_t *m)
 {
     m->view.motion_status |= INTERACTION_MOTION_OUTPUT_SUPPRESSED;
     m->view.motion_block_reason = INTERACTION_MOTION_BLOCK_CONTROL;
-    input_motion_reset(&m->pointer_motion);
-    memset(m->filtered, 0, sizeof m->filtered);
+    reset_pointer_output(m);
     memset(m->touch_carry, 0, sizeof m->touch_carry);
     m->selector_cell[0] = (int)(m->view.focus % INTERACTION_GRID_COLUMNS);
     m->selector_cell[1] = (int)(m->view.focus / INTERACTION_GRID_COLUMNS);
@@ -253,8 +259,11 @@ void interaction_sync(interaction_t *m, const input_state_t *state,
         state->locked != m->control.locked || state->connected != m->control.connected;
     m->control = *state;
     m->view.mode = state->mode;
+    const bool was_ready = m->output_ready;
     m->output_ready = output_ready && state->connected && !state->locked &&
         !state->release_pending;
+    if (state->mode == INPUT_MOUSE && was_ready != m->output_ready)
+        reset_pointer_output(m);
     m->touch_motion_ready = m->output_ready;
     if (boundary) {
         (void)interaction_touch_cancel(m);
@@ -308,28 +317,26 @@ bool interaction_set_motion_owned(interaction_t *m, input_owner_t source, bool e
     if (enabled && (m->view.mode != INPUT_MOUSE || !m->output_ready ||
         m->control.owner != source || m->view.menu_open)) return false;
     m->motion_source = source;
-    const bool acquire = enabled && !m->view.motion_enabled;
     m->view.motion_enabled = enabled;
     reset_motion(m);
-    if (acquire) recenter_reference(m, INTERACTION_REFERENCE_RESET_ENABLE);
     return true;
 }
 
 bool interaction_recenter_owned(interaction_t *m, input_owner_t source)
 {
     if (!valid_source(source) || m->view.mode != INPUT_MOUSE || !m->view.motion_enabled ||
-        !m->view.calibrated || m->view.calibrating || !m->output_ready || m->control.locked ||
+        !interaction_aim_reference_ready(m) || !m->output_ready || m->control.locked ||
         m->control.owner != source || m->motion_source != source || m->view.menu_open) return false;
-    recenter_reference(m, INTERACTION_REFERENCE_RESET_RECENTER);
+    recenter_reference(m);
     return true;
 }
 
 bool interaction_reset_grip_owned(interaction_t *m, input_owner_t source)
 {
     if (source != INPUT_LOCAL || m->view.mode != INPUT_MOUSE ||
-        !m->view.calibrated || m->view.calibrating || !m->output_ready ||
+        !interaction_aim_reference_ready(m) || !m->output_ready ||
         m->control.locked || m->control.owner != source) return false;
-    recenter_reference(m, INTERACTION_REFERENCE_RESET_RECENTER);
+    recenter_reference(m);
     return true;
 }
 
@@ -849,20 +856,80 @@ static bool normalize3(float v[3])
     return true;
 }
 
-/* A world-fixed vector rotates oppositely to the body. Rodrigues propagation
- * keeps finite rotations stable at the maximum accepted sample interval. */
-static void propagate3(float v[3], const float gyro[3], float dt)
+static void cross3(const float a[3], const float b[3], float v[3])
+{
+    v[0] = a[1] * b[2] - a[2] * b[1];
+    v[1] = a[2] * b[0] - a[0] * b[2];
+    v[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static interaction_quaternion_t inverse_rotation(interaction_quaternion_t q)
+{
+    return (interaction_quaternion_t){q.w, -q.x, -q.y, -q.z};
+}
+
+static void rotate3(interaction_quaternion_t q, const float v[3], float out[3])
+{
+    const float axis[] = {q.x, q.y, q.z};
+    float first[3], second[3];
+    cross3(axis, v, first);
+    cross3(axis, first, second);
+    for (size_t i = 0; i < 3; ++i) out[i] = v[i] + 2 * (q.w * first[i] + second[i]);
+}
+
+static bool advance_attitude(interaction_quaternion_t *pose, interaction_quaternion_t d)
+{
+    const interaction_quaternion_t p = *pose;
+    const interaction_quaternion_t q = {
+        p.w*d.w - p.x*d.x - p.y*d.y - p.z*d.z,
+        p.w*d.x + p.x*d.w + p.y*d.z - p.z*d.y,
+        p.w*d.y - p.x*d.z + p.y*d.w + p.z*d.x,
+        p.w*d.z + p.x*d.y - p.y*d.x + p.z*d.w
+    };
+    const float norm = sqrtf(q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z);
+    if (!isfinite(norm) || norm < .0001f) return false;
+    *pose = (interaction_quaternion_t){q.w/norm, q.x/norm, q.y/norm, q.z/norm};
+    return true;
+}
+
+static interaction_quaternion_t gyro_increment(const float gyro[3], float dt)
 {
     const float speed = sqrtf(dot3(gyro, gyro));
-    if (speed < .00001f || dt <= 0) return;
-    const float axis[] = {gyro[0] / speed, gyro[1] / speed, gyro[2] / speed};
-    const float angle = speed * dt * .017453292519943295f;
-    const float c = cosf(angle), s = sinf(angle), projection = dot3(axis, v);
-    const float cross[] = {axis[1] * v[2] - axis[2] * v[1],
-                           axis[2] * v[0] - axis[0] * v[2],
-                           axis[0] * v[1] - axis[1] * v[0]};
-    for (size_t i = 0; i < 3; ++i)
-        v[i] = v[i] * c - cross[i] * s + axis[i] * projection * (1 - c);
+    if (speed < .00001f || dt <= 0) return (interaction_quaternion_t){.w = 1};
+    const float half_angle = speed * dt * .008726646259971648f;
+    const float scale = sinf(half_angle) / speed;
+    return (interaction_quaternion_t){cosf(half_angle), gyro[0]*scale, gyro[1]*scale, gyro[2]*scale};
+}
+
+static void set_aim_basis(interaction_t *m)
+{
+    const float body_right[] = {1, 0, 0}, body_top[] = {0, 1, 0};
+    rotate3(m->attitude, body_right, m->aim_pitch);
+    float along_up = dot3(m->aim_pitch, m->world_up);
+    /* At a sideways calibration pose the right axis can be vertical. Use
+     * the screen top in that case. The selected basis then stays fixed. */
+    if (fabsf(along_up) > .988685997f) {
+        rotate3(m->attitude, body_top, m->aim_pitch);
+        along_up = dot3(m->aim_pitch, m->world_up);
+    }
+    for (size_t i = 0; i < 3; ++i) m->aim_pitch[i] -= along_up * m->world_up[i];
+    (void)normalize3(m->aim_pitch);
+}
+
+/* Restore tilt from measured gravity after a real gap. Preserve the last
+ * available heading estimate. Rotation about gravity during the gap is unknown. */
+static bool recover_attitude(interaction_t *m, const float measured[3])
+{
+    float expected[3], axis[3];
+    rotate3(inverse_rotation(m->attitude), m->world_up, expected);
+    float w = 1 + dot3(measured, expected);
+    cross3(measured, expected, axis);
+    if (w < .0001f && dot3(axis, axis) < .00000001f) {
+        const float right[] = {1, 0, 0}, top[] = {0, 1, 0};
+        cross3(measured, fabsf(measured[0]) < .9f ? right : top, axis);
+        w = 0;
+    }
+    return advance_attitude(&m->attitude, (interaction_quaternion_t){w, axis[0], axis[1], axis[2]});
 }
 
 static void clear_reference(interaction_t *m)
@@ -871,8 +938,6 @@ static void clear_reference(interaction_t *m)
     m->gravity_predicted = false;
     m->gravity_acquire_samples = 0;
     m->accel_seen = false;
-    m->geometry_ready = false;
-    m->geometry_acquire_us = 0;
     m->view.motion_status &= (uint32_t)INTERACTION_MOTION_CALIBRATED;
     m->view.motion_status |= INTERACTION_MOTION_OUTPUT_SUPPRESSED;
     m->view.motion_block_reason = INTERACTION_MOTION_BLOCK_REFERENCE;
@@ -899,62 +964,67 @@ static void __attribute__((noinline)) invalidate_reference(interaction_t *m, int
     clear_reference(m);
 }
 
-static void motion_status(interaction_t *m, interaction_motion_block_t reason, bool limited)
+static void motion_status(interaction_t *m, interaction_motion_block_t reason)
 {
     m->view.motion_status = (m->view.calibrated ? INTERACTION_MOTION_CALIBRATED : 0U) |
         (m->gravity_ready ? INTERACTION_MOTION_GRAVITY_READY : 0U) |
         (m->gravity_ready && m->gravity_predicted ? INTERACTION_MOTION_GRAVITY_PREDICTED : 0U) |
-        (limited ? INTERACTION_MOTION_GEOMETRY_LIMITED : 0U) |
         (reason != INTERACTION_MOTION_BLOCK_NONE ? INTERACTION_MOTION_OUTPUT_SUPPRESSED : 0U);
     m->view.motion_block_reason = reason;
 }
 
-static void __attribute__((noinline)) recenter_reference(interaction_t *m, interaction_reference_reset_t reason)
+bool interaction_aim_reference_ready(const interaction_t *m)
+{
+    const uint64_t sample_ms = m->sample_us / 1000U;
+    return m->view.calibrated && !m->view.calibrating && m->gravity_ready && m->sample_seen &&
+        (!m->clock_seen || m->now_ms <= sample_ms ||
+         m->now_ms - sample_ms <= INTERACTION_IMU_MAX_INTERVAL_US / 1000U);
+}
+
+static void __attribute__((noinline)) recenter_reference(interaction_t *m)
 {
     interaction_reference_diagnostics_t *d = reference_diagnostics(m);
     if (d) {
-        if (reason == INTERACTION_REFERENCE_RESET_ENABLE) reference_count(&d->enable_resets, &d->saturated);
-        else reference_count(&d->recenter_resets, &d->saturated);
-        d->last_reset = reason;
+        reference_count(&d->recenter_resets, &d->saturated);
+        d->last_reset = INTERACTION_REFERENCE_RESET_RECENTER;
         d->last_reset_ms = m->now_ms;
     }
-    reference_accepted(m);
-    clear_reference(m);
+    set_aim_basis(m);
     reset_motion(m);
-    /* An intentional reset is waiting for real stable input, not a fault. */
-    motion_status(m, INTERACTION_MOTION_BLOCK_REFERENCE, false);
 }
 
 static bool update_reference(interaction_t *m, const interaction_imu_sample_t *sample,
-                             const float gyro[3], float dt)
+                             const float gyro[3], interaction_quaternion_t increment, float dt)
 {
     float accel[] = {sample->ax_g, sample->ay_g, sample->az_g};
     const float norm = sqrtf(dot3(accel, accel));
+    const bool haptic = m->view.haptic_active;
     interaction_reference_diagnostics_t *d = reference_diagnostics(m);
     if (d) { d->work.dt = dt; d->work.dt_known = true; d->work.norm = norm; d->work.norm_known = true; }
-    if (m->view.haptic_active) {
-        reference_rejected(m, true);
-        m->gravity_acquire_samples = 0;
-        m->accel_seen = false;
-        if (!m->gravity_ready) return false;
-        if (sample->timestamp_us - m->gravity_trusted_us > 250000) {
-            invalidate_reference(m, INTERACTION_REFERENCE_HAPTIC_AGE);
-            return false;
-        }
-        propagate3(m->gravity, gyro, dt);
-        if (!normalize3(m->gravity)) { invalidate_reference(m, INTERACTION_REFERENCE_HAPTIC_NORMALIZE); return false; }
-        m->gravity_predicted = true;
-        return true;
-    }
-    if (norm < .25f || norm > 2.5f) {
+    if (!haptic && (norm < .25f || norm > 2.5f)) {
         reference_checks(m, INTERACTION_REFERENCE_SAFE_NORM, 0);
         reference_rejected(m, false);
         invalidate_reference(m, INTERACTION_REFERENCE_ACCEL_NORM);
         return false;
     }
+    if (m->gravity_ready) {
+        if (!advance_attitude(&m->attitude, increment)) {
+            invalidate_reference(m, haptic ? INTERACTION_REFERENCE_HAPTIC_NORMALIZE :
+                                 INTERACTION_REFERENCE_PREDICT_NORMALIZE);
+            return false;
+        }
+        rotate3(inverse_rotation(m->attitude), m->world_up, m->gravity);
+    }
+    if (haptic) {
+        reference_rejected(m, true);
+        m->gravity_acquire_samples = 0;
+        m->accel_seen = false;
+        m->gravity_predicted = m->gravity_ready;
+        return m->gravity_ready;
+    }
     reference_checks(m, INTERACTION_REFERENCE_SAFE_NORM, INTERACTION_REFERENCE_SAFE_NORM);
-    float expected[] = {m->previous_accel[0], m->previous_accel[1], m->previous_accel[2]};
-    propagate3(expected, gyro, dt);
+    float expected[3];
+    rotate3(inverse_rotation(increment), m->previous_accel, expected);
     const float change[] = {accel[0] - expected[0], accel[1] - expected[1], accel[2] - expected[2]};
     const bool gentle = !m->accel_seen || (dt > 0 && sqrtf(dot3(change, change)) <= 3 * dt);
     memcpy(m->previous_accel, accel, sizeof accel);
@@ -977,35 +1047,37 @@ static bool update_reference(interaction_t *m, const interaction_imu_sample_t *s
         ++m->gravity_acquire_samples;
         if (m->gravity_acquire_samples < 8 || sample->timestamp_us - m->gravity_acquire_us < 100000)
             return false;
-        if (!normalize3(accel)) return false;
-        memcpy(m->gravity, accel, sizeof accel);
+        for (size_t i = 0; i < 3; ++i) accel[i] /= norm;
+        if (!recover_attitude(m, accel)) return false;
+        rotate3(inverse_rotation(m->attitude), m->world_up, m->gravity);
         m->gravity_ready = true;
         m->gravity_predicted = false;
         m->gravity_trusted_us = sample->timestamp_us;
-        m->geometry_ready = sqrtf(fmaxf(0, 1 - accel[0] * accel[0])) >= .35f;
         reference_accepted(m);
         return true;
     }
-    propagate3(m->gravity, gyro, dt);
-    if (!normalize3(m->gravity)) { invalidate_reference(m, INTERACTION_REFERENCE_PREDICT_NORMALIZE); return false; }
     for (size_t i = 0; i < 3; ++i) accel[i] /= norm;
-    /* Magnitude alone cannot identify lateral acceleration near one g. Check
-     * its innovation against gyro prediction, and gyro-compensated jerk. */
+    /* Reject inconsistent acceleration for correction only. The observed gyro
+     * interval already advanced the attitude and stays usable for aiming. */
     const bool trusted = near_one_g && gentle && dot3(accel, m->gravity) >= .939692621f;
     if (near_one_g && gentle)
         reference_checks(m, INTERACTION_REFERENCE_INNOVATION, trusted ? INTERACTION_REFERENCE_INNOVATION : 0U);
     if (trusted) {
-        const float alpha = 1 - expf(-dt / .5f);
-        for (size_t i = 0; i < 3; ++i) m->gravity[i] += alpha * (accel[i] - m->gravity[i]);
-        if (!normalize3(m->gravity)) { invalidate_reference(m, INTERACTION_REFERENCE_CORRECT_NORMALIZE); return false; }
+        float correction[3];
+        cross3(accel, m->gravity, correction);
+        const float half_alpha = dt / (2 * (.5f + dt));
+        const interaction_quaternion_t rotation = {
+            1, correction[0]*half_alpha, correction[1]*half_alpha, correction[2]*half_alpha
+        };
+        if (!advance_attitude(&m->attitude, rotation)) {
+            invalidate_reference(m, INTERACTION_REFERENCE_CORRECT_NORMALIZE);
+            return false;
+        }
+        rotate3(inverse_rotation(m->attitude), m->world_up, m->gravity);
         m->gravity_trusted_us = sample->timestamp_us;
         reference_accepted(m);
     } else {
         reference_rejected(m, false);
-        if (sample->timestamp_us - m->gravity_trusted_us > 250000) {
-            invalidate_reference(m, INTERACTION_REFERENCE_TRUST_AGE);
-            return false;
-        }
     }
     m->gravity_predicted = !trusted;
     return true;
@@ -1031,7 +1103,7 @@ void interaction_calibration_cancel(interaction_t *m)
     m->sample_seen = false;
     memset(m->bias, 0, sizeof m->bias);
     reset_calibration(m); invalidate_reference(m, INTERACTION_REFERENCE_CANCEL); reset_motion(m);
-    motion_status(m, INTERACTION_MOTION_BLOCK_CALIBRATION, false);
+    motion_status(m, INTERACTION_MOTION_BLOCK_CALIBRATION);
 }
 
 static void calibrate_sample(interaction_t *m, const interaction_imu_sample_t *s)
@@ -1077,8 +1149,10 @@ static void calibrate_sample(interaction_t *m, const interaction_imu_sample_t *s
     m->gravity_ready = true;
     m->gravity_predicted = false;
     m->gravity_trusted_us = s->timestamp_us;
-    m->geometry_ready = sqrtf(fmaxf(0, 1 - m->gravity[0] * m->gravity[0])) >= .35f;
-    motion_status(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
+    m->attitude = (interaction_quaternion_t){.w = 1};
+    memcpy(m->world_up, m->gravity, sizeof m->world_up);
+    set_aim_basis(m);
+    motion_status(m, INTERACTION_MOTION_BLOCK_CONTROL);
     reset_motion(m);
 }
 
@@ -1128,11 +1202,10 @@ static float selected_rate(const float gyro[3], int8_t axis)
     return gyro[index] * (axis < 0 ? -1.0f : 1.0f);
 }
 
-static input_delta_t blocked_motion(interaction_t *m, interaction_motion_block_t reason,
-                                    bool limited)
+static input_delta_t blocked_motion(interaction_t *m, interaction_motion_block_t reason)
 {
     reset_motion(m);
-    motion_status(m, reason, limited);
+    motion_status(m, reason);
     return (input_delta_t){0};
 }
 
@@ -1144,13 +1217,13 @@ input_delta_t interaction_motion_sample(interaction_t *m, const interaction_imu_
 input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t source,
                                               const interaction_imu_sample_t *s)
 {
-    if (!valid_source(source)) return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
+    if (!valid_source(source)) return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL);
     reference_begin(m, s);
     if (!s) {
         invalidate_reference(m, INTERACTION_REFERENCE_MISSING);
         m->sample_seen = false;
         reset_calibration(m);
-        return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE);
     }
     const float values[] = {s->gx_dps, s->gy_dps, s->gz_dps, s->ax_g, s->ay_g, s->az_g};
     for (size_t i = 0; i < 6; ++i) {
@@ -1158,68 +1231,59 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
             invalidate_reference(m, INTERACTION_REFERENCE_INVALID_SAMPLE);
             reset_calibration(m);
             m->sample_seen = false;
-            return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
+            return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE);
         }
     }
     const bool first = !m->sample_seen;
     const uint64_t previous = m->sample_us;
     m->sample_seen = true;
     m->sample_us = s->timestamp_us;
-    if (!first && (s->timestamp_us <= previous || s->timestamp_us - previous > 50000)) {
+    if (!first && (s->timestamp_us <= previous || s->timestamp_us - previous > INTERACTION_IMU_MAX_INTERVAL_US)) {
         invalidate_reference(m, INTERACTION_REFERENCE_SAMPLE_TIME);
         reset_calibration(m);
         m->sample_seen = false;
-        return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE, false);
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_SAMPLE);
     }
     if (m->view.calibrating) {
         calibrate_sample(m, s);
         return blocked_motion(m, m->view.calibrating ? INTERACTION_MOTION_BLOCK_CALIBRATION :
-                              INTERACTION_MOTION_BLOCK_CONTROL, false);
+                              INTERACTION_MOTION_BLOCK_CONTROL);
     }
     if (!m->view.calibrated)
-        return blocked_motion(m, INTERACTION_MOTION_BLOCK_CALIBRATION, false);
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_CALIBRATION);
     const float dt = first ? 0 : (float)(s->timestamp_us - previous) / 1000000.0f;
     const float gyro[] = {s->gx_dps - m->bias[0], s->gy_dps - m->bias[1], s->gz_dps - m->bias[2]};
+    const interaction_quaternion_t previous_attitude = m->attitude;
     const bool had_reference = m->gravity_ready;
-    const bool reference = update_reference(m, s, gyro, dt);
-    if (first || !m->view.calibrated || m->control.locked || m->control.owner != source ||
+    const bool reference = update_reference(m, s, gyro, gyro_increment(gyro, dt), dt);
+    if (first || m->control.locked || m->control.owner != source ||
         m->view.touch_active || (m->touch.active && m->touch.source == source) ||
         m->view.menu_open || m->view.haptic_active || m->view.button_down ||
         (m->view.mode == INPUT_KEYBOARD && m->click_pending) ||
         s->timestamp_us / 1000 < m->freeze_until_ms) {
-        return blocked_motion(m, !m->view.calibrated ? INTERACTION_MOTION_BLOCK_CALIBRATION :
-                              INTERACTION_MOTION_BLOCK_CONTROL, false);
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL);
     }
     float rates[2];
     if (m->view.mode == INPUT_KEYBOARD) {
         rates[0] = selected_rate(gyro, m->config.selector_axis_x);
         rates[1] = selected_rate(gyro, m->config.selector_axis_y);
     } else {
-        if (!reference || !had_reference)
-            return blocked_motion(m, INTERACTION_MOTION_BLOCK_REFERENCE, false);
-        const float right_norm = sqrtf(fmaxf(0, 1 - m->gravity[0] * m->gravity[0]));
-        const bool limited = right_norm < .35f;
-        if (right_norm < .15f) {
-            m->geometry_ready = false;
-            m->geometry_acquire_us = 0;
-        } else if (!m->geometry_ready) {
-            if (limited) m->geometry_acquire_us = 0;
-            else if (!m->geometry_acquire_us) m->geometry_acquire_us = s->timestamp_us;
-            else if (s->timestamp_us - m->geometry_acquire_us >= 100000) {
-                m->geometry_ready = true;
-                m->geometry_acquire_us = 0;
-                return blocked_motion(m, INTERACTION_MOTION_BLOCK_GEOMETRY, false);
-            }
+        if (m->view.mode != INPUT_MOUSE || !m->view.motion_enabled || m->motion_source != source || !m->output_ready)
+            return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL);
+        if (!reference) return blocked_motion(m, INTERACTION_MOTION_BLOCK_REFERENCE);
+        motion_status(m, INTERACTION_MOTION_BLOCK_NONE);
+        if (!had_reference || !m->aim_aligned) {
+            /* No delta crosses an inactive or unobserved interval. */
+            m->aim_aligned = true;
+            return (input_delta_t){0};
         }
-        if (!m->geometry_ready)
-            return blocked_motion(m, INTERACTION_MOTION_BLOCK_GEOMETRY, true);
-        const float right[] = {(1 - m->gravity[0] * m->gravity[0]) / right_norm,
-            -m->gravity[0] * m->gravity[1] / right_norm,
-            -m->gravity[0] * m->gravity[2] / right_norm};
-        const float fade = fminf(1, fmaxf(0, (right_norm - .15f) / .2f));
-        rates[0] = dot3(gyro, m->gravity) * (m->config.invert_x ? -1.0f : 1.0f);
-        rates[1] = dot3(gyro, right) * fade * (m->config.invert_y ? -1.0f : 1.0f);
-        motion_status(m, INTERACTION_MOTION_BLOCK_NONE, limited);
+        /* The rotation vector of the world-space gyro increment is the
+         * body rotation vector rotated by the starting attitude. Express its
+         * angle per second directly, before gravity correction. */
+        float world_rate[3];
+        rotate3(previous_attitude, gyro, world_rate);
+        rates[0] = dot3(world_rate, m->world_up) * (m->config.invert_x ? -1.0f : 1.0f);
+        rates[1] = dot3(world_rate, m->aim_pitch) * (m->config.invert_y ? -1.0f : 1.0f);
     }
     const float alpha = m->config.filter_seconds == 0 ? 1 :
         1 - expf(-dt / m->config.filter_seconds);
@@ -1229,11 +1293,11 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
     }
     if (m->view.mode == INPUT_KEYBOARD && editable_by(m, source) && m->view.keyboard_motion) {
         move_focus(m, m->filtered[0], m->filtered[1], dt);
-        motion_status(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
+        motion_status(m, INTERACTION_MOTION_BLOCK_CONTROL);
         return (input_delta_t){0};
     }
     if (m->view.mode != INPUT_MOUSE || !m->view.motion_enabled || m->motion_source != source || !m->output_ready)
-        return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL, false);
+        return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL);
     /* Threshold in angular units before applying independent gains. The shared
      * bounded integrator retains per-axis fractions and drops clamped excess. */
     const float x = fabsf(m->filtered[0]) <= m->config.deadzone_dps ? 0 :

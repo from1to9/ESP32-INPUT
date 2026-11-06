@@ -146,7 +146,7 @@ static hid_engine_t s_engine;
 static interaction_t s_interaction;
 static interaction_multitouch_t s_multitouch;
 static bool s_multitouch_available, s_multitouch_consuming, s_multitouch_eligible;
-static const char *s_message = "Keep still to calibrate. Select an input connection.";
+static const char *s_message = "Hold still in your aiming direction. Select an input connection.";
 static app_overlay_t s_overlay;
 static app_keyboard_submode_t s_keyboard_submode = APP_KEYBOARD_TOUCH;
 static app_host_os_t s_host_os;
@@ -865,7 +865,7 @@ static bool set_motion(input_owner_t source, bool enable)
 {
     if (enable && remote_update_maintenance()) return false;
     if (enable && !s_interaction.view.calibrated) {
-        s_message = "Keep still to calibrate motion first.";
+        s_message = "Hold still in your aiming direction to calibrate.";
         return false;
     }
     if (!hid_engine_set_gyro_owned(&s_engine, source, enable)) return false;
@@ -873,7 +873,8 @@ static bool set_motion(input_owner_t source, bool enable)
         (void)hid_engine_set_gyro_owned(&s_engine, source, false);
         return false;
     }
-    s_message = enable ? "Motion on. Hold still briefly to find your grip." : "Motion off.";
+    s_message = !enable ? "Motion off." : interaction_aim_reference_ready(&s_interaction) ?
+        "Motion on." : "Motion waiting for fresh sensor samples.";
     board_haptic_feedback(BOARD_FEEDBACK_CONFIRM);
     return true;
 }
@@ -885,10 +886,7 @@ static app_motion_reference_t motion_reference_state(void)
 {
     if (!s_interaction.clock_seen) return APP_REFERENCE_UNKNOWN;
     if (!board_capabilities().imu) return APP_REFERENCE_UNAVAILABLE;
-    if (!s_interaction.gravity_ready) return APP_REFERENCE_ACQUIRING;
-    if (!s_interaction.geometry_ready ||
-        (s_interaction.view.motion_status & INTERACTION_MOTION_GEOMETRY_LIMITED)) return APP_REFERENCE_UNSTABLE;
-    return APP_REFERENCE_READY;
+    return interaction_aim_reference_ready(&s_interaction) ? APP_REFERENCE_READY : APP_REFERENCE_ACQUIRING;
 }
 
 static cp_error_t motion_recenter_status(input_owner_t source, bool immediate)
@@ -906,6 +904,7 @@ static cp_error_t motion_recenter_status(input_owner_t source, bool immediate)
     if (s_engine.congested || (s_overlay != APP_OVERLAY_NONE && !input_settings) || remote_update_maintenance() ||
         s_transport_switch_pending || s_idle.asleep || s_idle.wake_capture || s_drag_requested ||
         s_engine.mouse_buttons || interaction_touch_holding(&s_interaction)) return CP_BUSY;
+    if (!interaction_aim_reference_ready(&s_interaction)) return CP_UNAVAILABLE;
     if (immediate) {
         portENTER_CRITICAL(&s_control_lock);
         bool held = s_touch_down || s_physical_down;
@@ -924,7 +923,7 @@ static cp_error_t recenter_motion(input_owner_t source)
         s_settings_page == APP_SETTINGS_INPUT;
     if (!(input_settings ? interaction_reset_grip_owned(&s_interaction, source) :
         interaction_recenter_owned(&s_interaction, source))) return CP_BUSY;
-    s_message = "Reference reset. Hold still briefly; sensor calibration is unchanged.";
+    s_message = "Aim reference set to the current direction.";
     return CP_OK;
 }
 
@@ -2474,6 +2473,7 @@ static void process_motion(void)
     board_imu_sample_t sample;
     if (board_imu_read(&sample) != ESP_OK) {
         motion_trace_count(&s_motion_trace.read_errors);
+        if (s_interaction.sample_seen) (void)interaction_motion_sample(&s_interaction, NULL);
         if (!board_capabilities().imu) {
             (void)hid_engine_set_gyro(&s_engine, false);
             (void)interaction_set_motion(&s_interaction, false);
@@ -2501,10 +2501,10 @@ static void process_motion(void)
     if (s_interaction.view.motion_block_reason == INTERACTION_MOTION_BLOCK_SAMPLE)
         motion_trace_count(&s_motion_trace.sample_blocks);
     if (!was_calibrated && s_interaction.view.calibrated) {
-        s_message = "Motion calibrated. Click AI to toggle motion.";
+        s_message = "Sensor calibrated. Aim reference set.";
     }
     if (delta.x || delta.y) {
-        (void)hid_engine_enqueue_mouse_move(&s_engine, s_engine.state.epoch,
+        (void)hid_engine_enqueue_aim_move(&s_engine, s_engine.state.epoch,
             INPUT_LOCAL, delta.x, delta.y);
     }
 }
@@ -2677,7 +2677,7 @@ static void __attribute__((noinline)) report_motion_diagnostics(const input_link
              "phase=%d worker_running=%d recoveries=%llu failure_streak=%u retry_ms=%u "
              "batch_time_known=%d batch_us=%llu max_batch_us=%llu schedule_late_us=%llu "
              "engine_motion=%d model_motion=%d model_ready=%d model_block=%d mode=%d owner=%d "
-             "reference=%d geometry=%d touch=%d gesture=%d menu=%d haptic=%d button=%d freeze_left_ms=%llu "
+             "reference=%d touch=%d gesture=%d menu=%d haptic=%d button=%d freeze_left_ms=%llu "
              "consumer_samples=%u duplicate_samples=%u consumer_errors=%u consumer_gaps=%u "
              "consumer_dt_us=%llu consumer_max_dt_us=%llu last_gap_us=%llu "
              "first_active_gap_known=%d first_active_gap_us=%llu first_active_gap_at_us=%llu "
@@ -2696,7 +2696,7 @@ static void __attribute__((noinline)) report_motion_diagnostics(const input_link
              (unsigned long long)imu.last_schedule_late_us,
              s_engine.state.gyro_enabled, s_interaction.view.motion_enabled, s_interaction.output_ready,
              (int)s_interaction.view.motion_block_reason, (int)s_engine.state.mode, (int)s_engine.state.owner,
-             s_interaction.gravity_ready, s_interaction.geometry_ready, s_interaction.view.touch_active,
+             s_interaction.gravity_ready, s_interaction.view.touch_active,
              s_interaction.touch.active, s_interaction.view.menu_open, s_interaction.view.haptic_active,
              s_interaction.view.button_down,
              (unsigned long long)(s_now_ms < s_interaction.freeze_until_ms ? s_interaction.freeze_until_ms - s_now_ms : 0),

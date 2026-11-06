@@ -136,6 +136,10 @@ void hid_engine_cancel(hid_engine_t *engine);
  * with a nonzero modifier. Usages 1..3 are HID error codes, not keys. */
 hid_engine_enqueue_result_t hid_engine_enqueue_mouse_move(hid_engine_t *engine,
     uint64_t epoch, input_owner_t owner, int x, int y);
+/* One live IMU delta for the coordinator's immediate HID service. Older input
+ * retains the turn if queued, so IMU deltas cannot wait behind that input. */
+hid_engine_enqueue_result_t hid_engine_enqueue_aim_move(hid_engine_t *engine,
+    uint64_t epoch, input_owner_t owner, int x, int y);
 /* Wide touch displacement, split into the unchanged signed 8-bit wire axes.
  * Local samples may be retained during transient congestion; remote callers
  * still receive BLOCKED so their command receipt can request a retry.

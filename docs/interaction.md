@@ -15,13 +15,26 @@ Show the foreground mode and a compact selected-input/target cue in its context.
 
 ### Mouse
 
-Provide a motion toggle, compact fine-gain chooser, much larger touchpad, separate scroll controls, clicks and explicit drag/release. No edge swipe or navigation gesture crosses the pad: pointer deltas must not be emitted before deciding to navigate. Any touch suppresses motion; release starts a short freeze. Menus and mode changes cancel drag. Mouse Motion follows handheld waving using orientation-compensated inertial estimates; direct angular pointer control is superseded. The new estimator is still under [investigation](motion-estimation.md); this requirement does not establish current device support.
+Provide a motion toggle, compact fine-gain chooser, much larger touchpad, separate scroll controls, clicks and explicit drag/release. No edge swipe or navigation gesture crosses the pad: pointer deltas must not be emitted before deciding to navigate. Any touch suppresses motion; release starts a short freeze. Menus and mode changes cancel drag. Mouse Motion uses rotational aiming through relative HID over the selected USB or Bluetooth link.
 
 The right scroll column accepts a one-finger slide starting on either arrow or in the gap between them. Slide up for wheel up and down for wheel down. Distance determines the number of steps. Holding still or lifting after a slide adds no step. A tap on an arrow sends its usual single step, and a tap in the gap has no effect. Scrolling works over either input transport with either tap-to-click setting. The adjacent pointer pad keeps its own gestures.
 
-Enabling Motion automatically establishes a stable grip reference; losing that reference enters automatic recovery. The existing pad hint asks the user to hold still while acquiring or restoring it. The toggle shows **Motion / waiting** while the request is enabled but the reference is not ready, and remains available to stop. Sensor, calibration and connection blockers take priority over grip guidance. Ordinary touch pauses and samples with no output do not imply a lost reference.
+Hold the device still in your intended aiming direction during **Calibrate
+sensor**. This measures gyro bias and sets the aiming basis. Motion toggles and
+touch pauses retain that basis and keep tracking valid samples. Resuming starts
+with fresh relative increments and clears filter and movement fractions from
+the paused interval. Temporary acceleration can disable gravity correction
+while gyro tracking continues. **Motion / waiting** indicates that aiming needs
+valid sensor evidence after a genuine sample loss or invalid sample.
 
-The fixed header **Recenter** button requests a fresh grip reference through `APP_RECENTER`, only while Motion is already requested and the coordinator reports `motion_recenter_available`. It stays disabled while Motion is off; enabling Motion already acquires a fresh grip. It preserves sensor bias, settings and whether Motion was requested; it never turns an off request on or sends pointer movement itself. The coordinator revalidates ownership, transport, epoch, UI revision and other safety gates. UI only queues the request and waits for acknowledged state. **Calibrate sensor** remains a separate Input settings action for sensor bias calibration. Full connection and Motion detail remain in Menu / Status and Input settings.
+The header **Recenter** captures the current aiming direction with Motion on
+and a fresh, valid attitude. It preserves bias, settings and the Motion request
+and clears pending model movement. The authenticated Wi-Fi input API uses the
+same action with its existing authorization and input gates. In **Input**
+settings, **Recenter aim** captures the same basis while Motion is off. It
+leaves Motion off. Use **Calibrate sensor** to measure bias again. The
+[orientation design](motion-estimation.md) describes recovery after missing
+samples and the limits of gyro heading.
 
 Input settings provides **Tap to click**, default on. The input recognizer owns single tap, double tap and double-tap-and-hold drag; the UI forwards real touch boundaries, displacement and bounded stationary-contact freshness. With the setting off, the pad moves only; explicit mouse buttons and scroll still work. The pad hint and Status report the actual selected provider, readiness, calibration and sensor conditions. Selecting USB does not by itself establish that the sensor is calibrated or that USB input is ready.
 
@@ -62,12 +75,8 @@ or cancel the action. Failures use the existing neutral-release recovery without
 replaying an accepted down report. Changing the header layout under a held
 contact cancels that contact; a fresh press is required.
 
-**Input > Reset grip** retains discoverable access when Navigation occupies the
-header. In Mouse mode this clears the grip reference while the settings menu
-keeps Motion off; it preserves sensor calibration, draft and settings, and
-emits no HID report. Enable Motion and hold still to acquire the current grip.
-The ordinary header Recenter and remote Recenter retain their original
-Motion-enabled admission. Calibrate sensor remains a separate bias operation.
+**Input > Recenter aim** provides the manual reference action when Navigation
+occupies the header.
 
 ### Keyboard
 
