@@ -53,6 +53,12 @@ submissions. This locates an input-suppression branch; it does not identify the
 transition into that branch, prove a second physical contact, or measure Windows
 arrival. Repeated physical testing was stopped for focused source investigation.
 
+The operator subsequently reproduced an immediate stop when crossing the pad
+edge, matching the earlier symptom. Source inspection shows that geometric
+ineligibility drains the active single-contact state until all contacts lift,
+despite the UI pad retaining press ownership. This narrows the repair to edge
+continuity; a corrected implementation and device validation remain pending.
+
 ### Mouse freeze and Classic reconnect follow-up (2026-11-06)
 
 Clean `b0c1dfae0fb2688d6dbd0d10438159fc860c30a8` combines the reviewed
