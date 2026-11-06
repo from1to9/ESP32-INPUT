@@ -3022,6 +3022,15 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
     for (size_t i = 0; i < sizeof(view.wifi_setup_passcode); ++i) secret[i] = 0;
 }
 
+static void observe_input_expiry(bool congested)
+{
+    if (!hid_engine_observe_transport(&s_engine, s_now_ms, congested)) return;
+    update_send(true);
+    s_drag_requested = false;
+    discard_intents();
+    s_message = "Pending input expired; releases have priority.";
+}
+
 static void observe_input_link(const input_link_t *link, input_link_t *previous)
 {
     bool replaced = link->kind != previous->kind || link->generation != previous->generation;
@@ -3037,12 +3046,7 @@ static void observe_input_link(const input_link_t *link, input_link_t *previous)
                  (int)link->kind, link->connected, link->ready, (unsigned long long)link->generation);
     }
     *previous = *link;
-    if (hid_engine_observe_transport(&s_engine, s_now_ms, link->congested)) {
-        update_send(true);
-        s_drag_requested = false;
-        discard_intents();
-        s_message = "Pending input expired; releases have priority.";
-    }
+    observe_input_expiry(link->congested);
 }
 
 #include "app_update_bindings.inc"
@@ -3156,6 +3160,12 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         process_motion();
         service_motion_capture();
         if (!link.congested) {
+            /* A turn can stall after admitting movement. Check its age at
+             * report service so the engine can choose a neutral release. */
+            if (s_engine.buffered_motion_count) {
+                s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
+                observe_input_expiry(false);
+            }
             hid_engine_step_result_t step = hid_engine_step(&s_engine, send_report, &link.generation);
             app_touch_trace_step((unsigned)step);
             if (step != previous_step &&

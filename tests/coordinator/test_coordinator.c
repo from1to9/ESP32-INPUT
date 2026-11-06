@@ -101,6 +101,7 @@ static unsigned test_name_requests;
 static bool test_clock_override;
 static uint64_t test_clock_ms;
 static void (*test_coordinator_delay)(TickType_t ticks);
+static void (*test_before_intent_receive)(void);
 static void (*test_update_gate_entry_hook)(void);
 static void coordinator_test_lock_entry(portMUX_TYPE *lock)
 {
@@ -611,6 +612,7 @@ BaseType_t xQueueSend(QueueHandle_t queue, const void *item, TickType_t timeout)
 BaseType_t xQueueReceive(QueueHandle_t queue, void *item, TickType_t timeout)
 {
     assert(queue && item && timeout == 0);
+    if (queue == s_intents && test_before_intent_receive) test_before_intent_receive();
     if (queue->count == 0) return pdFALSE;
     memcpy(item, queue->bytes + queue->head * queue->item_size, queue->item_size);
     queue->head = (queue->head + 1) % queue->capacity;
@@ -6596,6 +6598,7 @@ int main(int argc, char **argv)
     RUN(mouse_pad_wake_is_consumed_before_fresh_takeover_and_click);
     RUN(queued_expired_pad_and_real_clock_refresh_never_replay);
     RUN(mouse_schedule_drains_touch_bursts);
+    RUN(mouse_buffer_expiry_before_submit);
     RUN(short_selection_ticket_expires_even_while_scan_is_fresh);
     RUN(common_keys_route_from_keyboard_chooser_rejects_other_origins);
     RUN(network_detail_back_returns_to_list_only_from_valid_origin);

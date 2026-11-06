@@ -18,6 +18,13 @@ the old generation. No freshness, gesture or congestion threshold is relaxed.
 The test models delayed scheduling; it does not measure the device's task costs,
 radio timing or host arrival, or establish the cause of device scheduling gaps.
 
+`mouse_buffer_expiry_before_submit` pauses the same production loop after
+admitting movement, before its next FIFO read. At 249 ms the original movement
+is submitted. At 250, 251 and 300 ms it is cancelled, with neutral keyboard and
+mouse releases on separate turns and no failed-send retry. This covers USB and
+BLE, including when the empty FIFO leaves the cached coordinator time unchanged
+until the report service reads the clock.
+
 Run `python3 tests/coordinator/run.py` from the repository root. The runner builds with strict C11 diagnostics, conversion/shadow warnings and address/undefined-behavior sanitizers, using a temporary output directory. It includes the actual [production coordinator](../../firmware/main/main.c) and links production `interaction`, `hid_engine`, `input_core` and `device_settings`; no coordinator decisions, gesture classification, idle policy or safety transitions are reimplemented in the harness. To diagnose one case, use `python3 tests/coordinator/run.py --case touch_release_has_one_freeze_interval`. The default always runs every case.
 
 The normal-profile configuration stub keeps the optional startup tone disabled.

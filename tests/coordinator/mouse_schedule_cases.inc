@@ -98,3 +98,87 @@ static void mouse_schedule_drains_touch_bursts(void)
         }
     }
 }
+
+static struct {
+    jmp_buf done;
+    unsigned turn, receives, pause_ms;
+    uint64_t epoch;
+    size_t report_start;
+} expiry;
+
+static void pause_after_buffering_move(void)
+{
+    if (++expiry.receives != 3) return;
+    assert(s_engine.buffered_motion_count == 1);
+    assert(s_engine.motion_since_ms == test_clock_ms);
+    /* Stop after admission, before the next receive. With the FIFO empty,
+     * no subsequent input handler refreshes the coordinator's cached time. */
+    test_clock_ms += expiry.pause_ms;
+}
+
+static void expiry_schedule(TickType_t ticks)
+{
+    assert(ticks == pdMS_TO_TICKS(COORDINATOR_PERIOD_MS));
+    ++expiry.turn;
+    if (expiry.turn == 3) {
+        assert(!s_engine.state.release_pending);
+        app_intent_t begin = make_intent(APP_TOUCH_BEGIN, 100, 100, NULL);
+        begin.surface = APP_SURFACE_TOUCHPAD;
+        begin.gesture = 9002;
+        assert(submit_intent(&begin));
+    } else if (expiry.turn == 4) {
+        assert(s_interaction.touch.active);
+        expiry.epoch = s_engine.state.epoch;
+        expiry.report_start = trace_count;
+        board_touch_snapshot_t sample = {.sequence = 1, .timestamp_ms = test_clock_ms,
+            .valid = true, .count = 1, .contacts = {{.id = 3, .x = 102, .y = 100}}};
+        assert(submit_contacts(&sample));
+        app_intent_t move = make_intent(APP_TOUCH_MOVE, 2, 0, NULL);
+        move.surface = APP_SURFACE_TOUCHPAD;
+        move.gesture = 9002;
+        assert(submit_intent(&move));
+        test_before_intent_receive = pause_after_buffering_move;
+        return;
+    } else if (expiry.turn == 5) {
+        test_before_intent_receive = NULL;
+        assert(expiry.receives == 3 && trace_count == expiry.report_start + 1U);
+        const report_t *report = &trace[expiry.report_start];
+        fprintf(stderr, "Mouse pre-submit transport=%d age_ms=%u first_id=%u first_x=%d epoch=%llu->%llu\n",
+            (int)s_input_transport, expiry.pause_ms, (unsigned)report->id, (int8_t)report->bytes[1],
+            (unsigned long long)expiry.epoch, (unsigned long long)s_engine.state.epoch);
+        if (expiry.pause_ms < 250) {
+            assert(report->id == HID_ENGINE_MOUSE_REPORT_ID && report->bytes[1] == 2);
+            assert(!report->bytes[0] && !report->bytes[2] && !report->bytes[3]);
+            assert(s_engine.state.epoch == expiry.epoch && !s_engine.state.release_pending);
+            longjmp(expiry.done, 1);
+        }
+        assert(report->id == HID_ENGINE_KEYBOARD_REPORT_ID && !s_engine.count && !s_engine.send_failures);
+        assert(s_engine.state.epoch != expiry.epoch && s_engine.state.release_pending);
+        for (size_t i = 0; i < report->length; ++i) assert(!report->bytes[i]);
+    } else if (expiry.turn == 6) {
+        assert(trace_count == expiry.report_start + 2U && !s_engine.state.release_pending);
+        const report_t *report = &trace[expiry.report_start + 1U];
+        assert(report->id == HID_ENGINE_MOUSE_REPORT_ID && !s_engine.send_failures);
+        for (size_t i = 0; i < report->length; ++i) assert(!report->bytes[i]);
+        longjmp(expiry.done, 1);
+    }
+    test_clock_ms += COORDINATOR_PERIOD_MS;
+}
+
+static void mouse_buffer_expiry_before_submit(void)
+{
+    const unsigned ages[] = {249, 250, 251, 300};
+    for (unsigned transport = 0; transport < 2; ++transport) {
+        for (size_t age = 0; age < sizeof ages / sizeof ages[0]; ++age) {
+            transport_setup(INPUT_MOUSE, (app_input_transport_t)transport);
+            expiry.turn = expiry.receives = 0;
+            expiry.pause_ms = ages[age];
+            test_clock_override = true;
+            test_clock_ms = 1000;
+            test_coordinator_delay = expiry_schedule;
+            if (!setjmp(expiry.done)) coordinator_run(ESP_OK);
+            test_coordinator_delay = NULL;
+            test_clock_override = false;
+        }
+    }
+}
