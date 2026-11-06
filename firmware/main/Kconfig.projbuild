@@ -42,6 +42,11 @@ menu "Input device board resources"
             reports aggregate HCI fragments, queue timing and RTP sequence gaps.
             No media, keys or device addresses are collected.
 
+    config APP_CLASSIC_SCAN_COORDINATION
+        bool
+        depends on IDF_TARGET_ESP32S31 && BT_CLASSIC_ENABLED && BT_A2DP_ENABLE && BT_HFP_ENABLE && BT_HFP_CLIENT_ENABLE && BT_HFP_AUDIO_DATA_PATH_HCI && !BT_A2DP_USE_EXTERNAL_CODEC && !BT_HFP_USE_EXTERNAL_CODEC && BT_CTRL_BR_EDR_MAX_ACL_CONN = 1
+        default y
+
     config APP_CLASSIC_CONNECT_DIAGNOSTICS
         bool "Observe the first Classic Create Connection and controller slot"
         depends on IDF_TARGET_ESP32S31 && BT_CLASSIC_ENABLED && BT_CTRL_BR_EDR_MAX_ACL_CONN = 1 && SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY

@@ -36,6 +36,8 @@ the actual patched SDK dispatch function: Just Works and ordinary confirmation
 must reach admission; allocation/dispatch failure must never auto-accept.
 Run `python3 tests/bt_audio/test_classic_closed_window.py` against the patched
 SDK for the closed-window rejection, bond retention and unrelated failure paths.
+Run `python3 tests/bt_audio/test_classic_scan.py` for the audio request owner and
+the generated BTU scan path with the optional Classic observer enabled and disabled.
 `python3 tests/toolchain/test_idf_patches.py` separately validates reproducible
 patch provenance and preservation of unrelated SDK/BSP work.
 

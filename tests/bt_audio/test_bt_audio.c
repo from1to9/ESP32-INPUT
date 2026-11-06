@@ -12,6 +12,9 @@
 #include "esp_a2dp_api.h"
 #include "esp_gap_bt_api.h"
 #include "freertos/timers.h"
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+#include "bt_classic_scan.h"
+#endif
 
 /* Existing state-transition assertions exercise copy-out and legacy callers. */
 static bt_audio_bond_list_t observed_bonds(void)
@@ -43,7 +46,7 @@ static esp_a2d_cb_t a2;
 static esp_bt_gap_cb_t gap;
 static esp_bt_gap_profile_status_t gap_status;
 static bool pairing_claim, deny_claim, security_accept, drop_scan;
-static unsigned security_replies, claim_calls, le_closes, discoverable_writes;
+static unsigned security_replies, claim_calls, le_closes, discoverable_writes, scan_mode_writes;
 static unsigned closed_window_replies;
 static bool le_window, resource_current = true;
 static int bond_count = 1, shared_count = 1;
@@ -88,7 +91,7 @@ int btc_storage_get_num_all_bond_devices(void)
 esp_err_t esp_bt_gap_get_bond_device_list(int *count, esp_bd_addr_t *list)
 { assert(*count >= bond_count); *count = bond_count; if (bond_count >= 1) memcpy(list[0], peer, 6); if (bond_count == 2) memcpy(list[1], other, 6); return bond_list_error; }
 esp_err_t esp_bt_gap_set_scan_mode(esp_bt_connection_mode_t connection, esp_bt_discovery_mode_t discovery)
-{ if (discovery == ESP_BT_GENERAL_DISCOVERABLE) ++discoverable_writes; if (!drop_scan) gap_status = (esp_bt_gap_profile_status_t){.conn_mode = connection, .disc_mode = discovery}; return ESP_OK; }
+{ ++scan_mode_writes; if (discovery == ESP_BT_GENERAL_DISCOVERABLE) ++discoverable_writes; if (!drop_scan) gap_status = (esp_bt_gap_profile_status_t){.conn_mode = connection, .disc_mode = discovery}; return ESP_OK; }
 esp_err_t esp_bt_gap_get_profile_status(esp_bt_gap_profile_status_t *status) { *status = gap_status; if (after_status) { clock_hook = after_status; after_status = NULL; } return ESP_OK; }
 esp_err_t esp_bt_gap_pin_reply(esp_bd_addr_t address, bool accept, uint8_t bytes, esp_bt_pin_code_t pin)
 { (void)address; (void)pin; assert(!accept && bytes == 0); security_accept = accept; ++security_replies; return ESP_OK; }
@@ -154,6 +157,28 @@ int btc_inter_profile_call(btc_msg_t *message)
     if (inside_handler) { void (*hook)(void) = inside_handler; inside_handler = NULL; hook(); }
     return BT_STATUS_SUCCESS;
 }
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+static uint64_t scan_request;
+static unsigned scan_prepares, scan_releases;
+static bool scan_async_release;
+static esp_err_t scan_prepare_error;
+
+esp_err_t bt_classic_scan_prepare(uint64_t request, const uint8_t address[6])
+{
+    assert(on_btc && !audio_locked && request && !memcmp(address, peer, 6));
+    scan_request = request;
+    ++scan_prepares;
+    return scan_prepare_error;
+}
+
+bool bt_classic_scan_release(uint64_t request, bool *restore)
+{
+    assert(!audio_locked && request == scan_request);
+    ++scan_releases;
+    *restore = !scan_async_release && scan_prepare_error == ESP_OK;
+    return !scan_async_release;
+}
+#endif
 void esp_hf_client_outgoing_data_ready(void) { ++kicks; }
 
 static void initialized(void)
@@ -1207,6 +1232,78 @@ static void pairing_test(const char *scenario)
     }
 }
 
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+static esp_err_t request_scan_connect(uint64_t *request)
+{
+    bt_audio_snapshot_t view = bt_audio_snapshot();
+    bt_audio_bond_list_t bonds = observed_bonds();
+    return bt_audio_saved_request(view.generation, view.a2dp_link_generation, bonds.revision,
+                                  BT_AUDIO_CONNECT_A2DP, peer, request);
+}
+
+static void scan_owner_test(const char *scenario)
+{
+    initialized(); bt_audio_service();
+    unsigned visibility = scan_mode_writes;
+    if (!strcmp(scenario, "scan-queue-full")) scan_prepare_error = ESP_ERR_NO_MEM;
+    uint64_t first;
+    assert(request_scan_connect(&first) == ESP_OK);
+    bt_audio_service();
+    assert(!dispatch_calls && "profile must wait for the matching scan result");
+    assert(scan_prepares == 1 && scan_request == first);
+    if (scan_prepare_error != ESP_OK) {
+        assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_FAILED &&
+               bt_audio_snapshot().request_error == ESP_ERR_NO_MEM);
+        bt_audio_service();
+        assert(scan_releases == 1 && scan_mode_writes == visibility);
+        return;
+    }
+    if (!strcmp(scenario, "scan-cancel")) {
+        scan_async_release = true;
+        bt_audio_cancel_request(first);
+        bt_audio_classic_scan_result(first, ESP_OK);
+        bt_audio_service();
+        uint64_t second;
+        assert(!dispatch_calls && scan_releases == 1 && scan_mode_writes == visibility);
+        assert(request_scan_connect(&second) == ESP_ERR_INVALID_STATE);
+        bt_audio_classic_scan_drained(first, true);
+        assert(request_scan_connect(&second) == ESP_OK && second != first);
+        bt_audio_service();
+        assert(scan_mode_writes == visibility + 1 && scan_prepares == 2);
+        bt_audio_classic_scan_result(first, ESP_OK);
+        bt_audio_service();
+        assert(!dispatch_calls);
+        bt_audio_classic_scan_result(second, ESP_OK);
+        bt_audio_service();
+        assert(dispatch_calls == 1);
+        return;
+    }
+    if (!strcmp(scenario, "scan-timeout")) {
+        clock_us += BT_AUDIO_COMMAND_TIMEOUT_US;
+        deadline(NULL);
+        assert(!scan_releases && bt_audio_snapshot().request_status == BT_AUDIO_JOB_FAILED);
+        bt_audio_classic_scan_result(first, ESP_OK);
+        bt_audio_service();
+        assert(!dispatch_calls && scan_releases == 1 && scan_mode_writes == visibility + 1);
+        return;
+    }
+    bt_audio_classic_scan_result(first, ESP_OK);
+    if (!strcmp(scenario, "scan-ready-expired")) {
+        defer_btc = true;
+        bt_audio_service();
+        clock_us += BT_AUDIO_COMMAND_TIMEOUT_US;
+        run_btc();
+        assert(!dispatch_calls && bt_audio_snapshot().request_error == ESP_ERR_TIMEOUT);
+        return;
+    }
+    bt_audio_service(); bt_audio_service();
+    assert(dispatch_calls == 1 && !scan_releases);
+    music_connection(ESP_A2D_CONNECTION_STATE_CONNECTED, 0x801);
+    bt_audio_service();
+    assert(scan_releases == 1 && scan_mode_writes == visibility + 1);
+}
+#endif
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -1232,6 +1329,10 @@ int main(int argc, char **argv)
         assert(bt_audio_init() == ESP_ERR_INVALID_STATE);
     } else {
         assert(result == ESP_OK && !bt_audio_snapshot().initialized && !bt_audio_snapshot().failed);
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+        if (!strncmp(scenario, "scan-", 5)) scan_owner_test(scenario);
+        else
+#endif
         if (!strncmp(scenario, "pair-", 5)) pairing_lifecycle(scenario);
         else if (!strcmp(scenario, "foreign-bonds") || !strcmp(scenario, "other-profile")) profile_lifecycle(scenario);
         else if (!strcmp(scenario, "peer-switch")) profile_peer_switch();

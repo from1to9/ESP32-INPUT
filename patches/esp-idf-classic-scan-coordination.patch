@@ -1,0 +1,110 @@
+--- a/btu_hcif.c
++++ b/btu_hcif.c
+@@ -33,6 +33,7 @@
+ #include "stack/bt_types.h"
+ #include "stack/hcimsgs.h"
+ #include "stack/btu.h"
++#include "bt_classic_scan.h"
+ #include "l2c_int.h"
+ #include "stack/btm_api.h"
+ #include "btm_int.h"
+@@ -736,12 +737,19 @@
+     metadata->command_status_cb = btu_hcif_command_status_evt;
+     metadata->opcode = opcode;
+
++    if (opcode == HCI_WRITE_SCAN_ENABLE &&
++        (p_buf->len != HCIC_PREAMBLE_SIZE + 1 ||
++         !bt_classic_scan_write(stream[1], (uint32_t)(uintptr_t)metadata->context))) {
++        HCI_FREE_CMD_BUF(p_buf);
++        return;
++    }
+     vsc_callback = metadata->context;
+     /* Only commands with an explicit completion context can carry one. */
+     if ((opcode & HCI_GRP_VENDOR_SPECIFIC) != HCI_GRP_VENDOR_SPECIFIC
+ #if CLASSIC_BT_INCLUDED == TRUE
+             && (opcode != HCI_READ_LOCAL_NAME)
+             && (opcode != HCI_USER_CONF_VALUE_NEG_REPLY)
++            && (opcode != HCI_WRITE_SCAN_ENABLE)
+ #endif
+ #if BLE_INCLUDED == TRUE
+             && (opcode != HCI_BLE_RAND)
+@@ -1623,6 +1631,14 @@
+     uint8_t *stream = hack->response->data + hack->response->offset + 3; // 2 to skip the event headers, 1 to skip the command credits
+     STREAM_TO_UINT16(opcode, stream);
+
++    if (opcode == HCI_WRITE_SCAN_ENABLE) {
++        bool accepted = hack->response->len == 6 && *stream == HCI_SUCCESS;
++        if (!accepted) HCI_TRACE_WARNING("Write Scan Enable failed or returned a malformed reply");
++        bt_classic_scan_complete((uint32_t)(uintptr_t)hack->context, accepted);
++        osi_free(hack->response);
++        osi_free(event);
++        return;
++    }
+     if (*stream != HCI_SUCCESS) {
+         HCI_TRACE_WARNING("opcode=0x%04x, status= %02x: %s", opcode, *stream, hci_status_code_to_string(*stream));
+     }
+@@ -1974,6 +1990,9 @@
+         hack->status,
+         stream,
+         hack->context);
++
++    if (opcode == HCI_WRITE_SCAN_ENABLE)
++        bt_classic_scan_complete((uint32_t)(uintptr_t)hack->context, false);
+
+     // check the HCI command integrity: opcode
+     hci_cmd_metadata_t *metadata = HCI_GET_CMD_METAMSG(hack->command);
+--- a/btu_init.c
++++ b/btu_init.c
+@@ -30,6 +30,7 @@
+ #include "l2c_int.h"
+ #include "stack/dyn_mem.h"
+ #include "stack/btu.h"
++#include "bt_classic_scan.h"
+ #if (C2H_FLOW_CONTROL_INCLUDED == TRUE)
+ #include "stack/c2h_credit.h"
+ #endif
+@@ -219,6 +220,9 @@
+     }
+ #endif
+
++    if (!bt_classic_scan_bind(btu_thread)) {
++        goto error_exit;
++    }
+     if (btu_task_post(SIG_BTU_START_UP, NULL, OSI_THREAD_MAX_TIMEOUT) == false) {
+         goto error_exit;
+     }
+@@ -242,6 +246,7 @@
+ ******************************************************************************/
+ void BTU_ShutDown(void)
+ {
++    bt_classic_scan_unbind();
+ #if (C2H_FLOW_CONTROL_INCLUDED == TRUE)
+     btu_c2h_credit_set_enabled(FALSE);
+     /* Host only; HCI credit is closed in hci_shut_down while HCI thread lives. */
+--- a/bta_dm_act.c
++++ b/bta_dm_act.c
+@@ -34,6 +34,7 @@
+ #include "stack/hcimsgs.h"
+ #include "btm_int.h"
+ #include "stack/btu.h"
++#include "bt_classic_scan.h"
+ #include "stack/sdp_api.h"
+ #include "stack/l2c_api.h"
+ #include "bta/utl.h"
+@@ -332,6 +333,8 @@
+         return;
+     }
+
++    bt_classic_scan_enable();
++
+     /* first, register our callback to SYS HW manager */
+     bta_sys_hw_register( BTA_SYS_HW_BLUETOOTH, bta_dm_sys_hw_cback );
+
+@@ -625,6 +628,7 @@
+ void bta_dm_disable (tBTA_DM_MSG *p_data)
+ {
+     UNUSED(p_data);
++    bt_classic_scan_disable();
+
+     /* Set l2cap idle timeout to 0 (so BTE immediately disconnects ACL link after last channel is closed) */
+     L2CA_SetIdleTimeoutByBdAddr((UINT8 *)BT_BD_ANY, 0, BT_TRANSPORT_BR_EDR);

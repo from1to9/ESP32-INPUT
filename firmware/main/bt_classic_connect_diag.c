@@ -346,7 +346,7 @@ uint8_t __wrap_r_olm_conn_alloc(const uint8_t *addr, uint8_t *link)
     return result;
 }
 
-void __wrap_r_olm_pscan_end(uint8_t link, const void *event)
+void bt_classic_connect_diag_scan_end(uint8_t link, const void *event)
 {
     bool observe = observing_slot();
     slot_t before = {0};
@@ -357,6 +357,13 @@ void __wrap_r_olm_pscan_end(uint8_t link, const void *event)
         retain_olm(SCAN_END, UNKNOWN, before, after, now_ms());
     }
 }
+
+#if !CONFIG_APP_CLASSIC_SCAN_COORDINATION
+void __wrap_r_olm_pscan_end(uint8_t link, const void *event)
+{
+    bt_classic_connect_diag_scan_end(link, event);
+}
+#endif
 
 static char *hex_record(char *out, const void *data, size_t size)
 {

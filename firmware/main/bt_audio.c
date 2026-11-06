@@ -27,6 +27,9 @@
 #include "esp_hf_client_api.h"
 #include "bt_bond_guard.h"
 #include "ble_hid.h"
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+#include "bt_classic_scan.h"
+#endif
 #else
 #define AUDIO_PROFILES_SUPPORTED 0
 #endif
@@ -61,6 +64,10 @@ static struct {
     uint64_t command_started_us, command_link_generation;
     /* The single posted item retains this ID even if its request is cancelled. */
     uint64_t posted_request_id;
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    uint64_t scan_request;
+    bool scan_waiting, scan_releasing;
+#endif
     ae_id_t boot_id;
     uint8_t classic_bonds[BT_AUDIO_CLASSIC_BONDS_MAX][6];
     bool bond_refresh_pending, pairing_claimed, scan_pending, scan_submitted;
@@ -269,6 +276,19 @@ static void advance_bond_list_locked(void)
     else error_locked("Classic bond-list revision exhausted", ESP_ERR_INVALID_STATE, true);
 }
 
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+static bool scan_expired_locked(uint64_t now)
+{
+    if (!audio.scan_request || !audio.command_pending || now < audio.command_started_us ||
+        now - audio.command_started_us < BT_AUDIO_COMMAND_TIMEOUT_US) return false;
+    audio.command_pending = false;
+    audio.public.request_status = BT_AUDIO_JOB_FAILED;
+    audio.public.request_error = ESP_ERR_TIMEOUT;
+    error_locked("Classic scan preparation timeout", ESP_ERR_TIMEOUT, false);
+    return true;
+}
+#endif
+
 static void watchdog(TimerHandle_t timer)
 {
     (void)timer;
@@ -292,6 +312,9 @@ static void watchdog(TimerHandle_t timer)
         now - audio.init_started_us >= BT_AUDIO_INIT_TIMEOUT_US) {
         error_locked("Audio profile initialization timeout", ESP_ERR_TIMEOUT, true);
     }
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    scan_expired_locked(now);
+#endif
     if (!audio.public.failed && audio.public.control_inflight && now >= audio.command_started_us &&
         now - audio.command_started_us >= BT_AUDIO_COMMAND_TIMEOUT_US && audio.public.request_error != ESP_ERR_TIMEOUT) {
         audio.public.request_status = BT_AUDIO_JOB_UNCERTAIN;
@@ -479,6 +502,9 @@ static void service_classic_pairing(void)
     service_security_request();
     portENTER_CRITICAL(&audio_lock);
     bool submit_scan = audio.scan_pending && !audio.scan_submitted;
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    submit_scan = submit_scan && !audio.scan_request;
+#endif
     bool discover = audio.public.pairing_requested && !audio.public.failed;
     if (submit_scan) {
         audio.scan_pending = false; audio.scan_submitted = true; audio.scan_expected = discover;
@@ -1040,6 +1066,9 @@ static esp_err_t submit_control_locked(uint64_t generation, uint64_t link_genera
         !audio.public.pairing_busy && !audio.command_pending && !audio.public.control_inflight &&
         control_peer_compatible_locked(command, peer ? peer : current) &&
         (connecting ? !known : (known && (!peer || peer_matches(peer, current))));
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    if (audio.scan_request) accepted = false;
+#endif
     if (command == BT_AUDIO_OPEN_VOICE || command == BT_AUDIO_CLOSE_VOICE)
         accepted = accepted && audio.public.hfp_connected && (audio.public.hfp_audio_connected == (command == BT_AUDIO_CLOSE_VOICE));
     if (accepted) {
@@ -1131,6 +1160,49 @@ esp_err_t bt_audio_refresh_bonds(void)
 }
 
 #if AUDIO_PROFILES_SUPPORTED
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+void bt_audio_classic_scan_result(uint64_t request, esp_err_t result)
+{
+    portENTER_CRITICAL(&audio_lock);
+    if (request == audio.scan_request && request == audio.public.request_id && audio.command_pending) {
+        audio.scan_waiting = false;
+        if (result != ESP_OK) {
+            audio.command_pending = false;
+            audio.public.request_status = BT_AUDIO_JOB_FAILED;
+            audio.public.request_error = result;
+            error_locked("Classic scan preparation", result, false);
+        }
+    }
+    portEXIT_CRITICAL(&audio_lock);
+}
+
+void bt_audio_classic_scan_drained(uint64_t request, bool restore)
+{
+    portENTER_CRITICAL(&audio_lock);
+    if (request == audio.scan_request) {
+        audio.scan_request = 0;
+        audio.scan_waiting = audio.scan_releasing = false;
+        if (restore) audio.scan_pending = true;
+    }
+    portEXIT_CRITICAL(&audio_lock);
+}
+
+static void service_scan_release(void)
+{
+    portENTER_CRITICAL(&audio_lock);
+    uint64_t release = 0;
+    if (audio.scan_request && !audio.scan_releasing &&
+        ((!audio.command_pending && !audio.public.control_inflight) ||
+         audio.public.request_status == BT_AUDIO_JOB_UNCERTAIN || audio.public.failed)) {
+        release = audio.scan_request;
+        audio.scan_releasing = true;
+    }
+    portEXIT_CRITICAL(&audio_lock);
+    bool restore;
+    if (release && bt_classic_scan_release(release, &restore)) bt_audio_classic_scan_drained(release, restore);
+}
+#endif
+
 /* Runs on BTC queue 0, the same serialized owner as the profile callbacks.
  * An earlier down/reconnect is already visible here. A later callback can
  * only run inside or after the synchronous profile dispatch. */
@@ -1143,19 +1215,37 @@ static void dispatch_control(void *unused)
     if (!audio.command_pending || request != audio.public.request_id) {
         portEXIT_CRITICAL(&audio_lock); return;
     }
-    audio.command_pending = false;
     bt_audio_command_t command = audio.command;
     uint64_t link = command_is_hfp(command) ? audio.public.hfp_link_generation : audio.public.a2dp_link_generation;
     bool saved = audio.public.classic_bonds_known && !audio.bond_refresh_pending && saved_peer_locked(audio.command_peer);
     if (audio.command_link_generation != link || (audio.command_requires_saved && !saved) ||
         !control_peer_compatible_locked(command, audio.command_peer)) {
+        audio.command_pending = false;
         audio.public.request_status = BT_AUDIO_JOB_FAILED;
         audio.public.request_error = audio.command_link_generation != link ? ESP_ERR_NOT_FOUND : ESP_ERR_INVALID_STATE;
         portEXIT_CRITICAL(&audio_lock); return;
     }
     uint8_t peer[6]; memcpy(peer, audio.command_peer, sizeof(peer));
+    uint64_t now = now_us();
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    if (scan_expired_locked(now)) {
+        portEXIT_CRITICAL(&audio_lock); return;
+    }
+    if ((command == BT_AUDIO_CONNECT_HFP || command == BT_AUDIO_CONNECT_A2DP) && !audio.scan_request) {
+        audio.scan_request = request;
+        audio.scan_waiting = true;
+        audio.command_started_us = now;
+        portEXIT_CRITICAL(&audio_lock);
+        esp_err_t prepared = bt_classic_scan_prepare(request, peer);
+        if (prepared != ESP_OK) bt_audio_classic_scan_result(request, prepared);
+        return;
+    }
+    if (!audio.scan_request) audio.command_started_us = now;
+#else
+    audio.command_started_us = now;
+#endif
+    audio.command_pending = false;
     audio.public.control_inflight = true;
-    audio.command_started_us = now_us();
     audio.public.request_status = BT_AUDIO_JOB_WAITING;
     portEXIT_CRITICAL(&audio_lock);
 
@@ -1177,6 +1267,9 @@ void bt_audio_service(void)
 {
 #if AUDIO_PROFILES_SUPPORTED
     watchdog(NULL);
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    service_scan_release();
+#endif
     service_classic_pairing();
     service_classic_name();
     portENTER_CRITICAL(&audio_lock);
@@ -1184,7 +1277,11 @@ void bt_audio_service(void)
     expire_ring_locked(&audio.music, now); expire_ring_locked(&audio.voice, now);
     expire_ring_locked(&audio.microphone, now);
     uint64_t post = 0;
-    if (audio.command_pending && !audio.posted_request_id && audio.public.initialized && !audio.public.failed) {
+    bool dispatch = audio.command_pending && !audio.posted_request_id && audio.public.initialized && !audio.public.failed;
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    dispatch = dispatch && !audio.scan_waiting && !audio.scan_releasing;
+#endif
+    if (dispatch) {
         post = audio.public.request_id;
         audio.posted_request_id = post;
     }

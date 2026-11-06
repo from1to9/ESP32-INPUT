@@ -1,29 +1,44 @@
-# Use one generated H4 source for both diagnostic options. The existing VHCI
-# callback owner and pinned SDK checkout remain intact.
+# Generate each active Bluetooth replacement once. The existing VHCI callback
+# owner and pinned SDK checkout remain intact.
 idf_component_get_property(acl_bt_lib bt COMPONENT_LIB)
 idf_component_get_property(acl_bt_dir bt COMPONENT_DIR)
 set(acl_src_dir "${acl_bt_dir}/host/bluedroid")
 set(acl_output_dir "${CMAKE_BINARY_DIR}/generated/a2dp_acl")
-set(acl_inputs "${acl_src_dir}/hci/hci_hal_h4.c")
+set(acl_inputs)
 set(acl_patches)
+if(CONFIG_APP_A2DP_ACL_DIAGNOSTICS OR CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS)
+    list(APPEND acl_inputs "${acl_src_dir}/hci/hci_hal_h4.c")
+endif()
 if(CONFIG_APP_A2DP_ACL_DIAGNOSTICS)
     list(APPEND acl_inputs "${acl_src_dir}/btc/profile/std/a2dp/btc_a2dp_sink.c"
                            "${acl_src_dir}/stack/btu/btu_task.c")
     list(APPEND acl_patches "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-a2dp-acl-diagnostics.patch")
     target_sources(${acl_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main/bt_acl_diag.c")
 endif()
-if(CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS)
+if(CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS OR CONFIG_APP_CLASSIC_SCAN_COORDINATION)
     set(classic_archive "${acl_bt_dir}/controller/lib_esp32s31/esp32s31-bt-lib/libbredr_app.a")
     file(SHA256 "${classic_archive}" classic_archive_sha)
     if(NOT classic_archive_sha STREQUAL "b7c964b1a459f501f417ed411c673397e8e96f4754e31b9183fbefd0d76b830f")
-        message(FATAL_ERROR "Classic connection diagnostics require the reviewed OLM slot ABI")
+        message(FATAL_ERROR "Classic connection hooks require the reviewed OLM slot ABI")
     endif()
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${classic_archive}")
+    target_link_options(${acl_bt_lib} INTERFACE
+        "-Wl,--wrap=r_olm_pscan_end" "-Wl,--undefined=__wrap_r_olm_pscan_end")
+endif()
+if(CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS)
     list(APPEND acl_patches "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-classic-connect-diagnostics.patch")
     target_sources(${acl_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main/bt_classic_connect_diag.c")
     target_link_options(${acl_bt_lib} INTERFACE
-        "-Wl,--wrap=r_olm_conn_alloc" "-Wl,--undefined=__wrap_r_olm_conn_alloc"
-        "-Wl,--wrap=r_olm_pscan_end" "-Wl,--undefined=__wrap_r_olm_pscan_end")
+        "-Wl,--wrap=r_olm_conn_alloc" "-Wl,--undefined=__wrap_r_olm_conn_alloc")
+endif()
+if(CONFIG_APP_CLASSIC_SCAN_COORDINATION)
+    list(APPEND acl_inputs "${acl_src_dir}/stack/btu/btu_hcif.c"
+                           "${acl_src_dir}/stack/btu/btu_init.c"
+                           "${acl_src_dir}/bta/dm/bta_dm_act.c")
+    list(APPEND acl_patches "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-classic-scan-coordination.patch")
+    target_sources(${acl_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main/bt_classic_scan.c")
+    target_link_options(${acl_bt_lib} INTERFACE "-Wl,--wrap=r_orca_hci_cc_evt_status_send"
+        "-Wl,--undefined=__wrap_r_orca_hci_cc_evt_status_send")
 endif()
 
 find_package(Git REQUIRED)
