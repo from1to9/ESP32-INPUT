@@ -345,7 +345,7 @@ static void source_aware_motion_and_virtual_timeout_use_the_same_model(void)
     f.now=s.timestamp_us/1000;
     assert(app_remote_input_motion_sample(f.remote,&s,f.now));
     assert(f.engine.count==1 && f.engine.queue[f.engine.head].owner==INPUT_REMOTE &&
-        f.engine.queue[f.engine.head].data[1]==1 && f.engine.queue[f.engine.head].data[2]==0);
+        f.engine.queue[f.engine.head].data[1]==2 && f.engine.queue[f.engine.head].data[2]==0);
     step(&f);
     assert(!hid_engine_set_gyro(&f.engine,true)); /* Native source cannot enable foreign motion. */
     cp_command_t script=command(&f,CP_OP_MOUSE_MOVE_RELATIVE,"{\"dx\":1,\"dy\":0}");cp_result_t result;

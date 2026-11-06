@@ -88,6 +88,11 @@ its immutable signed axes and local grid geometry.
 
 Configuration accepts independent X/Y gains 0.25..100 HID units/degree, deadzone 0..10 dps, filter time constant 0..1 seconds, settling freeze 0..1000 ms, selector cell width 1..45 degrees and hysteresis from zero up to half a cell (exclusive). Defaults are X=Y=4, no inversion, deadzone 0.5 dps, filter 0.03 seconds, freeze 150 ms, cell width 6 degrees and hysteresis 1 degree. `interaction_freeze_after` applies the configured duration to original event time with saturating arithmetic; `interaction_freeze_until` still accepts an explicit later deadline. Configuration changes clear filters and carry. Status flags distinguish calibrated, gravity ready, gyro-predicted and suppressed output, with a reason for suppression. Calls and snapshots must remain on the coordinator; the model is not thread-safe.
 
+For Mouse these gains and the filter time constant are base values. The
+[aim response](../../docs/motion-estimation.md#current-orientation-design)
+scales them with projected turn speed. The selector uses its configured
+filter directly.
+
 ### Optional reference-loss evidence
 
 `interaction_reference_diagnostics_bind` attaches fixed caller-owned storage;

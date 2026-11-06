@@ -40,8 +40,9 @@ optimistically and never sends a whole stale settings structure.
 
 Input settings links to Motion sensitivity and Gesture help. Horizontal and
 vertical sensitivity each offer Slow (2.00), Default (4.00), Fast (8.00), a full
-0.25..100.00 slider and 0.25 nudges. Values represent the actual shared setting
-in HID units per degree. Adjusting one axis cannot change the other. Boundary
+0.25..100.00 slider and 0.25 nudges. Values represent the saved base gain
+in HID units per degree. The [aim response](../docs/motion-estimation.md#current-orientation-design)
+scales gain and smoothing for faster turns. Each axis retains its own setting. Boundary
 nudges stop at the nearest valid endpoint; unavailable controls submit nothing.
 
 Motion tuning exposes deadzone (0..10.000 degrees/second, 0.100 nudges), smoothing

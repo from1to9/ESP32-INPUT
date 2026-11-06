@@ -35,7 +35,7 @@ typedef struct {
 } interaction_imu_sample_t;
 
 typedef struct {
-    float pointer_gain_x, pointer_gain_y; /* 0.25..100 relative HID units/degree. */
+    float pointer_gain_x, pointer_gain_y; /* Base 0.25..100 relative HID units/degree. */
     bool invert_x, invert_y;
     uint32_t freeze_ms; /* 0..1000, applied after touch/button/haptic transitions. */
     float deadzone_dps;

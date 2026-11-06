@@ -1263,7 +1263,7 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
         s->timestamp_us / 1000 < m->freeze_until_ms) {
         return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL);
     }
-    float rates[2];
+    float rates[2], response = 1;
     if (m->view.mode == INPUT_KEYBOARD) {
         rates[0] = selected_rate(gyro, m->config.selector_axis_x);
         rates[1] = selected_rate(gyro, m->config.selector_axis_y);
@@ -1283,10 +1283,25 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
         float world_rate[3];
         rotate3(previous_attitude, gyro, world_rate);
         rates[0] = dot3(world_rate, m->world_up) * (m->config.invert_x ? -1.0f : 1.0f);
-        rates[1] = dot3(world_rate, m->aim_pitch) * (m->config.invert_y ? -1.0f : 1.0f);
+        /* Positive pitch raises the calibrated aim. HID Y increases down. */
+        rates[1] = dot3(world_rate, m->aim_pitch) * (m->config.invert_y ? 1.0f : -1.0f);
+        /* Keep the saved gain and time constant as the fine-motion base.
+         * Faster projected turns cover more distance and need less lag. */
+        const float speed = fmaxf(fabsf(rates[0]), fabsf(rates[1]));
+        response += fminf(speed / 20, 3);
     }
     const float alpha = m->config.filter_seconds == 0 ? 1 :
-        1 - expf(-dt / m->config.filter_seconds);
+        1 - expf(-dt * response / m->config.filter_seconds);
+    if (m->view.mode == INPUT_MOUSE) {
+        if (rates[0] * m->filtered[0] < 0) {
+            m->filtered[0] = 0;
+            m->pointer_motion.x = 0;
+        }
+        if (rates[1] * m->filtered[1] < 0) {
+            m->filtered[1] = 0;
+            m->pointer_motion.y = 0;
+        }
+    }
     for (size_t axis = 0; axis < 2; ++axis) {
         if (fabsf(rates[axis]) <= m->config.deadzone_dps) m->filtered[axis] = 0;
         else m->filtered[axis] += alpha * (rates[axis] - m->filtered[axis]);
@@ -1301,8 +1316,8 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
     /* Threshold in angular units before applying independent gains. The shared
      * bounded integrator retains per-axis fractions and drops clamped excess. */
     const float x = fabsf(m->filtered[0]) <= m->config.deadzone_dps ? 0 :
-        m->filtered[0] * m->config.pointer_gain_x;
+        m->filtered[0] * fminf(m->config.pointer_gain_x * response, 100);
     const float y = fabsf(m->filtered[1]) <= m->config.deadzone_dps ? 0 :
-        m->filtered[1] * m->config.pointer_gain_y;
+        m->filtered[1] * fminf(m->config.pointer_gain_y * response, 100);
     return input_motion_step(&m->pointer_motion, x, y, dt, 1, 0, true);
 }

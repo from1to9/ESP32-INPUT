@@ -62,7 +62,7 @@ Rotate the held device to aim the Mouse pointer. Calibrate while holding the
 desired aiming direction. The device tracks orientation and projects observed
 angular increments onto the calibrated axes. It sends relative movement over
 the existing USB or Bluetooth HID connection. Host software and screen
-calibration are unnecessary. Gains remain in HID units per degree, with
+calibration are unnecessary. Base gains are in HID units per degree, with
 independent X/Y sensitivity, inversion, filtering and touch freeze. Keyboard
 angular selection retains its existing behavior.
 

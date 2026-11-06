@@ -434,13 +434,13 @@ static void pending_selection_double_hold_and_mouse(void)
     }
     assert(interaction_tick(&mouse, up_ms + INTERACTION_FREEZE_MS) == INTERACTION_EVENT_NONE);
     assert(motion(&mouse, &time, 10000, 26, -2).x == 0);
-    assert(motion(&mouse, &time, 10000, 26, -2).x == 1);
+    assert(motion(&mouse, &time, 10000, 26, -2).x == 2);
 }
 
 static void motion_calibration_and_focus(void)
 {
-    assert(pointer_second(10000, 100) == 100);
-    assert(pointer_second(20000, 50) == 100);
+    assert(pointer_second(10000, 100) == 225);
+    assert(pointer_second(20000, 50) == 225);
     interaction_t m;
     setup(&m, INPUT_MOUSE);
     uint64_t time = calibrate(&m);
@@ -455,7 +455,7 @@ static void motion_calibration_and_focus(void)
     for (unsigned i = 0; i < 13; ++i)
         assert(motion(&m, &time, 10000, 1, -2).x == 0);
     assert(m.gravity_ready); /* A gap needs fresh still evidence, with no catch-up. */
-    assert(motion(&m, &time, 10000, 26, -2).x == 1);
+    assert(motion(&m, &time, 10000, 26, -2).x == 2);
     interaction_imu_sample_t invalid = sample(time + 10000, NAN, -2);
     assert(interaction_motion_sample(&m, &invalid).x == 0);
     invalid.gx_dps = 2001;
@@ -648,7 +648,7 @@ static void suppression_and_touch(void)
     uint64_t time = calibrate(&m);
     assert(interaction_set_motion(&m, true));
     align_mouse_output(&m, &time);
-    assert(motion(&m, &time, 10000, 26, -2).x == 1);
+    assert(motion(&m, &time, 10000, 26, -2).x == 2);
     interaction_set_suppressed(&m, true, false, false, time / 1000);
     assert(motion(&m, &time, 10000, 26, -2).x == 0);
     assert(interaction_set_touch_divisor(&m, 4));
@@ -665,13 +665,13 @@ static void suppression_and_touch(void)
     interaction_set_suppressed(&m, false, false, false, time / 1000);
     for (size_t i = 0; i < 14; ++i) assert(motion(&m, &time, 10000, 26, -2).x == 0);
     assert(motion(&m, &time, 10000, 26, -2).x == 0);
-    assert(motion(&m, &time, 10000, 26, -2).x == 1);
+    assert(motion(&m, &time, 10000, 26, -2).x == 2);
     assert(m.view.motion_enabled);
     interaction_sync(&m, &m.control, false, time / 1000);
     assert(motion(&m, &time, 10000, 26, -2).x == 0 && m.view.motion_enabled);
     interaction_sync(&m, &m.control, true, time / 1000);
     assert(motion(&m, &time, 10000, 26, -2).x == 0);
-    assert(motion(&m, &time, 10000, 26, -2).x == 1); /* Short backpressure does not disable intent. */
+    assert(motion(&m, &time, 10000, 26, -2).x == 2); /* Short backpressure does not disable intent. */
     assert(interaction_button_update(&m, true, time / 1000) == INTERACTION_EVENT_DOWN);
     assert(motion(&m, &time, 10000, 26, -2).x == 0);
     assert(interaction_button_update(&m, false, time / 1000) == 0);
@@ -706,13 +706,15 @@ static void asynchronous_freeze(void)
     assert(interaction_set_motion(&m, true));
     align_mouse_output(&m, &time);
     const uint64_t deadline = time / 1000 + 70;
-    for (size_t i = 0; i < 3; ++i) assert(motion(&m, &time, 10000, 26, -2).x == 0);
+    const int before[] = {0, 1, 0};
+    for (size_t i = 0; i < 3; ++i) assert(motion(&m, &time, 10000, 26, -2).x == before[i]);
     interaction_freeze_until(&m, deadline);
     assert(interaction_tick(&m, 100) == 0 && m.view.motion_enabled); /* No clock observation. */
     for (size_t i = 0; i < 3; ++i) assert(motion(&m, &time, 10000, 26, -2).x == 0);
+    const int after[] = {0, 0, 1};
     for (size_t i = 0; i < 3; ++i) {
         interaction_freeze_until(&m, deadline); /* Repeated delivery must preserve new fractional carry. */
-        assert(motion(&m, &time, 10000, 26, -2).x == 0);
+        assert(motion(&m, &time, 10000, 26, -2).x == after[i]);
     }
     interaction_freeze_until(&m, deadline - 1);
     assert(motion(&m, &time, 10000, 26, -2).x == 0);
@@ -1061,7 +1063,7 @@ static uint64_t physical_grip(interaction_t *m, float tilt)
     return time;
 }
 
-static void auto_grip_projection_and_independent_gains(void)
+static void calibrated_projection_and_independent_gains(void)
 {
     const uint64_t intervals[] = {5000, 10000, 20000};
     for (unsigned grip = 0; grip <= 6; ++grip) {
@@ -1083,7 +1085,7 @@ static void auto_grip_projection_and_independent_gains(void)
                         yaw * sinf(tilt), yaw * cosf(tilt), 0, sinf(tilt), cosf(tilt));
                     total_x += d.x; total_y += d.y;
                 }
-                assert(total_x >= 199 && total_x <= 200 && total_y == 0);
+                assert(total_x >= 449 && total_x <= 450 && total_y == 0);
                 time = physical_grip(&m, tilt);
                 config = m.config;
                 config.pointer_gain_x = 8;
@@ -1099,7 +1101,7 @@ static void auto_grip_projection_and_independent_gains(void)
                         25 * (float)direction, 0, 0, 0, sinf(pitch), cosf(pitch));
                     total_x += d.x; total_y += d.y;
                 }
-                assert(total_y >= 49 && total_y <= 50 && total_x == 0);
+                assert(total_y >= -113 && total_y <= -112 && total_x == 0);
             }
         }
     }
@@ -1118,11 +1120,11 @@ static void aiming_turns_stop_and_return_across_angle_wrap(void)
             for (unsigned i = 0; i < counts[speed]; ++i) {
                 const input_delta_t delta = physical_sample(&m, &time, 10000, 0, 0, rate, 0, 0, 1);
                 assert(m.gravity_ready && delta.y == 0 && (direction ? delta.x <= 0 : delta.x >= 0));
-                assert(delta.x >= -10 && delta.x <= 10);
+                assert(delta.x >= -40 && delta.x <= 40);
                 displacement += delta.x;
             }
             if (!direction) {
-                const int expected = speed ? 1600 : 15;
+                const int expected = speed ? 6400 : 15;
                 assert(displacement >= expected - 1 && displacement <= expected);
             }
             for (unsigned i = 0; i < 30; ++i) {
@@ -1145,7 +1147,7 @@ static void aiming_sideways_calibration_and_gravity_only_correction(void)
     assert(m.gravity_ready && m.aim_pitch[1] == 1 && m.world_up[0] == 1);
     (void)physical_sample(&m, &time, 10000, 0, 0, 0, 1, 0, 0);
     const input_delta_t yaw = physical_sample(&m, &time, 10000, 50, 0, 0, 1, 0, 0);
-    assert(yaw.x == 2 && yaw.y == 0);
+    assert(yaw.x == 7 && yaw.y == 0);
     /* A smooth accelerometer drift inside the correction gate can change the
      * attitude estimate. Zero gyro still means zero cursor movement. */
     for (unsigned i = 0; i < 200; ++i) {
@@ -1157,15 +1159,55 @@ static void aiming_sideways_calibration_and_gravity_only_correction(void)
     assert(fabsf(m.gravity[1]) > .05f && m.world_up[0] == 1 && m.aim_pitch[1] == 1);
 }
 
+static void aiming_default_response_stops_and_reverses_cleanly(void)
+{
+    interaction_t m;
+    uint64_t time = physical_grip(&m, 0);
+    interaction_config_t config = m.config;
+    config.filter_seconds = .03f;
+    assert(interaction_configure(&m, &config));
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    /* The first 10 ms interval of an ordinary turn moves one HID unit. */
+    assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 1);
+    assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
+    int distance = 0;
+    for (unsigned i = 0; i < 100; ++i) {
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 250, 0, 0, 1);
+        assert(d.x >= 29 && d.x <= 40 && !d.y);
+        distance += d.x;
+    }
+    assert(distance >= 3980 && distance <= 3990);
+    assert(physical_sample(&m, &time, 50000, 0, 0, 250, 0, 0, 1).x == 127);
+    assert(m.pointer_motion.x == 0);
+    for (unsigned i = 0; i < 30; ++i) {
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+        assert(!d.x && !d.y);
+    }
+    for (unsigned i = 0; i < 40; ++i)
+        (void)physical_sample(&m, &time, 10000, 0, 0, 100, 0, 0, 1);
+    for (unsigned i = 1; i <= 6; ++i) {
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, -5, 0, 0, 1);
+        assert(d.x == (i == 6 ? -1 : 0) && !d.y);
+    }
+    config.pointer_gain_x = 100;
+    config.filter_seconds = 0;
+    assert(interaction_configure(&m, &config));
+    (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
+    assert(physical_sample(&m, &time, 10000, 0, 0, 20, 0, 0, 1).x == 20);
+}
+
 static void gravity_transients_gaps_and_reacquisition(void)
 {
     interaction_t m;
     uint64_t time = physical_grip(&m, 0);
+    int total_x = 0;
     for (unsigned i = 0; i < 150; ++i) {
         const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 25, .8f, 0, .6f);
-        assert(d.x == 1 && d.y == 0);
+        assert(d.x >= 2 && d.x <= 3 && d.y == 0);
+        total_x += d.x;
         assert(m.gravity_predicted && m.gravity_ready); /* Norm alone is insufficient. */
     }
+    assert(total_x == 337);
     for (unsigned i = 0; i < 150; ++i)
         assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
     assert(m.gravity_ready && !m.gravity_predicted);
@@ -1177,7 +1219,7 @@ static void gravity_transients_gaps_and_reacquisition(void)
         for (unsigned i = 0; i < 15; ++i)
             assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
         assert(m.gravity_ready);
-        assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 1);
+        assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 2);
     }
     assert(physical_sample(&m, &time, 50001, 0, 0, 25, 0, 0, 1).x == 0);
     assert(!m.gravity_ready && m.pointer_motion.x == 0);
@@ -1189,7 +1231,7 @@ static void gravity_transients_gaps_and_reacquisition(void)
     interaction_set_suppressed(&m, false, false, false, time / 1000);
     for (unsigned i = 0; i < 20; ++i)
         assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
-    assert(m.gravity_ready && physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 1);
+    assert(m.gravity_ready && physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 2);
     interaction_set_suppressed(&m, false, false, true, time / 1000);
     for (unsigned i = 0; i < 26; ++i)
         assert(physical_sample(&m, &time, 10000, 0, 0, 100, 0, 0, 1).x == 0);
@@ -1209,7 +1251,7 @@ static void orientation_tracks_during_touch_and_crosses_old_geometry_limit(void)
     interaction_set_suppressed(&m, false, false, false, time / 1000);
     for (unsigned i = 0; i < 15; ++i)
         assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 1, 0).x == 0);
-    assert(physical_sample(&m, &time, 10000, 0, 25, 0, 0, 1, 0).x == 1);
+    assert(physical_sample(&m, &time, 10000, 0, 25, 0, 0, 1, 0).x == 2);
     time = physical_grip(&m, 0);
     for (unsigned i = 1; i <= 200; ++i) {
         const float roll = (float)i * 3.14159265359f / 200;
@@ -1218,7 +1260,7 @@ static void orientation_tracks_during_touch_and_crosses_old_geometry_limit(void)
         assert(d.x == 0 && d.y == 0);
         assert(m.gravity_ready && m.view.motion_block_reason == INTERACTION_MOTION_BLOCK_NONE);
     }
-    assert(physical_sample(&m, &time, 10000, 0, 0, -25, 0, 0, -1).x == 1);
+    assert(physical_sample(&m, &time, 10000, 0, 0, -25, 0, 0, -1).x == 2);
     interaction_config_t config = m.config;
     config.freeze_ms = 1000;
     assert(interaction_configure(&m, &config));
@@ -1492,7 +1534,7 @@ static void aim_toggle_and_recenter_preserve_bias_intent_and_fault_history(void)
     out = physical_sample(&m, &time, 10000, 50, 0, 0, 0, 0, 1);
     assert(!out.x && !out.y); /* First interval after an explicit alignment. */
     out = physical_sample(&m, &time, 10000, 50, 0, 0, 0, 0, 1);
-    assert(!out.x && out.y >= 1);
+    assert(!out.x && out.y <= -1);
     (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 3);
     assert(d.first_active.known && d.first_active.reason == INTERACTION_REFERENCE_ACCEL_NORM);
     const interaction_reference_incident_t incident = d.first_active;
@@ -1551,9 +1593,10 @@ int main(void)
     pad_heartbeat_deadlines_and_old_gesture_isolation();
     pad_event_time_staleness_clock_and_malformed_input();
     pad_configuration_and_token_exhaustion();
-    auto_grip_projection_and_independent_gains();
+    calibrated_projection_and_independent_gains();
     aiming_turns_stop_and_return_across_angle_wrap();
     aiming_sideways_calibration_and_gravity_only_correction();
+    aiming_default_response_stops_and_reverses_cleanly();
     gravity_transients_gaps_and_reacquisition();
     orientation_tracks_during_touch_and_crosses_old_geometry_limit();
     calibration_cancellation_requires_a_new_explicit_start();

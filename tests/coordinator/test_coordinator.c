@@ -1738,7 +1738,7 @@ static void motion_gates_and_local_keyboard_focus(void)
     if (s_engine.state.gyro_enabled && s_interaction.gravity_ready) align_motion_output();
     assert(s_engine.state.gyro_enabled);
     sample_after(10, 25, 0);
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     expect_report(2, moved, sizeof moved);
     process_motion(); /* Repeated board snapshot cannot duplicate movement. */
     expect_idle();
@@ -1796,11 +1796,12 @@ static void fresh_sensor_after_consumer_gap_requires_new_reference(void)
     calibrate();
     action(APP_MOTION, 0);
     if (s_engine.state.gyro_enabled && s_interaction.gravity_ready) align_motion_output();
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     /* Yaw about gravity is a physically coherent constant-1g trajectory. */
     for (unsigned i = 0; i < 200; ++i) {
         sample_after(10, 25, 0);
-        const uint8_t fractional[] = {0, (uint8_t)(i % 2 ? 3 : 2), 0, 0};
+        const uint8_t steps[] = {5, 6, 5, 6, 6, 5, 6, 6};
+        const uint8_t fractional[] = {0, steps[i % 8], 0, 0};
         expect_report(2, fractional, sizeof fractional);
     }
     /* The board still supplies a new fresh sample; only the consumer missed
@@ -1883,7 +1884,7 @@ static void motion_recovery_requires_fresh_samples_and_explicit_enable(void)
     action(APP_MOTION, 0);
     if (s_engine.state.gyro_enabled && s_interaction.gravity_ready) align_motion_output();
     sample_after(10, 25, 0);
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     expect_report(2, moved, sizeof moved);
     process_motion();
     expect_idle();
@@ -1944,7 +1945,7 @@ static void touch_release_has_one_freeze_interval(void)
     for (unsigned i = 0; i < 14; ++i) { sample_after(10, 25, 0); expect_idle(); }
     sample_after(10, 25, 0); expect_idle(); /* Align the first eligible interval. */
     sample_after(10, 25, 0);
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     expect_report(2, moved, sizeof moved); /* One 150 ms freeze and one output boundary. */
     assert(s_engine.state.gyro_enabled && s_interaction.view.motion_enabled);
 }
@@ -1964,7 +1965,7 @@ static void physical_down_freezes_before_classification(void)
     for (unsigned i = 0; i < 14; ++i) { sample_after(10, 25, 0); expect_idle(); }
     sample_after(10, 25, 0); expect_idle(); /* Align the first eligible interval. */
     sample_after(10, 25, 0);
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     expect_report(2, moved, sizeof moved);
 }
 
@@ -2041,7 +2042,7 @@ static void short_congestion_preserves_motion_intent(void)
     assert(s_engine.state.gyro_enabled && s_interaction.view.motion_enabled);
     sample_after(10, 25, 0); expect_idle(); /* Align the first eligible interval. */
     sample_after(10, 25, 0);
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     expect_report(2, moved, sizeof moved);
 }
 
@@ -2267,7 +2268,7 @@ static void completed_quick_touch_still_freezes_motion(void)
     for (unsigned i = 0; i < 14; ++i) { sample_after(10, 25, 0); expect_idle(); }
     sample_after(10, 25, 0); expect_idle(); /* Align the first eligible interval. */
     sample_after(10, 25, 0);
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     expect_report(2, moved, sizeof moved);
 }
 
@@ -4168,7 +4169,7 @@ static void motion_and_scan_diagnostics_are_bounded_observations(void)
     setup(INPUT_MOUSE); calibrate(); action(APP_MOTION, 0);
     if (s_engine.state.gyro_enabled && s_interaction.gravity_ready) align_motion_output();
     sample_after(10, 25, 0);
-    const uint8_t moved[] = {0, 2, 0, 0}; expect_report(2, moved, sizeof moved);
+    const uint8_t moved[] = {0, 5, 0, 0}; expect_report(2, moved, sizeof moved);
     const uint32_t processed = s_motion_trace.processed;
     process_motion();
     assert(s_motion_trace.processed == processed && s_motion_trace.duplicates == 1);
@@ -4291,7 +4292,7 @@ static void native_recenter_captures_current_aim_and_keeps_intent_stoppable(void
     render_view(&test_link, ESP_OK);
     assert(test_view.motion_enabled && test_view.motion_settings.reference == APP_REFERENCE_READY);
     align_motion_output();
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     sample_after(10, 25, 0); expect_report(2, moved, sizeof moved);
     action(APP_MOTION, 0);
     assert(!s_engine.state.gyro_enabled && s_interaction.gravity_ready);
@@ -5588,6 +5589,31 @@ static void pad_boundary_preserves_captured_movement(void)
     }
 }
 
+static void aim_default_direction_and_fast_response_reach_both_transports(void)
+{
+    for (int transport = APP_INPUT_BLUETOOTH; transport <= APP_INPUT_USB; ++transport) {
+        transport_setup(INPUT_MOUSE, (app_input_transport_t)transport);
+        calibrate();
+        assert(configure_motion_preferences(&s_settings));
+        action(APP_MOTION, 0);
+        align_motion_output();
+        sample_after(10, 0, 25);
+        const uint8_t up[] = {0, 0, (uint8_t)-1, 0};
+        expect_report(2, up, sizeof up);
+        sample_after(10, 0, 0);
+        expect_idle();
+        sample_after(20, 250, 0);
+        const uint8_t fast[] = {0, 74, 0, 0};
+        expect_report(2, fast, sizeof fast);
+        sample_after(50, 250, 0);
+        const uint8_t bounded[] = {0, 127, 0, 0};
+        expect_report(2, bounded, sizeof bounded);
+        sample_after(10, -5, 0);
+        expect_idle();
+        assert(s_interaction.gravity_ready && s_engine.state.gyro_enabled);
+    }
+}
+
 static void aim_clutch_preserves_full_screen_touch_and_live_report_order(void)
 {
     for (int transport = APP_INPUT_BLUETOOTH; transport <= APP_INPUT_USB; ++transport) {
@@ -5595,7 +5621,7 @@ static void aim_clutch_preserves_full_screen_touch_and_live_report_order(void)
         s_multitouch_available = true;
         calibrate(); action(APP_MOTION, 0); align_motion_output();
         const uint64_t epoch = s_engine.state.epoch;
-        const uint8_t aim[] = {0, 2, 0, 0}, scroll[] = {0, 0, 0, 1};
+        const uint8_t aim[] = {0, 5, 0, 0}, scroll[] = {0, 0, 0, 1};
         assert(hid_engine_enqueue_mouse_scroll(&s_engine, epoch, INPUT_LOCAL, 1) == HID_ENGINE_ENQUEUE_OK);
         sample_after(10, 25, 0);
         expect_report(2, scroll, sizeof scroll);
@@ -5963,7 +5989,7 @@ static void remote_imu_uses_the_single_board_sample_and_hid_queue(void)
     assert(s_engine.state.gyro_enabled && s_engine.state.owner == INPUT_REMOTE);
     for (unsigned i = 0; i < 15; ++i) { sample_after(10, 0, 0); expect_idle(); }
     sample_after(10, 25, 0);
-    const uint8_t moved[] = {0, 2, 0, 0};
+    const uint8_t moved[] = {0, 5, 0, 0};
     expect_report(2, moved, sizeof moved);
     process_motion(); expect_idle(); /* The cached board sample is consumed once. */
     remote_local_override(false); release_barrier(); sync_interaction();
@@ -6655,6 +6681,7 @@ int main(int argc, char **argv)
     RUN(same_or_invalid_mode_preserves_active_send);
     RUN(short_congestion_preserves_preview_send);
     RUN(short_congestion_preserves_motion_intent);
+    RUN(aim_default_direction_and_fast_response_reach_both_transports);
     RUN(modal_button_press_is_not_retargeted_after_close);
     RUN(local_touch_takeover_consumes_its_gesture);
     RUN(preview_survives_mode_modal_and_link_cancellation);

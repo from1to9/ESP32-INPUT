@@ -854,9 +854,9 @@ static void test_board_to_model_flat_inclined_and_upright_axes(void)
                     assert(model.gravity_ready);
                 }
                 if (pitch) {
-                    assert(abs(total_x) <= 1 && total_y * direction >= 61 && total_y * direction <= 64);
+                    assert(abs(total_x) <= 1 && total_y * direction <= -157 && total_y * direction >= -164);
                 } else {
-                    assert(abs(total_y) <= 1 && total_x * direction >= 249 && total_x * direction <= 252);
+                    assert(abs(total_y) <= 1 && total_x * direction >= 637 && total_x * direction <= 646);
                 }
             }
         }
