@@ -106,9 +106,9 @@ and control was unlocked at the transition. Touch/haptic/button/freeze context
 is retained, not silently excluded. Explicit calibration/cancel disables intent
 before invalidation and therefore cannot occupy this active incident slot.
 Inactive losses remain counted without occupying it.
-Intentional enable/Recenter resets have separate saturating counters and a
-last-reset reason/model timestamp; they do not count as losses or clear the
-first unexpected incident. They clear only the current rejection episode.
+Recenter records a saturating count and the last reset reason and model
+timestamp independently of loss and rejection evidence. Motion toggles retain
+the calibrated reference. The enable-reset counter remains for older captures.
 
 An episode starts at the first rejected correction while reference is ready and
 ends on a trusted correction, reacquisition or invalidation. Its near-one-g,
@@ -128,7 +128,8 @@ plus at most two `MotionRefFrame` rows for the frozen incident. Rows stay below
 `losses` lists reason indices 1..12 from the header enum (clock, calibrate,
 cancel, missing, invalid sample, sample time, haptic age, haptic normalization,
 hard acceleration norm, prediction normalization, correction normalization,
-ordinary trust age). Frame vectors are comma-separated exact IEEE binary32
+ordinary trust age). The two age reasons describe older captures. Frame
+vectors are comma-separated exact IEEE binary32
 hex bits, in gyro X/Y/Z then acceleration X/Y/Z order for samples, and X/Y/Z
 for bias/gravity/previous acceleration. Unknown fields must be interpreted via
 their known flags, never as measured zero. These observations identify executed

@@ -36,7 +36,13 @@ The touchpad grows from 384 x 156 = 59, 904 px to 396 x 292 = 115, 632 px: **93%
 
 Touch start and physical AI down suppress motion. Existing click freeze, relative deltas, fractional carry, congestion handling and release recovery stay coordinator-owned. Disabled input needs an actual reason in the critical-state area. The browser's synthetic ready fixture is explicitly distinct from an offline production boot.
 
-The 2026-10-23 grip-reference revision reuses the Mouse header slot at x 140/y 8/w 132/h 48 for `Recenter`. Auto grip is automatic behavior, with its acknowledged state in the existing noninteractive pad caption. `Motion / waiting` means Motion is requested but the reference is acquiring or restoring; it remains tappable to stop. `Motion / on` requires the coordinator's ready reference, while sensor, calibration and connection blockers retain priority. Ordinary touch pauses and zero-delta samples do not change this coarse reference state. `Recenter` is available only while Motion is requested, uses a distinct coordinator-admitted intent, preserves sensor bias, settings and the current Motion request, and never enables Motion while off. Input settings retains `Calibrate sensor` for bias calibration. The 106-object core, 160-object dynamic ceiling and all pad, scroll, click and bottom-row rectangles remain unchanged.
+The Mouse header places `Recenter` at x 140/y 8/w 132/h 48. The existing
+noninteractive pad caption shows the coordinator's aiming-reference state.
+See the [Mouse interaction contract](../docs/interaction.md#mouse) for
+calibration, readiness, recovery and Recenter behavior. The browser preview
+illustrates the geometry and includes earlier Motion copy. This layout uses
+the 106-object core, the 160-object dynamic ceiling and the existing pad,
+scroll, click and bottom-row rectangles.
 
 ### Optional Navigation revision
 
@@ -44,11 +50,11 @@ The user-approved Navigation preference is off by default and persists through
 the settings owner. When enabled, Mouse replaces only the Recenter slot with
 Home (140, 8, 62, 48) and Back (210, 8, 62, 48), separated by 8 px. All other
 Mouse and safety geometry stays fixed. The ordinary layout retains Recenter.
-Input places Calibrate sensor and Reset grip side by side, with separate
+Input places `Calibrate sensor` and `Recenter aim` side by side, with separate
 Tap-to-click, Motion settings/Gesture help and Navigation rows; Back and save
 status remain at their existing positions. The current Motion reason remains
-visible below the haptics text. Reset grip clears the reference while
-Motion stays off in the menu, without changing sensor bias or sending input.
+visible below the haptics text. `Recenter aim` captures the current direction
+while Motion is off in the menu.
 
 The Navigation page explains AssistiveTouch Button 3 to Home setup, including
 returning to Mouse to register the button. It labels Back as Command+[ for apps

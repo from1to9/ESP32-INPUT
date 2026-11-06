@@ -11,7 +11,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 ## Confirmed decisions
 
 1. Three primary modes: mouse, keyboard and microphone/speaker. Cold boot restores the last explicitly selected primary mode. With no saved choice it enters Mouse. Motion starts disabled and a restored Keyboard opens Touch.
-2. A click toggles mouse motion. Once enabled, handheld waving controls relative movement without holding a button. Use inertial sensor data and holding orientation to estimate natural direction and speed; direct wrist-rotation pointer control is superseded by the 2026-10-23 user revision.
+2. A click toggles Mouse Motion. Once enabled, rotate the device to aim using the direction established during calibration. See [Mouse behavior](#mouse-behavior).
 3. Motion character selection, touch selection and spoken English letters belong to keyboard mode.
 4. Prioritize iPhone, iPad, Windows and macOS. No proprietary target client is required for basic HID, but pairing, input layout and accessibility settings may still be necessary.
 5. Prefer concurrent mouse and microphone operation. Deliver independent modes first if concurrency cannot be made stable.
@@ -42,7 +42,7 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 
 | ID | Feature | Acceptance |
 | --- | --- | --- |
-| M01 | Motion mouse | Handheld waving gives intuitive relative movement; stopping holds the pointer; no braking reversal, unexplained timeout or stale burst |
+| M01 | Motion mouse | Turning with valid samples produces continuous directional relative HID movement using the calibrated aiming basis. Stopping holds the pointer and resuming uses fresh motion. |
 | M02 | Touch fine control | Relative single-finger movement; quarter/eighth gain; touch priority and a short release freeze |
 | M03 | Mouse buttons and wheel | Left/right click and explicit drag. Tap either scroll arrow for one wheel step or slide one finger vertically anywhere in the right scroll column. Interruptions release drag. |
 | M04 | Touchpad gestures | Configurable tap-to-click: single tap, double tap and double-tap-and-hold drag; movement-only when disabled |

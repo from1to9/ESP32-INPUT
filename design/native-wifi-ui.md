@@ -121,10 +121,10 @@ The pad's existing noninteractive caption gives the actual Motion reason. The 20
 | Connected but HID not ready | `Host connected; input is not ready.` | Connection detail; no claim that pairing alone enables input |
 | Release or transport switch in progress | `Waiting for held input to release.` / `Switching input connection.` | Status; retain truthful recovery/cancellation state |
 | Actual transport error | `Input connection error. Open Status.` | Status shows all simultaneous error/release/disconnection conditions |
-| Calibration running | `Keep the device still to calibrate sensor.` | Input settings; no redundant calibration request while active |
+| Calibration running | `Hold still in your aiming direction.` | Hold the desired aim while sensor calibration runs |
 | IMU present, calibration not ready | `Calibrate sensor in Input settings.` | Existing `APP_CALIBRATE` through Input settings |
 | IMU unavailable | `Motion sensor unavailable.` | Show actual capability/error evidence; never suggest Bluetooth pairing repairs a sensor |
-| All prerequisites met | `Enable Motion to set your grip.` while off; actual grip state while on | Motion toggle is enabled; AI single retains its contextual toggle |
+| All prerequisites met | `Enable Motion to aim.` while off, or the reported aim state while on | Motion toggle is enabled and AI single retains its contextual toggle |
 
 The appended `app_motion_reason_t` is coordinator-derived so UI, API and tests agree with the gate, retaining independent sensor/calibration and link fields for simultaneous blockers. Its zero value is UNKNOWN, not READY. Enabling requires READY plus the existing actual prerequisites; an already active Motion control remains available to turn off. Existing public fields do not establish fresh IMU read health: do not label a transient read failure unless the board/coordinator reports it. This guidance never forces Motion on without a ready host or calibration.
 
@@ -170,12 +170,30 @@ With the setting off, touchpad contact produces movement only. Explicit Left, Ri
 
 Required evidence belongs primarily to the Input Engine and coordinator: single/double tap, second-contact hold and movement, interrupted sequences, off-mode movement-only behavior, explicit-button preservation, late/invalid boundaries, queue pressure, failed release and persistence migration. UI evidence covers truthful toggle value, pending/error storage, help text, no duplicate gesture interpretation and unchanged spacious touchpad geometry.
 
-## 13. Automatic grip reference and manual Recenter
+## 13. Calibrated aiming reference and manual Recenter
 
-The coordinator publishes the existing reference enum: READY requires valid gravity and geometry references without a geometry limit; ACQUIRING waits for a stable reference; UNSTABLE requires recovery; UNKNOWN and UNAVAILABLE never imply readiness. These coarse states do not follow transient touch, haptic suppression, freeze windows or individual zero-delta samples. Motion remains a relative wrist-rotation pointer.
+The coordinator publishes the aiming-reference state defined by the
+[Mouse interaction contract](../docs/interaction.md#mouse). READY requires
+fresh, valid attitude. ACQUIRING covers calibration or recovery after loss.
+The enum retains UNSTABLE for compatibility. The aim state remains distinct
+from temporary touch, haptic and settling suppression.
 
-With no higher-priority Motion blocker, the pad shows `Enable Motion to set your grip.` while off, `Hold still to set your grip.` while acquiring, `Hold still to restore your grip.` while recovering, and `Grip ready. Touch pauses motion.` once ready. Unknown and unavailable references show explicit status guidance. The requested-on toggle reads `Motion / waiting` during acquisition/recovery, `Motion / on` when ready, `Motion / unavailable` for unknown/unavailable reference, and `Motion / paused` for another reported blocker. Every requested-on state remains stoppable. Calibration retains its distinct progress caption.
+With no higher-priority Motion blocker, the pad shows `Enable Motion to aim.`
+while off, `Hold still to recover aim.` during recovery, and `Aim ready. Touch
+pauses motion.` once ready. Unknown and unavailable references show explicit
+status guidance. The requested-on toggle reads `Motion / waiting` during
+recovery, `Motion / on` when ready, `Motion / unavailable` for unknown or
+unavailable reference, and `Motion / paused` for another reported blocker.
+Every requested-on state remains stoppable. Calibration retains its distinct
+progress caption.
 
-`motion_recenter_available` is authoritative coordinator eligibility and requires Motion to be already requested. Recenter stays disabled while Motion is off; enabling Motion itself acquires a fresh grip. The UI forwards `APP_RECENTER` only from the visible Mouse header and rejects stale epoch/revision, revoked eligibility, wake, lock and remote-owned presses. Mode changes cannot retarget a held press into Recenter. The owner rechecks the complete admission and reference lifecycle; UI does not estimate stability or update reference state optimistically. Sensor bias calibration stays under `Calibrate sensor` in Input settings. The Motion settings reference label becomes `Auto grip / ...` without an additional toggle or diagnostic row.
+`motion_recenter_available` reports coordinator eligibility. The Mouse
+header requires Motion to be on. The Input settings `Recenter aim` action
+captures the current direction while Motion is off. Both use `APP_RECENTER`
+with the visible press's epoch and revision. The owner rechecks wake, lock,
+ownership, admission and fresh attitude. Mode changes cannot retarget a held
+press into Recenter.
+Input settings provides separate `Calibrate sensor` and `Recenter aim`
+actions. The Motion settings reference label reports the current aim state.
 
 Native evidence must cover both themes, exact unchanged hit rectangles, all five reference states, stop while waiting, independent calibration/Recenter actions, stale/revoked/covered/wake/lock/ownership admission, unchanged keyboard header routing, and the actual control-gesture BEGIN / END / RECENTER FIFO order. Repeated identical snapshots must remain allocation- and flush-free under the existing object ceilings. Device stability, axis mapping and actual host motion require separate owner and physical validation.
