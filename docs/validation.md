@@ -16,6 +16,43 @@ IMU samples but still failed the error-log and physical Motion gates.
 This checkpoint is not a qualified release. Reusable findings are indexed in
 the [engineering lessons](../.agent/shared/ENGINEERING_LESSONS.md).
 
+### Combined connection and mouse diagnostic run (2026-11-06)
+
+Clean `d8ccd1bf8236240600ece5b92a9d02e5bcfe83ac` integrates the independently
+reviewed MousePhase and Classic connection observers. Focused combined checks,
+the target build, single generated H4 source, real wrapper call edges and task
+stack gates passed. The published application was written and verified in the
+inactive slot, preserving confirmed `b0c1dfa`. Its runtime identity matched the
+package and first-boot confirmation completed. Product failures remain open.
+
+The first automatic Classic allocation returned `0x09` with capacity one,
+addressless used flags and page-scan state 4 before and after the call. This
+observes a scan reservation at that failing allocation. The diagnostic's new
+H4 receive guard incorrectly compares the packet type with `0x3e` instead of
+event type `0x04`; normal received events were omitted. The export contains
+five transmitted commands and one controller sample, with no recorded terminal.
+Its complete connection chronology is unavailable. The direct parser tests
+missed this integration defect; a generated-H4 regression and correction are
+required. The controller sample and ordinary UART failure remain separate
+usable observations.
+
+Audio did not connect or play. The operator reported `Pairing closed`/error and
+loss of the saved Windows row after attempting saved-device and host connection.
+The log records authentication failure reason 5, whose SDK path removes Classic
+bond data. A later known peer table contains only the BLE record, versus two
+service records at boot. The initiating authentication failure is unresolved.
+
+The operator reports pointer freezing after 3–5 seconds of continuous movement,
+with movement restored by lifting and touching again. A complete MousePhase
+window and TouchTrace were captured after local Audio-to-Mouse selection,
+without preceding audio playback. Several intervals show the multitouch
+consuming/no-gesture state and blocked single-pointer gestures. No link, expiry,
+priority, queue-reset or general input-cancel event was counted in that window.
+TouchTrace recorded zero queue drops or congestion and 754 accepted/matched SDK
+submissions. This locates an input-suppression branch; it does not identify the
+transition into that branch, prove a second physical contact, or measure Windows
+arrival. Repeated physical testing was stopped for focused source investigation.
+
 ### Mouse freeze and Classic reconnect follow-up (2026-11-06)
 
 Clean `b0c1dfae0fb2688d6dbd0d10438159fc860c30a8` combines the reviewed
