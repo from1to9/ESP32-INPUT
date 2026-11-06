@@ -18,9 +18,9 @@ typedef enum { ESP_BT_GAP_AUTH_CMPL_EVT, ESP_BT_GAP_REMOVE_BOND_DEV_COMPLETE_EVT
 typedef union {
     struct { unsigned int stat; uint8_t eir_type_num, eir_type[10]; } config_eir_data;
     struct { unsigned int status; char *name; } get_dev_name_cmpl;
-    struct { uint8_t bda[6]; unsigned int stat; } auth_cmpl;
+    struct { uint8_t bda[6]; unsigned int stat; uint8_t lk_type; char device_name[249]; } auth_cmpl;
     struct { uint8_t bda[6]; unsigned int status; } remove_bond_dev_cmpl;
-    struct { uint8_t bda[6]; } cfm_req;
+    struct { uint8_t bda[6]; uint32_t num_val, confirmation_id; } cfm_req;
     struct { uint8_t bda[6]; } pin_req;
     struct { uint8_t bda[6]; } key_req;
 } esp_bt_gap_cb_param_t;
@@ -40,4 +40,5 @@ esp_err_t esp_bt_gap_set_scan_mode(esp_bt_connection_mode_t, esp_bt_discovery_mo
 esp_err_t esp_bt_gap_get_profile_status(esp_bt_gap_profile_status_t *);
 esp_err_t esp_bt_gap_pin_reply(esp_bd_addr_t, bool, uint8_t, esp_bt_pin_code_t);
 esp_err_t esp_bt_gap_ssp_confirm_reply(esp_bd_addr_t, bool);
+esp_err_t esp_bt_gap_ssp_reject_closed_window(esp_bd_addr_t, uint32_t);
 esp_err_t esp_bt_gap_ssp_passkey_reply(esp_bd_addr_t, bool, uint32_t);

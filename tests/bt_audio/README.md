@@ -34,6 +34,8 @@ manager rebind; production callbacks never invoke the manager.
 After SDK setup, run `python3 tests/bt_audio/test_sdk_admission.py` to exercise
 the actual patched SDK dispatch function: Just Works and ordinary confirmation
 must reach admission; allocation/dispatch failure must never auto-accept.
+Run `python3 tests/bt_audio/test_classic_closed_window.py` against the patched
+SDK for the closed-window rejection, bond retention and unrelated failure paths.
 `python3 tests/toolchain/test_idf_patches.py` separately validates reproducible
 patch provenance and preservation of unrelated SDK/BSP work.
 

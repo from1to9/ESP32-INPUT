@@ -67,7 +67,9 @@ static struct {
     bool name_pending;
     uint64_t name_started_us;
     bool scan_expected, security_pending, security_eligible, verify_pairing_bond;
+    bool security_window_closed;
     unsigned int security_kind; /* 1 confirmation, 2 legacy PIN, 3 passkey. */
+    uint32_t security_confirmation_id;
     uint8_t security_peer[6], handshake_peer[6];
     uint64_t bond_revision, pairing_deadline_us, scan_started_us, handshake_started_us;
     uint64_t classic_list_revision;
@@ -147,6 +149,7 @@ static void close_window_locked(void)
     audio.public.pairing_requested = false;
     audio.public.pairing_remaining_ms = 0;
     audio.security_eligible = false;
+    if (audio.security_pending) audio.security_window_closed = true;
     audio.scan_pending = true;
 }
 
@@ -364,8 +367,10 @@ static void classic_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t
             error_locked("Concurrent Classic security requests", ESP_ERR_NO_MEM, true);
         } else {
             audio.security_pending = true;
+            audio.security_window_closed = !audio.public.pairing_requested;
             audio.security_eligible = audio.public.pairing_requested && !audio.public.pairing_handshake_pending;
             audio.security_kind = event == ESP_BT_GAP_CFM_REQ_EVT ? 1U : (event == ESP_BT_GAP_PIN_REQ_EVT ? 2U : 3U);
+            audio.security_confirmation_id = event == ESP_BT_GAP_CFM_REQ_EVT ? parameter->cfm_req.confirmation_id : 0;
             memcpy(audio.security_peer, event == ESP_BT_GAP_CFM_REQ_EVT ? parameter->cfm_req.bda :
                 (event == ESP_BT_GAP_PIN_REQ_EVT ? parameter->pin_req.bda : parameter->key_req.bda), 6);
         }
@@ -405,18 +410,23 @@ static void service_security_request(void)
         portEXIT_CRITICAL(&audio_lock); return;
     }
     unsigned int kind = audio.security_kind;
+    uint32_t confirmation_id = audio.security_confirmation_id;
     memcpy(peer, audio.security_peer, 6); audio.security_pending = false;
+    bool window_open = audio.public.pairing_requested && now_us() < audio.pairing_deadline_us;
     bool accept = audio.security_eligible && kind == 1 && audio.public.initialized && !audio.public.failed &&
-        audio.public.pairing_requested && now_us() < audio.pairing_deadline_us && audio.pairing_claimed &&
+        window_open && audio.pairing_claimed &&
         !audio.public.pairing_handshake_pending && audio.public.classic_bonds_known &&
         count >= 0 && count < CONFIG_BT_SMP_MAX_BONDS;
+    bool closed_window = !accept && kind == 1 && confirmation_id && audio.public.initialized && !audio.public.failed &&
+        !audio.public.pairing_handshake_pending && (audio.security_window_closed || !window_open);
     if (accept) {
         audio.public.pairing_handshake_pending = true;
         memcpy(audio.handshake_peer, peer, 6); audio.handshake_started_us = now_us();
     }
     portEXIT_CRITICAL(&audio_lock);
     esp_err_t error;
-    if (kind == 1) error = esp_bt_gap_ssp_confirm_reply(peer, accept);
+    if (closed_window) error = esp_bt_gap_ssp_reject_closed_window(peer, confirmation_id);
+    else if (kind == 1) error = esp_bt_gap_ssp_confirm_reply(peer, accept);
     else if (kind == 2) { esp_bt_pin_code_t pin = {0}; error = esp_bt_gap_pin_reply(peer, false, 0, pin); }
     else error = esp_bt_gap_ssp_passkey_reply(peer, false, 0);
     if (error != ESP_OK) {

@@ -1,0 +1,66 @@
+{
+  "sdk_commit": "383dda6c182e3dabf6355160166fe007df775629",
+  "files": {
+    "components/bt/host/bluedroid/api/esp_gap_bt_api.c": {
+      "before": "f7a3120eff409cf4122169af34b81f4a44b7307ff58e35afa7ef04fd3437c4c0",
+      "after": "6231289af80e05a15b14010636a9039eb91dde8bbb407bc777199d4769562623"
+    },
+    "components/bt/host/bluedroid/api/include/api/esp_gap_bt_api.h": {
+      "before": "3e9f8b8b4bc90c6627ece08bdd385f1d5285b92d6991814e6c2cd29c6f57b9e8",
+      "after": "69cd9be7f652eccf0f7f42950ba260959037e1c7e67b7ae3a93998a6965ea570"
+    },
+    "components/bt/host/bluedroid/bta/dm/bta_dm_act.c": {
+      "before": "3d8f11bd500bb26e98525f2905b0f1a366db56d05cf0bdab934ff3629fed2847",
+      "after": "4e088e571aed08cf3157d4307fa7421634a8ec9e40d7498b4b07e4299681b0be"
+    },
+    "components/bt/host/bluedroid/bta/dm/bta_dm_api.c": {
+      "before": "0c487319d0fa12a9d937fab8bc87b19d5e78fffc9dfec2cbd9458d6435a82a06",
+      "after": "23ab43832f50833d0e51a08458b006ae4dea6ddd7d502d8c2e5ea86f7e7d3d8e"
+    },
+    "components/bt/host/bluedroid/bta/dm/include/bta_dm_int.h": {
+      "before": "b426ad07647a97da4d44539a68989c34a8e03dcba7d59cf5eaeb2df8e2587bc9",
+      "after": "bbc8ec85474ef14aebf8b8d27962bcc0a3a57f5693d2a916551932e1f1799bf2"
+    },
+    "components/bt/host/bluedroid/bta/include/bta/bta_api.h": {
+      "before": "f2528697f5ffe2aca3f4f94ca12a4b0349acf3d5e5e4bb3f1209743c5e3f149b",
+      "after": "a952c30711b0478dd7bcb534d0918579978520804b1c16524c225cd1c6e52dc1"
+    },
+    "components/bt/host/bluedroid/btc/core/btc_dm.c": {
+      "before": "3a509ef1f9723efe5a5d8061d8203cbcff8852b56e1333070d1b6e9e060ea739",
+      "after": "2f0264fd5bd3d5ddc86c8b434b45b61d4470b9c5226d003e86fb358f52ca48fc"
+    },
+    "components/bt/host/bluedroid/btc/profile/std/gap/btc_gap_bt.c": {
+      "before": "dcdd856214143a61aaa50139de297b0d8e9c421eb0558cbf8e8dfb6f53083bbf",
+      "after": "c8bfb38562231c18e38cdaf302be6987f8aeb8c82eabe2893c8daba08acde2e1"
+    },
+    "components/bt/host/bluedroid/btc/profile/std/include/btc_gap_bt.h": {
+      "before": "107c059eb291509a6f55422d00a944295156c578fb6e48b3e7b9741a4ad3e733",
+      "after": "380c5a02c7078e81ed9e9ca0d0b705484f5f102d8279c02edb82137ad6ff2c61"
+    },
+    "components/bt/host/bluedroid/stack/btm/btm_sec.c": {
+      "before": "2be88ae7737dc3727071ab4bb92c9ac391eda87a9d0f56081a2baeb9812fd665",
+      "after": "404df257d89b596843b87a2fc469e4a7bfdf845be3c7c5f9a072b378c9867317"
+    },
+    "components/bt/host/bluedroid/stack/btm/include/btm_int.h": {
+      "before": "02d192338c554c4925946ad203b0936655a75a7b6d69cf47df5afde9b637edde",
+      "after": "042be03644c74577d5d08d4e6fcb25c7c943ad3d92fd39b4d5ceac29440f1602"
+    },
+    "components/bt/host/bluedroid/stack/btu/btu_hcif.c": {
+      "before": "2075e518961f5a578524fefb39a34c4226ac67a1d852232f74be8f88e43a9b5f",
+      "after": "6b5926ab1c19675ba9e6e511f25817cc65d7e024c4e5e2b04f0f5aa6efb98b9d"
+    },
+    "components/bt/host/bluedroid/stack/hcic/hcicmds.c": {
+      "before": "74caaf7073691de6896297b729026ca176cb9cc495c225bdeb9fd26d1029f2c5",
+      "after": "e7dd276f8969a96a6967323db498195ee9483eb9537c454f1bc439e9daf8ccd2"
+    },
+    "components/bt/host/bluedroid/stack/include/stack/btm_api.h": {
+      "before": "594834498e424374c822c07c2c87244db905e77c92084b4da74ea0c187403b7a",
+      "after": "a72b7940a89193f41f5fd05d43c5340d99f02c5db68417f895f449c857636cbe"
+    },
+    "components/bt/host/bluedroid/stack/include/stack/hcimsgs.h": {
+      "before": "03e891dbbc279dcc0c3d1ac0451e41721c787c077ba2230b7ca6fe4101031b78",
+      "after": "329f774b79a47b1cb2b2d3a082d0a9fd59c3190d133a7ef88599ce73eba7c694"
+    }
+  },
+  "patch_sha256": "fd8650be5c533b1ca62204f0c8e7730f037791ac96ac2cf93908ce417c0de855"
+}

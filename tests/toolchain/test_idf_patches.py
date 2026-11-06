@@ -75,6 +75,24 @@ class PatchPolicy(unittest.TestCase):
         self.verify()
         self.assertEqual((self.sdk / "security.c").read_text(), self.after["security.c"])
 
+    def test_reviewed_followup_upgrades_an_existing_admission_patch(self):
+        self.verify()
+        previous = self.after["security.c"]
+        final = "void confirm(void) { ask_application_with_token(); }\n"
+        path = self.base / "followup.patch"
+        patch = "".join(difflib.unified_diff(previous.splitlines(True), final.splitlines(True), n=0,
+                                             fromfile="a/security.c", tofile="b/security.c"))
+        path.write_text(patch)
+        manifest = path.with_suffix(".json")
+        manifest.write_text(json.dumps({"sdk_commit": self.pin, "patch_sha256": self.sha(patch),
+            "files": {"security.c": {"before": self.sha(previous), "after": self.sha(final)}}}))
+        with self.assertRaises(SystemExit):
+            self.verify(check_only=True, followup=(manifest, path))
+        self.assertEqual((self.sdk / "security.c").read_text(), previous)
+        self.verify(followup=(manifest, path))
+        self.verify(check_only=True, followup=(manifest, path))
+        self.assertEqual((self.sdk / "security.c").read_text(), final)
+
     def test_unrelated_dirty_and_staged_changes_are_preserved(self):
         path = self.sdk / "unrelated.c"
         path.write_text("int user_work;\n")

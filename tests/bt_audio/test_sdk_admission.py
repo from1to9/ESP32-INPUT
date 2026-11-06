@@ -21,8 +21,8 @@ def main():
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-typedef struct { bool just_works; uint8_t bd_addr[6]; uint32_t num_val; } tBTA_DM_SP_CFM_REQ;
-typedef union { struct { uint8_t bda[6]; uint32_t num_val; } cfm_req; } esp_bt_gap_cb_param_t;
+typedef struct { bool just_works; uint8_t bd_addr[6]; uint32_t num_val, confirmation_id; } tBTA_DM_SP_CFM_REQ;
+typedef union { struct { uint8_t bda[6]; uint32_t num_val, confirmation_id; } cfm_req; } esp_bt_gap_cb_param_t;
 typedef struct { unsigned int sig, pid, act; uint8_t arg[]; } btc_msg_t;
 typedef int bt_status_t;
 #define ESP_BD_ADDR_LEN 6
@@ -42,13 +42,13 @@ void BTA_DmConfirm(const uint8_t *peer, bool accept) { (void)peer; if (accept) +
 bt_status_t btc_inter_profile_call(btc_msg_t *message) {
     assert(message->sig == BTC_SIG_API_CB && message->pid == BTC_PID_GAP_BT && message->act == BTC_GAP_BT_CFM_REQ_EVT);
     const esp_bt_gap_cb_param_t *event = (const void *)message->arg;
-    assert(event->cfm_req.bda[0] == 0x42 && event->cfm_req.num_val == 123456);
+    assert(event->cfm_req.bda[0] == 0x42 && event->cfm_req.num_val == 123456 && event->cfm_req.confirmation_id == 42);
     ++dispatches; return dispatch_failure ? -1 : BT_STATUS_SUCCESS;
 }
 '''
     checks = r'''
 int main(void) {
-    tBTA_DM_SP_CFM_REQ request = {.just_works = true, .bd_addr = {0x42}, .num_val = 123456};
+    tBTA_DM_SP_CFM_REQ request = {.just_works = true, .bd_addr = {0x42}, .num_val = 123456, .confirmation_id = 42};
     btc_dm_sp_cfm_req_evt(&request);
     assert(dispatches == 1 && automatic_accepts == 0 && allocations == releases);
     request.just_works = false; btc_dm_sp_cfm_req_evt(&request);

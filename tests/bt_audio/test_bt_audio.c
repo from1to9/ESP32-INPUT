@@ -44,6 +44,7 @@ static esp_bt_gap_cb_t gap;
 static esp_bt_gap_profile_status_t gap_status;
 static bool pairing_claim, deny_claim, security_accept, drop_scan;
 static unsigned security_replies, claim_calls, le_closes, discoverable_writes;
+static unsigned closed_window_replies;
 static bool le_window, resource_current = true;
 static int bond_count = 1, shared_count = 1;
 static esp_err_t bond_list_error;
@@ -93,6 +94,11 @@ esp_err_t esp_bt_gap_pin_reply(esp_bd_addr_t address, bool accept, uint8_t bytes
 { (void)address; (void)pin; assert(!accept && bytes == 0); security_accept = accept; ++security_replies; return ESP_OK; }
 esp_err_t esp_bt_gap_ssp_confirm_reply(esp_bd_addr_t address, bool accept)
 { assert(memcmp(address, peer, 6) == 0); security_accept = accept; ++security_replies; return ESP_OK; }
+esp_err_t esp_bt_gap_ssp_reject_closed_window(esp_bd_addr_t address, uint32_t confirmation_id)
+{
+    assert(confirmation_id == 42); ++closed_window_replies;
+    return esp_bt_gap_ssp_confirm_reply(address, false);
+}
 esp_err_t esp_bt_gap_ssp_passkey_reply(esp_bd_addr_t address, bool accept, uint32_t passkey)
 { (void)address; assert(!accept && passkey == 0); security_accept = accept; ++security_replies; return ESP_OK; }
 void ble_hid_pairing_close(void) { assert(pairing_claim); ++le_closes; le_window = false; }
@@ -678,6 +684,7 @@ static void security_event(esp_bt_gap_cb_event_t event)
 {
     esp_bt_gap_cb_param_t parameter = {0};
     memcpy(parameter.cfm_req.bda, peer, 6);
+    if (event == ESP_BT_GAP_CFM_REQ_EVT) parameter.cfm_req.confirmation_id = 42;
     gap(event, &parameter);
 }
 
@@ -1165,6 +1172,7 @@ static void pairing_test(const char *scenario)
     shared_count = 15; assert(bt_audio_pairing_open(100) == ESP_ERR_NO_MEM && !pairing_claim); shared_count = 1;
     security_event(ESP_BT_GAP_CFM_REQ_EVT); bt_audio_service();
     assert(!security_accept && security_replies == 1 && !bt_audio_snapshot().pairing_handshake_pending);
+    assert(closed_window_replies == 1);
     assert(bt_audio_pairing_open(100) == ESP_OK && pairing_claim);
     if (strcmp(scenario, "discovery-timeout") == 0) {
         drop_scan = true; bt_audio_service(); clock_us += BT_AUDIO_INIT_TIMEOUT_US; bt_audio_service();
@@ -1179,7 +1187,7 @@ static void pairing_test(const char *scenario)
         return;
     }
     shared_count = 15; security_event(ESP_BT_GAP_CFM_REQ_EVT); bt_audio_service();
-    assert(!security_accept && !bt_audio_snapshot().pairing_handshake_pending); shared_count = 1;
+    assert(!security_accept && !bt_audio_snapshot().pairing_handshake_pending && closed_window_replies == 1); shared_count = 1;
     security_event(ESP_BT_GAP_PIN_REQ_EVT); bt_audio_service(); assert(!security_accept);
     security_event(ESP_BT_GAP_KEY_REQ_EVT); bt_audio_service(); assert(!security_accept);
     security_event(ESP_BT_GAP_CFM_REQ_EVT); bt_audio_service();
