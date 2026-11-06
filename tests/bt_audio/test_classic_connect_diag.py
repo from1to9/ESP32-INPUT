@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the bounded HCI and OLM observer at its host and controller seams."""
+import argparse
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +15,12 @@ STUBS = {
     'esp_log.h': 'void ESP_LOGI(const char *, const char *, ...);\n',
     'esp_timer.h': '#include <stdint.h>\nint64_t esp_timer_get_time(void);\n',
     'freertos/FreeRTOS.h': '#include <stdbool.h>\nbool xPortInIsrContext(void);\n',
+}
+H4_STUBS = {
+    'bt_user_config.h': '',
+    'common/bt_target.h': '#define C2H_FLOW_CONTROL_INCLUDED TRUE\n',
+    'osi/pkt_queue.h': 'typedef struct pkt_linked_item pkt_linked_item_t;\n',
+    'osi/semaphore.h': 'typedef void *osi_sem_t;\n',
 }
 
 FIXTURE = r'''
@@ -165,6 +173,94 @@ static void timeout(void)
     assert(logs == 2);
 }
 
+#ifdef TEST_H4_RX
+#include <stdlib.h>
+#include "hci/hci_hal.h"
+#include "hci/hci_internals.h"
+
+static BT_HDR *input_packet;
+static const uint8_t *input_frame;
+static unsigned dispatches, drops, credits;
+static uint16_t input_length, output_event;
+
+static void packet_ready(BT_HDR *packet)
+{
+    assert(packet == input_packet && output_event && packet->event == output_event);
+    assert(packet->offset == 3 && packet->len == input_length - 1);
+    assert(!memcmp(packet->data + packet->offset, input_frame + 1, packet->len));
+    ++dispatches;
+    free(packet);
+}
+
+static void osi_free(BT_HDR *packet)
+{
+    assert(packet == input_packet && !output_event);
+    ++drops;
+    free(packet);
+}
+
+static void c2h_credit(uint16_t handle, uint16_t count)
+{
+    assert(handle == 0x801 && count == 1);
+    ++credits;
+}
+
+static const hci_hal_callbacks_t callbacks = {.packet_ready = packet_ready, .c2h_credit = c2h_credit};
+static struct { const hci_hal_callbacks_t *callbacks; } hci_hal_env = {&callbacks};
+
+static void observe_rx(const uint8_t *frame, size_t length)
+{
+    assert(frame == input_packet->data + 2 && length == input_length);
+    assert(frame[0] == DATA_TYPE_EVENT);
+    bt_classic_connect_diag_rx(frame, length);
+}
+
+#define HCI_TRACE_ERROR(...) ((void)sizeof(printf(__VA_ARGS__)))
+#define bt_classic_connect_diag_rx observe_rx
+#include "h4_receive.inc"
+#undef bt_classic_connect_diag_rx
+
+static void feed_h4(const uint8_t *frame, uint16_t length, uint16_t event)
+{
+    BT_HDR *packet = calloc(1, sizeof(*packet) + 2 + length);
+    assert(packet);
+    packet->offset = 2;
+    packet->len = length;
+    memcpy(packet->data + packet->offset, frame, length);
+    input_packet = packet;
+    input_frame = frame;
+    input_length = length;
+    output_event = event;
+    unsigned previous_dispatches = dispatches, previous_drops = drops;
+    hci_hal_h4_hdl_rx_packet(packet);
+    assert(dispatches == previous_dispatches + !!event && drops == previous_drops + !event);
+}
+
+static void h4_receive(void)
+{
+    const uint8_t scan_complete[] = {4, 0x0e, 4, 1, 0x1a, 0x0c, 0};
+    const uint8_t other_event[] = {4, 0x3e, 13, 0x05, 1, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t acl[] = {2, 1, 0x28, 4, 0, 0, 0, 0x40, 0};
+    const uint8_t short_acl[] = {2, 1, 0x28, 1, 0};
+    const uint8_t short_event[] = {4, 0x0f, 4, 9, 1, 5};
+    feed_h4(scan_complete, sizeof(scan_complete), MSG_HC_TO_STACK_HCI_EVT);
+    bt_classic_connect_diag_tx(create, sizeof(create));
+    feed_h4(denied, sizeof(denied), MSG_HC_TO_STACK_HCI_EVT);
+    feed_h4(up, sizeof(up), MSG_HC_TO_STACK_HCI_EVT);
+    feed_h4(down, sizeof(down), MSG_HC_TO_STACK_HCI_EVT);
+    feed_h4(other_event, sizeof(other_event), MSG_HC_TO_STACK_HCI_EVT);
+    feed_h4(acl, sizeof(acl), MSG_HC_TO_STACK_HCI_ACL);
+    feed_h4(short_acl, sizeof(short_acl), 0);
+    feed_h4(short_event, sizeof(short_event), 0);
+    assert(credits == 1);
+    assert(hci.sequence == 5 && "H4 must retain Command Complete, Command Status and link events");
+    assert(hci.records[0].kind == COMPLETE && hci.records[0].code == 0x0c1a);
+    assert(hci.terminal == 3 && hci.records[2].kind == STATUS && hci.records[2].status == 9);
+    assert(hci.records[3].kind == LINK_UP && hci.records[3].handle == 0x801);
+    assert(hci.records[4].kind == LINK_DOWN && hci.records[4].detail == 0x13);
+}
+#endif
+
 int main(int argc, char **argv)
 {
     assert(argc == 2);
@@ -172,6 +268,9 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "loss")) loss();
     else if (!strcmp(argv[1], "filter")) filter();
     else if (!strcmp(argv[1], "timeout")) timeout();
+#ifdef TEST_H4_RX
+    else if (!strcmp(argv[1], "h4-receive")) h4_receive();
+#endif
     else assert(false);
     puts(argv[1]);
     return 0;
@@ -179,10 +278,38 @@ int main(int argc, char **argv)
 '''
 
 
+def h4_receive_source(sdk, tmp):
+    bt = sdk / 'components/bt'
+    bluedroid = bt / 'host/bluedroid'
+    for path in ('hci/hci_hal_h4.c', 'btc/profile/std/a2dp/btc_a2dp_sink.c', 'stack/btu/btu_task.c'):
+        shutil.copy(bluedroid / path, tmp)
+    for name in ('a2dp-acl', 'classic-connect'):
+        patch = ROOT / f'patches/esp-idf-{name}-diagnostics.patch'
+        subprocess.run(['git', 'apply', '--no-index', str(patch)], cwd=tmp, check=True)
+
+    h4 = (tmp / 'hci_hal_h4.c').read_text()
+    layer = (bluedroid / 'hci/include/hci/hci_layer.h').read_text()
+    messages = (bluedroid / 'stack/include/stack/hcimsgs.h').read_text()
+    definitions = re.findall(r'^#define (?:HCI_BLE_EVENT|PACKET_TYPE_TO_INDEX)\b.*', h4, re.M)
+    definitions += re.findall(r'^#define MSG_HC_TO_STACK_HCI_(?:ERR|ACL|SCO|EVT)\b.*', layer, re.M)
+    definitions += re.findall(r'^#define HCI_DATA_HANDLE_MASK\b.*', messages, re.M)
+    tables = h4[h4.index('static const uint8_t preamble_sizes[]'):h4.index('typedef struct {')]
+    start = h4.index('#if (C2H_FLOW_CONTROL_INCLUDED == TRUE)\nstatic void hci_hal_acl_c2h_credit')
+    end = h4.index('#if (BLE_42_SCAN_EN == TRUE)', start)
+    (tmp / 'h4_receive.inc').write_text('\n'.join(definitions) + '\n' + tables + h4[start:end])
+    return ['-DTEST_H4_RX', '-I', str(bt / 'common/include'), '-I', str(bluedroid / 'hci/include'),
+            '-I', str(bluedroid / 'stack/include')]
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--sdk', type=Path, help='also test H4 RX with this pinned ESP-IDF checkout')
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory() as directory:
         tmp = Path(directory)
-        for name, content in STUBS.items():
+        stubs = STUBS | H4_STUBS if args.sdk else STUBS
+        flags = h4_receive_source(args.sdk, tmp) if args.sdk else []
+        for name, content in stubs.items():
             path = tmp / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
@@ -190,9 +317,10 @@ def main():
         compiler = shutil.which('clang') or 'cc'
         subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror',
                         '-fsanitize=address,undefined', '-I', str(tmp), '-I',
-                        str(ROOT / 'firmware/main'), str(tmp / 'fixture.c'),
+                        str(ROOT / 'firmware/main'), *flags, str(tmp / 'fixture.c'),
                         '-o', str(tmp / 'fixture')], check=True)
-        for case in ('failure', 'loss', 'filter', 'timeout'):
+        cases = ('failure', 'loss', 'filter', 'timeout')
+        for case in cases + (('h4-receive',) if args.sdk else ()):
             subprocess.run([str(tmp / 'fixture'), case], check=True)
 
 

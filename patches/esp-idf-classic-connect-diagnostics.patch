@@ -10,5 +10,5 @@
      hci_host_send_packet(data, length);
 @@ -466,2 +468,3 @@
      }
-+    if (stream[0] == HCI_BLE_EVENT) bt_classic_connect_diag_rx(stream, packet->len);
++    if (stream[0] == DATA_TYPE_EVENT) bt_classic_connect_diag_rx(stream, packet->len);
      STREAM_TO_UINT8(type, stream);
