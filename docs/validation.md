@@ -16,6 +16,51 @@ IMU samples but still failed the error-log and physical Motion gates.
 This checkpoint is not a qualified release. Reusable findings are indexed in
 the [engineering lessons](../.agent/shared/ENGINEERING_LESSONS.md).
 
+### Mouse freeze and Classic reconnect follow-up (2026-11-06)
+
+Clean `b0c1dfae0fb2688d6dbd0d10438159fc860c30a8` combines the reviewed
+bounded FIFO drain, pre-submit buffered-motion expiry and Classic authentication
+cleanup isolation from LE bonds. The combined 203 coordinator cases, SDK cleanup
+regression, repository checks, ESP32-S31 build and declared task stack gates
+passed. Interrupt safety remains unqualified. The diagnostic configuration
+enabled the existing touch-latency and A2DP ACL observers.
+
+The application was written to the inactive slot and read back. The previous
+confirmed `2a40872` application and selector were preserved; the installer did
+not write settings. The runtime reported the expected clean commit and packaged
+ELF identity, confirmed first boot and retained two saved service records.
+**Physical acceptance failed:**
+
+- The operator reports that the mouse connects automatically at boot but can
+  freeze or stop moving. The first 20-second touch trace ran before audio
+  connected. It recorded zero FIFO drops or congestion and 687 SDK-accepted,
+  matched completion callbacks. Maximum scan interval, coordinator interval and
+  pre-submit age were 19, 36 and 36.234 ms. The exact freeze interval and Windows
+  report arrival were not captured; these counters do not establish smoothness
+  or explain the reported freeze.
+- Automatic Classic audio connection again failed with controller allocation
+  failure and HCI Create Connection status `0x09`. The operator reports that
+  automatic and saved-list audio connection fail, and existing devices require
+  `Add device` from the list. An earlier report of restored `Input ready` proves
+  recovered connectivity only; it does not establish a successful saved-list
+  connection path.
+- After audio connected, the operator heard intermittent stutter without a
+  disconnection. The capture contains 61 unfinished-packet reassembly drops,
+  no A2DP ring overruns, one partial packet expiry and a maximum callback gap of
+  187.858 ms. The observed playback interval was approximately 65 seconds, not
+  two minutes. At test termination the job reported `AE_JOB_PARTIAL`,
+  `AE_STOP_OWNER_LOST` and `AE_UNAVAILABLE`; this is not an underrun receipt.
+
+One diagnostic HTTPS read was incomplete. The retained first allocation failure
+requested 1,199 internal bytes; repeated log lines report that same latched
+event. Later short reads succeeded and showed the same boot, ready BLE input,
+connected A2DP/HFP, two saved service records, audio off and confirmed microphone
+and speaker mute. The capture contains no panic or negative LTK reply. These
+observations do not prove the causes of the pointer freeze, audio stutter or
+earlier missing-key behavior. The user used `Add device`; an unchanged record
+count does not prove unchanged authentication keys. Further repeated physical
+actions were stopped pending focused investigation.
+
 ### Wi-Fi browser input and Bluetooth reconnection on Windows (2026-11-04)
 
 Clean `1e5e7b5dae0d7ec5dc043d16fc1533ea214fbd5b` was written to the
