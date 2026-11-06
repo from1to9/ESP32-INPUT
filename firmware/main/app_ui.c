@@ -2353,6 +2353,8 @@ void app_ui_render(const app_view_t *view)
     observe_remote_review_clock(&view->remote_review);
     bool access_changed = s_view.local_access != view->local_access;
     s_view = *view;
+    /* A Mouse press on the blank background retains its non-pad origin. */
+    lv_obj_set_flag(s_screen, LV_OBJ_FLAG_PRESS_LOCK, s_view.mode == INPUT_MOUSE);
     if (access_changed) {
         for (size_t i = 0; i < s_binding_count; ++i) {
             lv_obj_t *button = s_bindings[i].object;
@@ -2730,6 +2732,7 @@ app_ui_touch_context_t app_ui_touch_context(void)
     if (area.x1 < 0 || area.y1 < 0 || area.x2 >= 480 || area.y2 >= 480 ||
         area.x2 < area.x1 || area.y2 < area.y1) return context;
     context.eligible_pad = true;
+    context.control_press = s_touch_active && s_touch_surface == APP_SURFACE_CONTROL;
     context.x1 = (int16_t)area.x1;
     context.y1 = (int16_t)area.y1;
     context.x2 = (int16_t)area.x2;

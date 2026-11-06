@@ -913,6 +913,33 @@ static void wheel_checks(void)
         assert(last_action(APP_SCROLL)->surface == APP_SURFACE_CONTROL &&
             last_action(APP_SCROLL)->gesture == last_action(APP_TOUCH_BEGIN)->gesture);
         assert(action_count(APP_TOUCH_MOVE) == 0 && action_count(APP_CLICK) == 0 && action_count(APP_DRAG) == 0);
+        /* Pad capture follows this press to the opposite edge of the screen. */
+        clear_intents(); pointer(395, 120, true);
+        const uint32_t pad_gesture = last_action(APP_TOUCH_BEGIN)->gesture;
+        assert(!app_ui_touch_context().control_press);
+        pointer(440, 120, true); pointer(440, 420, true); pointer(465, 478, true);
+        pointer(465, 478, false);
+        assert(action_count(APP_TOUCH_BEGIN) == 1 && action_count(APP_TOUCH_END) == 1);
+        assert(action_count(APP_TOUCH_MOVE) == 3 && last_action(APP_TOUCH_MOVE)->gesture == pad_gesture);
+        assert(last_action(APP_TOUCH_MOVE)->surface == APP_SURFACE_TOUCHPAD);
+        assert(action_count(APP_SCROLL) == 0 && action_count(APP_CLICK) == 0 &&
+            action_count(APP_DRAG) == 0 && action_count(APP_GAIN) == 0);
+        clear_intents(); pointer(440, 120, true);
+        assert(app_ui_touch_context().control_press);
+        pointer(395, 120, true); pointer(180, 160, true);
+        assert(app_ui_touch_context().control_press);
+        pointer(180, 160, false);
+        assert(!app_ui_touch_context().control_press);
+        assert(action_count(APP_TOUCH_BEGIN) == 1 && action_count(APP_TOUCH_MOVE) == 0);
+        assert(action_count(APP_SCROLL) == 0 && action_count(APP_CLICK) == 0);
+        tap(440, 120);
+        assert(action_count(APP_SCROLL) == 1 && last_action(APP_SCROLL)->x == 1);
+        clear_intents(); pointer(1, 1, true);
+        assert(app_ui_touch_context().control_press);
+        pointer(395, 120, true); pointer(180, 160, true);
+        assert(app_ui_touch_context().control_press);
+        pointer(180, 160, false);
+        assert(action_count(APP_TOUCH_MOVE) == 0 && action_count(APP_CLICK) == 0);
     }
     /* The board reports all contacts before LVGL sees its primary point.
      * Holding A and B still while lifting A replaces the primary with B. */

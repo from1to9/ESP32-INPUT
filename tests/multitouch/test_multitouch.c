@@ -157,6 +157,36 @@ static void invalid_missing_stale_and_unavailable_evidence(void)
     assert(f.model.phase == INTERACTION_MULTI_PAIR && f.model.contact_ms == 130);
 }
 
+static void outside_single_continuity_requires_valid_current_contact(void)
+{
+    for (unsigned fault = 0; fault < 7; ++fault) {
+        fixture_t f = fixture();
+        (void)feed(&f, 10, 1);
+        f.sample.outside_pad = true;
+        f.context.drag_held = true;
+        if (fault == 1) ++f.sample.contacts[0].id;
+        if (fault == 2) f.sample.valid = false;
+        if (fault == 3) ++f.sample.sequence;
+        if (fault == 4) f.context.enabled = false;
+        interaction_multitouch_result_t r = feed(&f, fault == 5 ? 110 : 20, fault == 6 ? 2 : 1);
+        if (fault == 0) {
+            assert(f.model.phase == INTERACTION_MULTI_SINGLE && r.disqualify_single_tap);
+            assert(!r.consume_pointer && !r.cancel_single && !r.release_required);
+        } else {
+            assert(f.model.phase == INTERACTION_MULTI_DRAIN && !r.disqualify_single_tap);
+            assert(r.consume_pointer && r.cancel_single && r.release_required);
+        }
+        assert(!r.right_click && !r.scroll_y);
+    }
+    fixture_t f = fixture();
+    (void)feed(&f, 10, 1);
+    f.sample.outside_pad = true;
+    assert(feed(&f, 20, 1).disqualify_single_tap);
+    f.sample.outside_pad = false;
+    assert(feed(&f, 30, 2).consume_pointer);
+    assert(!feed(&f, 40, 0).right_click); /* The excursion invalidates a pair tap as well. */
+}
+
 static void held_cleanup_preferences_clock_and_exhaustion(void)
 {
     fixture_t f = fixture();
@@ -189,6 +219,7 @@ int main(void)
     scroll_fraction_order_clamp_and_pair_to_single();
     motion_excursion_join_and_release_deadlines();
     invalid_missing_stale_and_unavailable_evidence();
+    outside_single_continuity_requires_valid_current_contact();
     held_cleanup_preferences_clock_and_exhaustion();
     puts("PASS: multi-contact tap/scroll, contact identity, cleanup, freshness, interruption and no replay");
     return 0;

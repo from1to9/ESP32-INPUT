@@ -25,6 +25,13 @@ The fixed header **Recenter** button requests a fresh grip reference through `AP
 
 Input settings provides **Tap to click**, default on. The input recognizer owns single tap, double tap and double-tap-and-hold drag; the UI forwards real touch boundaries, displacement and bounded stationary-contact freshness. With the setting off, the pad moves only; explicit mouse buttons and scroll still work. The pad hint and Status report the actual selected provider, readiness, calibration and sensor conditions. Selecting USB does not by itself establish that the sensor is calibrated or that USB input is ready.
 
+A single-finger press that starts on the pad keeps its relative pointer
+movement across the entire screen until lift, including over the scroll column
+and buttons. It retains an already held drag, and crossing the pad boundary
+disqualifies a tap. Controls along the path receive no activation. A press
+that starts elsewhere keeps its original target when it moves into the pad.
+Multi-contact recognition and existing input cancellation rules still apply.
+
 Preserve relative touch displacement and precision fractions across ordinary USB/BLE backpressure. Split large movement into the existing signed 8-bit reports, and merge only adjacent local movement without crossing click, scroll or button transitions. A contact beginning while busy may move once output resumes, but cannot grant a delayed tap or drag. Retained movement uses the existing 32-slot queue, a 4096-unit per-axis action bound and a 250 ms deadline from the oldest source sample; overflow or expiry cancels the pending epoch and prioritizes neutral releases. Cancellation, lock, mode/owner changes and target replacement discard residual movement. Remote touch uses the same displacement conversion and splitting, with explicit busy/capacity rejection before consuming a retryable request; lease revocation takes priority over retained movement.
 
 #### Optional Navigation layout

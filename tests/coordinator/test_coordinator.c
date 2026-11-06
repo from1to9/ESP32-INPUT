@@ -33,6 +33,7 @@ static bool test_haptics_enabled;
 static bool test_haptic_active;
 static unsigned test_sensor_buttons, test_sensor_contacts;
 static bool test_sensor_public;
+static bool test_control_press;
 void app_sensor_api_init(void) {}
 void app_sensor_api_touch(const board_touch_snapshot_t *sample, bool public_coordinates)
 { assert(sample); ++test_sensor_contacts; test_sensor_public = public_coordinates; }
@@ -1081,6 +1082,7 @@ static void setup(input_mode_t mode)
     s_priority_requests = 0;
     interaction_multitouch_init(&s_multitouch);
     s_multitouch_available = s_multitouch_consuming = s_multitouch_eligible = false;
+    test_control_press = false;
     memset(s_touch_emergency, 0, sizeof s_touch_emergency);
     memset(s_touch_emergency_pending, 0, sizeof s_touch_emergency_pending);
     s_overlay = APP_OVERLAY_NONE;
@@ -5532,14 +5534,98 @@ static void temporary_transport_switch_waits_without_persisting(void)
     assert(s_durable_settings.preferred_transport == DEVICE_TRANSPORT_BLUETOOTH);
 }
 
-static void contacts_at(uint64_t sequence, uint64_t time, unsigned contacts, unsigned y)
+static void contacts_at_position(uint64_t sequence, uint64_t time, unsigned contacts, unsigned x, unsigned y)
 {
     s_now_ms = time;
     board_touch_snapshot_t sample = {.sequence = sequence, .timestamp_ms = time,
         .valid = true, .count = (uint8_t)contacts,
-        .contacts = {{.id = 3, .x = 100, .y = (uint16_t)y},
+        .contacts = {{.id = 3, .x = (uint16_t)x, .y = (uint16_t)y},
                      {.id = 7, .x = 200, .y = (uint16_t)y}}};
     assert(submit_contacts(&sample)); consume_one();
+}
+
+static void contacts_at(uint64_t sequence, uint64_t time, unsigned contacts, unsigned y)
+{
+    contacts_at_position(sequence, time, contacts, 100, y);
+}
+
+static void pad_boundary_preserves_captured_movement(void)
+{
+    for (int transport = APP_INPUT_BLUETOOTH; transport <= APP_INPUT_USB; ++transport) {
+        for (unsigned tap = 0; tap < 2; ++tap) {
+            transport_setup(INPUT_MOUSE, (app_input_transport_t)transport);
+            s_multitouch_available = true;
+            device_settings_t settings = s_settings;
+            settings.tap_to_click = tap != 0;
+            assert(update_settings_internal(&settings, false));
+            const int positions[][2] = {{395,345}, {425,345}, {450,415}, {450,479}, {395,355}};
+            contacts_at_position(1, 1000, 1, 395, 345);
+            pad_at(APP_TOUCH_BEGIN, 5031, 1000, 395, 345);
+            for (size_t i = 1; i < sizeof positions / sizeof positions[0]; ++i) {
+                uint64_t time = 1000 + 20U * i;
+                int dx = positions[i][0] - positions[i - 1][0];
+                int dy = positions[i][1] - positions[i - 1][1];
+                contacts_at_position(i + 1U, time, 1, (unsigned)positions[i][0], (unsigned)positions[i][1]);
+                assert(test_sensor_public == (i == 4));
+                pad_at(APP_TOUCH_MOVE, 5031, time, dx, dy);
+                const uint8_t move[4] = {0,(uint8_t)dx,(uint8_t)dy,0};
+                expect_report(2, move, sizeof move);
+            }
+            contacts_at(6, 1100, 0, 0);
+            pad_at(APP_TOUCH_END, 5031, 1100, 395, 355);
+            expect_idle();
+        }
+    }
+}
+
+static void pad_boundary_keeps_drag_and_disqualifies_tap(void)
+{
+    setup(INPUT_MOUSE); s_multitouch_available = true;
+    contacts_at_position(1, 1000, 1, 407, 120);
+    pad_at(APP_TOUCH_BEGIN, 5032, 1000, 407, 120);
+    contacts_at_position(2, 1020, 1, 408, 120);
+    pad_at(APP_TOUCH_MOVE, 5032, 1020, 1, 0);
+    const uint8_t one[4] = {0,1,0,0};
+    expect_report(2, one, sizeof one);
+    contacts_at(3, 1040, 0, 0);
+    pad_at(APP_TOUCH_END, 5032, 1040, 408, 120);
+    expect_idle();
+
+    contacts_at_position(4, 1200, 1, 395, 345);
+    pad_at(APP_TOUCH_BEGIN, 5033, 1200, 395, 345);
+    contacts_at(5, 1220, 0, 0);
+    pad_at(APP_TOUCH_END, 5033, 1220, 395, 345);
+    pad_click_pair();
+    contacts_at_position(6, 1300, 1, 395, 345);
+    pad_at(APP_TOUCH_BEGIN, 5034, 1300, 395, 345);
+    const uint8_t down[4] = {1,0,0,0}, moved[4] = {1,55,120,0}, up[4] = {0};
+    expect_report(2, down, sizeof down);
+    contacts_at_position(7, 1320, 1, 450, 465);
+    pad_at(APP_TOUCH_MOVE, 5034, 1320, 55, 120);
+    expect_report(2, moved, sizeof moved);
+    assert(interaction_touch_holding(&s_interaction));
+    contacts_at(8, 1340, 0, 0);
+    pad_at(APP_TOUCH_END, 5034, 1340, 450, 465);
+    expect_report(2, up, sizeof up);
+    assert(!interaction_touch_holding(&s_interaction) && !s_engine.mouse_buttons);
+    expect_idle();
+}
+
+static void control_press_cannot_acquire_multitouch_by_crossing_into_pad(void)
+{
+    setup(INPUT_MOUSE); s_multitouch_available = true;
+    contacts_at_position(1, 1000, 1, 440, 120);
+    app_intent_t press = make_intent(APP_TOUCH_BEGIN, 440, 120, NULL);
+    press.gesture = 5035;
+    deliver(press);
+    test_control_press = true;
+    contacts_at_position(2, 1020, 1, 395, 120);
+    contacts_at_position(3, 1040, 2, 395, 120);
+    assert(s_multitouch.phase == INTERACTION_MULTI_IDLE && !s_multitouch_consuming);
+    contacts_at(4, 1060, 0, 0);
+    press.action = APP_TOUCH_END;
+    deliver(press);
+    expect_idle();
 }
 
 static void wheel_slide_and_arrow_tap_reports(void)
@@ -6637,6 +6723,9 @@ int main(int argc, char **argv)
     RUN(temporary_transport_switch_waits_without_persisting);
     RUN(wheel_slide_and_arrow_tap_reports);
     RUN(full_contact_fifo_precedes_primary_and_drains_pair);
+    RUN(pad_boundary_preserves_captured_movement);
+    RUN(pad_boundary_keeps_drag_and_disqualifies_tap);
+    RUN(control_press_cannot_acquire_multitouch_by_crossing_into_pad);
     RUN(full_contact_right_click_and_cancelled_drag);
     RUN(contact_overflow_stale_context_and_motion_keep_safe_defaults);
     RUN(consumed_event_workspace_does_not_retain_private_payloads);
@@ -6655,6 +6744,7 @@ void app_ui_observe_contact_count(uint8_t count, bool valid)
 { (void)count; (void)valid; }
 app_ui_touch_context_t app_ui_touch_context(void)
 { return (app_ui_touch_context_t){.epoch = s_engine.state.epoch, .ui_revision = s_ui_revision,
-    .eligible_pad = s_overlay == APP_OVERLAY_NONE, .x1 = 0, .y1 = 0, .x2 = 480, .y2 = 480}; }
+    .eligible_pad = s_overlay == APP_OVERLAY_NONE, .control_press = test_control_press,
+    .x1 = 12, .y1 = 64, .x2 = 407, .y2 = 355}; }
 esp_err_t board_touch_observe(board_touch_snapshot_fn observer)
 { (void)observer; return ESP_ERR_INVALID_STATE; }

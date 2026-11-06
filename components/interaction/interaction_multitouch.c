@@ -109,6 +109,18 @@ interaction_multitouch_result_t interaction_multitouch_input(interaction_multito
     }
     if (!c->enabled || m->phase == INTERACTION_MULTI_DRAIN || m->release_required || m->exhausted)
         return result(m);
+    if (s->outside_pad) {
+        if (m->phase == INTERACTION_MULTI_SINGLE && s->count == 1 && s->contacts[0].id == m->ids[0]) {
+            m->tap_candidate = false;
+            interaction_multitouch_result_t r = result(m);
+            r.disqualify_single_tap = true;
+            return r;
+        }
+        /* Geometry still gates new gestures and cancels an owned pair. */
+        (void)interaction_multitouch_cancel(m);
+        if (consuming(m) && c->drag_held) m->release_required = true;
+        return result(m);
+    }
     if (m->phase == INTERACTION_MULTI_IDLE) {
         m->phase = INTERACTION_MULTI_SINGLE;
         m->started_ms = s->timestamp_ms; m->tap_candidate = true;

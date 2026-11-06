@@ -540,6 +540,11 @@ interaction_touch_result_t interaction_touch_admit(interaction_t *m, uint64_t to
     return touch_none(false);
 }
 
+void interaction_touch_disqualify_tap(interaction_t *m)
+{
+    m->touch.candidate = false;
+}
+
 bool interaction_touch_holding(const interaction_t *m)
 {
     return m && (m->touch.held || m->touch.pending.effect == INTERACTION_TOUCH_LEFT_DOWN ||

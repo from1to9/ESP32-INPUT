@@ -99,6 +99,7 @@ preference off, the touchpad only moves the pointer; explicit click/drag control
 remain available. Menus, lock, wake capture, owner/transport changes, stale
 gestures and cancellation must not generate clicks or leave a held button.
 Gesture time and distance bounds belong to the portable interaction profile.
+The [Mouse interaction contract](interaction.md#mouse) defines pad capture.
 
 Motion and touchpad gestures coexist. Enabling Motion does not disable the
 default single/double tap or double-tap-and-hold drag behavior. An explicitly

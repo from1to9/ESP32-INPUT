@@ -286,6 +286,8 @@ interaction_touch_result_t interaction_touch_input_owned(interaction_t *model, i
 interaction_touch_result_t interaction_touch_tick(interaction_t *model,
     uint64_t now_ms, uint64_t current_ui_revision);
 interaction_touch_result_t interaction_touch_cancel(interaction_t *model);
+/* An excursion disqualifies a tap without ending a captured swipe or drag. */
+void interaction_touch_disqualify_tap(interaction_t *model);
 /* Call immediately for each proposed effect. true means HID queue admission,
  * or the coordinator has established its neutral cleanup barrier for
  * RELEASE_REQUIRED; never host delivery. A rejected UP returns latched

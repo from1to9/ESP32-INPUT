@@ -10,18 +10,18 @@
 typedef struct { uint8_t id; float x, y; } interaction_contact_t;
 typedef struct {
     uint64_t sequence, timestamp_ms, epoch, ui_revision;
-    bool supported, fresh, valid, overflow;
+    bool supported, fresh, valid, overflow, outside_pad;
     uint8_t count;
     interaction_contact_t contacts[INTERACTION_CONTACT_CAPACITY];
 } interaction_contact_snapshot_t;
 typedef struct {
     uint64_t epoch, ui_revision;
-    /* enabled requires a real multi-contact provider, eligible local pad and
-     * the user's gesture preference. Movement-only must pass enabled=false. */
+    /* enabled requires a real provider, local pad authority and the user's
+     * gesture preference. Contact geometry belongs to the snapshot. */
     bool enabled, drag_held;
 } interaction_multitouch_context_t;
 typedef struct {
-    bool consume_pointer, cancel_single, release_required, right_click;
+    bool consume_pointer, cancel_single, disqualify_single_tap, release_required, right_click;
     int8_t scroll_y; /* Positive centroid Y produces positive wheel units. */
     uint64_t sequence; /* Effect belongs to this consumed fresh snapshot only. */
 } interaction_multitouch_result_t;
@@ -42,6 +42,8 @@ typedef struct {
  * from the existing touch reader, before routing a primary pointer event.
  * IDs are stable until release; order may change. Never create freshness from
  * cached LVGL PRESSING, or add an independent read that consumes the same data.
+ * An in-pad single contact retains pointer ownership outside the pad while its
+ * ID, freshness and context remain valid. An excursion disqualifies taps.
  * Two fingers cancel one-finger recognition and consume primary pointer input.
  * Scroll commits after 8 px centroid travel, at 24 px per wheel unit. A still
  * pair <=250 ms gives one right-click; second finger joins within 80 ms and

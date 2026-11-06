@@ -520,20 +520,21 @@ static bool submit_contacts(const board_touch_snapshot_t *sample)
         .timestamp_ms = sample->timestamp_ms, .epoch = visible.epoch,
         .ui_revision = visible.ui_revision, .supported = true, .fresh = true,
         .valid = sample->valid, .overflow = sample->overflow, .count = sample->count};
-    event.value.touch.eligible = visible.eligible_pad;
+    event.value.touch.eligible = visible.eligible_pad && !visible.control_press;
     for (uint8_t i = 0; i < sample->count && i < INTERACTION_CONTACT_CAPACITY; ++i) {
         const board_touch_contact_t *point = &sample->contacts[i];
         out->contacts[i] = (interaction_contact_t){.id = point->id, .x = point->x, .y = point->y};
         if (point->x < visible.x1 || point->x > visible.x2 ||
-            point->y < visible.y1 || point->y > visible.y2) event.value.touch.eligible = false;
+            point->y < visible.y1 || point->y > visible.y2) out->outside_pad = true;
     }
-    app_sensor_api_touch(sample, event.value.touch.eligible);
+    const bool public_pad = visible.eligible_pad && !out->outside_pad;
+    app_sensor_api_touch(sample, public_pad);
     /* Complete snapshots and primary events share one FIFO; a later sensor
      * update can never overtake an earlier primary pointer event. */
     const bool queued = xQueueSend(s_intents, &event, 0) == pdTRUE;
 #if APP_TOUCH_TRACE_ENABLED
     if (app_touch_trace_active()) app_touch_trace_scan(sample->sequence, sample->timestamp_ms,
-        sample->valid, sample->overflow, event.value.touch.eligible && sample->valid &&
+        sample->valid, sample->overflow, public_pad && sample->valid &&
         !sample->overflow && sample->count == 1, queued, uxQueueMessagesWaiting(s_intents));
 #endif
     if (queued) return true;
@@ -1453,6 +1454,7 @@ static void apply_multitouch(interaction_multitouch_result_t result)
     s_multitouch_consuming = result.consume_pointer;
     if (result.cancel_single || result.release_required) app_mouse_phase_event(MOUSE_EVENT_MULTI);
     if (result.cancel_single) cancel_touch_recognition();
+    if (result.disqualify_single_tap) interaction_touch_disqualify_tap(&s_interaction);
     if (result.release_required) {
         cancel_input();
         interaction_multitouch_release_owned(&s_multitouch);

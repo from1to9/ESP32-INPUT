@@ -579,6 +579,7 @@ app_ui_capture_indicator_t app_ui_capture_indicator(void);
 typedef struct {
     uint64_t epoch, ui_revision; /* The visible snapshot, not a newer owner state. */
     bool eligible_pad;
+    bool control_press; /* The current LVGL press began outside the pad. */
     int16_t x1, y1, x2, y2; /* Inclusive LVGL logical bounds, valid only if eligible. */
 } app_ui_touch_context_t;
 /* Read-only, under the existing LVGL lock before the normal primary events.
