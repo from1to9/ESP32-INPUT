@@ -29,6 +29,6 @@ target_compile_options(${input_tinyusb_lib} PUBLIC
 # generated audio-class repair with the existing TinyUSB target configuration.
 include("${CMAKE_CURRENT_LIST_DIR}/tinyusb_audio_patch.cmake")
 
-if(CONFIG_APP_A2DP_ACL_DIAGNOSTICS)
+if(CONFIG_APP_A2DP_ACL_DIAGNOSTICS OR CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS)
     include("${CMAKE_CURRENT_LIST_DIR}/bt_acl_diag.cmake")
 endif()

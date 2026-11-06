@@ -1,51 +1,71 @@
-# The built-in VHCI driver has one host callback owner. Instrument the pinned
-# HAL, BTU and SBC queues in the diagnostic build without replacing that callback
-# or changing the shared SDK checkout.
+# Use one generated H4 source for both diagnostic options. The existing VHCI
+# callback owner and pinned SDK checkout remain intact.
 idf_component_get_property(acl_bt_lib bt COMPONENT_LIB)
 idf_component_get_property(acl_bt_dir bt COMPONENT_DIR)
 set(acl_src_dir "${acl_bt_dir}/host/bluedroid")
 set(acl_output_dir "${CMAKE_BINARY_DIR}/generated/a2dp_acl")
-set(acl_patch "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-a2dp-acl-diagnostics.patch")
-set(acl_hal "${acl_src_dir}/hci/hci_hal_h4.c")
-set(acl_sink "${acl_src_dir}/btc/profile/std/a2dp/btc_a2dp_sink.c")
-set(acl_btu "${acl_src_dir}/stack/btu/btu_task.c")
-set(acl_btu_copy "${acl_output_dir}/btu_task.c")
-set(acl_hal_copy "${acl_output_dir}/hci_hal_h4.c")
-set(acl_sink_copy "${acl_output_dir}/btc_a2dp_sink.c")
+set(acl_inputs "${acl_src_dir}/hci/hci_hal_h4.c")
+set(acl_patches)
+if(CONFIG_APP_A2DP_ACL_DIAGNOSTICS)
+    list(APPEND acl_inputs "${acl_src_dir}/btc/profile/std/a2dp/btc_a2dp_sink.c"
+                           "${acl_src_dir}/stack/btu/btu_task.c")
+    list(APPEND acl_patches "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-a2dp-acl-diagnostics.patch")
+    target_sources(${acl_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main/bt_acl_diag.c")
+endif()
+if(CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS)
+    set(classic_archive "${acl_bt_dir}/controller/lib_esp32s31/esp32s31-bt-lib/libbredr_app.a")
+    file(SHA256 "${classic_archive}" classic_archive_sha)
+    if(NOT classic_archive_sha STREQUAL "b7c964b1a459f501f417ed411c673397e8e96f4754e31b9183fbefd0d76b830f")
+        message(FATAL_ERROR "Classic connection diagnostics require the reviewed OLM slot ABI")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${classic_archive}")
+    list(APPEND acl_patches "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-classic-connect-diagnostics.patch")
+    target_sources(${acl_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main/bt_classic_connect_diag.c")
+    target_link_options(${acl_bt_lib} INTERFACE
+        "-Wl,--wrap=r_olm_conn_alloc" "-Wl,--undefined=__wrap_r_olm_conn_alloc"
+        "-Wl,--wrap=r_olm_pscan_end" "-Wl,--undefined=__wrap_r_olm_pscan_end")
+endif()
+
 find_package(Git REQUIRED)
-add_custom_command(OUTPUT "${acl_hal_copy}" "${acl_sink_copy}" "${acl_btu_copy}"
+set(acl_outputs)
+set(acl_commands)
+foreach(source IN LISTS acl_inputs)
+    get_filename_component(name "${source}" NAME)
+    set(copy "${acl_output_dir}/${name}")
+    list(APPEND acl_outputs "${copy}")
+    list(APPEND acl_commands COMMAND "${CMAKE_COMMAND}" -E copy "${source}" "${copy}")
+endforeach()
+foreach(patch IN LISTS acl_patches)
+    list(APPEND acl_commands COMMAND "${CMAKE_COMMAND}" -E env "GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}/generated"
+        "${GIT_EXECUTABLE}" -C "${acl_output_dir}" apply --no-index "${patch}")
+endforeach()
+add_custom_command(OUTPUT ${acl_outputs}
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${acl_output_dir}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${acl_hal}" "${acl_hal_copy}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${acl_sink}" "${acl_sink_copy}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${acl_btu}" "${acl_btu_copy}"
-    COMMAND "${CMAKE_COMMAND}" -E env "GIT_CEILING_DIRECTORIES=${CMAKE_BINARY_DIR}/generated"
-        "${GIT_EXECUTABLE}" -C "${acl_output_dir}" apply --no-index "${acl_patch}"
-    DEPENDS "${acl_hal}" "${acl_sink}" "${acl_btu}" "${acl_patch}"
+    ${acl_commands}
+    DEPENDS ${acl_inputs} ${acl_patches}
     VERBATIM)
-add_custom_target(input_a2dp_acl_sources DEPENDS "${acl_hal_copy}" "${acl_sink_copy}" "${acl_btu_copy}")
+add_custom_target(input_a2dp_acl_sources DEPENDS ${acl_outputs})
 add_dependencies(${acl_bt_lib} input_a2dp_acl_sources)
 
 get_target_property(acl_sources ${acl_bt_lib} SOURCES)
 get_target_property(acl_base ${acl_bt_lib} SOURCE_DIR)
 set(acl_build_sources)
-set(acl_replaced 0)
+set(acl_remaining ${acl_inputs})
 foreach(source IN LISTS acl_sources)
     get_filename_component(absolute "${source}" ABSOLUTE BASE_DIR "${acl_base}")
-    if(absolute STREQUAL acl_hal)
-        list(APPEND acl_build_sources "${acl_hal_copy}")
-    elseif(absolute STREQUAL acl_btu)
-        list(APPEND acl_build_sources "${acl_btu_copy}")
-    elseif(absolute STREQUAL acl_sink)
-        list(APPEND acl_build_sources "${acl_sink_copy}")
+    if(absolute IN_LIST acl_inputs)
+        if(NOT absolute IN_LIST acl_remaining)
+            message(FATAL_ERROR "Duplicate pinned Bluetooth source ${absolute}")
+        endif()
+        list(REMOVE_ITEM acl_remaining "${absolute}")
+        get_filename_component(name "${absolute}" NAME)
+        list(APPEND acl_build_sources "${acl_output_dir}/${name}")
     else()
         list(APPEND acl_build_sources "${source}")
-        continue()
     endif()
-    math(EXPR acl_replaced "${acl_replaced} + 1")
 endforeach()
-if(NOT acl_replaced EQUAL 3)
-    message(FATAL_ERROR "Expected the pinned H4, BTU and SBC sink sources for ACL diagnostics")
+if(acl_remaining)
+    message(FATAL_ERROR "Missing pinned Bluetooth diagnostic sources ${acl_remaining}")
 endif()
 set_property(TARGET ${acl_bt_lib} PROPERTY SOURCES "${acl_build_sources}")
 target_include_directories(${acl_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main")
-target_sources(${acl_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main/bt_acl_diag.c")

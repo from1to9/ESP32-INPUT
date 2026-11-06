@@ -1,0 +1,14 @@
+--- a/hci_hal_h4.c
++++ b/hci_hal_h4.c
+@@ -24,2 +24,3 @@
+ #include "hci/hci_layer.h"
++#include "bt_classic_connect_diag.h"
+ #include "hci/hci_trans_int.h"
+@@ -228,2 +229,3 @@
+     // TX Data to target
++    if (type == DATA_TYPE_COMMAND) bt_classic_connect_diag_tx(data, length);
+     hci_host_send_packet(data, length);
+@@ -466,2 +468,3 @@
+     }
++    if (stream[0] == HCI_BLE_EVENT) bt_classic_connect_diag_rx(stream, packet->len);
+     STREAM_TO_UINT8(type, stream);

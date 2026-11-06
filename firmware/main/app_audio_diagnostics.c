@@ -6,6 +6,9 @@
 #include "usb_audio.h"
 #include "bt_audio.h"
 #include "bt_acl_diag.h"
+#if CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS
+#include "bt_classic_connect_diag.h"
+#endif
 #include "usb_audio_transport.h"
 #include "esp_log.h"
 #ifdef ESP_PLATFORM
@@ -448,6 +451,9 @@ void app_audio_diagnostics_poll(uint64_t now_ms)
     }
     if (diagnostics.clock_known && now_ms - diagnostics.last_check_ms < DIAGNOSTIC_CHECK_MS) return;
     diagnostics.clock_known = true; diagnostics.last_check_ms = now_ms;
+#if CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS
+    bt_classic_connect_diag_poll(now_ms);
+#endif
     observe();
     const diagnostic_observation_t *current = &diagnostics.current, *previous = &diagnostics.previous;
     bool summary = !diagnostics.observed || now_ms - diagnostics.last_summary_ms >= DIAGNOSTIC_SUMMARY_MS;

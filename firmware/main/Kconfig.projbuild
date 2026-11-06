@@ -42,6 +42,16 @@ menu "Input device board resources"
             reports aggregate HCI fragments, queue timing and RTP sequence gaps.
             No media, keys or device addresses are collected.
 
+    config APP_CLASSIC_CONNECT_DIAGNOSTICS
+        bool "Observe the first Classic Create Connection and controller slot"
+        depends on IDF_TARGET_ESP32S31 && BT_CLASSIC_ENABLED && BT_CTRL_BR_EDR_MAX_ACL_CONN = 1 && SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+        default n
+        help
+            Record a bounded, header-only HCI timeline and controller slot
+            samples around the first outbound Classic connection attempt.
+            Export the frozen result once through the existing audio diagnostic
+            service. Preserve scan, connection and retry behavior.
+
     config APP_IMU_CAPTURE
         bool "Bounded raw IMU diagnostic capture"
         default n
