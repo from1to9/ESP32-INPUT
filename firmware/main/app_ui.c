@@ -12,7 +12,7 @@
 #include <stdarg.h>
 #include <string.h>
 
-/* Logical geometry follows design/ui-plan.md; all navigation is coordinator-owned. */
+/* Logical geometry follows docs/interaction.md; all navigation is coordinator-owned. */
 #define INK 0x182a25
 #define MUTED 0x5c6c65
 #define LINE 0xdae1db

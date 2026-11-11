@@ -27,11 +27,12 @@ Bluetooth Battery and Device Information services are not implemented in this mi
 
 ## Reproduce locally
 
-Install Git, a C compiler and Python 3.11 or newer, then run from the repository root:
+Install Git, a C compiler with sanitizers and Python 3.11 or newer. Run these
+commands from the repository root. Follow the [companion setup](../bridge/README.md)
+if the host suite needs its pinned Python dependencies.
 
 ```sh
-git submodule update --init --recursive
-python3 tools/idf.py setup --python python3.12
+python3 tools/idf.py setup
 python3 tools/idf.py build
 python3 tools/check.py
 python3 tools/check_repository.py
@@ -66,8 +67,7 @@ Keep the pinned BSP's TE synchronization and internal DMA bounce path. TE mode
 uses full-frame rendering; reducing LVGL buffer height does not reduce that
 mode's frame or transfer demand. The ten-entry LCD transfer queue can retain
 roughly 80 KiB of bounce buffers plus overhead, so total free heap or the reserve
-alone cannot prove that transfers fit. The earlier expanded device image failed
-despite abundant external memory; see the [failed device gate](../docs/validation.md#expanded-baseline-failed-device-gate).
+alone cannot prove that transfers fit. Inspect both total free memory and the largest DMA-capable block.
 
 Runtime diagnostics retain six startup memory samples and the first allocation
 and Bluetooth failure until reboot, so late CDC attachment does not erase the

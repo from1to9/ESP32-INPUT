@@ -1,14 +1,7 @@
 # Combined delivery checklist
 
-This checklist reconciles the accepted requirements with the current combined
-implementation. The latest delivery boundary is source review and GitHub
-publication after local validation. No flashing or device testing is authorized
-in this stage. Earlier device observations describe their original images only.
-
-Do not turn a proposed interface, mocked backend or successful link into a
-completed function. Each row needs an implemented user path, failure handling,
-focused regression evidence and independent review. Hardware qualification is a
-separate, explicitly deferred result.
+Use this checklist to review feature ownership, host evidence and physical
+acceptance. See [validation](validation.md) for current results.
 
 ## Implementation inventory
 
@@ -24,7 +17,7 @@ separate, explicitly deferred result.
 | Wi-Fi | Join existing LAN from scan/password UI; saved profiles/order/backoff; recovery AP secondary only | Wi-Fi owner, local private editor | Immutable scan selection, credential lifetime, legacy migration, retry and storage errors | Router/security compatibility and RF coexistence |
 | Audio transport | HFP HF, A2DP Sink and USB UAC under one codec owner; explicit readiness and peer generation | Audio manager, Bluetooth/UAC, board HAL | Exact PCM formats, bounded queues, generation replacement, mute/stop and failure cleanup | Host negotiation, sound quality and latency |
 | Audio coexistence | Preserve local HID while selected audio runs within resources; distinct link identities | Coordinator, transport/manager arbitration | No second radio/codec/USB stack; overload and disconnect tests | Same-host and different-host concurrency |
-| Recording | Explicit capture, visible indicator, quota/duration, stop/finalize, recovery, playback/delete/export | Audio manager, durable store | WAV boundaries, partial/uncertain writes, retention, access, no auto-resume | NAND geometry/provisioning, power-loss durability |
+| Recording | Explicit capture, visible indicator, quota/duration, stop/finalize, recovery, playback/delete/export | Audio manager, durable store | WAV boundaries, partial/uncertain writes, retention, access, no auto-resume | Recording partition provisioning and power-loss durability |
 | LAN API | Full typed operation registry, status/events, authenticated ownership, cancellation and local override | Control protocol/server, coordinator | Schema parity, auth/Origin, leases, dedupe, deadlines, stale target and backpressure | Sustained network load |
 | MCP | Usable companion for published operations; trust enrollment and scoped credentials | Bridge, LAN API | Protocol/schema tests, TLS trust, disconnect/cancellation, no hidden direct HID | End-to-end client workflow |
 | Updates | Authorized signed download, inactive staging, explicit installation boundary, rollback state | Update manager, partitions/trust | Artifact/target validation, short download, cancellation, slot exclusion and boot health | Partition migration, rollback and power-loss recovery |

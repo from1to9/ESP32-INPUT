@@ -68,7 +68,7 @@ One audio manager owns codec initialization, formats, capture/playback and mute.
 
 Qualify independent HFP and A2DP before HID + HFP stress testing. One USB manager must own UAC/CDC resources to avoid conflicting stack instances.
 
-## Future Mac interface
+## LAN control
 
 Wi-Fi is an independent LAN management channel. It may run alongside either
 selected HID transport; choosing Bluetooth or USB does not choose the Wi-Fi
@@ -79,7 +79,7 @@ release held input before reboot. No update path may directly emit HID or bypass
 local locking. Network/peer reconnect ordering is separate from runtime work
 priority; key release and local override always take precedence.
 
-Proposed actions: `move_relative`, `mouse_button`, `scroll`, `key`, `text_ascii`, `release_all`, `get_state`. Include protocol version, session ID, request ID, epoch, target ID and deadline. Distinguish accepted, sent and rejected; sent does not mean target UI success.
+The [operation catalog](../api/control-v1.json) defines the command names, request context, arguments and deadlines. Submission and observed host behavior are separate results.
 
 Remote control uses an authenticated short lease. Expiration cancels queues and releases keys. Local takeover wins and never automatically resumes a script. Screen recognition and outcome checks run on the Mac; Mosaico does not relay iPad video.
 
@@ -93,6 +93,6 @@ The haptic worker does not delay the input task. Disabling feedback cancels pend
 
 `board_mosaico.c` samples the official BMI270 interfaces at 100 Hz and publishes bounded-age snapshots; the coordinator performs no I2C access. Raw AI edges carry monotonic timestamps into a bounded queue. Global touch/physical state suppresses motion independently of normal UI queue admission. UI intents capture both input epoch and visible-context revision, so delayed controls cannot act on a different grid or modal.
 
-The preview holds 64 printable US ANSI characters. One explicit send owns a token and may use successive 32-character HID batches. Accepted key-down prefixes are removed from the preview, even if their key-up later fails; only the unsent suffix remains after cancellation. Enter is never appended. The original design conformance checklist distinguishes source, host, LVGL, physical and target evidence.
+The preview holds 64 printable US ANSI characters. One explicit send owns a token and may use successive 32-character HID batches. Accepted key-down prefixes are removed from the preview, even if their key-up later fails; only the unsent suffix remains after cancellation. Enter is never appended. The [validation summary](validation.md) distinguishes source, host, LVGL, physical and target evidence.
 
-Remote control will enter through the same coordinator and use the [versioned Wi-Fi/MCP contract](remote-control.md). No remote-input endpoint is enabled by this build; the temporary Wi-Fi provisioning form has a separate local-only scope. A state view must distinguish hardware capability, implemented feature, link readiness and observed host outcome.
+Remote control enters the same coordinator through the [LAN control API](remote-control.md). The provisioning hotspot has a separate local setup scope. State views distinguish hardware capability, implemented features and link readiness from observed host outcomes.

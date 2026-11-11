@@ -1,12 +1,12 @@
 # Product requirements v0.1
 
-Baseline: 2026-10-21. Product: ESP32-INPUT. Current user decisions take precedence over proposed defaults.
+Product requirements for ESP32-INPUT. See [validation](validation.md) for current evidence.
 
 ## Goal and scope
 
 Use one Mosaico to control one unlocked iPhone, iPad or computer. Basic mouse and keyboard operation must work without a Mac or network. A Mac may later provide remote commands, screen recognition and heavier transcription, but is optional for local input.
 
-The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as v1.2 by its hardware eFuse; supported revisions must still be detected at runtime. Long-term external power is expected. The first release does not capture iOS screens, unlock devices or implement business approval, attendance or account-switching workflows.
+Detect the supported Mosaico revision at runtime using its hardware eFuse. Long-term external power is expected. The first release does not capture iOS screens, unlock devices or implement business approval, attendance or account-switching workflows.
 
 ## Confirmed decisions
 
@@ -202,10 +202,8 @@ Project attribution and source identity follow the [build identity contract](bui
 
 ### Focused mode workspace revision
 
-The user subsequently requested that each mode show only its core controls,
-opening mode selection, device status and settings through a screen button or
-physical AI double-click. This explicitly supersedes the prototype's persistent
-bottom tabs and detailed header, while preserving its product workflows. Keep
+Each mode shows its core controls. A screen button and the physical AI
+double-click open mode selection, device status and settings. Keep
 the menu entry discoverable and at least 44 px, the current mode and input
 context understandable, and lock/remote/recording/error state visible when
 relevant. Do not turn touchpad movement into hidden navigation gestures.
@@ -246,26 +244,10 @@ The user's existing router credentials stay inside the private local editor
 and network owner; they never enter the HID preview or require typing a newly
 generated device password on another computer.
 
-## Complete delivery boundary
+## Qualification
 
-The latest user request requires all previously accepted modules, including real
-audio/recording, spoken-letter input, configuration, authenticated LAN control,
-MCP, firmware updates, motion refinement and the startup logo, to be completed
-before the next combined submission. Earlier
-published checkpoints remain historical evidence. Module self-tests and
-independent review continue during development; no placeholder or successful
-build counts as a completed physical capability. Preserve explicit hardware and
-host qualification limits, and report any requirement that cannot be implemented
-on the actual board rather than silently dropping it.
-
-The latest delivery instruction defers all device testing and flashing. Complete
-local host/native tests, the pinned target build and independent review, then
-commit and push the combined source. Do not access serial/USB, pair a host,
-install firmware or perform physical tests for this delivery. Physical
-qualification remains pending and is not a source-publication gate. Installation,
-partition migration, acoustic quality, host compatibility and endurance must not
-be reported as verified by source tests. The [delivery checklist](delivery-checklist.md)
-tracks implementation separately from that deferred evidence.
+The [delivery checklist](delivery-checklist.md) defines source and physical
+acceptance requirements. Current results are recorded in [validation](validation.md).
 
 ## Connection management and firmware updates
 
@@ -333,6 +315,6 @@ Do not persist per-frame state or write unchanged defaults on every boot.
   timestamps, source identity and explicit loss/unknown state. Support independent
   developer readers and bounded host recording without additional sensor owners.
 
-### Shared Bluetooth manager revision (2026-11-04)
+### Shared Bluetooth manager
 
-One Bluetooth devices page serves system settings and Audio Manage devices, with entry-selected Mouse & Keyboard / Audio purposes. Each purpose lists its actual saved records, search name and pairing state and exposes only owner-supported operations. Names or private addresses do not merge pairing authority. The original mode, keyboard draft and input transport survive management. Audio remains off until separately started. Unsupported Classic single deletion must remain explicit; no address-only optimistic deletion is acceptable. The [native contract](../design/native-bluetooth-devices.md) and [prototype](../design/bluetooth-devices.html) define the 480px flow.
+One Bluetooth devices page serves system settings and Audio Manage devices, with entry-selected Mouse & Keyboard / Audio purposes. Each purpose lists its actual saved records, search name and pairing state and exposes only owner-supported operations. Names or private addresses do not merge pairing authority. The original mode, keyboard draft and input transport survive management. Audio remains off until separately started. Unsupported Classic single deletion must remain explicit; no address-only optimistic deletion is acceptable. See [shared Bluetooth devices](interaction.md#shared-bluetooth-devices) for the interaction contract.

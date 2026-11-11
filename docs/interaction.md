@@ -9,7 +9,7 @@ edits stay paused. Confirmation restores normal controls for a fresh gesture.
 An already confirmed image boots normally. Active flash work and restart
 maintenance retain priority over browsing. Lock and release remain available.
 
-The latest user instruction revises the 480 x 480 baseline: **Mouse**, **Keyboard** and **Audio** each use the display for core functions. Remove persistent bottom tabs and the bulky target/telemetry header. One consistent Menu button (at least 44 x 44 px) and AI double-click open the same quick panel with mode choices, actual input-target/connection summary, Status, Settings and Close. The UI and physical buttons use one authoritative state. The [focused prototype and geometry plan](../design/ui-plan.md) define the authorized layout; production delivery requires native rendering, safety and resource validation.
+**Mouse**, **Keyboard** and **Audio** each use the 480 × 480 display for core functions. One consistent Menu button (at least 44 x 44 px) and AI double-click open the same quick panel with mode choices, actual input-target/connection summary, Status, Settings and Close. The UI and physical buttons use one authoritative state. The [native UI suite](../tests/ui/README.md) checks layout and hit targets.
 
 Show the foreground mode and a compact selected-input/target cue in its context. Keep full target/link, battery and Wi-Fi details in the quick panel or Status. Reserve a small area outside touchpad/grid/slider targets for critical remote ownership, active capture/recording and input error/release state, with a real Stop/takeover/details action. Lock remains a full-screen safety state. Paired, HID-connected and audio-active must not collapse into one green indicator. Do not expose private credentials or unrelated management data in global status.
 
@@ -86,13 +86,13 @@ Settings, Keys or the entry chooser, and selecting the current Keyboard mode
 again, preserve the current submode and draft. Motion remains an explicit entry
 choice. Local and authorized remote mode selection use the same transition.
 
-One compact chooser opens **Motion**, **Touch**, **Spoken letters** and **Shortcuts**; four persistent submode tabs are unnecessary. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. The nine-cell layout is an explicit user revision of the original six-cell prototype. Motion moves local focus only; empty cells never receive focus or confirm input.
+One compact chooser opens **Motion**, **Touch**, **Spoken letters** and **Shortcuts**; four persistent submode tabs are unnecessary. Motion and touch share a two-level 3 x 3 character grid, preview, case and symbol pages. Motion moves local focus only; empty cells never receive focus or confirm input.
 
 A persistent **Keys** button in the Keyboard header opens the live-host panel in one tap from Motion, Touch, Spoken and Shortcuts. Its fifteen buttons form a symmetric five-row, three-column grid: Copy, Paste, Undo; Backspace, forward Delete, Enter; Esc, Tab, Select all; Home, Up, End; Left, Down, Right. The panel names the selected input host and shows the acknowledged Ctrl/Command shortcut setting. Its keys act on the host without changing the draft. Copy/Paste/Undo/Select all use Ctrl+C/V/Z/A for Windows or Command+C/V/Z/A for Apple hosts; Paste asks the host to paste its own clipboard and never reads clipboard contents. **Delete draft** removes a local preview character only; Send remains an explicit, separate action with no appended Enter. The existing chooser and six-button Shortcuts entry remain available, with no sticky modifiers. The nine-cell grid and preview controls keep their original geometry.
 
 Flow: choose group -> choose character -> confirm into preview -> send. Keep delete, space and send visible. Sending never includes Enter; expose stop and accepted-prefix progress. An Alpha sample yields an A candidate, which needs confirmation before entering preview. Prefer spelling words for easily confused letter sounds.
 
-Spoken letters and arbitrary dictation are distinct features. The browser prototype labels its samples and never requests microphone access or pretends to run recognition.
+Spoken letters and arbitrary dictation are distinct features.
 
 ### Microphone / speaker
 
@@ -182,7 +182,7 @@ Settings are not a fourth primary mode; closing them returns to the previous mod
 
 Settings includes Light and Dark appearance. Dark uses a black background, near-white text and a light-blue accent for clearer selection and focus, with amber warnings and coral errors; Light retains the original green accent. Every page, focus indicator, disabled control and overlay follows the same theme. Appearance does not change input mode, target, draft or lock state. Dark is the default when no saved preference exists. Theme, brightness, idle timeout, haptics and the host shortcut modifier use validated persistent settings, with coalesced writes and visible save failures.
 
-The user-authorized focused-workspace revision supersedes the original fixed-tab geometry; product workflows and requirements remain the acceptance baseline. Diagnostic buttons and sample text cannot replace the touchpad or preview-first keyboard flow. See [design conformance](design-conformance.md) for evidence levels and unresolved hardware acceptance.
+Keep the full touchpad and preview-first keyboard flows in their workspaces. See [validation](validation.md) for evidence and unresolved hardware issues.
 
 
 ## Status, connectivity and display
@@ -265,7 +265,7 @@ never sent into the HID preview, ordinary intents, labels or diagnostics. Only
 explicit Apply/Join submits a private copy; acceptance is not manager completion.
 Close, Back, AI double, lock, screen-off, session replacement and the five-minute
 deadline clear local drafts. AI single cannot activate the hidden HID grid.
-See the [native setup contract](../design/native-wifi-ui.md) for limits and states.
+See [Wi-Fi provisioning](wifi-provisioning.md) for service limits and states.
 
 ### Browser controller permissions
 
@@ -308,4 +308,4 @@ separate board/configuration repair, not justification for changing touch policy
 
 ## Shared Bluetooth devices
 
-System Bluetooth settings and Audio Manage devices enter the same purpose-scoped manager. Mouse & Keyboard and Audio retain separate saved records and search names. Add device enters the selected owner's local pairing flow; it never starts audio, changes input transport or sends a draft. Exact record actions preserve owner revisions and host generations. Audio connection requests report actual service state; Classic single Forget remains visibly unavailable until a safe owner transaction exists. See the [shared manager layout and acceptance](../design/native-bluetooth-devices.md).
+System Bluetooth settings and Audio Manage devices enter the same purpose-scoped manager. Mouse & Keyboard and Audio retain separate saved records and search names. Add device enters the selected owner's local pairing flow; it never starts audio, changes input transport or sends a draft. Exact record actions preserve owner revisions and host generations. Audio connection requests report actual service state; Classic single Forget remains visibly unavailable until a safe owner transaction exists. See [Bluetooth peer observations](bluetooth-peer-snapshots.md) for the service contract.

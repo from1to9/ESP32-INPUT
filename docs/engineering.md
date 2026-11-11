@@ -1,6 +1,6 @@
 # Engineering standards
 
-Status: active. Established 2026-10-21. These standards govern first-party engineering work; functional behavior is defined in [requirements.md](requirements.md).
+These standards govern first-party engineering work; functional behavior is defined in [requirements.md](requirements.md).
 
 ## 1. Language and source ownership
 
@@ -42,7 +42,7 @@ Use descriptive names and consistent existing style. C and Python use four-space
 
 Use sanitizers where supported. Test invariants, numerical boundaries and recovery; avoid tests that mirror implementation line for line. Never relax checks just to obtain a pass. If a requirement changes, document the new expected result.
 
-For product UI work, use the original `design/` prototype and [interaction contract](interaction.md) as the baseline. The prototype was introduced in commit `21c30f1`; its simulated host, recognition and audio state must be replaced by truthful runtime capability and connection state, while preserving its navigation and input workflows. Diagnostic screens do not satisfy the product UI acceptance gate. Inspect actual LVGL renders at 480 x 480 and exercise the corresponding production interaction paths. Record feature-level gaps without changing the approved baseline to match incomplete code.
+For product UI work, use the [interaction contract](interaction.md) and consult the original prototype where available in local design records. Inspect actual LVGL renders at 480 × 480 and exercise the corresponding production interaction paths. Report gaps against the documented behavior.
 
 Run `python3 tools/check_repository.py` for first-party text hygiene and local Markdown links. Its CJK check prevents the previous mixed-language regression; it is not a complete language detector. Review wording manually. Run `python3 tools/check.py` for portable C behavior.
 
@@ -88,7 +88,3 @@ Historical notes are leads, not current evidence. Reverify cheap, changeable fac
 Complete only the explicitly delivered scope: intended behavior is implemented, relevant checks pass or limitations are evidenced, documentation matches the result, unrelated work is preserved, and requested publication is verified. Scaffolding, mocks or a successful build do not establish a working device.
 
 Report what changed, why it matters, how it was checked and what remains unverified. State blockers precisely without disguising partial progress as completion.
-
-## Adaptation source
-
-These general principles were adapted from the current QuantTrade `AGENTS.md`, knowledge contract, Git delivery workflow and validation workflow, inspected on 2026-10-21. They retain persistent authorization, scoped edits, provenance, root-cause fixes, meaningful validation and verified delivery. Trading semantics, optimizer rules, machine names, fixed worker counts, data paths and QuantTrade-specific commands are excluded. There is no runtime dependency on that checkout.

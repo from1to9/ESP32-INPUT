@@ -60,8 +60,7 @@ transport failure. Exact `busy` responses to GET are polled at most four times
 with 20/40/80 ms backoff so the coordinator can publish its bounded fresh read.
 Commands and failed connections are never automatically replayed. This preserves
 the device's read-cache freshness limit instead of relying on a new TLS handshake
-fitting inside it. Use the [LAN diagnostic collector](../tools/lan_debug.md) for
-bounded status evidence and the [sensor collector](../tools/sensor_capture.md)
+fitting inside it. Use the [sensor collector](../tools/sensor_capture.md)
 for ordered raw sensor observations.
 
 ## HTTP and media

@@ -1,6 +1,6 @@
 # Portable interaction model
 
-The coordinator owns this fixed-storage C11 model. It has no board, UI, Bluetooth, heap or clock dependencies. The [product requirements](../../docs/requirements.md), [interaction design](../../docs/interaction.md) and [original prototype](../../design/app.js) define the preview/confirmation/send flow. The current nine-cell layout follows the user's subsequent 3x3 keyboard decision; the original prototype is not rewritten.
+The coordinator owns this fixed-storage C11 model. It has no board, UI, Bluetooth, heap or clock dependencies. The [product requirements](../../docs/requirements.md), [interaction contract](../../docs/interaction.md) and [original prototype](../../docs/interaction.md) define the preview/confirmation/send flow. The current nine-cell layout follows the user's subsequent 3x3 keyboard decision; the original prototype is not rewritten.
 
 Both selection stages use a row-major three-column, three-row grid with indices 0..8. The combined Letters page has nine groups of four, covering A-Z and 0-9 exactly once:
 

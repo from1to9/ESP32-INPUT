@@ -13,3 +13,7 @@ __pycache__/
 node_modules/
 .tools/
 .agent/local/
+
+# Local design, experiment and investigation workspaces.
+/design/
+/experiments/
