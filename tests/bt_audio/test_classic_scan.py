@@ -56,7 +56,7 @@ void bt_audio_classic_scan_drained(uint64_t id, bool restore) { (void)id; (void)
                         str(ROOT / 'firmware/main/bt_audio_btc.c'), *legacy, '-o', str(owner)], check=True)
         for case in ('scan-owner', 'scan-cancel', 'scan-timeout', 'scan-ready-expired', 'scan-queue-full',
                      'forget-empty', 'forget-sole', 'forget-other', 'forget-rekey', 'forget-acl',
-                     'forget-expired', 'forget-nvs-error', 'forget-multiblob'):
+                     'forget-expired', 'forget-nvs-error', 'forget-multiblob', 'forget-storage-timeout'):
             subprocess.run([str(owner), case], check=True)
         if args.owner_only:
             return

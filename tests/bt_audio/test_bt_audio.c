@@ -174,6 +174,7 @@ esp_err_t bt_classic_scan_prepare(uint64_t request, const uint8_t address[6])
 
 static uint8_t reviewed_incarnation = 1;
 static unsigned storage_calls, ram_posts;
+static bool expire_during_storage;
 static esp_err_t storage_result;
 
 esp_err_t bt_classic_forget_review(const uint8_t address[6], bt_classic_bond_id_t *identity)
@@ -192,6 +193,13 @@ esp_err_t bt_classic_forget_storage(const uint8_t address[6], const bt_classic_b
 {
     assert(on_btc && !audio_locked && !memcmp(address, peer, 6));
     ++storage_calls;
+    if (expire_during_storage) {
+        clock_us += BT_AUDIO_COMMAND_TIMEOUT_US;
+        bt_audio_service(); /* Independent service/watchdog tick before BTC can return. */
+        bt_audio_snapshot_t snapshot = bt_audio_snapshot();
+        assert(snapshot.request_status == BT_AUDIO_JOB_UNCERTAIN && snapshot.control_inflight);
+        assert(!scan_releases && "Do not reopen page scan while storage may still delete the key");
+    }
     if (storage_result != ESP_OK) return storage_result;
     if (identity->bytes[0] != reviewed_incarnation) return ESP_ERR_INVALID_VERSION;
     --bond_count;
@@ -1298,6 +1306,7 @@ static void forget_owner_test(const char *scenario)
     assert(scan_prepares == 1 && scan_request == request && !storage_calls && !ram_posts);
     bool connected = !strcmp(scenario, "forget-acl");
     bool expired = !strcmp(scenario, "forget-expired");
+    expire_during_storage = !strcmp(scenario, "forget-storage-timeout");
     if (expired) clock_us += BT_AUDIO_COMMAND_TIMEOUT_US;
     bt_audio_classic_scan_result(request, connected ? ESP_ERR_INVALID_STATE : ESP_OK);
     if (!strcmp(scenario, "forget-nvs-error")) storage_result = ESP_ERR_NOT_FINISHED;
@@ -1314,16 +1323,19 @@ static void forget_owner_test(const char *scenario)
                (storage_result == ESP_ERR_NOT_FINISHED ? BT_AUDIO_JOB_UNCERTAIN : BT_AUDIO_JOB_FAILED));
         return;
     }
-    assert(ram_posts == 1 && bt_audio_snapshot().request_status == BT_AUDIO_JOB_WAITING);
+    bt_audio_job_status_t waiting = expire_during_storage ? BT_AUDIO_JOB_UNCERTAIN : BT_AUDIO_JOB_WAITING;
+    assert(ram_posts == 1 && bt_audio_snapshot().request_status == waiting);
     bt_audio_classic_forget_committed(request + 1, ESP_OK);
     bt_audio_service();
-    assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_WAITING);
+    assert(bt_audio_snapshot().request_status == waiting && !scan_releases);
     bt_audio_classic_forget_committed(request, ESP_OK);
     bt_audio_service();
     assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED);
     bt_audio_bond_list_t after = observed_bonds();
     assert(after.known && after.count == (multiple ? 1 : 0) && after.revision != before.revision);
     if (multiple) assert(!memcmp(after.bonds[0].address, other, sizeof(other)));
+    bt_audio_service();
+    assert(scan_releases == 1);
 }
 
 static void scan_owner_test(const char *scenario)

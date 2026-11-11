@@ -1297,7 +1297,10 @@ static void service_scan_release(void)
 {
     portENTER_CRITICAL(&audio_lock);
     uint64_t release = 0;
-    if (audio.scan_request && !audio.scan_releasing &&
+    /* A timed-out Forget can still write storage or commit on BTU. Keep
+     * Classic pages gated until that exact transaction reaches a result. */
+    bool forget_inflight = audio.command == BT_AUDIO_FORGET_CLASSIC && audio.public.control_inflight;
+    if (audio.scan_request && !audio.scan_releasing && !forget_inflight &&
         ((!audio.command_pending && !audio.public.control_inflight) ||
          audio.public.request_status == BT_AUDIO_JOB_UNCERTAIN || audio.public.failed)) {
         release = audio.scan_request;
