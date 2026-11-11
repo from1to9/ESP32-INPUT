@@ -90,6 +90,10 @@ static uint64_t s_imu_generation;
 static bsp_imu_config_t s_imu_config;
 static float s_imu_accel_scale, s_imu_gyro_scale;
 static board_imu_sample_t s_imu_sample;
+/* Twenty accepted frames span 190 ms at the normal 10 ms cadence. Both
+ * endpoints must be retained to bridge a delayed coordinator read. */
+static board_imu_sample_t s_imu_history[BOARD_IMU_HISTORY_CAPACITY];
+static size_t s_imu_history_next, s_imu_history_count;
 static board_imu_queue_t s_imu_stream; /* Serialized with cache/status by s_status_mux. */
 static EXT_RAM_BSS_ATTR board_sensor_record_t s_sensor_records[BOARD_SENSOR_JOURNAL_CAPACITY];
 static board_sensor_journal_t s_sensor_journal;
@@ -422,6 +426,7 @@ static esp_err_t imu_failure_locked(esp_err_t error, const char *stage, bool fat
     s_imu_status.phase = fatal ? BOARD_IMU_FATAL : BOARD_IMU_RECOVERING;
     s_imu_error = error;
     s_imu_sample_valid = false;
+    s_imu_history_count = 0;
     s_caps.imu = false;
     if (attempted && s_imu_status.failure_streak != UINT32_MAX) ++s_imu_status.failure_streak;
     const uint32_t delays[] = {10, 20, 40, 80, 160, IMU_MAX_RETRY_MS};
@@ -650,6 +655,15 @@ done:
     return result;
 }
 
+static void imu_cache_sample_locked(const board_imu_sample_t *sample)
+{
+    s_imu_sample = *sample;
+    s_imu_sample_valid = true;
+    s_imu_history[s_imu_history_next] = *sample;
+    s_imu_history_next = (s_imu_history_next + 1) % BOARD_IMU_HISTORY_CAPACITY;
+    if (s_imu_history_count < BOARD_IMU_HISTORY_CAPACITY) ++s_imu_history_count;
+}
+
 /* A consumer loss invalidates the in-flight generation once. Only a subsequent
  * fresh acquisition may recover capability; user Motion intent stays off. */
 static esp_err_t imu_update(void)
@@ -696,8 +710,7 @@ static esp_err_t imu_update(void)
                 if (s_imu_status.recovery_count != UINT64_MAX) ++s_imu_status.recovery_count;
                 else s_imu_status.recovery_count_saturated = true;
             }
-            s_imu_sample = candidate;
-            s_imu_sample_valid = true;
+            imu_cache_sample_locked(&candidate);
             s_imu_status.phase = BOARD_IMU_ACTIVE;
             s_imu_status.failure_streak = 0;
             s_imu_status.retry_delay_ms = IMU_POLL_MS;
@@ -859,8 +872,7 @@ static void init_optional_imu(void)
         return;
     }
     portENTER_CRITICAL(&s_status_mux);
-    s_imu_sample = first;
-    s_imu_sample_valid = true;
+    imu_cache_sample_locked(&first);
     s_imu_error = ESP_OK;
     s_imu_status.phase = BOARD_IMU_ACTIVE;
     s_imu_status.retry_delay_ms = IMU_POLL_MS;
@@ -1276,6 +1288,33 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
     s_imu_status.last_read_us = time_us;
     portEXIT_CRITICAL(&s_status_mux);
     return result;
+}
+
+size_t board_imu_copy_history(uint64_t after_us, uint64_t through_us,
+    board_imu_sample_t samples[BOARD_IMU_HISTORY_CAPACITY - 2])
+{
+    if (!samples || after_us >= through_us) return 0;
+    size_t count = 0;
+    portENTER_CRITICAL(&s_status_mux);
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
+    if (imu_cached_error_locked(now_us, false) == ESP_OK && now_us >= through_us &&
+        now_us - through_us <= IMU_MAX_AGE_US) {
+        size_t start = s_imu_history_count;
+        const size_t oldest = s_imu_history_next + BOARD_IMU_HISTORY_CAPACITY - s_imu_history_count;
+        for (size_t i = 0; i < s_imu_history_count; ++i) {
+            const uint64_t timestamp = s_imu_history[(oldest + i) % BOARD_IMU_HISTORY_CAPACITY].timestamp_us;
+            if (timestamp == after_us) start = i;
+            if (timestamp == through_us && start < i) {
+                count = i - start - 1;
+                for (size_t j = 0; j < count; ++j) {
+                    samples[j] = s_imu_history[(oldest + start + 1 + j) % BOARD_IMU_HISTORY_CAPACITY];
+                }
+                break;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&s_status_mux);
+    return count;
 }
 
 esp_err_t board_imu_stream_attach(board_imu_consumer_t *consumer)

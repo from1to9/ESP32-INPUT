@@ -2468,6 +2468,27 @@ static void process_buttons(void)
     handle_button_events(interaction_tick(&s_interaction, s_now_ms));
 }
 
+static interaction_imu_sample_t map_motion_sample(const board_imu_sample_t *sample)
+{
+    /* The board adapter supplies the right-handed display frame for both
+     * sensors. Host inversion belongs after gravity projection, never here. */
+    return (interaction_imu_sample_t){
+        .timestamp_us = sample->timestamp_us,
+        .gx_dps = sample->x_dps, .gy_dps = sample->y_dps, .gz_dps = sample->z_dps,
+        .ax_g = sample->x_g, .ay_g = sample->y_g, .az_g = sample->z_g
+    };
+}
+
+static void __attribute__((noinline)) track_motion_history(uint64_t through_us)
+{
+    static board_imu_sample_t history[BOARD_IMU_HISTORY_CAPACITY - 2];
+    const size_t count = board_imu_copy_history(s_last_imu_us, through_us, history);
+    for (size_t i = 0; i < count && s_interaction.gravity_ready; ++i) {
+        const interaction_imu_sample_t mapped = map_motion_sample(&history[i]);
+        interaction_motion_track_history(&s_interaction, &mapped);
+    }
+}
+
 static void process_motion(void)
 {
     board_imu_sample_t sample;
@@ -2485,14 +2506,16 @@ static void process_motion(void)
         return;
     }
     observe_motion_sample(&sample);
+    /* Preserve the reference through observed intervals only. History clears
+     * output carry so the fresh frame aligns without a catch-up report. */
+    if (s_interaction.view.mode == INPUT_MOUSE && s_interaction.gravity_ready &&
+        s_interaction.sample_seen && s_interaction.sample_us == s_last_imu_us &&
+        sample.timestamp_us > s_last_imu_us &&
+        sample.timestamp_us - s_last_imu_us > INTERACTION_IMU_MAX_INTERVAL_US) {
+        track_motion_history(sample.timestamp_us);
+    }
     s_last_imu_us = sample.timestamp_us;
-    /* The board adapter supplies the right-handed display frame for both
-     * sensors. Host inversion belongs after gravity projection, never here. */
-    interaction_imu_sample_t mapped = {
-        .timestamp_us = sample.timestamp_us,
-        .gx_dps = sample.x_dps, .gy_dps = sample.y_dps, .gz_dps = sample.z_dps,
-        .ax_g = sample.x_g, .ay_g = sample.y_g, .az_g = sample.z_g
-    };
+    const interaction_imu_sample_t mapped = map_motion_sample(&sample);
     bool was_calibrated = s_interaction.view.calibrated;
     /* The remote adapter consumes the same physical sample and model. It
      * chooses an authorized source; it never starts another sensor reader. */

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <assert.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -670,6 +671,18 @@ esp_err_t board_imu_read(board_imu_sample_t *sample)
     return test_imu_result;
 }
 
+static board_imu_sample_t test_imu_history[BOARD_IMU_HISTORY_CAPACITY - 2];
+static size_t test_imu_history_count;
+static uint64_t test_imu_history_after_us;
+
+size_t board_imu_copy_history(uint64_t after_us, uint64_t through_us,
+    board_imu_sample_t samples[BOARD_IMU_HISTORY_CAPACITY - 2])
+{
+    if (after_us != test_imu_history_after_us || through_us != test_sample.timestamp_us) return 0;
+    memcpy(samples, test_imu_history, test_imu_history_count * sizeof(*samples));
+    return test_imu_history_count;
+}
+
 void coordinator_test_log(const char *tag, const char *format, ...)
 {
 #if APP_MOUSE_PHASE_ENABLED
@@ -1209,6 +1222,8 @@ static void setup(input_mode_t mode)
     test_name_error = ESP_OK;
     test_name_requests = 0;
     test_sample = (board_imu_sample_t){0};
+    test_imu_history_count = 0;
+    test_imu_history_after_us = 0;
     test_imu_result = ESP_FAIL;
     test_presenter_available = true;
     test_publish_count = 0;
@@ -1787,6 +1802,83 @@ static void motion_gates_and_local_keyboard_focus(void)
     sync_interaction();
     for (unsigned i = 0; i < 20; ++i) { sample_after(10, 50, 0); expect_idle(); }
     assert(!s_engine.state.gyro_enabled && s_interaction.view.preview_length == 0);
+}
+
+static jmp_buf imu_schedule_done;
+static unsigned imu_schedule_turns, imu_schedule_publications;
+static size_t imu_reports_before_stall;
+static interaction_quaternion_t imu_attitude_before_stall;
+
+static void imu_schedule_publish_until(uint64_t ms)
+{
+    test_imu_history_after_us = test_sample.timestamp_us;
+    test_imu_history_count = 0;
+    while (test_sample.timestamp_us < ms * 1000U) {
+        test_sample.timestamp_us += 10000;
+        test_sample.z_dps = 25;
+        ++imu_schedule_publications;
+        if (test_sample.timestamp_us < ms * 1000U) {
+            assert(test_imu_history_count < BOARD_IMU_HISTORY_CAPACITY - 2);
+            test_imu_history[test_imu_history_count++] = test_sample;
+        }
+    }
+    test_clock_ms = ms;
+}
+
+static void imu_schedule_delay(TickType_t ticks)
+{
+    assert(ticks == pdMS_TO_TICKS(COORDINATOR_PERIOD_MS));
+    ++imu_schedule_turns;
+    if (imu_schedule_turns == 3) {
+        sync_interaction();
+        assert(set_motion(INPUT_LOCAL, true));
+    }
+    if (imu_schedule_turns == 30) {
+        assert(s_engine.state.gyro_enabled && s_interaction.gravity_ready && s_interaction.aim_aligned);
+        imu_reports_before_stall = trace_count;
+        imu_attitude_before_stall = s_interaction.attitude;
+        imu_schedule_publish_until(test_clock_ms + 160);
+        return;
+    }
+    if (imu_schedule_turns == 31) {
+        assert(imu_schedule_publications == 45);
+        assert(s_motion_trace.first_active_gap_known && s_motion_trace.first_active_gap_us == 160000);
+        assert(trace_count == imu_reports_before_stall); /* No stale reports. */
+        fprintf(stderr, "IMU stall: publications=%u latest_age_us=%llu gap_us=%llu reference=%d reason=%d\n",
+            imu_schedule_publications, (unsigned long long)(test_clock_ms * 1000U - test_sample.timestamp_us),
+            (unsigned long long)s_motion_trace.first_active_gap_us, s_interaction.gravity_ready,
+            s_interaction.view.motion_block_reason);
+        assert(s_interaction.gravity_ready);
+        const interaction_quaternion_t before = imu_attitude_before_stall;
+        const interaction_quaternion_t after = s_interaction.attitude;
+        /* 160 ms of observed 25 degrees/s yaw, with no emitted displacement. */
+        const float yaw = 2 * atan2f(after.z * before.w - after.w * before.z,
+                                    after.w * before.w + after.z * before.z);
+        assert(fabsf(yaw - .06981317f) < .00005f);
+        imu_schedule_publish_until(test_clock_ms + 10);
+        return;
+    }
+    if (imu_schedule_turns == 32) {
+        assert(trace_count == imu_reports_before_stall + 1);
+        assert(trace[trace_count - 1].id == HID_ENGINE_MOUSE_REPORT_ID &&
+               (int8_t)trace[trace_count - 1].bytes[1] > 0);
+        longjmp(imu_schedule_done, 1);
+    }
+    imu_schedule_publish_until(test_clock_ms + 10);
+}
+
+static void delayed_coordinator_preserves_observed_aim(void)
+{
+    setup(INPUT_MOUSE);
+    remote_control_init(false);
+    calibrate();
+    imu_schedule_turns = imu_schedule_publications = 0;
+    test_clock_override = true;
+    test_clock_ms = s_now_ms;
+    test_coordinator_delay = imu_schedule_delay;
+    if (!setjmp(imu_schedule_done)) coordinator_run(ESP_OK);
+    test_coordinator_delay = NULL;
+    test_clock_override = false;
 }
 
 static void fresh_sensor_after_consumer_gap_requires_new_reference(void)
@@ -6672,6 +6764,7 @@ int main(int argc, char **argv)
     RUN(touch_precision_and_drag_boundaries);
     RUN(raw_button_timing_and_takeover);
     RUN(motion_gates_and_local_keyboard_focus);
+    RUN(delayed_coordinator_preserves_observed_aim);
     RUN(fresh_sensor_after_consumer_gap_requires_new_reference);
     RUN(rendered_state_is_truthful);
     RUN(motion_recovery_requires_fresh_samples_and_explicit_enable);

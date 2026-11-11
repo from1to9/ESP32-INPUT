@@ -373,3 +373,7 @@ input_delta_t interaction_motion_sample(interaction_t *model,
                                         const interaction_imu_sample_t *sample);
 input_delta_t interaction_motion_sample_owned(interaction_t *model, input_owner_t source,
                                               const interaction_imu_sample_t *sample);
+/* Advance an established reference using an observed gyro interval.
+ * History cannot acquire or calibrate the reference, move focus or emit HID. */
+void interaction_motion_track_history(interaction_t *model,
+                                      const interaction_imu_sample_t *sample);

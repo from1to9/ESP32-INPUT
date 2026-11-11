@@ -994,7 +994,8 @@ static void __attribute__((noinline)) recenter_reference(interaction_t *m)
 }
 
 static bool update_reference(interaction_t *m, const interaction_imu_sample_t *sample,
-                             const float gyro[3], interaction_quaternion_t increment, float dt)
+                             const float gyro[3], interaction_quaternion_t increment, float dt,
+                             bool history)
 {
     float accel[] = {sample->ax_g, sample->ay_g, sample->az_g};
     const float norm = sqrtf(dot3(accel, accel));
@@ -1015,8 +1016,10 @@ static bool update_reference(interaction_t *m, const interaction_imu_sample_t *s
         }
         rotate3(inverse_rotation(m->attitude), m->world_up, m->gravity);
     }
-    if (haptic) {
-        reference_rejected(m, true);
+    /* The coordinator cannot associate present haptic state with a past
+     * sample. Only live samples may correct or acquire the reference. */
+    if (haptic || history) {
+        if (haptic) reference_rejected(m, true);
         m->gravity_acquire_samples = 0;
         m->accel_seen = false;
         m->gravity_predicted = m->gravity_ready;
@@ -1214,8 +1217,8 @@ input_delta_t interaction_motion_sample(interaction_t *m, const interaction_imu_
     return interaction_motion_sample_owned(m, INPUT_LOCAL, s);
 }
 
-input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t source,
-                                              const interaction_imu_sample_t *s)
+static input_delta_t motion_sample(interaction_t *m, input_owner_t source,
+                                   const interaction_imu_sample_t *s, bool history)
 {
     if (!valid_source(source)) return blocked_motion(m, INTERACTION_MOTION_BLOCK_CONTROL);
     reference_begin(m, s);
@@ -1255,8 +1258,8 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
     const float gyro[] = {s->gx_dps - m->bias[0], s->gy_dps - m->bias[1], s->gz_dps - m->bias[2]};
     const interaction_quaternion_t previous_attitude = m->attitude;
     const bool had_reference = m->gravity_ready;
-    const bool reference = update_reference(m, s, gyro, gyro_increment(gyro, dt), dt);
-    if (first || m->control.locked || m->control.owner != source ||
+    const bool reference = update_reference(m, s, gyro, gyro_increment(gyro, dt), dt, history);
+    if (history || first || m->control.locked || m->control.owner != source ||
         m->view.touch_active || (m->touch.active && m->touch.source == source) ||
         m->view.menu_open || m->view.haptic_active || m->view.button_down ||
         (m->view.mode == INPUT_KEYBOARD && m->click_pending) ||
@@ -1320,4 +1323,16 @@ input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t so
     const float y = fabsf(m->filtered[1]) <= m->config.deadzone_dps ? 0 :
         m->filtered[1] * fminf(m->config.pointer_gain_y * response, 100);
     return input_motion_step(&m->pointer_motion, x, y, dt, 1, 0, true);
+}
+
+input_delta_t interaction_motion_sample_owned(interaction_t *m, input_owner_t source,
+                                              const interaction_imu_sample_t *s)
+{
+    return motion_sample(m, source, s, false);
+}
+
+void interaction_motion_track_history(interaction_t *m, const interaction_imu_sample_t *s)
+{
+    if (m->gravity_ready && m->sample_seen && m->view.calibrated && !m->view.calibrating)
+        (void)motion_sample(m, INPUT_LOCAL, s, true);
 }

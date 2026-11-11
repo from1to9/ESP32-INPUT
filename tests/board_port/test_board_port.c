@@ -588,6 +588,7 @@ static void reset(void)
     memset(&s_imu_config, 0, sizeof(s_imu_config));
     s_imu_accel_scale = s_imu_gyro_scale = 0;
     memset(&s_imu_sample, 0, sizeof(s_imu_sample));
+    s_imu_history_next = s_imu_history_count = 0;
     memset(&s_imu_stream, 0, sizeof(s_imu_stream));
     memset(&s_sensor_journal, 0, sizeof(s_sensor_journal));
     memset(&s_imu_observation, 0, sizeof(s_imu_observation));
@@ -1792,6 +1793,36 @@ static void stream_start(void)
         stream_batch.discontinuities == BOARD_IMU_DISCONTINUITY_ATTACH && stream_batch.latest_sequence == 1);
 }
 
+static void test_aim_history_retains_accepted_frames_within_source_generation(void)
+{
+    reset();
+    assert(board_init(legacy_hold) == ESP_OK);
+    uint64_t timestamps[BOARD_IMU_HISTORY_CAPACITY + 1] = {s_imu_sample.timestamp_us};
+    board_imu_sample_t samples[BOARD_IMU_HISTORY_CAPACITY - 2];
+    for (size_t i = 1; i <= BOARD_IMU_HISTORY_CAPACITY; ++i) {
+        hw.time_us += 10000;
+        hw.gyro[0] = (float)i;
+        assert(imu_update() == ESP_OK);
+        timestamps[i] = s_imu_sample.timestamp_us;
+    }
+    const uint64_t latest = timestamps[BOARD_IMU_HISTORY_CAPACITY];
+    const unsigned reads = hw.gyro_reads;
+    const size_t count = board_imu_copy_history(timestamps[1], latest, samples);
+    assert(count == BOARD_IMU_HISTORY_CAPACITY - 2 && hw.gyro_reads == reads);
+    for (size_t i = 0; i < count; ++i) assert(samples[i].timestamp_us == timestamps[i + 2]);
+    assert(board_imu_copy_history(timestamps[0], latest, samples) == 0);
+    assert(board_imu_copy_history(timestamps[1], latest - 1, samples) == 0);
+    hw.time_us = latest + IMU_MAX_AGE_US + 1;
+    assert(board_imu_copy_history(timestamps[1], latest, samples) == 0);
+    assert(board_capabilities().imu);
+    hw.gyro_error = ESP_FAIL;
+    assert(imu_update() == ESP_FAIL);
+    hw.gyro_error = ESP_OK;
+    hw.time_us += 10000;
+    assert(imu_update() == ESP_OK);
+    assert(board_imu_copy_history(latest, s_imu_sample.timestamp_us, samples) == 0);
+}
+
 static void test_ordered_stream_preserves_cache_units_and_identity(void)
 {
     reset();
@@ -2167,6 +2198,7 @@ int main(void)
     test_power_observer_is_pure_and_power_journal_has_provenance_fields();
     test_raw_journal_input_whitelist_redaction_and_exhaustion_isolation();
     test_raw_journal_startup_failure_clock_and_inflight_cancellation();
+    test_aim_history_retains_accepted_frames_within_source_generation();
     test_ordered_stream_preserves_cache_units_and_identity();
     test_ordered_stream_inflight_fence_is_delivery_only();
     test_ordered_stream_loss_and_hardware_health_are_distinct();

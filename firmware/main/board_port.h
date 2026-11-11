@@ -160,6 +160,13 @@ board_capabilities_t board_capabilities(void);
  * timestamp intervals. Samples older than 50 ms fail closed. On failure output
  * is untouched; unavailable/faulted streams return an error and drop imu. */
 esp_err_t board_imu_read(board_imu_sample_t *sample);
+
+/* Accepted samples strictly between two known samples in the current
+ * source generation. The ending sample must still be fresh. Older frames
+ * support attitude prediction only. Zero means no history was copied. */
+enum { BOARD_IMU_HISTORY_CAPACITY = 20 };
+size_t board_imu_copy_history(uint64_t after_us, uint64_t through_us,
+    board_imu_sample_t samples[BOARD_IMU_HISTORY_CAPACITY - 2]);
 /* Nonmutating cached diagnostics: no sensor I/O, freshness latch or recovery.
  * sample_count includes accepted samples only; late_batch_count separately
  * counts discarded finite monotonic batches over 20 ms. Both saturate. Age is
