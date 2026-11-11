@@ -62,6 +62,15 @@ Start with [validation procedures](docs/test-coverage.md) for test commands
 or the [diagnostics guide](firmware/README.md#opt-in-diagnostics) for the
 available build options.
 
+## Developer
+
+ESP32-INPUT is developed and maintained on GitHub by
+[from1to9](https://github.com/from1to9). The canonical source repository is
+[from1to9/ESP32-INPUT](https://github.com/from1to9/ESP32-INPUT).
+The device's About screen reports the project attribution and build identity.
+See [firmware attribution](docs/build-identity.md) for the fields and how they
+are generated.
+
 ## Contributing and license
 
 See [Contributing](CONTRIBUTING.md) for checks and patch guidance, [Security](SECURITY.md)
