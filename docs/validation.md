@@ -14,6 +14,24 @@ host-side or physical check.
 | Windows input and audio | Prior board tests observed pointer movement and recovered BLE input. Fresh Classic pairing established HFP and A2DP links in an earlier run. Saved audio reconnection failed. Link state does not establish audio quality. |
 | USB audio, iPhone, iPad and macOS | Source and host tests cover their shared transport contracts. No complete physical compatibility result is claimed for these combinations. |
 
+## Motion candidate
+
+Native checks for `959aabd` passed 213 coordinator cases, interaction and
+board-adapter regressions, the pinned ESP32-S31 build and 700 declared
+task-stack paths. In one controlled trajectory, a rightward input produced
+13 horizontal HID units and 9 unintended vertical units on the baseline.
+The vertical sign depended on the preceding turn direction. The candidate
+produced 7 horizontal and zero vertical units in both runs. A pure-roll trajectory changed from 1,336
+accumulated absolute HID units to zero. These are report units from host
+fixtures.
+
+In a separate fixture with a 100 Hz producer and a 160 ms coordinator delay,
+the baseline lost its reference. The candidate tracked four degrees of
+attitude change from retained samples, emitted no catch-up movement and
+resumed on the next live sample. A real sample gap still invalidates the
+reference. Device feel, host delivery, runtime CPU cost and interrupt
+safety remain unverified for this candidate.
+
 ## Open issues
 
 - **Motion aiming.** Earlier runs showed reference loss during active aiming

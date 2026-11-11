@@ -60,16 +60,15 @@ Detect the supported Mosaico revision at runtime using its hardware eFuse. Long-
 
 Rotate the held device to aim the Mouse pointer. Calibrate while holding the
 desired aiming direction. The device tracks orientation and projects observed
-angular increments onto the calibrated axes. It sends relative movement over
-the existing USB or Bluetooth HID connection. Host software and screen
+angular increments using the calibrated pointing direction. It sends relative
+movement over the existing USB or Bluetooth HID connection. Host software and screen
 calibration are unnecessary. Base gains are in HID units per degree, with
 independent X/Y sensitivity, inversion, filtering and touch freeze. Keyboard
 angular selection retains its existing behavior.
 
 The [Mouse interaction contract](interaction.md#mouse) defines reference
-retention, recovery and manual **Recenter**. The [orientation
-design](motion-estimation.md) describes the mapping, measured boundaries and
-the earlier translation experiments. Source and bench tests establish the
+retention, recovery and manual **Recenter**. The [aiming reference](motion-estimation.md) describes the mapping, sample
+continuity and recovery boundaries. Source and bench tests establish the
 implemented behavior. Physical aiming feel requires testing on the device.
 
 Touch start, physical button down, menus, calibration and keyboard selection suppress host pointer output. Entering keyboard/audio clears the motion intent; returning to mouse requires explicit re-enabling. Leaving fine control may restore the previous motion intent. Haptic feedback must also suppress IMU output during vibration.
