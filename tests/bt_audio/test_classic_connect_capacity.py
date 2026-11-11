@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the pinned Classic connection-failure path with synthetic link owners."""
 import argparse
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,7 +28,9 @@ def main():
             function(utils.read_text(), 'BOOLEAN l2cu_lcb_disconnecting ('),
             function((l2cap / 'l2c_link.c').read_text(), 'BOOLEAN l2c_link_hci_conn_comp ('),
         )))
-        compiler = shutil.which('clang') or 'cc'
+        compiler = os.environ.get('CC') or shutil.which('clang') or shutil.which('cc')
+        if not compiler:
+            raise SystemExit('A C11 compiler with sanitizers is required.')
         executable = scratch / 'classic_connect_capacity'
         subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
                         '-I', directory, str(SUITE / 'classic_connect_capacity_fixture.c'), '-o', str(executable)],
