@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /* Exact server owner functions are inserted by run_stack.py. Only the SDK
- * listener/task/clock ports and unrelated channel-drain callback are replaced. */
+ * listener/task/clock ports and unrelated route and channel callbacks are replaced. */
 #include <assert.h>
 #include <setjmp.h>
 #include <stdio.h>
@@ -31,7 +31,7 @@ typedef struct {
 } httpd_uri_t;
 typedef struct {
     unsigned stack_size, task_priority, task_caps, max_open_sockets, max_uri_handlers, backlog_conn;
-    unsigned recv_wait_timeout, send_wait_timeout, ctrl_port;
+    unsigned recv_wait_timeout, send_wait_timeout, ctrl_port, max_req_hdr_len;
     bool lru_purge_enable;
     struct ifreq *if_name;
     bool (*uri_match_fn)(const char *, const char *, size_t);
@@ -191,6 +191,7 @@ static bool httpd_uri_match_wildcard(const char *a, const char *b, size_t length
 static esp_err_t httpd_ssl_start(httpd_handle_t *listener, httpd_ssl_config_t *config)
 {
     assert(config->httpd.stack_size == 12288 && config->httpd.task_caps == APP_NETWORK_STACK_CAPS);
+    assert(config->httpd.max_req_hdr_len == 3072);
     assert(config->httpd.max_open_sockets == 4 &&
            config->transport_mode == HTTPD_SSL_TRANSPORT_SECURE);
     assert(config->servercert_len && config->prvtkey_len);
@@ -217,6 +218,11 @@ static esp_err_t httpd_register_uri_handler(httpd_handle_t listener, const httpd
     return ESP_OK;
 }
 static esp_err_t handle_request(httpd_req_t *request)
+{
+    (void)request;
+    return ESP_FAIL;
+}
+static esp_err_t handle_web(httpd_req_t *request)
 {
     (void)request;
     return ESP_FAIL;
