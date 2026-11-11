@@ -32,7 +32,7 @@ commands from the repository root. Follow the [companion setup](../bridge/README
 if the host suite needs its pinned Python dependencies.
 
 ```sh
-python3 tools/idf.py setup
+python3.12 tools/idf.py setup
 python3 tools/idf.py build
 python3 tools/check.py
 python3 tools/check_repository.py

@@ -136,8 +136,7 @@ drag, lock, sleep, modal, maintenance or target/transport boundaries. See the
 
 On-device letter recognition consumes local microphone frames; it does not require HFP transport. One audio manager owns capture/codec resources. Recognition and HFP must not independently reopen the codec.
 
-The 2026-10-23 user revision simplifies the primary Audio workspace to Mic and
-Speaker. Do not expose Routes, Roles, Voice, recording setup or internal profile
+The primary Audio workspace exposes Mic and Speaker. Do not expose Routes, Roles, Voice, recording setup or internal profile
 names as competing primary modes. The audio owner chooses a supported Bluetooth
 profile for the requested microphone/speaker combination; the UI does not guess
 from the HID connection. Connection transitions must stop and acknowledge old

@@ -33,10 +33,11 @@ relying on a particular host, audio route or combination.
   for code ownership and hardware boundaries.
 
 To compile from a clone, install Git, a C compiler with sanitizers, and
-Python 3.11 or newer. Run from the repository root:
+Python 3.11 or newer. Run from the repository root, using the installed
+Python version in the setup command:
 
 ```sh
-python3 tools/idf.py setup
+python3.12 tools/idf.py setup
 python3 tools/idf.py build
 ```
 

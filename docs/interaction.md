@@ -107,7 +107,7 @@ the actual Classic device name (or unavailable), and bounded pairing status and
 countdown. HID pairing remains separate; pairing completion does not start audio.
 Independent audio mode produces no motion or character output. Background audio
 becomes available in mouse/keyboard mode only after its concurrency capability is
-qualified. This primary-workspace revision was explicitly requested on 2026-10-23.
+qualified.
 
 USB connection selection does not require an open host audio stream. Local Mic
 or Speaker start becomes actionable only after the corresponding valid USB
