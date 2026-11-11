@@ -1,5 +1,7 @@
 # UI, buttons and state transitions
 
+See the [native UI renders](ui/README.md) for the workspace layouts.
+
 ## Primary navigation
 
 On the first boot of an OTA image awaiting confirmation, the header shows

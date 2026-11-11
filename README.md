@@ -6,21 +6,25 @@ The on-device keyboard lets you compose and review text before sending it.
 USB and Bluetooth use standard HID, so basic input needs no companion app
 on the target host.
 
-**Status:** Development firmware. The target build and host regressions
-have passed at the checkpoints listed in [validation](docs/validation.md).
-Motion reference loss, saved Bluetooth audio reconnection and audio quality
-remain open device issues.
+| Mouse | Keyboard | Audio |
+| :---: | :---: | :---: |
+| <img src="docs/ui/mouse.png" width="216" alt="Mouse workspace with aiming and touchpad"> | <img src="docs/ui/keyboard.png" width="216" alt="Keyboard workspace with a draft and explicit Send"> | <img src="docs/ui/audio.png" width="216" alt="Audio workspace with separate Mic and Speaker"> |
+| Rotate to aim or use the touchpad, wheel and drag controls. | Compose with touch, motion or confirmed spoken letters. | Choose USB or Bluetooth and control Mic and Speaker independently. |
 
-| Workspace | What it provides |
-| --- | --- |
-| Mouse | Relative touchpad and rotational aiming, scrolling, clicks and drag |
-| Keyboard | Touch or motion selection, shortcuts, preview and explicit Send. An English spoken-letter mode produces candidates for confirmation. |
-| Audio | Separate Mic and Speaker controls with USB or Bluetooth. Bluetooth uses HFP for voice and A2DP for playback. Check actual profile readiness before starting either. |
-| LAN | Optional authenticated browser control, native HTTPS/WSS and an MCP companion. Wi-Fi runs independently of the selected HID transport. |
+[Device UI and interaction](docs/ui/README.md) shows the layout from host-rendered
+LVGL fixtures.
 
-ESP-Mosaico is the target board. iPhone, iPad, Windows and macOS are
-compatibility targets. See the [hardware status](docs/validation.md) before
-relying on a particular host, audio route or combination.
+## Hardware and status
+
+- **Board:** ESP-Mosaico (ESP32-S31), with a USB-C data connection or Bluetooth.
+- **Input:** Standard relative mouse and keyboard HID. The target uses a US ANSI
+  layout for text and may need accessibility settings for pointer use.
+- **Optional LAN management:** Authenticated browser control, HTTPS/WSS,
+  sensor export, signed update staging and a local MCP companion.
+- **Validation:** Pinned target builds and host regressions have passed at
+  documented checkpoints. Physical Motion, saved Bluetooth audio reconnect
+  and audio quality remain open. iPhone, iPad, Windows and macOS are
+  compatibility targets. [Validation and known issues](docs/validation.md)
 
 ## Get started
 
