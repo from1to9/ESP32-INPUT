@@ -72,4 +72,5 @@ Use [Wi-Fi setup](wifi-provisioning.md) to join a station network.
 [Browser control](browser-controller.md) requires a trusted HTTPS identity and
 approval on the device. For a native client, follow the [enrollment
 procedure](../bridge/README.md#local-enrollment). Pairing a browser or client
-does not acquire an input lease.
+does not acquire an input lease. Try the [browser, HTTP API and AI control
+examples](automation.md) after enrollment.
