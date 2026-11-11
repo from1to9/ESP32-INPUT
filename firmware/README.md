@@ -77,9 +77,24 @@ largest internal DMA blocks. These observations do not alter input admission,
 retry errors or restart the device. Check actual generated `sdkconfig` after
 changing defaults; an existing configuration keeps its previous values.
 
-The optional [local touchpad timing observer](../docs/touch-latency-diagnostics.md)
-captures one genuine ready Bluetooth pad movement window and reports it once;
-normal builds leave it disabled.
+## Opt-in diagnostics
+
+The following options are disabled by default. Enable the one needed for a
+specific diagnostic image. Record the image revision and enabled options with
+any results.
+
+| Configuration | Observation |
+| --- | --- |
+| `CONFIG_APP_TOUCH_LATENCY_DIAGNOSTICS` | Bounded Bluetooth touchpad timing. [Capture guide](../docs/touch-latency-diagnostics.md) |
+| `CONFIG_APP_MOUSE_PHASE_DIAGNOSTICS` | Coordinator timing after local Audio-to-Mouse selection. [Capture guide](../docs/touch-latency-diagnostics.md#coordinator-window-after-audio-playback) |
+| `CONFIG_APP_LOCAL_SPEAKER_TEST` | Audible local codec tone before normal media startup. [Test details](../tests/local_speaker/README.md) |
+| `CONFIG_APP_A2DP_ACL_DIAGNOSTICS` | Bounded A2DP packet-header and queue counts. [Field definitions](../docs/bt-audio.md#locating-a2dp-packet-loss-on-s31) |
+| `CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS` | Bounded HCI and controller-slot observations around the first outbound Classic connection |
+| `CONFIG_APP_IMU_CAPTURE` | Ordered raw IMU frames. [Capture guide](../docs/motion-capture.md) |
+
+Keep raw captures, host identifiers and private recordings in an ignored
+local workspace. For the standard read-only sensor journal, see
+[sensor observations](../docs/sensor-api.md).
 
 ## Device procedure
 

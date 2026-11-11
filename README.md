@@ -46,6 +46,24 @@ It never opens a device. A board with the factory partition table requires a
 separate, backed-up migration before it can run this firmware. Follow the
 [device procedure](firmware/README.md#device-procedure) before writing flash.
 
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| [firmware/](firmware/) | ESP32-S31 application, board adapters and configuration |
+| [components/](components/) | Portable input, audio, settings and protocol logic |
+| [api/](api/) and [bridge/](bridge/) | Versioned API definitions and host companion |
+| [docs/](docs/) | User guides, interface contracts and validation results |
+| [tests/](tests/) and [tools/](tools/) | Host regressions, build helpers and diagnostic collectors |
+| [patches/](patches/) and [third_party/](third_party/) | Pinned SDK patches and upstream BSP |
+
+Start with [validation procedures](docs/test-coverage.md) for test commands
+or the [diagnostics guide](firmware/README.md#opt-in-diagnostics) for the
+available build options.
+
+## Contributing and license
+
 See [Contributing](CONTRIBUTING.md) for checks and patch guidance, [Security](SECURITY.md)
 for private reporting, and the [roadmap](docs/roadmap.md) for development goals.
 Original project code and documentation are under [Apache-2.0](LICENSE).

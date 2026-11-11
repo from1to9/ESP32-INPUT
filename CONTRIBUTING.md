@@ -9,8 +9,9 @@ For vulnerabilities, use the [private reporting procedure](SECURITY.md).
 Keep changes focused. Read the [interaction contract](docs/interaction.md)
 before changing the UI and the [engineering standards](docs/engineering.md)
 before changing firmware or a public interface. Preserve upstream attribution
-and pinned dependencies. Keep prototypes, raw device captures, test recordings
-and one-off bench scripts in an ignored local workspace.
+and pinned dependencies. Keep reusable diagnostics with their tests and
+usage instructions. Store prototypes, raw device captures, private recordings
+and machine-specific scripts in an ignored local workspace.
 
 Follow the [build guide](firmware/README.md) to resolve pinned dependencies,
 then run the checks relevant to the change from the repository root:
