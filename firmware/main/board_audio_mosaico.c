@@ -430,8 +430,11 @@ static ae_result_t hardware_prepare(const request_t *request)
      * IRAM-safe auto-clear requires internal buffers in the pinned driver. */
     channels.dma_buffer_in_psram = true;
 #endif
+    /* TX supplies the codec clocks for both roles. Allocate RX DMA only
+     * when the prepared roles include microphone capture. */
+    i2s_chan_handle_t *capture = (request->roles & AE_MICROPHONE) ? &s.rx : NULL;
     /* Claim I2S before touching power/PA. A preexisting BSP audio owner fails. */
-    esp_err_t error = i2s_new_channel(&channels, &s.tx, &s.rx);
+    esp_err_t error = i2s_new_channel(&channels, &s.tx, capture);
     remember(error, BOARD_AUDIO_SDK_I2S_ALLOCATE);
     if (error != ESP_OK) return sdk_result(error);
     gpio_config_t gpio = { .pin_bit_mask = UINT64_C(1) << BSP_AUDIO_PA_CTRL,
@@ -466,9 +469,11 @@ static ae_result_t hardware_prepare(const request_t *request)
     if (error != ESP_OK) goto fail;
     s.tx_initialized = true;
     s.tx_dirty = true;
-    error = i2s_channel_init_std_mode(s.rx, &config);
-    remember(error, BOARD_AUDIO_SDK_I2S_INIT_RX);
-    if (error != ESP_OK) goto fail;
+    if (s.rx) {
+        error = i2s_channel_init_std_mode(s.rx, &config);
+        remember(error, BOARD_AUDIO_SDK_I2S_INIT_RX);
+        if (error != ESP_OK) goto fail;
+    }
     i2c_device_config_t device = { .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = BSP_AUDIO_CODEC_I2C_ADDR >> 1, .scl_speed_hz = 100000 };
     error = i2c_master_bus_add_device(bsp_i2c_get_handle(), &device, &s.control.device);

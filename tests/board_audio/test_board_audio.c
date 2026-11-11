@@ -165,14 +165,18 @@ int codec_ref_release(const audio_codec_ctrl_info_t *info, codec_ref_stage_t sta
 esp_err_t i2s_new_channel(const i2s_chan_config_t *config, i2s_chan_handle_t *tx, i2s_chan_handle_t *rx)
 {
     sdk(); assert(config->dma_desc_num == 6 && config->dma_frame_num == 240 && config->auto_clear);
-    assert(tx && rx && config->dma_buffer_in_psram == TEST_EXPECT_PSRAM_DMA);
+    assert(tx && config->dma_buffer_in_psram == TEST_EXPECT_PSRAM_DMA);
     ++channel_allocations;
     if (fail_new) return ESP_ERR_INVALID_STATE;
     assert(!tx_channel.allocated && !rx_channel.allocated);
     tx_channel = (struct test_i2s_channel){.allocated = true};
-    rx_channel = (struct test_i2s_channel){.allocated = true};
     memset(dma_storage, 0, sizeof(dma_storage));
-    *tx = &tx_channel; *rx = &rx_channel; return ESP_OK;
+    *tx = &tx_channel;
+    if (rx) {
+        rx_channel = (struct test_i2s_channel){.allocated = true};
+        *rx = &rx_channel;
+    }
+    return ESP_OK;
 }
 esp_err_t i2s_channel_init_std_mode(i2s_chan_handle_t channel, const i2s_std_config_t *config)
 {
@@ -424,6 +428,20 @@ static void privacy_and_failures(void)
     assert(port.prepare(NULL, &mono, 3, offset + 11) == AE_BUSY);
 }
 
+static void playback_does_not_require_capture_dma(void)
+{
+    const ae_format_t bluetooth_speaker = {44100, 1, 10, AE_PCM_S16_LE};
+    const uint64_t generation = s.last_generation + 1;
+    const unsigned init_before = dma_init_calls;
+    fail_dma_channel = 2;
+    open_audio(&bluetooth_speaker, AE_SPEAKER, generation);
+    assert(dma_init_calls == init_before + 1 && !s.rx && !rx_channel.allocated);
+    unmute_role(AE_SPEAKER, generation);
+    assert(tx_channel.enabled && pa_level && !s.capture_gate);
+    close_audio(generation, AE_OK);
+    fail_dma_channel = 0;
+}
+
 static void dma_allocation_failures(void)
 {
     for (unsigned failed_channel = 1; failed_channel <= 2; ++failed_channel) {
@@ -518,6 +536,7 @@ int main(void)
     assert(port.capabilities(NULL, &caps) == AE_OK && caps.available && !caps.qualified && caps.format_count == 14);
     formats_and_pcm();
     advertised_profiles_match_actual_prepare();
+    playback_does_not_require_capture_dma();
     dma_allocation_failures();
     mailbox_scratch_lifetime();
     privacy_and_failures();
