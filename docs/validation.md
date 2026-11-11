@@ -43,9 +43,11 @@ unqualified.
   Speaker attempt, the ACL link connected and the device supplied a stored
   link key. The connection then entered Secure Simple Pairing. With Add
   device closed, local policy denied the confirmation and authentication
-  failed. The trace does not explain why pairing restarted. No repair has
-  been verified. Removing a Classic record from the audio UI remains
-  unavailable.
+  failed. The reason pairing restarted remains unresolved.
+  [Audio Forget](bluetooth-peer-snapshots.md#local-audio-forget) supports one
+  selected inactive Classic record with single-block storage and no controller
+  key store. Native checks cover retention of same-address BLE state. Physical
+  removal, continued BLE input and Windows audio re-pairing remain unverified.
 - **Audio quality.** Intermittent Bluetooth playback stutter has been observed.
   USB Speaker start, Mic restart under concurrent Speaker playback, and
   sustained duplex operation need physical qualification. An active link or a
