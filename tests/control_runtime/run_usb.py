@@ -28,7 +28,7 @@ def main():
         code = fixture.split("/* TYPES */")[0]
         code += section("#define INBOX_CAPACITY", "static uint64_t now_ms")
         code += fixture.split("/* PORTS */")[1].split("/* PRODUCTION */")[0]
-        code += section("static void hex(", "static cp_error_t read_resource(")
+        code += section("static void hex(", "static bool principal_source(")
         code += section("static void usb_reply(", "static void worker(")
         code += fixture.split("/* TESTS */")[1]
         test = Path(temporary) / "mux.c"

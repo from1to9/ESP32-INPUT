@@ -31,7 +31,8 @@ typedef struct {
 } httpd_uri_t;
 typedef struct {
     unsigned stack_size, task_priority, task_caps, max_open_sockets, max_uri_handlers, backlog_conn;
-    unsigned recv_wait_timeout, send_wait_timeout, ctrl_port, max_req_hdr_len;
+    unsigned recv_wait_timeout, send_wait_timeout, ctrl_port;
+    size_t max_req_hdr_len;
     bool lru_purge_enable;
     struct ifreq *if_name;
     bool (*uri_match_fn)(const char *, const char *, size_t);
