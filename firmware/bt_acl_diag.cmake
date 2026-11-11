@@ -36,11 +36,13 @@ if(CONFIG_APP_CLASSIC_SCAN_COORDINATION)
                            "${acl_src_dir}/stack/btu/btu_init.c"
                            "${acl_src_dir}/bta/dm/bta_dm_act.c"
                            "${acl_src_dir}/stack/btm/btm_dev.c"
+                           "${acl_src_dir}/stack/l2cap/l2c_utils.c"
                            "${acl_src_dir}/btc/core/btc_config.c"
                            "${acl_src_dir}/btc/core/btc_storage.c"
                            "${acl_bt_dir}/common/osi/config.c")
     list(APPEND acl_patches "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-classic-scan-coordination.patch")
     list(APPEND acl_patches "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-classic-forget.patch")
+    list(APPEND acl_patches "${CMAKE_CURRENT_LIST_DIR}/../patches/esp-idf-classic-connect-capacity.patch")
     target_sources(${acl_bt_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/main/bt_classic_scan.c")
     target_link_options(${acl_bt_lib} INTERFACE "-Wl,--wrap=r_orca_hci_cc_evt_status_send"
         "-Wl,--undefined=__wrap_r_orca_hci_cc_evt_status_send")

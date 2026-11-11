@@ -1,0 +1,30 @@
+--- a/l2c_utils.c
++++ b/l2c_utils.c
+@@ -2652,10 +2652,8 @@
+ **
+ ** Function         l2cu_lcb_disconnecting
+ **
+-** Description      On each active lcb, check if the lcb is in disconnecting
+-**                  state, or if there are no ccb's on the lcb (implying
+-                    idle timeout is running), or if last ccb on the link
+-                    is in disconnecting state.
++** Description      Check if a BR/EDR link is disconnecting, idle, or
++**                  waiting for its last channel to disconnect.
+ **
+ ** Returns          TRUE if any of above conditions met, FALSE otherwise
+ **
+@@ -2669,7 +2667,13 @@
+
+     for (p_node = list_begin(l2cb.p_lcb_pool); p_node; p_node = list_next(p_node)) {
+         p_lcb = list_node(p_node);
+-        if (p_lcb->in_use) {
++        /* Only an established Classic link can free a Classic ACL slot. */
++        if (p_lcb->in_use
++#if BLE_INCLUDED == TRUE
++                && p_lcb->transport == BT_TRANSPORT_BR_EDR
++#endif
++                && (p_lcb->link_state == LST_CONNECTED ||
++                    p_lcb->link_state == LST_DISCONNECTING)) {
+             /* no ccbs on lcb, or lcb is in disconnecting state */
+             if ((!p_lcb->ccb_queue.p_first_ccb) || (p_lcb->link_state == LST_DISCONNECTING)) {
+                 status = TRUE;
