@@ -569,6 +569,8 @@ static void submit_motion(app_motion_field_t field, int value)
     if ((!s_submit || !s_submit(&intent)) && s_status) label_text(s_status, "Input busy. Please try again.");
 }
 
+static lv_obj_t *s_reset_detail;
+
 static void on_action(lv_event_t *event)
 {
     binding_t *binding = lv_event_get_user_data(event);
@@ -582,6 +584,9 @@ static void on_action(lv_event_t *event)
         (s_view.mode != INPUT_MOUSE || !s_view.navigation_enabled ||
          !s_view.navigation_available || s_touch_local_blocked ||
          s_touch_epoch != s_view.epoch || s_touch_revision != s_view.ui_revision)) return;
+    if ((binding->action == APP_RESET_REQUEST ||
+         (binding->action == APP_CONFIRM && s_view.confirmation == APP_CONFIRM_DEVICE_RESET)) &&
+        (s_touch_local_blocked || s_touch_epoch != s_view.epoch || s_touch_revision != s_view.ui_revision)) return;
     if (binding->action == APP_CONFIRM && s_view.confirmation == APP_CONFIRM_REMOTE) {
         remote_review_action(binding->object, binding->value != 0); return;
     }
@@ -1527,13 +1532,15 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         lv_obj_set_height(s_about_repository, 68);
         s_about_battery = label(about, "Battery unavailable", 0, 248, 448, MUTED);
         lv_obj_set_height(s_about_battery, 40);
-        s_about_uptime = metadata(about, "Uptime unavailable", 0, 296, 448);
+        s_about_uptime = metadata(about, "Uptime unavailable", 0, 288, 448);
+        button(about, "Reset device", 0, 312, 448, 44, APP_RESET_REQUEST, 0);
         return;
     }
 }
 
 static void clear_panel_bindings(void)
 {
+    s_reset_detail = NULL;
     clear_media_panel();
     clear_connection_panel();
     clear_remote_review_panel();
@@ -1719,7 +1726,7 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
     lv_obj_t *title = heading(s_overlay, "Menu", 12, 16, 256);
     single_line(title);
     s_overlay_critical = critical_control(s_overlay);
-    button(s_overlay, "Close", 404, 8, 64, 48,
+    if (kind != APP_OVERLAY_RESET) button(s_overlay, "Close", 404, 8, 64, 48,
            kind == APP_OVERLAY_CONFIRM ? APP_CONFIRM : APP_CLOSE, 0);
     lv_obj_t *body = box(s_overlay, 12, 64, 456, 408, SURFACE);
     if (kind == APP_OVERLAY_MODES) {
@@ -1806,6 +1813,12 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         lv_label_set_long_mode(s_setup_url, LV_LABEL_LONG_DOT);
         label(body, "Save your home Wi-Fi there.\nSetup ends automatically.", 0, 292, 456, MUTED);
         s_setup_stop = button(body, "Stop setup", 0, 360, 456, 48, APP_WIFI_SETUP, 0);
+    } else if (kind == APP_OVERLAY_RESET) {
+        label_text(title, "Reset device");
+        heading(body, "Device reset", 0, 32, 456);
+        s_reset_detail = label(body, "", 0, 128, 456, MUTED);
+        lv_obj_set_height(s_reset_detail, 156);
+        button(body, "Back to About", 0, 360, 456, 48, APP_SETTINGS_PAGE, APP_SETTINGS_ABOUT);
     } else if (kind == APP_OVERLAY_CONFIRM) {
         if (s_view.confirmation == APP_CONFIRM_REMOTE) {
             create_remote_review(body, title);
@@ -2264,11 +2277,17 @@ static void render_device(const app_view_t *view, const char *link)
     label_text(s_setup_passcode, show_credentials && *view->wifi_setup_passcode ? view->wifi_setup_passcode : "--");
     label_text(s_setup_url, show_credentials && *view->wifi_setup_url ? view->wifi_setup_url : "--");
     enabled(s_setup_stop, view->wifi_setup_active || view->wifi_operation_pending);
+    label_text(s_reset_detail, view->message);
     const char *title = "Confirm action";
     const char *detail = "No action is pending. Return to Settings.";
     const char *accept = "Confirm";
     char pairing_detail[192];
     switch (view->confirmation) {
+    case APP_CONFIRM_DEVICE_RESET:
+        title = "Reset this device?";
+        detail = "Delete all pairings, Wi-Fi, settings, controller access and recordings. Restart to defaults. Cannot be undone.\nRemove old computer pairings before pairing again.\nFirmware stays installed.";
+        accept = "Reset and restart";
+        break;
     case APP_CONFIRM_PAIR_OPEN:
         title = "Disconnect and add host?";
         {

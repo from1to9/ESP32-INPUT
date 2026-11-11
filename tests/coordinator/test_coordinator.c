@@ -303,6 +303,9 @@ esp_err_t ble_hid_forget_bond_cancel(uint64_t id)
     test_remote_bond_forget.status = BLE_HID_BOND_FORGET_CANCELLED; return ESP_OK;
 }
 ble_hid_bond_forget_snapshot_t ble_hid_bond_forget_snapshot(void) { return test_remote_bond_forget; }
+esp_err_t app_factory_reset_boot(bool *performed) { *performed = false; return ESP_OK; }
+esp_err_t app_device_restart_request_local_reset(uint64_t deadline_ms, uint64_t *id)
+{ return app_device_restart_request(deadline_ms, id); }
 esp_err_t app_device_restart_init(void) { return test_restart_error; }
 esp_err_t app_device_restart_request(uint64_t deadline_ms, uint64_t *id)
 {
@@ -1046,6 +1049,9 @@ static void setup(input_mode_t mode)
     test_remote_target_request = (ble_hid_target_preferences_request_t){0};
     test_remote_wifi_forget_revision = 0; test_remote_wifi_forget_acknowledge = false;
     test_remote_bond_forget = (ble_hid_bond_forget_snapshot_t){0};
+    s_local_reset_message = NULL;
+    s_local_reset_active = s_local_reset_failed = false;
+    s_local_reset_review_until = s_local_reset_deadline = s_local_reset_restart_id = 0;
     s_remote_device_maintenance_active = false;
     s_remote_device_maintenance_revision = 1;
     remote_device_restart_available = false;
@@ -6478,6 +6484,7 @@ static void applied_remote_receipt_survives_later_local_selection(void)
 
 #include "update_cases.inc"
 #include "controller_cases.inc"
+#include "local_reset_cases.inc"
 #include "navigation_cases.inc"
 #include "remote_device_cases.inc"
 
@@ -6726,6 +6733,9 @@ int main(int argc, char **argv)
     RUN(keyboard_entry_defaults_to_touch_for_local_and_remote_modes);
     RUN(keyboard_session_navigation_preserves_explicit_submode_and_draft);
     REMOTE_UPDATE_CASES(RUN);
+    RUN(local_reset_confirmation_and_stale_input);
+    RUN(local_reset_waits_for_stop_and_blocks_repopulation);
+    RUN(local_reset_cancellation_and_update_conflict);
     RUN(controller_approval_is_physical_scoped_and_observed);
     RUN(controller_status_uses_the_active_lease);
     NAVIGATION_CASES(RUN);

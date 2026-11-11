@@ -7,12 +7,15 @@
 static int64_t clock_us;
 static unsigned lock_depth, dispatches, creates;
 static bool create_failure;
+static unsigned reset_arms;
+static esp_err_t reset_arm_error;
+esp_err_t app_factory_reset_arm(void) { ++reset_arms; return reset_arm_error; }
 int64_t esp_timer_get_time(void) { return clock_us; }
 void audio_test_enter(portMUX_TYPE *lock) { (void)lock; assert(!lock_depth++); }
 void audio_test_leave(portMUX_TYPE *lock) { (void)lock; assert(lock_depth-- == 1); }
 BaseType_t xTaskCreate(TaskFunction_t function, const char *name, uint32_t stack, void *argument, unsigned priority, TaskHandle_t *task)
 {
-    assert(!lock_depth && function == restart_worker && !strcmp(name,"device_restart") && stack == 2048 && !argument && priority == 2);
+    assert(!lock_depth && function == restart_worker && !strcmp(name,"device_restart") && stack == 4096 && !argument && priority == 2);
     ++creates; if (create_failure) return 0; *task = &creates; return pdPASS;
 }
 void vTaskDelay(TickType_t ticks) { (void)ticks; assert(false); }
@@ -26,6 +29,7 @@ static void reset(void)
     s_restart_worker = NULL; memset(&s_restart_status,0,sizeof(s_restart_status));
     s_restart_requested_ms = s_restart_deadline_ms = s_restart_authorized_ms = 0;
     s_restart_authorized = s_restart_maintenance = false;
+    reset_arms = 0; reset_arm_error = ESP_OK;
     clock_us = 1000000; dispatches = creates = lock_depth = 0; create_failure = false;
 }
 static void at(uint64_t ms) { clock_us = (int64_t)(ms * 1000U); }
@@ -51,7 +55,7 @@ static void fresh_authority_actual_maintenance_and_irreversible_receipt(void)
     reset(); assert(app_device_restart_init() == ESP_OK); uint64_t id = request();
     app_device_restart_authorize(id,true,true); at(1199); app_device_restart_authorize(id,true,true); restart_service(); assert(!dispatches);
     at(1200); app_device_restart_authorize(id,true,false); restart_service(); assert(!dispatches);
-    app_device_restart_authorize(id,true,true); restart_service(); assert(dispatches == 1);
+    app_device_restart_authorize(id,true,true); restart_service(); assert(dispatches == 1 && !reset_arms);
     assert(app_device_restart_status().state == APP_DEVICE_RESTART_UNCERTAIN); /* Stub returns; no observed reboot. */
     restart_service(); assert(dispatches == 1 && app_device_restart_cancel(id) == ESP_ERR_INVALID_STATE);
     assert(app_device_restart_request(2000,&id) == ESP_ERR_INVALID_STATE);
@@ -75,5 +79,16 @@ static void cancellation_staleness_and_clock_fail_closed(void)
 int main(void)
 {
     admission_and_no_implicit_restart(); fresh_authority_actual_maintenance_and_irreversible_receipt(); cancellation_staleness_and_clock_fail_closed();
+    reset(); assert(app_device_restart_init() == ESP_OK);
+    uint64_t id; assert(app_device_restart_request_local_reset(2000, &id) == ESP_OK);
+    at(1200); app_device_restart_authorize(id, true, false); restart_service(); assert(!reset_arms);
+    app_device_restart_authorize(id, true, true); restart_service();
+    assert(reset_arms == 1 && dispatches == 1 && app_device_restart_status().state == APP_DEVICE_RESTART_UNCERTAIN);
+    reset(); assert(app_device_restart_init() == ESP_OK);
+    assert(app_device_restart_request_local_reset(2000, &id) == ESP_OK);
+    reset_arm_error = ESP_FAIL; at(1200); app_device_restart_authorize(id, true, true); restart_service();
+    assert(reset_arms == 1 && !dispatches && app_device_restart_status().state == APP_DEVICE_RESTART_RESET_FAILED);
+    assert(app_device_restart_request(2000, &id) == ESP_ERR_INVALID_STATE);
+    restart_service(); assert(reset_arms == 1 && !dispatches);
     puts("Restart worker: bounded admission, fresh authority, actual maintenance, cancellation, stale identity, clock failure and truthful irreversible receipt passed.");
 }

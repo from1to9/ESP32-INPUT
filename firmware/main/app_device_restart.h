@@ -7,7 +7,7 @@
 typedef enum {
     APP_DEVICE_RESTART_IDLE, APP_DEVICE_RESTART_PENDING,
     APP_DEVICE_RESTART_CANCELLED, APP_DEVICE_RESTART_DISPATCHED,
-    APP_DEVICE_RESTART_UNCERTAIN,
+    APP_DEVICE_RESTART_UNCERTAIN, APP_DEVICE_RESTART_RESET_FAILED,
 } app_device_restart_state_t;
 typedef struct {
     uint64_t request_id;
@@ -23,6 +23,8 @@ typedef struct {
  * this boot can never claim that another boot was observed successfully. */
 esp_err_t app_device_restart_init(void);
 esp_err_t app_device_restart_request(uint64_t deadline_ms, uint64_t *request_id);
+/* Separate local-only operation; the remote restart/reset APIs never arm it. */
+esp_err_t app_device_restart_request_local_reset(uint64_t deadline_ms, uint64_t *request_id);
 void app_device_restart_authorize(uint64_t request_id, bool authorized, bool maintenance_ready);
 esp_err_t app_device_restart_cancel(uint64_t request_id);
 app_device_restart_status_t app_device_restart_status(void);

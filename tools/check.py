@@ -43,7 +43,7 @@ subprocess.run([sys.executable, str(root / "tests/presenter/run.py")], check=Tru
 for suite in ("motion_capture", "sensor_api", "sensor_capture", "touch_pointer", "touch_trace", "multitouch", "board_touch", "usb_audio", "bt_audio", "board_audio",
               "display_transfer", "boot_ui", "audio_engine", "spoken_letters",
               "media_runtime", "media_controls", "audio_diagnostics", "control_protocol", "command_bridge",
-              "remote_input", "remote_device", "device_restart", "remote_media", "control_runtime", "connectivity_controls"):
+              "remote_input", "remote_device", "device_restart", "factory_reset", "remote_media", "control_runtime", "connectivity_controls"):
     subprocess.run([sys.executable, str(root / "tests" / suite / "run.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/toolchain/test_idf_patches.py")], check=True)
 subprocess.run([sys.executable, str(root / "tests/toolchain/test_build_identity.py")], check=True)

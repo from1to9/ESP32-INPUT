@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_device_restart.h"
+#include "app_factory_reset.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -12,7 +13,7 @@ static portMUX_TYPE s_restart_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_restart_worker;
 static app_device_restart_status_t s_restart_status;
 static uint64_t s_restart_requested_ms, s_restart_deadline_ms, s_restart_authorized_ms;
-static bool s_restart_authorized, s_restart_maintenance;
+static bool s_restart_authorized, s_restart_maintenance, s_restart_local_reset;
 
 static bool restart_now(uint64_t *now)
 {
@@ -37,6 +38,14 @@ static void restart_service(void)
     }
     portEXIT_CRITICAL(&s_restart_lock);
     if (dispatch) {
+        esp_err_t error = s_restart_local_reset ? app_factory_reset_arm() : ESP_OK;
+        if (error != ESP_OK) {
+            portENTER_CRITICAL(&s_restart_lock);
+            s_restart_status.state = APP_DEVICE_RESTART_RESET_FAILED;
+            s_restart_status.error = error;
+            portEXIT_CRITICAL(&s_restart_lock);
+            return;
+        }
         esp_restart();
         /* Only a broken SDK boundary can return. Never label it a reboot. */
         portENTER_CRITICAL(&s_restart_lock);
@@ -53,25 +62,31 @@ static void restart_worker(void *argument)
 esp_err_t app_device_restart_init(void)
 {
     if (s_restart_worker) return ESP_OK;
-    return xTaskCreate(restart_worker, "device_restart", 2048, NULL, 2, &s_restart_worker) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+    return xTaskCreate(restart_worker, "device_restart", 4096, NULL, 2, &s_restart_worker) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
-esp_err_t app_device_restart_request(uint64_t deadline_ms, uint64_t *request_id)
+static esp_err_t restart_request(uint64_t deadline_ms, uint64_t *request_id, bool local_reset)
 {
     uint64_t now;
     if (!request_id || !restart_now(&now) || deadline_ms <= now || deadline_ms - now > RESTART_MAX_JOB_MS) return ESP_ERR_INVALID_ARG;
     portENTER_CRITICAL(&s_restart_lock);
     if (!s_restart_worker || s_restart_status.request_id == UINT64_MAX ||
         s_restart_status.state == APP_DEVICE_RESTART_PENDING || s_restart_status.state == APP_DEVICE_RESTART_DISPATCHED ||
-        s_restart_status.state == APP_DEVICE_RESTART_UNCERTAIN) {
+        s_restart_status.state == APP_DEVICE_RESTART_UNCERTAIN ||
+        s_restart_status.state == APP_DEVICE_RESTART_RESET_FAILED) {
         portEXIT_CRITICAL(&s_restart_lock); return ESP_ERR_INVALID_STATE;
     }
     s_restart_status = (app_device_restart_status_t){.request_id = s_restart_status.request_id + 1,
         .state = APP_DEVICE_RESTART_PENDING, .error = ESP_OK};
     s_restart_requested_ms = now; s_restart_deadline_ms = deadline_ms;
     s_restart_authorized = s_restart_maintenance = false;
+    s_restart_local_reset = local_reset;
     *request_id = s_restart_status.request_id;
     portEXIT_CRITICAL(&s_restart_lock); return ESP_OK;
 }
+esp_err_t app_device_restart_request(uint64_t deadline_ms, uint64_t *request_id)
+{ return restart_request(deadline_ms, request_id, false); }
+esp_err_t app_device_restart_request_local_reset(uint64_t deadline_ms, uint64_t *request_id)
+{ return restart_request(deadline_ms, request_id, true); }
 void app_device_restart_authorize(uint64_t request_id, bool authorized, bool maintenance_ready)
 {
     uint64_t now;

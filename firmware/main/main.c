@@ -29,6 +29,7 @@
 #include "board_touch_port.h"
 #include "device_settings.h"
 #include "settings_store.h"
+#include "app_factory_reset.h"
 #include "app_wifi.h"
 #include "usb_console.h"
 #include "usb_hid.h"
@@ -205,6 +206,9 @@ static app_command_bridge_t *s_command_bridge;
 static bool s_applying_remote_safety;
 static void remote_local_override(bool locked);
 static bool set_remote_allowance(bool allowed);
+static bool s_local_reset_active;
+static const char *s_local_reset_message;
+static bool local_reset_handle(const app_intent_t *intent);
 static bool remote_update_maintenance(void);
 static app_local_access_t local_access(void);
 static bool remote_device_maintenance(void);
@@ -1265,6 +1269,7 @@ static bool allowed_in_overlay(app_action_t action)
         s_overlay == APP_OVERLAY_RECORDING_DETAIL || s_overlay == APP_OVERLAY_RECORDING_START)
         return action == APP_MEDIA_CONTROL;
     if (s_overlay == APP_OVERLAY_RECORDING_STORAGE) return action == APP_RECORDING_STORAGE_PREPARE_REQUEST;
+    if (s_overlay == APP_OVERLAY_RESET) return action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_API_CONNECTION)
         return action == APP_API_COMMISSIONING || action == APP_API_INPUT_ALLOW_SET || action == APP_SETTINGS_PAGE;
     if (s_overlay == APP_OVERLAY_API_REVIEW) return action == APP_API_COMMISSIONING;
@@ -1287,6 +1292,8 @@ static bool allowed_in_overlay(app_action_t action)
     if (s_overlay != APP_OVERLAY_SETTINGS) return false;
     if (action == APP_SETTINGS_PAGE) return true;
     switch (s_settings_page) {
+    case APP_SETTINGS_ABOUT:
+        return action == APP_RESET_REQUEST;
     case APP_SETTINGS_DEVICE_NAME:
         return action == APP_BLUETOOTH_NAME_EDIT;
     case APP_SETTINGS_INPUT:
@@ -1659,6 +1666,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
 #endif
         return;
     }
+    if (local_reset_handle(intent)) return;
     if (intent->action == APP_CONTROLLER_SELECT || intent->action == APP_CONTROLLER_EDIT) {
         handle_controller_intent(intent);
         return;
@@ -2953,7 +2961,7 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
             (s_input_transport == APP_INPUT_BLUETOOTH && error != ESP_OK),
         .haptics_available = capabilities.haptics, .haptics_enabled = board_haptics_enabled(),
         .queued = s_engine.count, .keyboard_leds = active.keyboard_leds,
-        .message = s_message, .target_name = target, .local_access = local_access(),
+        .message = s_overlay == APP_OVERLAY_RESET ? s_local_reset_message : s_message, .target_name = target, .local_access = local_access(),
         .remote_owned = s_engine.state.owner == INPUT_REMOTE,
         .motion_available = capabilities.imu && interaction.calibrated,
         .calibration_available = capabilities.imu,
@@ -3137,6 +3145,7 @@ static void observe_input_link(const input_link_t *link, input_link_t *previous)
 
 #include "app_update_bindings.inc"
 #include "app_remote_device_bindings.inc"
+#include "app_local_reset.inc"
 #include "app_remote_input_bindings.inc"
 
 /* Dispatch is synchronous: handlers/managers copy anything retained. Erase
@@ -3311,6 +3320,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
         service_media();
         MOUSE_PHASE_MARK(MOUSE_PHASE_MEDIA);
         service_connectivity();
+        local_reset_service();
         if (s_engine.state.release_pending) s_drag_requested = false;
         if (++ui_tick >= 10) {
             ui_tick = 0;
@@ -3406,6 +3416,15 @@ void app_main(void)
         return;
     }
     record_boot_memory("board");
+    present_boot(APP_BOOT_UI_STARTING, "Checking device storage", "Finishing reset if previously confirmed");
+    bool reset_performed = false;
+    esp_err_t reset_error = app_factory_reset_boot(&reset_performed);
+    if (reset_error != ESP_OK) {
+        ESP_LOGE(TAG, "Reset storage check failed: %s", esp_err_to_name(reset_error));
+        present_boot(APP_BOOT_UI_FAULT, "Storage or reset could not finish", "Restart to retry. Device functions are stopped.");
+        for (;;) vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    if (reset_performed) s_message = "Device reset. Remove old Bluetooth pairings on your computer before pairing again.";
     present_boot(APP_BOOT_UI_STARTING, "Loading preferences", "Microphone is off");
     esp_err_t storage_error = nvs_flash_init();
     if (storage_error == ESP_OK) storage_error = settings_store_init(&s_settings);

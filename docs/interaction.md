@@ -198,6 +198,33 @@ measurements do not become zero or empty battery indicators. Settings has Home,
 Connectivity, Display, Input and About pages, entered from the shared panel.
 Back returns to its parent; Close returns to the prior foreground mode.
 
+About provides **Reset device**. The first tap opens a local consequence summary;
+**Reset and restart** requires a second fresh touch within 30 seconds. Cancel,
+Close, expiry, a stale press or locking before dispatch cannot authorize erasure.
+The summary names pairings, Wi-Fi, settings, controller access and recordings,
+and explains that old computer-side Bluetooth pairings must be removed there.
+Reset releases input, stops audio with observed hardware-off, and restarts before
+clearing storage. A concurrent firmware update blocks reset. Stop/restart errors
+remain visible; they are not reported as a completed reset.
+
+The early boot reset owner clears user namespaces in `nvs` and `control`, and the
+internal `recordings` partition, before their application workers start. Current
+firmware and SDK namespaces are cleared by name so readable legacy blobs omitted
+by the NVS iterator are included; additional visible namespaces are also cleared.
+It retains the `phy` calibration namespace, `ctrl_ota` anti-rollback floor, firmware
+and OTA partitions, models, hardware identity and factory assets. External NAND
+is not a writable user store and stays untouched. NVS removal is logical record
+deletion, not a forensic secure-erase guarantee. The owned partition type,
+location and size must match the shipped layout before clearing. A durable
+`control/local_reset/pending` marker is removed only after all stores complete;
+interruption retries on the next boot, and errors stop normal startup. A normal
+boot without that marker clears nothing. An old layout without the optional
+`control` partition cannot have a reset marker and continues normal local startup;
+other initialization errors or marker-read failures still stop boot. No partition
+migration is performed.
+The existing remote factory-reset operation retains its narrower documented
+scope and does not arm this local reset.
+
 Display provides Light/Dark, brightness in ten-percent steps, and Screen timeout:
 Off, 1, 5, 10 or 30 minutes. Defaults are Dark, 50 percent and 5 minutes. Blanking
 leaves radios and enabled mouse control running, while hidden keyboard focus

@@ -23,6 +23,8 @@ SDK_ISR_RESERVE_BYTES = 2048
 STARTUP_FRAME_LIMIT_BYTES = 512
 UNITS = {
     "main": "firmware/main/main.c",
+    "factory_reset": "firmware/main/app_factory_reset.c",
+    "device_restart": "firmware/main/app_device_restart.c",
     "bridge": "firmware/main/app_command_bridge.c",
     "device": "firmware/main/app_remote_device.c",
     "remote_input": "firmware/main/app_remote_input.c",
@@ -1327,6 +1329,29 @@ for _label, (_owner, _steps) in ACCESS_PATHS.items():
     PATHS[_label] = _steps
     PATH_OWNERS[_label] = _owner
 
+# Local reset erases only during boot; the existing restart worker only arms it.
+RESET_BOOT = [("main", "app_main"), ("factory_reset", "app_factory_reset_boot")]
+RESET_SERVICE = CORE + [("main", "local_reset_service")]
+RESET_BEGIN = CORE + [("main", "handle_intent"), ("main", "local_reset_handle"), ("main", "local_reset_begin")]
+RESET_PATHS = {
+    "reset_boot_namespace": ("main", RESET_BOOT + [("factory_reset", "clear_user_namespaces"), ("factory_reset", "retained_namespace")]),
+    "reset_boot_owned_namespace": ("main", RESET_BOOT + [("factory_reset", "clear_user_namespaces"), ("factory_reset", "clear_owned_namespaces"), ("factory_reset", "clear_namespace")]),
+    "reset_boot_other_namespace": ("main", RESET_BOOT + [("factory_reset", "clear_user_namespaces"), ("factory_reset", "clear_namespace")]),
+    "reset_boot_marker": ("main", RESET_BOOT + [("factory_reset", "marker_read")]),
+    "reset_boot_partition": ("main", RESET_BOOT + [("factory_reset", "validate_stores"), ("factory_reset", "owned_partition")]),
+    "reset_local_media_stop": ("main", RESET_BEGIN + [("media_runtime", "app_media_runtime_stop")]),
+    "reset_local_input_release": ("main", RESET_BEGIN + [("main", "cancel_input"), ("hid_engine", "hid_engine_cancel")]),
+    "reset_local_neutral": ("main", RESET_SERVICE + [("main", "remote_device_neutral"), ("ble", "ble_hid_snapshot")]),
+    "reset_local_media_off": ("main", RESET_SERVICE + [("main", "remote_device_media_off"), ("media_runtime", "app_media_runtime_snapshot")]),
+    "reset_local_request": ("main", RESET_SERVICE + [("device_restart", "app_device_restart_request_local_reset"), ("device_restart", "restart_request"), ("device_restart", "restart_now")]),
+    "reset_local_authorize": ("main", RESET_SERVICE + [("device_restart", "app_device_restart_authorize"), ("device_restart", "restart_now")]),
+    "reset_worker_marker": ("device_restart", [("device_restart", "restart_worker"), ("device_restart", "restart_service"), ("factory_reset", "app_factory_reset_arm"), ("factory_reset", "marker_read")]),
+    "reset_worker_partition": ("device_restart", [("device_restart", "restart_worker"), ("device_restart", "restart_service"), ("factory_reset", "app_factory_reset_arm"), ("factory_reset", "validate_stores"), ("factory_reset", "owned_partition")]),
+}
+for _label, (_owner, _path) in RESET_PATHS.items():
+    PATHS[_label] = _path
+    PATH_OWNERS[_label] = _owner
+
 # This header function is file-static inline, despite its public-looking name.
 # Missing emission is charged to log_codec/poll; emitted bodies/clones still count.
 INLINABLE_HEADER_HELPERS = {("audio_diagnostics", "board_audio_sdk_operation_name")}
@@ -1365,6 +1390,7 @@ REQUIRED.update(step for path in TOUCH_PATHS.values() for step in path
 REQUIRED.update({("main", "send_report"), ("main", "remote_changed"), ("main", "remote_observe"),
     ("usb_hid", "usb_hid_send_generation"), ("usb_hid", "usb_hid_snapshot")})
 REQUIRED.add(("board_audio", "worker"))
+REQUIRED.add(("device_restart", "restart_worker"))
 REQUIRED.add(("firmware_update", "worker"))
 REQUIRED.update({("network_clock", "worker"), ("wifi", "worker"), ("wifi", "wifi_event"),
     ("wifi", "station_dns_clear"), ("sdk_dns", "dns_clear_cache"), ("sdk_netif", "esp_netif_api_cb"),
@@ -1390,6 +1416,7 @@ REQUIRED.update({("tinyusb_task", "tinyusb_device_task"), ("tinyusb_task", "tiny
     ("usb_audio", "input_usb_audio_dcd_registers"), ("usb_audio", "tud_audio_set_itf_cb"),
     ("usb_audio", "tud_audio_set_itf_close_ep_cb"), ("usb_audio", "tud_audio_feedback_params_cb")})
 CONSUMERS = [
+    "firmware/main/app_local_reset.inc",
     "firmware/main/app_motion_capture.inc",
     "firmware/main/main.c", "firmware/main/app_remote_device_bindings.inc",
     "firmware/main/app_remote_device_maintenance.inc", "firmware/main/app_remote_device_read.inc",
@@ -1402,6 +1429,7 @@ BUDGET_FILES = {
     "board": "firmware/main/board_mosaico.c",
     "main": "firmware/main/main.c",
     "runtime": "firmware/main/app_control_runtime.c",
+    "device_restart": UNITS["device_restart"],
     "firmware_update": UNITS["firmware_update"],
     "network_clock": UNITS["network_clock"],
     "network_task": "firmware/main/app_network_task.h",
@@ -1521,6 +1549,7 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
     main, timer = configured("CONFIG_ESP_MAIN_TASK_STACK_SIZE"), configured("CONFIG_ESP_TIMER_TASK_STACK_SIZE")
 
     wifi_stack = integer_expression(single("wifi", r'xTaskCreate\s*\(\s*worker\s*,\s*"app_wifi"\s*,\s*(\d+)\s*,')[1])
+    restart_stack = integer_expression(single("device_restart", r'xTaskCreate\s*\(\s*restart_worker\s*,\s*"device_restart"\s*,\s*(\d+)\s*,')[1])
     system_event = configured("CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE")
     tcpip = configured("CONFIG_LWIP_TCPIP_TASK_STACK_SIZE")
     single("sdk_tasks", r"#if CONFIG_LWIP_TCPIP_CORE_LOCKING\s*#define ESP_TASKD_EVENT_STACK\s+\(CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE\s*\+ TASK_EXTRA_STACK_SIZE \+ 2048\)\s*#else\s*#define ESP_TASKD_EVENT_STACK\s+\(CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE\s*\+ TASK_EXTRA_STACK_SIZE\)")
@@ -1617,6 +1646,7 @@ def task_budgets(config, root=ROOT, config_path="generated sdkconfig.h"):
             ["app_network_task_create(worker, control_server)"]),
         "firmware_update": budget("firmware_update", update_stack, ["firmware_update"],
             ["xTaskCreate(worker, firmware_update)"]),
+        "device_restart": budget("device_restart", restart_stack, ["device_restart"], ["xTaskCreate(restart_worker, device_restart)"]),
         "wifi_worker": budget("app_wifi", wifi_stack, ["wifi"], ["xTaskCreate(worker, app_wifi)"]),
         "system_event": budget("sys_evt", system_event, ["sdk_tasks", "sdk_event_default", "sdk_event"],
             ["CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE", "ESP_TASKD_EVENT_STACK"], event_extra),

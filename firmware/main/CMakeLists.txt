@@ -7,7 +7,7 @@ idf_component_register(SRCS "main.c" "app_ui.c" "ble_hid.c" "board_mosaico.c" "u
                            "app_media_controls.c" "app_control_runtime.c" "app_control_server.c" "app_control_web.c" "app_control_trust.c" "app_control_access.c" "app_clock.c" "app_firmware_update.c"
                            "app_connectivity_controls.c" "app_bluetooth_management.c" "board_imu_queue.c" "motion_capture.c"
                            "board_sensor_journal.c" "sensor_wire.c" "app_sensor_api.c" "app_runtime_diagnostics.c"
-                           "app_remote_device.c" "app_device_restart.c"
+                           "app_remote_device.c" "app_device_restart.c" "app_factory_reset.c"
                            "app_remote_media.c"
                        INCLUDE_DIRS "." "${CMAKE_CURRENT_BINARY_DIR}/generated"
                        EMBED_TXTFILES "web/controller.html" "web/controller.css" "web/controller.js"

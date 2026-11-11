@@ -124,3 +124,31 @@ static void about_metadata_checks(void)
     s_state = original; render(); clear_intents();
     puts("PASS: bounded About metadata, complete repository wrapping, distinct artifact/Git identity, truthful invalid snapshots and actual navigation hits");
 }
+
+static void about_reset_checks(void)
+{
+    app_view_t original = s_state;
+    s_state.mode = INPUT_MOUSE; s_state.overlay = APP_OVERLAY_SETTINGS;
+    s_state.settings_page = APP_SETTINGS_ABOUT;
+    s_state.locked = s_state.screen_off = s_state.remote_owned = false;
+    s_state.local_access = APP_LOCAL_NORMAL;
+    ++s_state.ui_revision; screenshot("about-reset-entry");
+    assert_rect(control("Reset device"), 12, 376, 448, 44);
+    clear_intents(); tap_control("Reset device");
+    assert(action_count(APP_RESET_REQUEST) == 1 && !action_count(APP_CONFIRM));
+    s_state.overlay = APP_OVERLAY_CONFIRM; s_state.confirmation = APP_CONFIRM_DEVICE_RESET;
+    ++s_state.ui_revision; screenshot("about-reset-confirm");
+    clear_intents(); tap_control("Cancel");
+    assert(action_count(APP_CONFIRM) == 1 && last_action(APP_CONFIRM)->x == 0);
+    clear_intents(); tap_control("Reset and restart");
+    assert(action_count(APP_CONFIRM) == 1 && last_action(APP_CONFIRM)->x == 1);
+    clear_intents(); pointer(340, 448, true); ++s_state.ui_revision; render(); pointer(340, 448, false);
+    assert(!action_count(APP_CONFIRM));
+    s_state.local_access = APP_LOCAL_PAUSED; s_state.overlay = APP_OVERLAY_RESET;
+    s_state.message = "Restarting to clear saved data. Keep the device connected to power.";
+    ++s_state.ui_revision; screenshot("about-reset-progress");
+    s_state.message = "Reset could not finish. Restart the device to check and continue.";
+    screenshot("about-reset-failed");
+    clear_intents(); tap(340, 448); assert(!action_count(APP_CONFIRM) && !action_count(APP_RESET_REQUEST));
+    s_state = original; render();
+}

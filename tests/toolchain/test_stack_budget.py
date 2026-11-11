@@ -77,7 +77,7 @@ class StackBudgets(unittest.TestCase):
         self.assertEqual({key: value["budget_bytes"] for key, value in budgets.items()}, {
             "main": 8192, "esp_timer": 3584, "sensor": 4096, "power": 3072,
             "control_runtime": 12288, "control_server": 4096, "firmware_update": 16384, "media_control": 6144, "board_audio": 6144,
-            "audio_manager": 8192, "network_clock": 4096, "wifi_worker": 16384, "system_event": 2304, "tcpip": 3072,
+            "audio_manager": 8192, "network_clock": 4096, "wifi_worker": 16384, "device_restart": 4096, "system_event": 2304, "tcpip": 3072,
             "ble_control": 6144, "btc": 3072, "usb_audio": 3072, "tinyusb": 4096, "https": 12288, "lvgl": 8192})
         self.assertEqual(budgets["main"]["allocated_bytes"], 8704)
         self.assertEqual(budgets["esp_timer"]["allocated_bytes"], 4096)

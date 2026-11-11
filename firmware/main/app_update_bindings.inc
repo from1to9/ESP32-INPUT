@@ -7,7 +7,7 @@
 static portMUX_TYPE s_update_gate_lock = portMUX_INITIALIZER_UNLOCKED;
 static struct {
     cp_command_t command;
-    bool active, pending, main_unlocked, maintenance_ready;
+    bool active, pending, main_unlocked, maintenance_ready, local_reset;
     uint64_t cached_ms, admitted_until_ms;
     uint32_t rejected;
 } s_update_gate;
@@ -45,6 +45,11 @@ static cp_error_t remote_update_authority(void *context, const cp_command_t *com
     /* The mailbox and its comparison time must describe the same lock view. */
     uint64_t now = (uint64_t)esp_timer_get_time() / 1000U;
     out->observation.observed_ms = now;
+    if (s_update_gate.local_reset) {
+        portEXIT_CRITICAL(&s_update_gate_lock);
+        out->authorized = false;
+        return CP_BUSY;
+    }
     bool fresh = now >= s_update_gate.cached_ms && now - s_update_gate.cached_ms <= 250;
     out->observation.owner_observed = true;
     out->observation.owner_cached_ms = s_update_gate.cached_ms;
@@ -84,7 +89,7 @@ static cp_error_t remote_update_authority(void *context, const cp_command_t *com
  * bond/profile writes and media admission; safety stop/lock/query stay usable. */
 static app_local_access_t local_access(void)
 {
-    return remote_device_maintenance() ? APP_LOCAL_PAUSED : s_update_access;
+    return (s_local_reset_active || remote_device_maintenance()) ? APP_LOCAL_PAUSED : s_update_access;
 }
 static bool remote_update_maintenance(void)
 {
@@ -232,7 +237,7 @@ static void __attribute__((noinline)) remote_update_service(void)
         ++s_ui_revision;
         button_access_changed(previous);
     }
-    app_wifi_set_maintenance(requested);
+    app_wifi_set_maintenance(requested || s_local_reset_active);
     bool ready = false;
     uint32_t rejected = 0;
     if (active && requested) {

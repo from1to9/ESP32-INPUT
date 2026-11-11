@@ -1554,6 +1554,7 @@ int main(int argc, char **argv)
         }
         if (about_only) {
             about_metadata_checks();
+            about_reset_checks();
             device_settings_checks();
             continue;
         }
@@ -1652,6 +1653,7 @@ int main(int argc, char **argv)
         geometry_checks();
         device_settings_checks();
         about_metadata_checks();
+        about_reset_checks();
         pairing_capacity_checks();
         transport_and_grid_checks();
         text_boundary_checks();
