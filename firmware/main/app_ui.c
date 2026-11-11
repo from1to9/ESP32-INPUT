@@ -590,7 +590,7 @@ static void on_action(lv_event_t *event)
     if (binding->action == APP_MEDIA_CONTROL || binding->object == s_voice_confirm ||
         (binding->action == APP_CONFIRM && binding->value == 1 &&
          ((s_view.confirmation >= APP_CONFIRM_RECORDING_START && s_view.confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD) ||
-          s_view.confirmation == APP_CONFIRM_AUDIO_PAIR))) {
+          s_view.confirmation == APP_CONFIRM_AUDIO_PAIR || s_view.confirmation == APP_CONFIRM_AUDIO_DEVICE_FORGET))) {
         media_action(binding->object, -1);
         return;
     }
@@ -2314,7 +2314,7 @@ static void render_device(const app_view_t *view, const char *link)
     }
     if (view->confirmation == APP_CONFIRM_REMOTE) { render_remote_review(); return; }
     if ((view->confirmation >= APP_CONFIRM_RECORDING_START && view->confirmation <= APP_CONFIRM_RECORDING_CANCEL_DISCARD) ||
-        view->confirmation == APP_CONFIRM_AUDIO_PAIR) {
+        view->confirmation == APP_CONFIRM_AUDIO_PAIR || view->confirmation == APP_CONFIRM_AUDIO_DEVICE_FORGET) {
         render_media_confirmation();
         return;
     }

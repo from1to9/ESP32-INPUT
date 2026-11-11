@@ -43,3 +43,24 @@ Wait for APPLIED before declaring reset complete. That durable empty record
 clears orphan preferences and prevents automatic initial pairing on the next
 boot. A later explicit local pairing action remains available. Classic bonds
 are preserved unless separately authorized.
+
+## Local Audio Forget
+
+Audio Forget uses the selected Classic address and an opaque key fingerprint
+captured by the local confirmation. The Classic scan coordinator requires an
+inactive matching BR/EDR record and prevents new Classic pages during the
+request. BTC checks the same persisted identity and saves only the removal of
+its Classic fields. BTU then clears that exact RAM key and its Classic security
+flags. The LE handle, keys and shared bond state remain intact even at the same
+address. The Audio manager reports success after the refreshed list omits the
+selected address.
+
+This operation requires the pinned S31 controller without a link-key store
+and an existing single-block Bluedroid config whose current serialization fits
+one block. The existing reader treats a first blob shorter than 1536 bytes as
+complete, so one checked NVS update carries all effective data and no separate
+continuation index. A full-sized first block, a larger cache, or an unknown
+storage layout fails before key deletion. A save or post-commit verification
+failure leaves removal unconfirmed and blocks new Classic commands until
+restart. No input disconnect, LE deletion, global clear or pairing window is
+part of the operation.

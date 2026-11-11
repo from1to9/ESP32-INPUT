@@ -76,6 +76,23 @@ void bt_audio_classic_scan_drained(uint64_t request, bool restore)
     ++drains;
 }
 
+static unsigned forget_checks, forget_writes, forget_completions;
+static esp_err_t forget_result;
+esp_err_t bt_classic_forget_runtime(const uint8_t peer[6], const bt_classic_bond_id_t *identity, bool clear)
+{
+    assert(context == BTU_TASK && !memcmp(peer, target, sizeof(target)) && identity->bytes[0] == 3);
+    if (acl_up) return ESP_ERR_INVALID_STATE;
+    if (clear) ++forget_writes;
+    else ++forget_checks;
+    return ESP_OK;
+}
+void bt_audio_classic_forget_committed(uint64_t request, esp_err_t result)
+{
+    assert(context == BTU_TASK && !gate_storage.held && request == 1);
+    ++forget_completions;
+    forget_result = result;
+}
+
 bool BTM_IsAclConnectionUp(const uint8_t *peer, int transport)
 {
     assert(context == BTU_TASK && transport == BT_TRANSPORT_BR_EDR && !memcmp(peer, target, 6));
@@ -360,6 +377,22 @@ int main(int argc, char **argv)
         controller_complete(0);
         ack(tokens[2], 0); step();
         expect(2, 2, ESP_OK);
+    } else if (!strcmp(test, "forget") || !strcmp(test, "forget-released") || !strcmp(test, "forget-late-acl")) {
+        bt_classic_bond_id_t identity = {{3}};
+        assert(bt_classic_scan_prepare_forget(1, target, &identity) == ESP_OK);
+        step();
+        controller_complete(0);
+        ack(tokens[0], 0);
+        step();
+        expect(1, 1, ESP_OK);
+        assert(forget_checks == 1 && !forget_writes);
+        assert(bt_classic_scan_commit_forget(1) == ESP_OK);
+        bool released = !strcmp(test, "forget-released");
+        acl_up = !strcmp(test, "forget-late-acl");
+        if (released) assert(bt_classic_scan_release(1, &restore) && restore);
+        step();
+        assert(forget_completions == 1 && forget_writes == (!released && !acl_up));
+        assert(forget_result == (released ? ESP_ERR_NOT_FINISHED : acl_up ? ESP_ERR_INVALID_STATE : ESP_OK));
     } else if (!strcmp(test, "unsupported-context")) {
         start(1);
         slot[32] = 1; slot_state = 5;

@@ -66,7 +66,8 @@ static struct {
     uint64_t posted_request_id;
 #if CONFIG_APP_CLASSIC_SCAN_COORDINATION
     uint64_t scan_request;
-    bool scan_waiting, scan_releasing;
+    bool scan_waiting, scan_releasing, forget_refresh, forget_uncertain;
+    bt_classic_bond_id_t forget_identity;
 #endif
     ae_id_t boot_id;
     uint8_t classic_bonds[BT_AUDIO_CLASSIC_BONDS_MAX][6];
@@ -245,7 +246,7 @@ static bool command_is_hfp(bt_audio_command_t command)
 static bool command_owns_route_locked(bt_audio_route_t route)
 {
     return (audio.command_pending || audio.public.control_inflight) &&
-        route == (command_is_hfp(audio.command) ? BT_AUDIO_HFP : BT_AUDIO_A2DP);
+        (audio.command == BT_AUDIO_FORGET_CLASSIC || route == (command_is_hfp(audio.command) ? BT_AUDIO_HFP : BT_AUDIO_A2DP));
 }
 
 #if AUDIO_PROFILES_SUPPORTED
@@ -490,6 +491,16 @@ static void service_classic_pairing(void)
             } else audio.public.pairing_error = error;
             set_bonded_locked(true, error == ESP_OK && audio.public.hfp_peer_known && saved_peer_locked(audio.public.hfp_peer));
             set_bonded_locked(false, error == ESP_OK && audio.public.a2dp_peer_known && saved_peer_locked(audio.public.a2dp_peer));
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+            if (audio.forget_refresh) {
+                audio.forget_refresh = false;
+                audio.public.control_inflight = false;
+                bool absent = error == ESP_OK && !saved_peer_locked(audio.command_peer);
+                audio.forget_uncertain = !absent;
+                audio.public.request_status = absent ? BT_AUDIO_JOB_SUCCEEDED : BT_AUDIO_JOB_UNCERTAIN;
+                audio.public.request_error = absent ? ESP_OK : ESP_ERR_NOT_FINISHED;
+            }
+#endif
             if (audio.verify_pairing_bond || audio.public.pairing_completed) {
                 audio.public.pairing_completed = error == ESP_OK && saved_peer_locked(audio.handshake_peer);
                 if (audio.verify_pairing_bond && error == ESP_OK && !audio.public.pairing_completed)
@@ -914,6 +925,9 @@ bt_audio_snapshot_t bt_audio_snapshot(void)
 #if AUDIO_PROFILES_SUPPORTED
 static bool pairing_ready_locked(void)
 {
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    if (audio.forget_uncertain) return false;
+#endif
     return audio.public.initialized && !audio.public.failed && audio.public.classic_bonds_known &&
         !audio.command_pending && !audio.public.control_inflight &&
         !audio.public.pairing_busy && !audio.public.pairing_handshake_pending &&
@@ -1067,7 +1081,7 @@ static esp_err_t submit_control_locked(uint64_t generation, uint64_t link_genera
         control_peer_compatible_locked(command, peer ? peer : current) &&
         (connecting ? !known : (known && (!peer || peer_matches(peer, current))));
 #if CONFIG_APP_CLASSIC_SCAN_COORDINATION
-    if (audio.scan_request) accepted = false;
+    if (audio.scan_request || audio.forget_uncertain) accepted = false;
 #endif
     if (command == BT_AUDIO_OPEN_VOICE || command == BT_AUDIO_CLOSE_VOICE)
         accepted = accepted && audio.public.hfp_connected && (audio.public.hfp_audio_connected == (command == BT_AUDIO_CLOSE_VOICE));
@@ -1120,6 +1134,75 @@ esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t link_generation, 
     return error;
 }
 
+bool bt_audio_classic_forget_supported(void)
+{
+#if AUDIO_PROFILES_SUPPORTED && CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    return true;
+#else
+    return false;
+#endif
+}
+
+#if AUDIO_PROFILES_SUPPORTED && CONFIG_APP_CLASSIC_SCAN_COORDINATION
+static bool forget_ready_locked(uint64_t revision, const uint8_t peer[6])
+{
+    return audio.public.initialized && !audio.public.failed && audio.public.classic_bonds_known &&
+        !audio.bond_refresh_pending && revision == audio.classic_list_revision && saved_peer_locked(peer) &&
+        !audio.public.pairing_busy && !audio.public.pairing_handshake_pending &&
+        !audio.public.hfp_connected && !audio.public.a2dp_connected &&
+        !audio.public.hfp_peer_known && !audio.public.a2dp_peer_known &&
+        !audio.command_pending && !audio.public.control_inflight && !audio.scan_request &&
+        !audio.forget_uncertain &&
+        audio.public.microphone_muted && audio.public.speaker_muted &&
+        (!audio.adapter.prepared || audio.adapter.stopped);
+}
+#endif
+
+esp_err_t bt_audio_classic_forget_review(uint64_t revision, const uint8_t peer[6],
+                                         bt_classic_bond_id_t *identity)
+{
+#if AUDIO_PROFILES_SUPPORTED && CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    if (!peer || !identity) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&audio_lock);
+    bool ready = forget_ready_locked(revision, peer);
+    portEXIT_CRITICAL(&audio_lock);
+    return ready ? bt_classic_forget_review(peer, identity) : ESP_ERR_INVALID_STATE;
+#else
+    (void)revision; (void)peer; (void)identity;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t bt_audio_classic_forget_request(uint64_t revision, const uint8_t peer[6],
+                                          const bt_classic_bond_id_t *identity, uint64_t *request_id)
+{
+#if AUDIO_PROFILES_SUPPORTED && CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    if (!peer || !identity || !request_id) return ESP_ERR_INVALID_ARG;
+    portENTER_CRITICAL(&audio_lock);
+    bool ready = forget_ready_locked(revision, peer);
+    if (ready) {
+        audio.command = BT_AUDIO_FORGET_CLASSIC;
+        audio.public.request_command = audio.command;
+        memcpy(audio.command_peer, peer, sizeof(audio.command_peer));
+        memcpy(audio.public.request_peer, peer, sizeof(audio.public.request_peer));
+        audio.forget_identity = *identity;
+        audio.command_requires_saved = true;
+        audio.command_pending = true;
+        ++audio.public.request_id;
+        if (!audio.public.request_id) ++audio.public.request_id;
+        audio.public.request_status = BT_AUDIO_JOB_PENDING;
+        audio.public.request_error = ESP_OK;
+        *request_id = audio.public.request_id;
+        refresh_locked();
+    }
+    portEXIT_CRITICAL(&audio_lock);
+    return ready ? ESP_OK : ESP_ERR_INVALID_STATE;
+#else
+    (void)revision; (void)peer; (void)identity; (void)request_id;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 void bt_audio_copy_bond_list(bt_audio_bond_list_t *out)
 {
     if (!out) return;
@@ -1164,6 +1247,8 @@ esp_err_t bt_audio_refresh_bonds(void)
 void bt_audio_classic_scan_result(uint64_t request, esp_err_t result)
 {
     portENTER_CRITICAL(&audio_lock);
+    bool forget_lost = request == audio.scan_request && request == audio.public.request_id &&
+        audio.command == BT_AUDIO_FORGET_CLASSIC && audio.public.control_inflight && result != ESP_OK;
     if (request == audio.scan_request && request == audio.public.request_id && audio.command_pending) {
         audio.scan_waiting = false;
         if (result != ESP_OK) {
@@ -1171,6 +1256,27 @@ void bt_audio_classic_scan_result(uint64_t request, esp_err_t result)
             audio.public.request_status = BT_AUDIO_JOB_FAILED;
             audio.public.request_error = result;
             error_locked("Classic scan preparation", result, false);
+        }
+    }
+    portEXIT_CRITICAL(&audio_lock);
+    if (forget_lost) bt_audio_classic_forget_committed(request, ESP_ERR_NOT_FINISHED);
+}
+
+void bt_audio_classic_forget_committed(uint64_t request, esp_err_t result)
+{
+    portENTER_CRITICAL(&audio_lock);
+    if (request == audio.public.request_id && audio.command == BT_AUDIO_FORGET_CLASSIC &&
+        audio.public.control_inflight && !audio.forget_refresh) {
+        if (result == ESP_OK) {
+            audio.forget_refresh = true;
+            ++audio.bond_revision;
+            audio.bond_refresh_pending = true;
+            audio.public.classic_bonds_known = false;
+        } else {
+            audio.forget_uncertain = true;
+            audio.public.control_inflight = false;
+            audio.public.request_status = BT_AUDIO_JOB_UNCERTAIN;
+            audio.public.request_error = ESP_ERR_NOT_FINISHED;
         }
     }
     portEXIT_CRITICAL(&audio_lock);
@@ -1203,6 +1309,38 @@ static void service_scan_release(void)
 }
 #endif
 
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+/* BTC owner. BTU validates the inactive exact record under the scan gate,
+ * then clears its RAM key only after the checked single-blob write. */
+static void dispatch_forget(uint64_t request, const uint8_t peer[6], const bt_classic_bond_id_t *identity,
+                            bool prepare)
+{
+    if (prepare) {
+        bt_classic_bond_id_t current;
+        esp_err_t result = bt_classic_forget_review(peer, &current);
+        if (result == ESP_OK && memcmp(&current, identity, sizeof(current))) result = ESP_ERR_INVALID_VERSION;
+        if (result == ESP_OK) result = bt_classic_scan_prepare_forget(request, peer, identity);
+        if (result != ESP_OK) bt_audio_classic_scan_result(request, result);
+        return;
+    }
+
+    esp_err_t result = bt_classic_forget_storage(peer, identity);
+    if (result == ESP_OK) {
+        if (bt_classic_scan_commit_forget(request) != ESP_OK)
+            bt_audio_classic_forget_committed(request, ESP_ERR_NOT_FINISHED);
+        return;
+    }
+    portENTER_CRITICAL(&audio_lock);
+    if (request == audio.public.request_id && audio.public.control_inflight) {
+        audio.public.control_inflight = false;
+        audio.forget_uncertain = result == ESP_ERR_NOT_FINISHED;
+        audio.public.request_status = audio.forget_uncertain ? BT_AUDIO_JOB_UNCERTAIN : BT_AUDIO_JOB_FAILED;
+        audio.public.request_error = result;
+    }
+    portEXIT_CRITICAL(&audio_lock);
+}
+#endif
+
 /* Runs on BTC queue 0, the same serialized owner as the profile callbacks.
  * An earlier down/reconnect is already visible here. A later callback can
  * only run inside or after the synchronous profile dispatch. */
@@ -1218,11 +1356,13 @@ static void dispatch_control(void *unused)
     bt_audio_command_t command = audio.command;
     uint64_t link = command_is_hfp(command) ? audio.public.hfp_link_generation : audio.public.a2dp_link_generation;
     bool saved = audio.public.classic_bonds_known && !audio.bond_refresh_pending && saved_peer_locked(audio.command_peer);
-    if (audio.command_link_generation != link || (audio.command_requires_saved && !saved) ||
+    if ((command != BT_AUDIO_FORGET_CLASSIC && audio.command_link_generation != link) ||
+        (audio.command_requires_saved && !saved) ||
         !control_peer_compatible_locked(command, audio.command_peer)) {
         audio.command_pending = false;
         audio.public.request_status = BT_AUDIO_JOB_FAILED;
-        audio.public.request_error = audio.command_link_generation != link ? ESP_ERR_NOT_FOUND : ESP_ERR_INVALID_STATE;
+        audio.public.request_error = command != BT_AUDIO_FORGET_CLASSIC && audio.command_link_generation != link ?
+            ESP_ERR_NOT_FOUND : ESP_ERR_INVALID_STATE;
         portEXIT_CRITICAL(&audio_lock); return;
     }
     uint8_t peer[6]; memcpy(peer, audio.command_peer, sizeof(peer));
@@ -1230,6 +1370,23 @@ static void dispatch_control(void *unused)
 #if CONFIG_APP_CLASSIC_SCAN_COORDINATION
     if (scan_expired_locked(now)) {
         portEXIT_CRITICAL(&audio_lock); return;
+    }
+    if (command == BT_AUDIO_FORGET_CLASSIC) {
+        bool prepare = !audio.scan_request;
+        bt_classic_bond_id_t identity = audio.forget_identity;
+        if (prepare) {
+            audio.scan_request = request;
+            audio.scan_waiting = true;
+            audio.command_started_us = now;
+        } else {
+            audio.command_pending = false;
+            audio.public.control_inflight = true;
+            audio.public.request_status = BT_AUDIO_JOB_WAITING;
+            audio.command_started_us = now;
+        }
+        portEXIT_CRITICAL(&audio_lock);
+        dispatch_forget(request, peer, &identity, prepare);
+        return;
     }
     if ((command == BT_AUDIO_CONNECT_HFP || command == BT_AUDIO_CONNECT_A2DP) && !audio.scan_request) {
         audio.scan_request = request;

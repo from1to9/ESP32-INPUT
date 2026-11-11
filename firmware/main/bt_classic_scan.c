@@ -40,6 +40,10 @@ static struct {
     unsigned writes;
     uint8_t peer[6], desired_mask, phase;
     bool enabled, released, sent, reported, deferred;
+    bool forget;
+    bt_classic_bond_id_t identity;
+    uint32_t commit_epoch;
+    uint64_t commit_request;
     scan_receipt_t receipt;
 } scan;
 
@@ -54,6 +58,7 @@ static void retire(void)
     scan.phase = NONE;
     scan.request = 0;
     scan.receipt.epoch = 0;
+    scan.forget = false;
 }
 
 /* An unobserved stop may still produce an end. It cannot be adopted by a
@@ -71,11 +76,19 @@ static void deliver(uint32_t epoch)
     if (!held) return;
     uint64_t request = 0;
     scan_receipt_t result = {0};
+    uint8_t peer[6];
+    bool forget = false;
+    bt_classic_bond_id_t identity;
     if (scan.epoch == epoch && scan.phase == HELD && !scan.released && !scan.reported &&
         scan.receipt.epoch == epoch) {
         scan.reported = true;
         request = scan.request;
         result = scan.receipt;
+        forget = scan.forget;
+        if (forget) {
+            memcpy(peer, scan.peer, sizeof(peer));
+            identity = scan.identity;
+        }
         if (result.addressed && memcmp(result.peer, scan.peer, sizeof(result.peer)))
             result.status = ESP_ERR_NOT_FINISHED;
     }
@@ -83,6 +96,8 @@ static void deliver(uint32_t epoch)
     if (!request) return;
     if (result.status == ESP_OK && result.addressed && !BTM_IsAclConnectionUp(result.peer, BT_TRANSPORT_BR_EDR))
         result.status = ESP_ERR_NOT_FINISHED;
+    if (result.status == ESP_OK && forget)
+        result.status = bt_classic_forget_runtime(peer, &identity, false);
     bt_audio_classic_scan_result(request, result.status);
 }
 
@@ -178,7 +193,7 @@ static void begin(void *token)
     else send_off();
 }
 
-esp_err_t bt_classic_scan_prepare(uint64_t request, const uint8_t peer[6])
+static esp_err_t prepare(uint64_t request, const uint8_t peer[6], const bt_classic_bond_id_t *identity)
 {
     SemaphoreHandle_t held = lock(portMAX_DELAY);
     if (!held) return ESP_ERR_INVALID_STATE;
@@ -188,12 +203,59 @@ esp_err_t bt_classic_scan_prepare(uint64_t request, const uint8_t peer[6])
         scan.epoch = ++next_epoch;
         scan.phase = QUEUED;
         scan.released = scan.sent = scan.reported = scan.deferred = false;
+        scan.forget = identity != NULL;
+        if (identity) scan.identity = *identity;
         memcpy(scan.peer, peer, sizeof(scan.peer));
         if (osi_thread_post(scan.thread, begin, (void *)(uintptr_t)scan.epoch, 0, 0)) result = ESP_OK;
         else {
             retire();
             result = ESP_ERR_NO_MEM;
         }
+    }
+    xSemaphoreGive(held);
+    return result;
+}
+
+esp_err_t bt_classic_scan_prepare(uint64_t request, const uint8_t peer[6])
+{
+    return prepare(request, peer, NULL);
+}
+
+esp_err_t bt_classic_scan_prepare_forget(uint64_t request, const uint8_t peer[6],
+                                         const bt_classic_bond_id_t *identity)
+{
+    return prepare(request, peer, identity);
+}
+
+static void commit_forget(void *token)
+{
+    uint32_t epoch = (uint32_t)(uintptr_t)token;
+    SemaphoreHandle_t held = lock(portMAX_DELAY);
+    if (!held) return;
+    uint64_t request = 0;
+    esp_err_t result = ESP_ERR_NOT_FINISHED;
+    if (scan.commit_epoch == epoch) {
+        request = scan.commit_request;
+        scan.commit_epoch = 0;
+        scan.commit_request = 0;
+        if (scan.enabled && scan.epoch == epoch && scan.phase == HELD && scan.forget && !scan.released)
+            result = bt_classic_forget_runtime(scan.peer, &scan.identity, true);
+    }
+    xSemaphoreGive(held);
+    if (request) bt_audio_classic_forget_committed(request, result);
+}
+
+esp_err_t bt_classic_scan_commit_forget(uint64_t request)
+{
+    SemaphoreHandle_t held = lock(portMAX_DELAY);
+    if (!held) return ESP_ERR_INVALID_STATE;
+    bool current = scan.enabled && scan.request == request && scan.phase == HELD && scan.forget &&
+        !scan.released && !scan.commit_epoch;
+    esp_err_t result = !current ? ESP_ERR_INVALID_STATE :
+        osi_thread_post(scan.thread, commit_forget, (void *)(uintptr_t)scan.epoch, 0, 0) ? ESP_OK : ESP_ERR_NO_MEM;
+    if (result == ESP_OK) {
+        scan.commit_epoch = scan.epoch;
+        scan.commit_request = request;
     }
     xSemaphoreGive(held);
     return result;

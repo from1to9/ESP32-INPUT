@@ -65,6 +65,11 @@ typedef struct {
     } resume;
     unsigned device_page;
     uint64_t device_request_id;
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    uint64_t forget_request_id;
+    bt_classic_bond_id_t forget_identity;
+    esp_err_t forget_review_error;
+#endif
     struct {
         bool active, opening_voice, device_management;
         uint64_t token, deadline_ms, epoch, bond_revision;
@@ -666,7 +671,8 @@ static void rebuild_devices(void)
         !any_jobs() && controls.runtime.audio.hardware_off_confirmed && !bt->pairing_busy && !bt->pairing_requested;
     int selected = selected_bond();
     bool idle = idle_controls() && !any_jobs() && controls.runtime.audio.hardware_off_confirmed &&
-        bt->initialized && !bt->failed && !view->pending && !bt->pairing_busy && !bt->pairing_requested;
+        bt->initialized && !bt->failed && !view->pending && !bt->pairing_busy && !bt->pairing_requested &&
+        !(bt->request_command == BT_AUDIO_FORGET_CLASSIC && bt->request_status == BT_AUDIO_JOB_UNCERTAIN);
     for (unsigned i = 0; i < APP_MEDIA_ROWS; ++i) {
         unsigned index = view->page * APP_MEDIA_ROWS + i;
         if (index >= view->count) break;
@@ -697,6 +703,26 @@ static void rebuild_devices(void)
         }
         view->voice_connected = view->connected[0] && bt->hfp_audio_connected;
     }
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    view->can_forget = idle && selected >= 0 && bt_audio_classic_forget_supported() &&
+        !bt->hfp_connected && !bt->a2dp_connected && !bt->hfp_peer_known && !bt->a2dp_peer_known;
+    bool forget_result = bt->request_command == BT_AUDIO_FORGET_CLASSIC && controls.forget_request_id &&
+        bt->request_id == controls.forget_request_id && controls.selected_peer_known &&
+        !memcmp(controls.selected_peer, bt->request_peer, sizeof(bt->request_peer));
+    esp_err_t forget_error = forget_result ? bt->request_error : controls.forget_review_error;
+    const char *forget_notice =
+        forget_result && bt->request_status == BT_AUDIO_JOB_SUCCEEDED ? "Audio pairing removed. Use Add device to pair again." :
+        forget_result && bt->request_status == BT_AUDIO_JOB_UNCERTAIN ? "Audio removal is unconfirmed. Restart before trying again." :
+        forget_error == ESP_ERR_INVALID_SIZE ? "This Bluetooth store spans multiple blocks. Audio removal is unavailable." :
+        forget_error == ESP_ERR_NOT_SUPPORTED ? "This controller cannot remove an audio pairing safely." :
+        forget_error == ESP_ERR_INVALID_VERSION || forget_error == ESP_ERR_NOT_FOUND ? "Saved audio pairing changed. Review it again." :
+        forget_error != ESP_OK ? "Audio pairing could not be removed. Check for a connected or busy device." :
+        forget_result && view->pending ? "Removing this audio pairing." : NULL;
+    if (forget_notice) {
+        snprintf(view->reason, sizeof(view->reason), "%s", forget_notice);
+        return;
+    }
+#endif
     bool connect_failed = view->request_failed && controls.device_request_id &&
         controls.device_request_id == bt->request_id && controls.selected_peer_known &&
         !memcmp(controls.selected_peer, bt->request_peer, sizeof(bt->request_peer)) &&
@@ -725,6 +751,8 @@ static void rebuild_audio_pairing(void)
         bt->supported && bt->initialized && !bt->failed && bt->classic_bonds_known && !bt->pairing_requested &&
         !bt->pairing_busy && !bt->pairing_handshake_pending && !bt->control_inflight && bt->request_status != BT_AUDIO_JOB_PENDING &&
         bt->request_status != BT_AUDIO_JOB_WAITING;
+    view->can_open = view->can_open &&
+        !(bt->request_command == BT_AUDIO_FORGET_CLASSIC && bt->request_status == BT_AUDIO_JOB_UNCERTAIN);
     view->can_close = selected && local_ready() && bt->pairing_requested;
     bool current_failure = bt->failed || bt->pairing_error != ESP_OK;
     esp_err_t error = current_failure ? (bt->pairing_error != ESP_OK ? bt->pairing_error : bt->error) : controls.audio_pairing_request_error;
@@ -1048,7 +1076,7 @@ static bool allowed_panel(app_media_operation_t operation)
         (panel == APP_OVERLAY_BLUETOOTH_DEVICES || panel == APP_OVERLAY_AUDIO_DEVICE))
         return operation == APP_MEDIA_PAIR_AUDIO_OPEN || operation == APP_MEDIA_PAIR_AUDIO_CLOSE ||
             operation == APP_MEDIA_DEVICE_DETAILS || operation == APP_MEDIA_DEVICE_PAGE || operation == APP_MEDIA_DEVICE_LINK ||
-            operation == APP_MEDIA_DEVICE_REFRESH;
+            operation == APP_MEDIA_DEVICE_REFRESH || operation == APP_MEDIA_DEVICE_FORGET;
     if (controls.context.mode != INPUT_AUDIO) return false;
     if (operation == APP_MEDIA_LIVE_START || operation == APP_MEDIA_LIVE_STOP) return panel == APP_OVERLAY_NONE;
     if (operation == APP_MEDIA_SELECT_CONNECTION) return panel == APP_OVERLAY_NONE || panel == APP_OVERLAY_MEDIA_OPTIONS;
@@ -1116,6 +1144,18 @@ static ae_result_t confirm_review(const app_intent_t *intent)
         !same_ui_id(intent->media.job_id, review.request.job_id) ||
         intent->media.consumer_generation != review.request.consumer_generation) return AE_STALE;
     switch (review.request.operation) {
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    case APP_MEDIA_DEVICE_FORGET: {
+        if (!controls.view.devices.can_forget || review.request.object_revision != controls.bonds.revision ||
+            !same_ui_id(review.request.object_id, controls.view.devices.selected)) return AE_STALE;
+        esp_err_t error = bt_audio_classic_forget_request(controls.bonds.revision, controls.selected_peer,
+            &controls.forget_identity, &controls.forget_request_id);
+        controls.forget_review_error = error;
+        controls.bluetooth = bt_audio_snapshot();
+        increase(&controls.revision);
+        return error == ESP_OK ? AE_AGAIN : AE_UNAVAILABLE;
+    }
+#endif
     case APP_MEDIA_PAIR_AUDIO_OPEN:
         if (!controls.view.pairing.can_open) return AE_STALE;
         esp_err_t opened = bt_audio_pairing_open_reviewed(BT_AUDIO_PAIRING_DEFAULT_MS, &controls.bluetooth,
@@ -1164,16 +1204,19 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
             effect_result(effect, AE_STALE); return true;
         }
         bool pairing = controls.confirmation == APP_CONFIRM_AUDIO_PAIR;
+        bool forget = controls.confirmation == APP_CONFIRM_AUDIO_DEVICE_FORGET;
         app_overlay_t pairing_return = controls.context.bluetooth_audio_devices ? APP_OVERLAY_BLUETOOTH_DEVICES : APP_OVERLAY_MEDIA_OPTIONS;
         bool storage = controls.confirmation == APP_CONFIRM_RECORDING_STORAGE_PREPARE;
         if (!intent->x) {
             controls.review.valid = controls.prepare_review = false;
-            open_panel(effect, storage ? APP_OVERLAY_RECORDING_STORAGE : pairing ? pairing_return : APP_OVERLAY_AUDIO, APP_CONFIRM_NONE);
+            open_panel(effect, storage ? APP_OVERLAY_RECORDING_STORAGE : pairing ? pairing_return :
+                forget ? APP_OVERLAY_AUDIO_DEVICE : APP_OVERLAY_AUDIO, APP_CONFIRM_NONE);
             return true;
         }
         ae_result_t result = confirm_review(intent);
         effect_result(effect, result);
-        if (storage || pairing) open_panel(effect, storage ? APP_OVERLAY_RECORDING_STORAGE : pairing_return, APP_CONFIRM_NONE);
+        if (storage || pairing || forget) open_panel(effect, storage ? APP_OVERLAY_RECORDING_STORAGE :
+            forget ? APP_OVERLAY_AUDIO_DEVICE : pairing_return, APP_CONFIRM_NONE);
         else if (result == AE_OK) open_panel(effect, controls.pending_action == APP_MEDIA_QUERY_DELETE ? APP_OVERLAY_RECORDING_DETAIL :
             APP_OVERLAY_RECORDING_START, APP_CONFIRM_NONE);
         rebuild(); return true;
@@ -1208,6 +1251,9 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
             cached_bond(request->value.peer_id.bytes + 10) >= 0 &&
             same_ui_id(request->value.peer_id, peer_id(request->value.peer_id.bytes + 10))) {
             memcpy(controls.selected_peer, request->value.peer_id.bytes + 10, 6); controls.selected_peer_known = true;
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+            controls.forget_review_error = ESP_OK;
+#endif
             increase(&controls.revision); open_panel(effect, APP_OVERLAY_AUDIO_DEVICE, APP_CONFIRM_NONE); result = AE_OK;
         }
         break;
@@ -1217,6 +1263,21 @@ bool app_media_controls_handle(const app_intent_t *intent, app_media_controls_ef
             bt_audio_copy_bond_list(&controls.bonds);
         }
         break;
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    case APP_MEDIA_DEVICE_FORGET:
+        if (controls.context.overlay != APP_OVERLAY_AUDIO_DEVICE ||
+            !controls.view.devices.can_forget || request->object_revision != controls.bonds.revision ||
+            !same_ui_id(request->object_id, controls.view.devices.selected)) { result = AE_STALE; break; }
+        controls.forget_request_id = 0;
+        controls.forget_review_error = bt_audio_classic_forget_review(controls.bonds.revision,
+            controls.selected_peer, &controls.forget_identity);
+        if (controls.forget_review_error == ESP_OK) {
+            controls.review = (app_media_review_t){.valid = true, .request = *request};
+            open_panel(effect, APP_OVERLAY_CONFIRM, APP_CONFIRM_AUDIO_DEVICE_FORGET);
+            result = AE_OK;
+        } else result = AE_UNAVAILABLE;
+        break;
+#endif
     case APP_MEDIA_DEVICE_LINK: {
         int action = request->value.page_delta;
         if (action < 0 || action > 3 || request->object_revision != controls.bonds.revision ||

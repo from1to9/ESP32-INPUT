@@ -54,7 +54,9 @@ void bt_audio_classic_scan_drained(uint64_t id, bool restore) { (void)id; (void)
                         '-I', str(ROOT / 'components/device_settings/include'),
                         str(SUITE / 'test_bt_audio.c'), str(args.app_source),
                         str(ROOT / 'firmware/main/bt_audio_btc.c'), *legacy, '-o', str(owner)], check=True)
-        for case in ('scan-owner', 'scan-cancel', 'scan-timeout', 'scan-ready-expired', 'scan-queue-full'):
+        for case in ('scan-owner', 'scan-cancel', 'scan-timeout', 'scan-ready-expired', 'scan-queue-full',
+                     'forget-empty', 'forget-sole', 'forget-other', 'forget-rekey', 'forget-acl',
+                     'forget-expired', 'forget-nvs-error', 'forget-multiblob'):
             subprocess.run([str(owner), case], check=True)
         if args.owner_only:
             return
@@ -78,7 +80,7 @@ void bt_audio_classic_scan_drained(uint64_t id, bool restore) { (void)id; (void)
             subprocess.run(command + [f'-DCONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS={observer}'], check=True)
             for case in ('drain', 'async', 'async-before-ack', 'no-scan', 'incoming', 'reuse', 'cancel',
                          'ack-failed', 'policy-reply-warning', 'alloc-failed', 'queue-full', 'async-queue-full', 'teardown', 'reenable',
-                         'unsupported-context'):
+                         'unsupported-context', 'forget', 'forget-released', 'forget-late-acl'):
                 subprocess.run([str(binary), case], check=True)
 
 

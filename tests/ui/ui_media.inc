@@ -92,14 +92,14 @@ static void audio_pairing_checks(void)
     s_state.media.devices.selected.bytes[15] = 3; render(); pointer(124, 192, false);
     assert(!action_count(APP_MEDIA_CONTROL));
     s_state.media.devices.selected.bytes[15] = 2; render();
-    clear_intents(); tap_control("Forget unavailable"); assert(!action_count(APP_MEDIA_CONTROL));
+    clear_intents(); tap_control("Forget audio pairing"); assert(!action_count(APP_MEDIA_CONTROL));
     s_state.media.devices.address[0] = 0xc2; s_state.media.devices.address[5] = 2;
     s_state.bluetooth_hosts[0].target_known = true;
     memcpy(s_state.bluetooth_hosts[0].target.address, s_state.media.devices.address, 6);
     screenshot("devices-audio-detail-shared-address");
-    audio_assert_text_fits("Connecting does not start audio.\nAddress also saved for input. Audio Forget unavailable; Disconnect keeps pairing.");
+    audio_assert_text_fits("Connecting does not start audio.");
     s_state.bluetooth_hosts_available = false; screenshot("devices-audio-detail-input-unknown");
-    audio_assert_text_fits("Connecting does not start audio.\nInput pairing state unknown. Audio Forget unavailable; Disconnect keeps pairing.");
+    audio_assert_text_fits("Connecting does not start audio.");
     clear_intents(); tap_control("Back to devices"); assert(last_action(APP_BLUETOOTH_DEVICES)->x==1);
     s_state=original; render(); clear_intents();
 }

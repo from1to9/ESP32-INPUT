@@ -571,6 +571,22 @@ static void render_media_panel(void)
 static void render_media_confirmation(void)
 {
     const app_media_review_t *review = &s_view.media_review;
+    if (s_view.confirmation == APP_CONFIRM_AUDIO_DEVICE_FORGET) {
+        const app_media_devices_view_t *devices = &s_view.media.devices;
+        bool valid = review->valid && devices->can_forget &&
+            review->request.operation == APP_MEDIA_DEVICE_FORGET &&
+            review->request.object_revision == devices->revision &&
+            !memcmp(review->request.object_id.bytes, devices->selected.bytes, sizeof(devices->selected.bytes));
+        label_text(s_confirm_title, "Forget audio pairing?");
+        if (valid)
+            label_format(s_confirm_detail,
+                "%s\nRemove this device's audio pairing. Its saved input pairing is kept. Use Add device to pair audio again.",
+                devices->identity);
+        else label_text(s_confirm_detail, "This review has expired. Cancel and try again.");
+        text(s_confirm_accept, "Forget audio");
+        media_bind(s_confirm_accept, review->request, valid);
+        return;
+    }
     if (s_view.confirmation == APP_CONFIRM_AUDIO_PAIR) {
         bool open = review->request.operation == APP_MEDIA_PAIR_AUDIO_OPEN;
         bool valid = review->valid && (open ? s_view.media.pairing.can_open :

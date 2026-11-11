@@ -22,7 +22,7 @@ static lv_obj_t *s_connection_actions[4], *s_connection_pages[2], *s_connection_
 static lv_obj_t *s_saved_names[4], *s_saved_actions[4][3];
 static lv_obj_t *s_device_tabs[2], *s_device_rows[4], *s_device_labels[4];
 static lv_obj_t *s_device_name, *s_device_status, *s_device_empty, *s_device_page;
-static lv_obj_t *s_device_pages[2], *s_device_add, *s_device_stop, *s_device_refresh;
+static lv_obj_t *s_device_pages[2], *s_device_add, *s_device_stop, *s_device_refresh, *s_audio_device_forget;
 
 static bool api_digest_valid(const char digest[65])
 {
@@ -190,8 +190,7 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
             s_connection_actions[i] = button(body, "", (int)(i % 2) * 232, 104 + (int)(i / 2) * 56, 224, 48, APP_MEDIA_CONTROL, 0);
         s_connection_reason = connection_label(body, 224, 64, MUTED);
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
-        lv_obj_t *forget = button(body, "Forget unavailable", 0, 296, 456, 48, APP_MEDIA_CONTROL, 0);
-        enabled(forget, false);
+        s_audio_device_forget = button(body, "Forget audio pairing", 0, 296, 456, 48, APP_MEDIA_CONTROL, 0);
         button(body, "Back to devices", 0, 360, 456, 48, APP_BLUETOOTH_DEVICES, 1);
     } else if (kind == APP_OVERLAY_BLUETOOTH_PAIRING) {
         label_text(title, "Add Bluetooth host");
@@ -399,14 +398,11 @@ static void render_connection_panel(void)
             request.object_revision = devices->revision; request.object_id = devices->selected; request.value.page_delta = (int)i;
             media_bind(s_connection_actions[i], request, i & 1 ? devices->can_disconnect[i / 2] : devices->can_connect[i / 2]);
         }
-        bool same_address = false;
-        for (size_t i = 0; i < s_view.bluetooth_host_count && i < APP_UI_BOND_CAPACITY; ++i)
-            same_address |= s_view.bluetooth_hosts[i].target_known &&
-                !memcmp(s_view.bluetooth_hosts[i].target.address, devices->address, 6);
-        const char *forget = !s_view.bluetooth_hosts_available ? "Input pairing state unknown. Audio Forget unavailable; Disconnect keeps pairing." :
-            same_address ? "Address also saved for input. Audio Forget unavailable; Disconnect keeps pairing." :
-            "Audio Forget unavailable. Disconnect keeps this device paired.";
-        label_format(s_connection_reason, "%.64s\n%s", devices->reason, forget);
+        app_media_request_t forget = media_request(APP_MEDIA_DEVICE_FORGET);
+        forget.object_revision = devices->revision;
+        forget.object_id = devices->selected;
+        media_bind(s_audio_device_forget, forget, devices->can_forget);
+        label_text(s_connection_reason, devices->reason);
         lv_obj_set_height(s_connection_reason, 64);
     } else if (s_view.overlay == APP_OVERLAY_BLUETOOTH_PAIRING) {
         const app_bluetooth_management_view_t *pairing = &s_view.bluetooth_management;

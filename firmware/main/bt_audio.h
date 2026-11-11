@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "audio_io.h"
 #include "bt_audio_btc.h"
+#include "bt_classic_forget.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -198,6 +199,13 @@ esp_err_t bt_audio_request(uint64_t generation, uint64_t link_generation, bt_aud
  * Same bounded command queue/result semantics as bt_audio_request. */
 esp_err_t bt_audio_saved_request(uint64_t generation, uint64_t link_generation, uint64_t bond_revision,
                                  bt_audio_command_t command, const uint8_t peer[6], uint64_t *request_id);
+/* Local exact-record review and asynchronous removal. The ordinary profile
+ * command API cannot submit this operation. */
+bool bt_audio_classic_forget_supported(void);
+esp_err_t bt_audio_classic_forget_review(uint64_t revision, const uint8_t peer[6],
+                                         bt_classic_bond_id_t *identity);
+esp_err_t bt_audio_classic_forget_request(uint64_t revision, const uint8_t peer[6],
+                                          const bt_classic_bond_id_t *identity, uint64_t *request_id);
 /* Cached bounded copy, no SDK calls. Unknown/read failure retains old rows
  * labelled unknown. Names stay explicitly unavailable; no identity inference. */
 /* Same-lock observation directly into caller-owned storage, without a large

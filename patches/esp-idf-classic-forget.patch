@@ -1,0 +1,220 @@
+--- a/config.c
++++ b/config.c
+@@ -398,6 +398,31 @@
+     *out_size = total_size;
+     return true;
+ }
++
++#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
++bool bt_classic_forget_fits_single_blob(const config_t *current)
++{
++    size_t size;
++    /* The size includes the terminating NUL, which is not written. A blob
++     * exactly CONFIG_FILE_MAX_SIZE bytes is a continuation on readback. */
++    return get_config_size(current, &size) && size <= CONFIG_FILE_MAX_SIZE;
++}
++
++esp_err_t bt_classic_forget_check_single_blob(const char *filename)
++{
++    nvs_handle_t handle;
++    esp_err_t error = nvs_open(filename, NVS_READONLY, &handle);
++    if (error != ESP_OK) return error;
++    size_t length = 0;
++    error = nvs_get_blob(handle, CONFIG_KEY "0", NULL, &length);
++    nvs_close(handle);
++    /* The existing reader ignores every continuation if chunk zero is
++     * shorter than the continuation size. No separate index is written. */
++    if (error != ESP_OK) return error;
++    if (!length) return ESP_ERR_INVALID_STATE;
++    return length < CONFIG_FILE_MAX_SIZE ? ESP_OK : ESP_ERR_INVALID_SIZE;
++}
++#endif
+
+ static int get_config_size_from_flash(nvs_handle_t fp)
+ {
+--- a/btc_config.c
++++ b/btc_config.c
+@@ -342,6 +342,23 @@
+     config_save(config, CONFIG_FILE_PATH);
+ }
+
++#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
++extern bool bt_classic_forget_fits_single_blob(const config_t *current);
++extern esp_err_t bt_classic_forget_check_single_blob(const char *filename);
++
++esp_err_t bt_classic_forget_config_check(void)
++{
++    if (!config) return ESP_ERR_INVALID_STATE;
++    if (!bt_classic_forget_fits_single_blob(config)) return ESP_ERR_INVALID_SIZE;
++    return bt_classic_forget_check_single_blob(CONFIG_FILE_PATH);
++}
++
++bool bt_classic_forget_config_save(void)
++{
++    return bt_classic_forget_fits_single_blob(config) && config_save(config, CONFIG_FILE_PATH);
++}
++#endif
++
+ int btc_config_clear(void)
+ {
+     assert(config != NULL);
+--- a/btc_storage.c
++++ b/btc_storage.c
+@@ -16,6 +16,11 @@
+ #include "device/bdaddr.h"
+ #include "btc/btc_config.h"
+ #include "btc_hh.h"
++#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
++#include "bt_classic_forget.h"
++#include "mbedtls/platform_util.h"
++#include "psa/crypto.h"
++#endif
+
+ /*******************************************************************************
+ **
+@@ -265,6 +270,85 @@
+ ** Returns          the num of the bonded device
+ **
+ *******************************************************************************/
++#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
++bool bt_classic_bond_id(const uint8_t key[16], bt_classic_bond_id_t *out)
++{
++    size_t length = 0;
++    return psa_hash_compute(PSA_ALG_SHA_256, key, sizeof(LINK_KEY), out->bytes, sizeof(out->bytes), &length) ==
++        PSA_SUCCESS && length == sizeof(out->bytes);
++}
++
++static bool classic_identity_locked(const char *address, LINK_KEY key, bt_classic_bond_id_t *id)
++{
++    size_t length = sizeof(LINK_KEY);
++    return btc_config_get_bin(address, BTC_STORAGE_LINK_KEY_STR, key, &length) &&
++        length == sizeof(LINK_KEY) && bt_classic_bond_id(key, id);
++}
++
++static void classic_address_string(const uint8_t peer[6], bdstr_t address)
++{
++    bt_bdaddr_t selected;
++    memcpy(selected.address, peer, sizeof(selected.address));
++    bdaddr_to_string(&selected, address, sizeof(bdstr_t));
++}
++
++esp_err_t bt_classic_forget_review(const uint8_t peer[6], bt_classic_bond_id_t *out)
++{
++    if (psa_crypto_init() != PSA_SUCCESS) return ESP_FAIL;
++    bdstr_t address;
++    LINK_KEY key = {0};
++    classic_address_string(peer, address);
++    btc_config_lock();
++    esp_err_t result = bt_classic_forget_config_check();
++    if (result == ESP_OK && !classic_identity_locked(address, key, out)) result = ESP_ERR_NOT_FOUND;
++    btc_config_unlock();
++    mbedtls_platform_zeroize(key, sizeof(key));
++    return result;
++}
++
++esp_err_t bt_classic_forget_storage(const uint8_t peer[6], const bt_classic_bond_id_t *expected)
++{
++    bdstr_t address;
++    bt_classic_bond_id_t identity;
++    LINK_KEY key = {0};
++    int type, pin;
++    uint8_t sc;
++    size_t sc_length = sizeof(sc);
++    classic_address_string(peer, address);
++
++    btc_config_lock();
++    esp_err_t result = bt_classic_forget_config_check();
++    if (result != ESP_OK) goto done;
++    result = ESP_ERR_INVALID_VERSION;
++    if (classic_identity_locked(address, key, &identity) &&
++               !memcmp(&identity, expected, sizeof(identity)) &&
++               btc_config_get_int(address, BTC_STORAGE_LINK_KEY_TYPE_STR, &type) &&
++               btc_config_get_int(address, BTC_STORAGE_PIN_LENGTH_STR, &pin) &&
++               btc_config_get_bin(address, BTC_STORAGE_SC_SUPPORT, &sc, &sc_length) &&
++               sc_length == sizeof(sc)) {
++        bool removed = btc_config_remove(address, BTC_STORAGE_LINK_KEY_STR);
++        removed &= btc_config_remove(address, BTC_STORAGE_LINK_KEY_TYPE_STR);
++        removed &= btc_config_remove(address, BTC_STORAGE_PIN_LENGTH_STR);
++        removed &= btc_config_remove(address, BTC_STORAGE_SC_SUPPORT);
++        if (removed && bt_classic_forget_config_save()) {
++            result = ESP_OK;
++        } else {
++            /* A failed write does not prove which image is durable. Retain
++             * the old cache; the owner reports an unconfirmed result. */
++            btc_config_set_bin(address, BTC_STORAGE_LINK_KEY_STR, key, sizeof(key));
++            btc_config_set_int(address, BTC_STORAGE_LINK_KEY_TYPE_STR, type);
++            btc_config_set_int(address, BTC_STORAGE_PIN_LENGTH_STR, pin);
++            btc_config_set_bin(address, BTC_STORAGE_SC_SUPPORT, &sc, sizeof(sc));
++            result = ESP_ERR_NOT_FINISHED;
++        }
++    }
++done:
++    btc_config_unlock();
++    mbedtls_platform_zeroize(key, sizeof(key));
++    return result;
++}
++#endif
++
+ int btc_storage_get_num_bt_bond_devices(void)
+ {
+     int num_dev = 0;
+--- a/btm_dev.c
++++ b/btm_dev.c
+@@ -36,8 +36,57 @@
+ #include "btm_int.h"
+ #include "stack/hcidefs.h"
+ #include "stack/l2c_api.h"
++#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
++#include "bt_classic_forget.h"
++#endif
+
+ static tBTM_SEC_DEV_REC *btm_find_oldest_dev_ex (tBTM_SEC_DEV_REC *exclude_rec);
++
++#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
++/* Pinned S31 archive. A zero capacity means the controller has no key
++ * store. Any other configuration needs its own deletion transaction. */
++extern uintptr_t odm_lk_store_capacity(void);
++
++esp_err_t bt_classic_forget_runtime(const uint8_t peer[6], const bt_classic_bond_id_t *expected, bool clear)
++{
++    if (odm_lk_store_capacity()) return ESP_ERR_NOT_SUPPORTED;
++    BD_ADDR address;
++    memcpy(address, peer, sizeof(address));
++    if (BTM_IsAclConnectionUp(address, BT_TRANSPORT_BR_EDR)) return ESP_ERR_INVALID_STATE;
++
++    /* Exact BR/EDR address. The general lookup also accepts LE aliases. */
++    tSecDevContext context = {.type = SEC_DEV_BDA, .context.p_bd_addr = address};
++    list_node_t *node = btm_cb.p_sec_dev_rec_list ?
++        list_foreach(btm_cb.p_sec_dev_rec_list, btm_find_sec_dev_in_list, &context) : NULL;
++    tBTM_SEC_DEV_REC *record = node ? list_node(node) : NULL;
++    if (!record || !(record->sec_flags & BTM_SEC_LINK_KEY_KNOWN)) return ESP_ERR_INVALID_VERSION;
++    if (record->hci_handle != BTM_SEC_INVALID_HANDLE || (record->sm4 & BTM_SM4_CONN_PEND) ||
++        record->sec_state != BTM_SEC_STATE_IDLE ||
++        (btm_cb.pairing_state != BTM_PAIR_STATE_IDLE && !memcmp(btm_cb.pairing_bda, address, sizeof(address)))) {
++        return ESP_ERR_INVALID_STATE;
++    }
++#if SMP_INCLUDED == TRUE
++    if (record == btm_cb.p_collided_dev_rec) return ESP_ERR_INVALID_STATE;
++#endif
++    bt_classic_bond_id_t identity;
++    if (!bt_classic_bond_id(record->link_key, &identity) || memcmp(&identity, expected, sizeof(identity))) {
++        return ESP_ERR_INVALID_VERSION;
++    }
++    if (clear) {
++        memset(record->link_key, 0, sizeof(record->link_key));
++        record->link_key_type = 0;
++        record->sec_flags &= ~(BTM_SEC_AUTHORIZED | BTM_SEC_AUTHENTICATED | BTM_SEC_ENCRYPTED |
++                               BTM_SEC_LINK_KEY_KNOWN | BTM_SEC_LINK_KEY_AUTHED | BTM_SEC_16_DIGIT_PIN_AUTHED);
++        /* Keep the record's LE link, keys, shared metadata and bond type.
++         * There is no unpair callback or GATT cancellation on this path. */
++        if (!(record->device_type & BT_DEVICE_TYPE_BLE) &&
++            record->ble_hci_handle == BTM_SEC_INVALID_HANDLE && !(record->sec_flags & BTM_SEC_LE_MASK)) {
++            list_remove(btm_cb.p_sec_dev_rec_list, record);
++        }
++    }
++    return ESP_OK;
++}
++#endif
+
+ /*******************************************************************************
+ **

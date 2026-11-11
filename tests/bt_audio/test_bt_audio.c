@@ -50,6 +50,7 @@ static unsigned security_replies, claim_calls, le_closes, discoverable_writes, s
 static unsigned closed_window_replies;
 static bool le_window, resource_current = true;
 static int bond_count = 1, shared_count = 1;
+static bool selected_storage_removed;
 static esp_err_t bond_list_error;
 static void (*bond_count_hook)(void);
 static void (*hf_rx)(const uint8_t *, uint32_t), (*a2_rx)(const uint8_t *, uint32_t);
@@ -89,7 +90,7 @@ int esp_bt_gap_get_bond_device_num(void) { return bond_count; }
 int btc_storage_get_num_all_bond_devices(void)
 { if (bond_count_hook) { void (*hook)(void) = bond_count_hook; bond_count_hook = NULL; hook(); } return shared_count; }
 esp_err_t esp_bt_gap_get_bond_device_list(int *count, esp_bd_addr_t *list)
-{ assert(*count >= bond_count); *count = bond_count; if (bond_count >= 1) memcpy(list[0], peer, 6); if (bond_count == 2) memcpy(list[1], other, 6); return bond_list_error; }
+{ assert(*count >= bond_count); *count = bond_count; if (bond_count >= 1) memcpy(list[0], selected_storage_removed ? other : peer, 6); if (bond_count == 2) memcpy(list[1], other, 6); return bond_list_error; }
 esp_err_t esp_bt_gap_set_scan_mode(esp_bt_connection_mode_t connection, esp_bt_discovery_mode_t discovery)
 { ++scan_mode_writes; if (discovery == ESP_BT_GENERAL_DISCOVERABLE) ++discoverable_writes; if (!drop_scan) gap_status = (esp_bt_gap_profile_status_t){.conn_mode = connection, .disc_mode = discovery}; return ESP_OK; }
 esp_err_t esp_bt_gap_get_profile_status(esp_bt_gap_profile_status_t *status) { *status = gap_status; if (after_status) { clock_hook = after_status; after_status = NULL; } return ESP_OK; }
@@ -169,6 +170,39 @@ esp_err_t bt_classic_scan_prepare(uint64_t request, const uint8_t address[6])
     scan_request = request;
     ++scan_prepares;
     return scan_prepare_error;
+}
+
+static uint8_t reviewed_incarnation = 1;
+static unsigned storage_calls, ram_posts;
+static esp_err_t storage_result;
+
+esp_err_t bt_classic_forget_review(const uint8_t address[6], bt_classic_bond_id_t *identity)
+{
+    assert(!audio_locked && !memcmp(address, peer, 6));
+    memset(identity, reviewed_incarnation, sizeof(*identity));
+    return ESP_OK;
+}
+esp_err_t bt_classic_scan_prepare_forget(uint64_t request, const uint8_t address[6],
+                                         const bt_classic_bond_id_t *identity)
+{
+    assert(identity->bytes[0] == reviewed_incarnation);
+    return bt_classic_scan_prepare(request, address);
+}
+esp_err_t bt_classic_forget_storage(const uint8_t address[6], const bt_classic_bond_id_t *identity)
+{
+    assert(on_btc && !audio_locked && !memcmp(address, peer, 6));
+    ++storage_calls;
+    if (storage_result != ESP_OK) return storage_result;
+    if (identity->bytes[0] != reviewed_incarnation) return ESP_ERR_INVALID_VERSION;
+    --bond_count;
+    selected_storage_removed = true;
+    return ESP_OK;
+}
+esp_err_t bt_classic_scan_commit_forget(uint64_t request)
+{
+    assert(on_btc && !audio_locked && request == scan_request && selected_storage_removed);
+    ++ram_posts;
+    return ESP_OK;
 }
 
 bool bt_classic_scan_release(uint64_t request, bool *restore)
@@ -1241,6 +1275,57 @@ static esp_err_t request_scan_connect(uint64_t *request)
                                   BT_AUDIO_CONNECT_A2DP, peer, request);
 }
 
+static void forget_owner_test(const char *scenario)
+{
+    bool multiple = !strcmp(scenario, "forget-other");
+    bool empty = !strcmp(scenario, "forget-empty");
+    bond_count = empty ? 0 : multiple ? 2 : 1;
+    initialized();
+    bt_audio_service();
+    bt_audio_bond_list_t before = observed_bonds();
+    bt_classic_bond_id_t identity;
+    esp_err_t reviewed = bt_audio_classic_forget_review(before.revision, peer, &identity);
+    if (empty) { assert(reviewed == ESP_ERR_INVALID_STATE); return; }
+    assert(reviewed == ESP_OK);
+    uint64_t request;
+    assert(bt_audio_classic_forget_request(before.revision, peer, &identity, &request) == ESP_OK);
+    if (!strcmp(scenario, "forget-rekey")) ++reviewed_incarnation;
+    bt_audio_service();
+    if (reviewed_incarnation != 1) {
+        assert(!scan_prepares && !storage_calls && bt_audio_snapshot().request_error == ESP_ERR_INVALID_VERSION);
+        return;
+    }
+    assert(scan_prepares == 1 && scan_request == request && !storage_calls && !ram_posts);
+    bool connected = !strcmp(scenario, "forget-acl");
+    bool expired = !strcmp(scenario, "forget-expired");
+    if (expired) clock_us += BT_AUDIO_COMMAND_TIMEOUT_US;
+    bt_audio_classic_scan_result(request, connected ? ESP_ERR_INVALID_STATE : ESP_OK);
+    if (!strcmp(scenario, "forget-nvs-error")) storage_result = ESP_ERR_NOT_FINISHED;
+    if (!strcmp(scenario, "forget-multiblob")) storage_result = ESP_ERR_INVALID_SIZE;
+    bt_audio_service();
+    if (connected || expired) {
+        assert(!storage_calls && !ram_posts && bt_audio_snapshot().request_status == BT_AUDIO_JOB_FAILED);
+        return;
+    }
+    assert(storage_calls == 1 && !claim_calls && !le_closes && !dispatch_calls);
+    if (storage_result != ESP_OK) {
+        assert(!ram_posts && bond_count == 1 && bt_audio_snapshot().request_error == storage_result);
+        assert(bt_audio_snapshot().request_status ==
+               (storage_result == ESP_ERR_NOT_FINISHED ? BT_AUDIO_JOB_UNCERTAIN : BT_AUDIO_JOB_FAILED));
+        return;
+    }
+    assert(ram_posts == 1 && bt_audio_snapshot().request_status == BT_AUDIO_JOB_WAITING);
+    bt_audio_classic_forget_committed(request + 1, ESP_OK);
+    bt_audio_service();
+    assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_WAITING);
+    bt_audio_classic_forget_committed(request, ESP_OK);
+    bt_audio_service();
+    assert(bt_audio_snapshot().request_status == BT_AUDIO_JOB_SUCCEEDED);
+    bt_audio_bond_list_t after = observed_bonds();
+    assert(after.known && after.count == (multiple ? 1 : 0) && after.revision != before.revision);
+    if (multiple) assert(!memcmp(after.bonds[0].address, other, sizeof(other)));
+}
+
 static void scan_owner_test(const char *scenario)
 {
     initialized(); bt_audio_service();
@@ -1331,6 +1416,7 @@ int main(int argc, char **argv)
         assert(result == ESP_OK && !bt_audio_snapshot().initialized && !bt_audio_snapshot().failed);
 #if CONFIG_APP_CLASSIC_SCAN_COORDINATION
         if (!strncmp(scenario, "scan-", 5)) scan_owner_test(scenario);
+        else if (!strncmp(scenario, "forget-", 7)) forget_owner_test(scenario);
         else
 #endif
         if (!strncmp(scenario, "pair-", 5)) pairing_lifecycle(scenario);

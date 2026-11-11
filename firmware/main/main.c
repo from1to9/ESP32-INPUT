@@ -780,7 +780,8 @@ static void refresh_media_context(void)
         .local_access = local_access(),
         .bluetooth_audio_devices = s_bluetooth_audio_devices &&
             (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES || s_overlay == APP_OVERLAY_AUDIO_DEVICE ||
-             (s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == APP_CONFIRM_AUDIO_PAIR)),
+             (s_overlay == APP_OVERLAY_CONFIRM &&
+              (s_confirmation == APP_CONFIRM_AUDIO_PAIR || s_confirmation == APP_CONFIRM_AUDIO_DEVICE_FORGET))),
         .screen_off = !visible, .display_asleep = s_idle.asleep && !s_idle.wake_capture, .preview_characters = s_interaction.view.preview_length};
     app_media_controls_context(&context);
 }
@@ -834,7 +835,8 @@ static void refresh_connectivity_context(void)
         .transport_switch_pending = s_transport_switch_pending,
         .bluetooth_audio_devices = s_bluetooth_audio_devices &&
             (s_overlay == APP_OVERLAY_BLUETOOTH_DEVICES || s_overlay == APP_OVERLAY_AUDIO_DEVICE ||
-             (s_overlay == APP_OVERLAY_CONFIRM && s_confirmation == APP_CONFIRM_AUDIO_PAIR))};
+             (s_overlay == APP_OVERLAY_CONFIRM &&
+              (s_confirmation == APP_CONFIRM_AUDIO_PAIR || s_confirmation == APP_CONFIRM_AUDIO_DEVICE_FORGET)))};
     app_connectivity_controls_context(&context);
 }
 
