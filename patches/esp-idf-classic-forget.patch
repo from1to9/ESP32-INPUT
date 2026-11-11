@@ -160,12 +160,13 @@
      int num_dev = 0;
 --- a/btm_dev.c
 +++ b/btm_dev.c
-@@ -36,8 +36,57 @@
+@@ -36,8 +36,59 @@
  #include "btm_int.h"
  #include "stack/hcidefs.h"
  #include "stack/l2c_api.h"
 +#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
 +#include "bt_classic_forget.h"
++#include "l2c_int.h"
 +#endif
 
  static tBTM_SEC_DEV_REC *btm_find_oldest_dev_ex (tBTM_SEC_DEV_REC *exclude_rec);
@@ -180,7 +181,8 @@
 +    if (odm_lk_store_capacity()) return ESP_ERR_NOT_SUPPORTED;
 +    BD_ADDR address;
 +    memcpy(address, peer, sizeof(address));
-+    if (BTM_IsAclConnectionUp(address, BT_TRANSPORT_BR_EDR)) return ESP_ERR_INVALID_STATE;
++    if (BTM_IsAclConnectionUp(address, BT_TRANSPORT_BR_EDR) ||
++        l2cu_find_lcb_by_bd_addr(address, BT_TRANSPORT_BR_EDR)) return ESP_ERR_INVALID_STATE;
 +
 +    /* Exact BR/EDR address. The general lookup also accepts LE aliases. */
 +    tSecDevContext context = {.type = SEC_DEV_BDA, .context.p_bd_addr = address};
@@ -218,3 +220,40 @@
 
  /*******************************************************************************
  **
+--- a/btu_hcif.c
++++ b/btu_hcif.c
+@@ -962,6 +962,9 @@
+     UINT8   reason;
+     BOOLEAN dev_find = FALSE;
+
++#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
++    bool disconnected = *p == HCI_SUCCESS;
++#endif
+     ++p;
+     STREAM_TO_UINT16 (handle, p);
+     STREAM_TO_UINT8  (reason, p);
+@@ -983,6 +986,24 @@
+ #endif
+
+     dev_find = btm_acl_disconnected(handle, reason);
++
++#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
++    /* L2CAP may reuse its link control block for a pending Classic
++     * reconnect. Any ACL still indexed by the completed handle belongs
++     * to the old physical link, even if the new page is queued. */
++    if (disconnected) {
++        tACL_CONN *retired = btm_handle_to_acl(handle);
++        if (retired
++#if BLE_INCLUDED == TRUE
++            && retired->transport == BT_TRANSPORT_BR_EDR
++#endif
++        ) {
++            BD_ADDR peer;
++            memcpy(peer, retired->remote_addr, sizeof(peer));
++            btm_acl_removed(peer, BT_TRANSPORT_BR_EDR);
++        }
++    }
++#endif
+
+ #if (BLE_FEAT_ISO_CIG_EN == TRUE)
+     // Not find device. it is iso handle

@@ -49,8 +49,11 @@ are preserved unless separately authorized.
 Audio Forget uses the selected Classic address and an opaque key fingerprint
 captured by the local confirmation. The Classic scan coordinator requires an
 inactive matching BR/EDR record and prevents new Classic pages during the
-request. BTC checks the same persisted identity and saves only the removal of
-its Classic fields. BTU then clears that exact RAM key and its Classic security
+request. BTU also rejects a selected peer with a pending Classic L2CAP link.
+A successful Classic Disconnect Complete retires any old ACL entry left
+after L2CAP processes the event, including when L2CAP retries on the same
+link control block. BTC checks the same persisted identity and saves the removal
+of its Classic fields. BTU then clears that exact RAM key and its Classic security
 flags. The LE handle, keys and shared bond state remain intact even at the same
 address. The Audio manager reports success after the refreshed list omits the
 selected address.

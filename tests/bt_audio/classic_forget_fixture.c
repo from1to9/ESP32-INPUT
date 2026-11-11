@@ -157,10 +157,12 @@ static struct {
     unsigned pairing_state;
     BD_ADDR pairing_bda;
 } btm_cb;
-static bool controller_store, classic_acl;
+static bool controller_store, classic_acl, classic_lcb;
 static uintptr_t odm_lk_store_capacity(void) { return controller_store ? 4 : 0; }
 static bool BTM_IsAclConnectionUp(const uint8_t *address, int transport)
 { assert(!memcmp(address, selected, 6) && transport == BT_TRANSPORT_BR_EDR); return classic_acl; }
+static void *l2cu_find_lcb_by_bd_addr(const uint8_t *address, int transport)
+{ assert(!memcmp(address, selected, 6) && transport == BT_TRANSPORT_BR_EDR); return classic_lcb ? &classic_lcb : NULL; }
 static bool btm_find_sec_dev_in_list(void *data, void *arg)
 {
     const list_node_t *node = data;
@@ -213,6 +215,11 @@ int main(void)
     classic_acl = true;
     assert(bt_classic_forget_runtime(selected, &identity, false) == ESP_ERR_INVALID_STATE);
     classic_acl = false;
+    classic_lcb = true;
+    assert(bt_classic_forget_runtime(selected, &identity, false) == ESP_ERR_INVALID_STATE);
+    assert(bt_classic_forget_runtime(selected, &identity, true) == ESP_ERR_INVALID_STATE);
+    assert(!writes && !memcmp(&before, &runtime, sizeof(runtime)));
+    classic_lcb = false;
     runtime.link_key[0] = 99;
     assert(bt_classic_forget_runtime(selected, &identity, true) == ESP_ERR_INVALID_VERSION);
     runtime.link_key[0] = 42;
