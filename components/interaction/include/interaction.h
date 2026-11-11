@@ -204,7 +204,7 @@ typedef struct {
     float calibration_accel_ref[3];
     uint64_t calibration_start_us;
     interaction_quaternion_t attitude;
-    float world_up[3], aim_pitch[3];
+    float world_up[3], aim_forward[3]; /* Reference-space up and body-space pointing ray. */
     float gravity[3], previous_accel[3], acquire_accel[3];
     bool gravity_ready, gravity_predicted, accel_seen, aim_aligned;
     uint64_t gravity_trusted_us, gravity_acquire_us;

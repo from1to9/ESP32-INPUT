@@ -903,17 +903,13 @@ static interaction_quaternion_t gyro_increment(const float gyro[3], float dt)
 
 static void set_aim_basis(interaction_t *m)
 {
+    float up[3];
+    rotate3(inverse_rotation(m->attitude), m->world_up, up);
     const float body_right[] = {1, 0, 0}, body_top[] = {0, 1, 0};
-    rotate3(m->attitude, body_right, m->aim_pitch);
-    float along_up = dot3(m->aim_pitch, m->world_up);
-    /* At a sideways calibration pose the right axis can be vertical. Use
-     * the screen top in that case. The selected basis then stays fixed. */
-    if (fabsf(along_up) > .988685997f) {
-        rotate3(m->attitude, body_top, m->aim_pitch);
-        along_up = dot3(m->aim_pitch, m->world_up);
-    }
-    for (size_t i = 0; i < 3; ++i) m->aim_pitch[i] -= along_up * m->world_up[i];
-    (void)normalize3(m->aim_pitch);
+    /* Capture a horizontal pointing ray in the current grip. When screen
+     * right is nearly vertical, screen top defines the starting pitch axis. */
+    cross3(up, fabsf(up[0]) > .988685997f ? body_top : body_right, m->aim_forward);
+    (void)normalize3(m->aim_forward);
 }
 
 /* Restore tilt from measured gravity after a real gap. Preserve the last
@@ -999,7 +995,9 @@ static bool update_reference(interaction_t *m, const interaction_imu_sample_t *s
 {
     float accel[] = {sample->ax_g, sample->ay_g, sample->az_g};
     const float norm = sqrtf(dot3(accel, accel));
-    const bool haptic = m->view.haptic_active;
+    /* A delayed sample has no contemporaneous haptic state. Keep its
+     * acceleration sanity check and use its gyro for prediction only. */
+    const bool haptic = !history && m->view.haptic_active;
     interaction_reference_diagnostics_t *d = reference_diagnostics(m);
     if (d) { d->work.dt = dt; d->work.dt_known = true; d->work.norm = norm; d->work.norm_known = true; }
     if (!haptic && (norm < .25f || norm > 2.5f)) {
@@ -1016,8 +1014,6 @@ static bool update_reference(interaction_t *m, const interaction_imu_sample_t *s
         }
         rotate3(inverse_rotation(m->attitude), m->world_up, m->gravity);
     }
-    /* The coordinator cannot associate present haptic state with a past
-     * sample. Only live samples may correct or acquire the reference. */
     if (haptic || history) {
         if (haptic) reference_rejected(m, true);
         m->gravity_acquire_samples = 0;
@@ -1280,18 +1276,20 @@ static input_delta_t motion_sample(interaction_t *m, input_owner_t source,
             m->aim_aligned = true;
             return (input_delta_t){0};
         }
-        /* The rotation vector of the world-space gyro increment is the
-         * body rotation vector rotated by the starting attitude. Express its
-         * angle per second directly, before gravity correction. */
-        float world_rate[3];
-        rotate3(previous_attitude, gyro, world_rate);
-        rates[0] = dot3(world_rate, m->world_up) * (m->config.invert_x ? -1.0f : 1.0f);
-        /* Positive pitch raises the calibrated aim. HID Y increases down. */
-        rates[1] = dot3(world_rate, m->aim_pitch) * (m->config.invert_y ? 1.0f : -1.0f);
-        /* Keep the saved gain and time constant as the fine-motion base.
-         * Faster projected turns cover more distance and need less lag. */
+        /* Project the gyro onto the tangent plane of the pointing ray in
+         * the starting pose. Rotation around the ray contributes no motion.
+         * Ease both axes to zero near vertical, where azimuth is ambiguous. */
+        float up[3], right[3], tangent_up[3];
+        rotate3(inverse_rotation(previous_attitude), m->world_up, up);
+        cross3(m->aim_forward, up, right);
+        cross3(right, m->aim_forward, tangent_up);
+        const float scale = 1 / fmaxf(sqrtf(dot3(right, right)), .25f);
+        rates[0] = dot3(gyro, tangent_up) * scale * (m->config.invert_x ? -1.0f : 1.0f);
+        rates[1] = dot3(gyro, right) * scale * (m->config.invert_y ? 1.0f : -1.0f);
+        /* Keep the saved gain as the fine-motion base and cap fast turns
+         * at twice that gain. Use the same response to shorten the filter. */
         const float speed = fmaxf(fabsf(rates[0]), fabsf(rates[1]));
-        response += fminf(speed / 20, 3);
+        response += fminf(speed / 120, 1);
     }
     const float alpha = m->config.filter_seconds == 0 ? 1 :
         1 - expf(-dt * response / m->config.filter_seconds);
