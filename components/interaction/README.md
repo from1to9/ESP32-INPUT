@@ -1,6 +1,9 @@
 # Portable interaction model
 
-The coordinator owns this fixed-storage C11 model. It has no board, UI, Bluetooth, heap or clock dependencies. The [product requirements](../../docs/requirements.md), [interaction design](../../docs/interaction.md) and [original prototype](../../design/app.js) define the preview/confirmation/send flow. The current nine-cell layout follows the user's subsequent 3x3 keyboard decision; the original prototype is not rewritten.
+The coordinator owns this fixed-storage C11 model. It has no board, UI,
+Bluetooth, heap or clock dependencies. The [product requirements](../../docs/requirements.md)
+and [interaction contract](../../docs/interaction.md) define the nine-cell
+keyboard, local confirmation, draft preview and explicit Send.
 
 Both selection stages use a row-major three-column, three-row grid with indices 0..8. The combined Letters page has nine groups of four, covering A-Z and 0-9 exactly once:
 
@@ -50,8 +53,8 @@ Call `interaction_touch_tick` after ordered queued events. A real stationary 0/0
 
 Board input is already axis-mapped angular velocity in degrees/second and acceleration in g, with monotonic microsecond timestamps. Calibration requires at least 64 consecutive samples spanning 500 ms, acceleration norm within 0.08 g of one, per-axis acceleration change within 0.03 g of the window's first sample, raw gyro no greater than 5 dps, and gyro variance no greater than 0.04 dps squared. It uses online statistics, not stored sample history. Reject nonfinite values, gyro outside +/-2000 dps, acceleration outside +/-16 g, repeated/backward timestamps, and intervals over 50 ms. Invalid/gapped intervals clear residual motion and restart an incomplete calibration window. Users must hold still; a gravity-only stationary check cannot distinguish every constant yaw rotation from bias.
 
-Mouse Motion uses gyro-propagated quaternion increments projected onto the
-aiming basis established by sensor calibration. Motion toggles and touch
+Mouse Motion uses gyro-propagated attitude and the aiming direction set during
+sensor calibration. Motion toggles and touch
 suppression preserve the basis and continuous attitude. Their output
 boundaries clear filter and carry and discard the first eligible interval.
 Keyboard selection uses its existing signed local angular axes and never
@@ -80,9 +83,9 @@ Keyboard angular position spans all three rows and columns. Selection compares o
 
 Touch movement accepts finite relative displacements in +/-4096 HID units per call, with gain divisors 1, 4 or 8, fractional carry and output bounded to +/-127. It requires active touch, Mouse mode, a current local owner and output readiness. Invalid/suppressed intervals and gain changes discard residual motion. HID units are not screen pixels. Calibration, axis orientation, default gain, filtering, freeze and selector thresholds still require actual-board tuning; host regressions do not establish physical accuracy.
 
-The [orientation design](../../docs/motion-estimation.md) specifies the
-calibrated basis, conditional gravity correction, gyro-only propagation and
-real-loss recovery. The model uses the existing right-handed display body
+The [aiming reference](../../docs/motion-estimation.md) describes the
+projection, conditional gravity correction, delayed-sample continuity and
+recovery after a real sample gap. The model uses the existing right-handed display body
 frame and the original 50 ms sample interval limit. Keyboard selection keeps
 its immutable signed axes and local grid geometry.
 

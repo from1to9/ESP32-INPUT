@@ -1,5 +1,6 @@
 .DS_Store
 build/
+/firmware/build-*/
 .build/
 managed_components/
 sdkconfig
@@ -13,3 +14,7 @@ __pycache__/
 node_modules/
 .tools/
 .agent/local/
+
+# Local design, experiment and investigation workspaces.
+/design/
+/experiments/

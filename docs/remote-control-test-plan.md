@@ -1,6 +1,6 @@
 # Remote control validation plan
 
-Status: proposed tests, 2026-10-21. No remote firmware, network security, BLE delivery, audio or screen-capture qualification is claimed by this plan. The Wi-Fi foundation is published at d0f1f6; current product/coordinator/BLE/USB source is distinct from the still-planned authenticated LAN/MCP interface. The proposed contract is [remote-control.md](remote-control.md); existing local acceptance remains in [validation.md](validation.md). The [complete matrix](api-function-matrix.md), [shared configuration](configuration.md), [network/update plan](wifi-management-ota.md) and [audio/recording plan](api-audio-recording.md) define full planned coverage. Finish these contracts before implementing new interfaces.
+Use this matrix to qualify the [LAN control API](remote-control.md), [configuration](configuration.md), [signed updates](wifi-management-ota.md) and [audio and recording](api-audio-recording.md). See [validation](validation.md) for completed checks and unresolved issues.
 
 ## Evidence and harness
 
@@ -10,7 +10,7 @@ Use three levels, recording each separately:
 
 1. **Host protocol tests:** deterministic time, actual parser and production coordinator, fault-injected transport/manager adapters, sanitizer and strict compiler checks where supported.
 2. **Target integration:** pinned SDK/BSP/firmware configuration on the actual S31 board; real TLS/WSS, heap/task-watermarks and Wi-Fi/Bluetooth contention. Use two independent client processes and an adversarial browser origin.
-3. **Host compatibility:** actual iPad Pro 2018, iPhone, Windows and macOS versions as available; controlled focus in a test field, physical takeover and real drag/key release. Qualify audio combinations and capture paths separately.
+3. **Host compatibility:** representative iPad, iPhone, Windows and macOS versions; controlled focus in a test field, physical takeover and real drag/key release. Qualify audio combinations and capture paths separately.
 
 A fake BLE adapter proves scheduler behavior, not radio delivery. A BLE API acceptance trace proves `sent` as defined by the contract, not the target UI outcome. A target screenshot or manual observation proves only its recorded predicate. Do not replace missing measurements with zero or infer qualification from compilation.
 
@@ -18,7 +18,7 @@ Every case starts from a captured boot ID, epoch, target, mode, lock, owner, rel
 
 ## Coverage matrix
 
-All rows are **planned / not run** until an evidence record says otherwise. `H` means host tests, `D` device integration and `C` actual target compatibility. All safety-relevant rows require their listed levels before the corresponding capability becomes available.
+Record results for each tested row and the firmware revision. `H` means host tests, `D` device integration and `C` actual target compatibility. All safety-relevant rows require their listed levels before the corresponding capability becomes available.
 
 | ID | Scenario / stimulus | Required result and evidence | Level |
 | --- | --- | --- | --- |
@@ -100,7 +100,7 @@ All rows are **planned / not run** until an evidence record says otherwise. `H` 
 
 ## Full registry/configuration/privacy/update cases
 
-All rows are planned, with H/D/C evidence levels as above. These extend the older input-focused matrix and inherit every schema/session/generation/capability test.
+Use the same H/D/C evidence levels for these additional cases.
 
 | ID | Scenario | Required result | Level |
 | --- | --- | --- | --- |
@@ -139,7 +139,7 @@ Before remote readiness is advertised, measure the exact firmware with two clien
 
 Record input/neutral-report scheduling latency distributions, watchdog overrun, queue high-water, minimum free internal heap, largest free block, task stack high-water, TLS memory and handshake time, radio disconnects, audio underruns and recovery outcomes. Proposed acceptance is no missed safety boundary, no leaked hold, no replay and no continuing resource growth. The 50 ms expiry scheduling allowance, queue/frame/client limits and coexistence readiness must be evidenced under worst tested load; reduce availability or fix the owning layer if they fail. Never relabel an overrun as a pass by changing only the test comparator.
 
-Use [existing device stages](validation.md#hardware-qualification-stages) for durations and host records. A planned 30-minute stress run or 8-hour soak is not a completed result. Record power, board revision, exact OS/Bluetooth stack, firmware/BSP/SDK commits and enabled profiles. Direct browser HTTPS also needs actual certificate setup/renewal checks on supported browsers; Mac pinning success does not qualify direct Safari access.
+Follow the [device qualification stages](validation.md#hardware-qualification-stages) and record the test duration. A planned 30-minute stress run or 8-hour soak is not a completed result. Record power, board revision, exact OS/Bluetooth stack, firmware/BSP/SDK commits and enabled profiles. Direct browser HTTPS also needs actual certificate setup/renewal checks on supported browsers; Mac pinning success does not qualify direct Safari access.
 
 ## Evidence record and release gates
 

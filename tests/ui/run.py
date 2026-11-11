@@ -77,8 +77,7 @@ def main():
         ROOT / "firmware/main/board_display_transfer.c", ROOT / "firmware/main/board_display_transfer.h",
         ROOT / "components/input_core/include/input_core.h",
         ROOT / "firmware/dependencies.lock",
-        ROOT / "design/ui-plan.md", ROOT / "docs/interaction.md",
-        ROOT / "design/native-wifi-ui.md",
+        ROOT / "docs/interaction.md", ROOT / "docs/wifi-provisioning.md",
     ]
 
     def hashes():

@@ -11,7 +11,7 @@
 #define HEIGHT 480
 #define IDLE_MS 10000
 #define FRAME_BYTES (WIDTH * HEIGHT * 2U)
-/* design/ui-plan.md: fixed input pages preserve gestures; one panel is dynamic. */
+/* docs/interaction.md: fixed input pages preserve gestures; one panel is dynamic. */
 #define CORE_OBJECT_LIMIT 120 /* Navigation plus the direct Manage devices entry. */
 #define PANEL_OBJECT_LIMIT 162 /* Two explicit Manage devices core objects extend every panel. */
 

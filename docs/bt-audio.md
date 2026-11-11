@@ -71,11 +71,6 @@ requires HCI voice data. A BLE-only configuration returns NOT_SUPPORTED; it
 cannot masquerade as implemented audio. Enabled controller status does not
 prove its runtime mode; BTDM is the shared owner's explicit precondition.
 
-[The unapplied BLE integration proposal](bt-audio-shared-stack.patch) adds a
-shared-stack entry point if the application later moves singleton setup out of
-BLE HID. It is an optional unapplied proposal, not required by the current
-BTDM lifecycle. Its zero-context patch can be inspected with
-`git apply --unidiff-zero --check docs/bt-audio-shared-stack.patch`.
 The audio module must not initialize a second controller or Bluedroid instance.
 
 ## Bounded Classic pairing
@@ -384,8 +379,5 @@ Run `python3 tests/toolchain/test_idf_patches.py` for isolated Git fixtures
 covering apply, idempotence, known partial recovery, wrong pins/digests and
 preservation of unrelated/unknown/staged SDK work and strict BSP verification.
 
-No board, host pairing, USB/serial, flashing or physical audio test was used.
-Capabilities remain physically unqualified. Actual microphone/speaker levels,
-HFP duplex behavior, A2DP/HFP/BLE coexistence, callback timing, host privacy and
-interoperability require later authorized device qualification. These are
-explicit evidence limits, not successful or zero-valued measurements.
+These checks cover source boundaries. See [validation](validation.md) for
+board observations, unresolved reconnection issues and audio coverage.

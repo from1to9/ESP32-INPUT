@@ -27,6 +27,4 @@ M5 examples target M5StickS3/CoreS3 and cannot simply be flashed to Mosaico. MCU
 
 ## Implementation provenance
 
-`components/input_core` and `design` are original project work, with no M5 implementation copied. The BSP remains an upstream submodule. No speech model weights or third-party binary libraries are committed.
-
-General engineering rules are adapted from QuantTrade's current working agreement and workflows, with domain-specific requirements removed. See [engineering standards](engineering.md#adaptation-source).
+`components/input_core` is original project work, with no M5 implementation copied. The BSP remains an upstream submodule. No speech model weights or third-party binary libraries are committed.

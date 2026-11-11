@@ -27,11 +27,12 @@ Bluetooth Battery and Device Information services are not implemented in this mi
 
 ## Reproduce locally
 
-Install Git, a C compiler and Python 3.11 or newer, then run from the repository root:
+Install Git, a C compiler with sanitizers and Python 3.11 or newer. Run these
+commands from the repository root. Follow the [companion setup](../bridge/README.md)
+if the host suite needs its pinned Python dependencies.
 
 ```sh
-git submodule update --init --recursive
-python3 tools/idf.py setup --python python3.12
+python3.12 tools/idf.py setup
 python3 tools/idf.py build
 python3 tools/check.py
 python3 tools/check_repository.py
@@ -66,8 +67,7 @@ Keep the pinned BSP's TE synchronization and internal DMA bounce path. TE mode
 uses full-frame rendering; reducing LVGL buffer height does not reduce that
 mode's frame or transfer demand. The ten-entry LCD transfer queue can retain
 roughly 80 KiB of bounce buffers plus overhead, so total free heap or the reserve
-alone cannot prove that transfers fit. The earlier expanded device image failed
-despite abundant external memory; see the [failed device gate](../docs/validation.md#expanded-baseline-failed-device-gate).
+alone cannot prove that transfers fit. Inspect both total free memory and the largest DMA-capable block.
 
 Runtime diagnostics retain six startup memory samples and the first allocation
 and Bluetooth failure until reboot, so late CDC attachment does not erase the
@@ -77,9 +77,24 @@ largest internal DMA blocks. These observations do not alter input admission,
 retry errors or restart the device. Check actual generated `sdkconfig` after
 changing defaults; an existing configuration keeps its previous values.
 
-The optional [local touchpad timing observer](../docs/touch-latency-diagnostics.md)
-captures one genuine ready Bluetooth pad movement window and reports it once;
-normal builds leave it disabled.
+## Opt-in diagnostics
+
+The following options are disabled by default. Enable the one needed for a
+specific diagnostic image. Record the image revision and enabled options with
+any results.
+
+| Configuration | Observation |
+| --- | --- |
+| `CONFIG_APP_TOUCH_LATENCY_DIAGNOSTICS` | Bounded Bluetooth touchpad timing. [Capture guide](../docs/touch-latency-diagnostics.md) |
+| `CONFIG_APP_MOUSE_PHASE_DIAGNOSTICS` | Coordinator timing after local Audio-to-Mouse selection. [Capture guide](../docs/touch-latency-diagnostics.md#coordinator-window-after-audio-playback) |
+| `CONFIG_APP_LOCAL_SPEAKER_TEST` | Audible local codec tone before normal media startup. [Test details](../tests/local_speaker/README.md) |
+| `CONFIG_APP_A2DP_ACL_DIAGNOSTICS` | Bounded A2DP packet-header and queue counts. [Field definitions](../docs/bt-audio.md#locating-a2dp-packet-loss-on-s31) |
+| `CONFIG_APP_CLASSIC_CONNECT_DIAGNOSTICS` | Bounded HCI and controller-slot observations around the first outbound Classic connection |
+| `CONFIG_APP_IMU_CAPTURE` | Ordered raw IMU frames. [Capture guide](../docs/motion-capture.md) |
+
+Keep raw captures, host identifiers and private recordings in an ignored
+local workspace. For the standard read-only sensor journal, see
+[sensor observations](../docs/sensor-api.md).
 
 ## Device procedure
 

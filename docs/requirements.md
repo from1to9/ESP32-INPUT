@@ -1,44 +1,15 @@
-# Product requirements v0.1
+# Product requirements
 
-Baseline: 2026-10-21. Product: ESP32-INPUT. Current user decisions take precedence over proposed defaults.
+ESP32-INPUT provides standard USB or Bluetooth mouse and keyboard input to
+one unlocked host. Basic input works without host software or Wi-Fi. The
+target board is ESP-Mosaico. Detect the board revision at startup and expose
+actual capabilities. iPhone, iPad, Windows and macOS are qualification targets.
 
-## Goal and scope
+This document describes required behavior. See [validation](validation.md)
+for the results and [roadmap](roadmap.md) for priorities. The
+[interaction contract](interaction.md) specifies the UI and input transitions.
 
-Use one Mosaico to control one unlocked iPhone, iPad or computer. Basic mouse and keyboard operation must work without a Mac or network. A Mac may later provide remote commands, screen recognition and heavier transcription, but is optional for local input.
-
-The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as v1.2 by its hardware eFuse; supported revisions must still be detected at runtime. Long-term external power is expected. The first release does not capture iOS screens, unlock devices or implement business approval, attendance or account-switching workflows.
-
-## Confirmed decisions
-
-1. Three primary modes: mouse, keyboard and microphone/speaker. Cold boot restores the last explicitly selected primary mode. With no saved choice it enters Mouse. Motion starts disabled and a restored Keyboard opens Touch.
-2. A click toggles Mouse Motion. Once enabled, rotate the device to aim using the direction established during calibration. See [Mouse behavior](#mouse-behavior).
-3. Motion character selection, touch selection and spoken English letters belong to keyboard mode.
-4. Prioritize iPhone, iPad, Windows and macOS. No proprietary target client is required for basic HID, but pairing, input layout and accessibility settings may still be necessary.
-5. Prefer concurrent mouse and microphone operation. Deliver independent modes first if concurrency cannot be made stable.
-6. Qualify three different connection cases separately: HID plus HFP/A2DP on one host; HID and audio on different hosts; multiple HID targets. The first case has priority. Remembering multiple bonds does not imply simultaneous control.
-7. Keep multiple Bluetooth pairings and show the actual connected peer. Bluetooth is a connection state, not a signal-strength meter in the product UI. Wi-Fi retains measured signal display.
-   Add host must lead to a visible pairing page showing the effective device
-   name, preparation, acknowledged advertising and remaining window, with Stop
-   and an actionable failure reason. If already connected, explain the required
-   disconnect before confirmation. Saved-host details support exact single-host
-   forgetting. Forget all waits for both bond removal and durable target-policy
-   cleanup; it does not implicitly open a new pairing window. Selection policy
-   changes, disconnection and new trust are distinct acknowledged operations.
-8. Functional mode and connection transport are independent. Every primary mode
-   offers Bluetooth or USB selection. System input settings select the shared
-   mouse/keyboard link; the Audio connection entry selects the audio link under
-   the Mic/Speaker workspace revision below. Their acknowledged connection states
-   remain separate, allowing the same-host and different-host cases above.
-   The initial input preference is Bluetooth and is saved after a successful
-   switch. Implement and qualify USB/Bluetooth mouse and keyboard first; audio
-   requires separate working drivers and host tests before its transport can be
-   shown as available.
-9. Wi-Fi is a separate management/control channel, not an alternative HID target.
-   It may remain connected while Bluetooth or USB carries input. Its services are
-   authenticated remote control, state reporting, MCP bridge access and firmware
-   download/update. Provisioning alone does not enable these services.
-
-## P0: complete the input loop
+## Input and safety
 
 | ID | Feature | Acceptance |
 | --- | --- | --- |
@@ -58,70 +29,28 @@ The initial tablet is an iPad Pro 2018. The development Mosaico is confirmed as 
 
 ### Mouse behavior
 
-Rotate the held device to aim the Mouse pointer. Calibrate while holding the
-desired aiming direction. The device tracks orientation and projects observed
-angular increments onto the calibrated axes. It sends relative movement over
-the existing USB or Bluetooth HID connection. Host software and screen
-calibration are unnecessary. Base gains are in HID units per degree, with
-independent X/Y sensitivity, inversion, filtering and touch freeze. Keyboard
-angular selection retains its existing behavior.
+Calibrate while holding the device in the desired aiming direction. Motion
+produces relative HID output and remains off at cold boot. Touch, menus,
+physical controls and haptics suppress it as defined in the interaction
+contract. Ordinary pauses preserve the valid reference and discard pending
+movement. Recenter changes the direction without recalibrating sensor bias.
+See [Mouse aiming](motion-estimation.md).
 
-The [Mouse interaction contract](interaction.md#mouse) defines reference
-retention, recovery and manual **Recenter**. The [orientation
-design](motion-estimation.md) describes the mapping, measured boundaries and
-the earlier translation experiments. Source and bench tests establish the
-implemented behavior. Physical aiming feel requires testing on the device.
-
-Touch start, physical button down, menus, calibration and keyboard selection suppress host pointer output. Entering keyboard/audio clears the motion intent; returning to mouse requires explicit re-enabling. Leaving fine control may restore the previous motion intent. Haptic feedback must also suppress IMU output during vibration.
-
-Tap-to-click defaults on and is a durable preference. A short stationary contact
-produces one left click; a second short contact produces the second click. On a
-second contact held or moved, dragging holds the left button until release.
-Movement outside the tap slop suppresses ordinary click recognition. With the
-preference off, the touchpad only moves the pointer; explicit click/drag controls
-remain available. Menus, lock, wake capture, owner/transport changes, stale
-gestures and cancellation must not generate clicks or leave a held button.
-Gesture time and distance bounds belong to the portable interaction profile.
-The [Mouse interaction contract](interaction.md#mouse) defines pad capture.
-
-Motion and touchpad gestures coexist. Enabling Motion does not disable the
-default single/double tap or double-tap-and-hold drag behavior. An explicitly
-saved movement-only preference remains respected. Touch takes pointer priority;
-release applies the configured settling freeze before restoring the existing
-motion intent. Single-finger swipes move the pointer without a hidden navigation
-action. Additional scroll/right-click gestures require actual multi-touch
-provider evidence; unavailable multi-touch must not be simulated from ambiguous
-single contacts. Expose concise gesture help, visible drag state and a clear
-release/cancel action. Gesture interruption must never leave a host button held.
-
-#### Optional Navigation controls
-
-Input settings provides a persisted **Navigation** layout, disabled by default.
-It replaces only the Mouse header Recenter rectangle with independent Home and
-Back buttons; pointer, wheel, critical controls, Menu, ordinary layout and keyboard
-draft behavior remain intact. Input settings retains **Recenter aim**, distinct
-from sensor calibration and unable to enable Motion by itself.
-
-Home uses the existing third mouse button and requires an explicit AssistiveTouch
-Button 3 to Home mapping. The setup instructions must permit returning to Mouse
-to emit the button during registration. Back is a Command+[ tap for supporting
-apps, not a system-wide return or a simulated screen swipe. Both use existing
-local ownership and USB/Bluetooth send/release recovery, and must not act across
-drag, lock, sleep, modal, maintenance or target/transport boundaries. See the
-[Navigation interaction contract](interaction.md#optional-navigation-layout).
+Tap-to-click defaults on. A contact originating on the pad keeps its pointer
+action until lift. Crossing the pad boundary cancels tap eligibility. Expose
+two-finger gestures only when the provider reports independent contacts.
+[Optional Navigation](interaction.md#optional-navigation-layout) uses explicit
+Home and Back controls while preserving the touchpad and scroll column.
 
 ### Keyboard behavior
 
-- First entry and re-entry from Mouse or Audio default to Touch. Menu, Settings, Keys and repeated selection of the current Keyboard mode preserve the current submode and draft; Motion remains explicitly selectable.
-- The device displays a two-level, three-column by three-row character grid; the host needs no custom input method. This user-requested nine-cell update supersedes the original six-cell layout while retaining the original preview and explicit-send workflow. Empty character cells cannot receive motion focus or confirm a character.
-- Motion changes local focus; AI single-click confirms. Touch uses the same grid and buffer.
-- Integrate relative angular movement, reset the center after confirmation, apply boundary hysteresis and never auto-confirm from dwell or jitter.
-- Characters enter preview first. Send emits key-down/key-up pairs without Enter. Track the accepted prefix and preserve only unsent text after interruption; never automatically replay a partial send.
-- A persistent Keyboard header Keys button opens a separate live-host panel from every submode. It sends explicit key-down/key-up pairs to the selected host. Copy/Paste/Undo/Select all follow the saved Ctrl/Command setting; no clipboard contents are read. Enter is deliberate and never appended by Send. Preview deletion, host Backspace and host forward Delete are distinct operations; key-panel actions leave the preview unchanged.
-- Initial encoding is US ANSI. The host must use a matching physical layout and English input mode. Other layouts require explicit support.
-- Transport acceptance does not prove text reached the intended field. Focus is user-controlled until a separate visual feedback loop exists.
+Entering Keyboard from another workspace selects Touch and preserves the
+draft. Motion changes local focus. The grid uses group selection, character
+confirmation and an explicit Send. Direct Keys actions leave the draft intact.
+The target must use a supported US ANSI physical layout. Interrupted sends
+leave the unsent suffix in the draft.
 
-## P1: spoken letters and independent audio
+## Spoken letters and independent audio
 
 | ID | Feature | Design |
 | --- | --- | --- |
@@ -134,57 +63,20 @@ drag, lock, sleep, modal, maintenance or target/transport boundaries. See the
 | A04 | Echo handling | Duplex playback/capture requires AEC and acoustic tests; otherwise limit experiments to separated output or half duplex |
 | A05 | Local recording | Explicit start/stop, visible capture state, bounded storage and duration, recoverable partial files, playback/list/delete/export and truthful completion; no automatic restart or upload |
 
-On-device letter recognition consumes local microphone frames; it does not require HFP transport. One audio manager owns capture/codec resources. Recognition and HFP must not independently reopen the codec.
+Selecting an audio route does not start Mic or Speaker. Expose waiting,
+active, stopping and fault states from the audio owner. Use a separate
+acknowledgement for mute and codec shutdown. Mic level describes fresh
+local samples and does not establish host capture. Start requires a usable
+route and appropriate capture permission. Recording requires explicit
+activation, visible indication and bounded storage. See the
+[media interface](api-audio-recording.md).
 
-The 2026-10-23 user revision simplifies the primary Audio workspace to Mic and
-Speaker. Do not expose Routes, Roles, Voice, recording setup or internal profile
-names as competing primary modes. The audio owner chooses a supported Bluetooth
-profile for the requested microphone/speaker combination; the UI does not guess
-from the HID connection. Connection transitions must stop and acknowledge old
-consumers before binding a new peer/profile. USB enumeration alone proves neither
-microphone delivery nor speaker playback. Show waiting, active, stopping and
-failure from actual stream/codec observations. Retain recording and spoken-letter
-backend contracts; spoken-letter controls remain in Keyboard.
-Each unavailable Start control must show the owning admission reason, such as
-missing host audio, unsupported microphone capability or an operation still
-stopping. Derive the explanation from the same decision that disables the
-control; a generic Off label or a previously successful command is insufficient.
+Qualify each audio route independently before coexistence. Treat same-host
+HID with HFP, same-host HID with A2DP, and different-host HID/audio as separate
+cases. Audio defaults off and the microphone muted. A known route or saved
+bond does not grant capture.
 
-The Mic card includes a live digital input level, derived from real local PCM
-already acquired with capture permission. Show a compact RMS dBFS value and a
-logarithmic bar, with separate off, waiting, unavailable, quiet and clipping
-states. Missing or stale samples must never look like silence or retain an old
-live value. This is local microphone activity, not proof that a host has saved
-or received a recording. Do not add hardware reads or retain audio for the meter;
-bound observation updates to 10 Hz and keep them independent of command
-revisions, audio scheduling and existing Start, Stop, Mute and volume controls.
-
-## P2: concurrency and remote extensions
-
-- Qualify same-host HID + HFP first and HID + A2DP separately. Enable background audio in mouse/keyboard mode only after qualification.
-- Different-host HID/audio requires independent peers, link states and failure rules. It is not a first-release default.
-- USB keyboard/mouse plus diagnostic CDC is part of the current input work. UAC audio composition still needs separate resource and OS validation.
-- Mac/Codex actions must pass through one coordinator. Local activity takes ownership immediately, consuming the first takeover action rather than forwarding it.
-- Full offline English transcription, air handwriting, multiple simultaneous HID targets and LE Audio do not block P0.
-
-## Resources and failures
-
-Prioritize key release and HID scheduling over animation, recognition and audio UI. On overload, reduce UI refresh or stop experimental recognition; never silently discard key-up. Disconnect cancels the queue. Recognition results from an old session must not reach a new target.
-
-Audio defaults off and the microphone muted. Keep samples in short-lived memory, with no recording persistence or upload by default. Diagnostic capture requires explicit activation and indication. Standalone operation does not require Wi-Fi.
-
-## Added foundation and deployment requirements
-
-- Provide a global haptic feedback switch. Confirmations, mode changes, locking and errors may use short bounded pulses; continuous motion and per-report transmission stay silent. Missing or failed motors expose an unavailable capability. Runtime disable cancels pending pulses; the preference is saved with other device settings.
-- Keep input semantics, encoding, queues and remote contracts independent of board pins and BSP types. Porting to another ESP32 requires a board adapter and explicit feature/transport capabilities, plus independent hardware qualification.
-- Support extended external-power operation with bounded memory/queues, watchdog coverage, rate-limited diagnostics, no-host USB logging behavior, fault recovery and long-duration evidence. A brief successful run is insufficient for this claim.
-- Before unattended-use qualification, define an idle display dim/off policy that does not suspend Bluetooth control, verify available power/temperature telemetry, and test supply interruption and thermal behavior under realistic enclosure conditions. Do not invent battery, charging or temperature capabilities on boards that do not expose them. Coalesce persistent settings and avoid per-frame or per-heartbeat flash writes.
-- Design Wi-Fi remote control and state display for all implemented capabilities, with authenticated ownership, local override and explicit unavailable features. The [remote-control contract](remote-control.md) defines the API and MCP bridge boundary.
-- Review all first-party code in an independent conversation and retain actionable findings, fixes and relevant retest evidence before delivery.
-
-## Device basics added to the current delivery
-
-These additions preserve the original Mouse / Keyboard / Audio workflows.
+## Device controls and persistence
 
 | ID | Feature | Acceptance |
 | --- | --- | --- |
@@ -198,141 +90,40 @@ These additions preserve the original Mouse / Keyboard / Audio workflows.
 | D08 | Startup identity | Show a lightweight ESP32-INPUT startup logo consistent with the dark/pale-blue design, then hand off to the saved workspace (Mouse by default). No artificial startup delay, additional full-frame allocation, hidden fault or automatic microphone activation. |
 | D09 | Developer and source identity | About and startup diagnostics identify the developer, repository and build-time Git commit with Clean/Modified/Unknown state. Preserve the separate firmware version and ELF build fingerprint. Missing Git data is unknown, never a fabricated commit or clean claim. |
 
-Project attribution and source identity follow the [build identity contract](build-identity.md).
+Restore the saved workspace at cold boot, with Mouse as the fallback and
+Touch as the Keyboard entry mode. AI double-press opens Menu. A sustained AI
+press locks or unlocks through the [physical control contract](interaction.md#physical-controls).
+Coalesce validated preference writes. Preserve unknown state when capability,
+power or storage evidence is missing. [Configuration](configuration.md) owns
+types, units and apply/save semantics.
 
-### Focused mode workspace revision
+## Connectivity and updates
 
-The user subsequently requested that each mode show only its core controls,
-opening mode selection, device status and settings through a screen button or
-physical AI double-click. This explicitly supersedes the prototype's persistent
-bottom tabs and detailed header, while preserving its product workflows. Keep
-the menu entry discoverable and at least 44 px, the current mode and input
-context understandable, and lock/remote/recording/error state visible when
-relevant. Do not turn touchpad movement into hidden navigation gestures.
+- Bluetooth stores multiple bonds and uses one active HID destination.
+  Mouse & Keyboard and Audio have separate records and readiness. New pairing
+  requires a bounded window. Disconnect retains the bond. Forget acts on the
+  exact selected record where supported. [Peer behavior](bluetooth-peer-snapshots.md)
+- Wi-Fi joins an existing station network. The setup hotspot is a bounded
+  recovery option. Keep Wi-Fi credentials inside the local editor and network
+  owner. Station connectivity alone grants no LAN access. [Wi-Fi setup](wifi-provisioning.md)
+- Local UI, HTTPS/WSS and MCP share typed semantics and owner validation. LAN
+  clients require scoped authorization. Local lock, takeover and release keep
+  priority over scans, reconnects and transfers. [LAN API](remote-control.md)
+- Firmware updates verify the signed artifact and matching layout, stage an
+  inactive application slot and activate only after the release and maintenance
+  gates. Preserve the confirmed image across interrupted staging and require
+  health confirmation or rollback. Partition migration and recovery are
+  separate operations. [Update procedure](wifi-management-ota.md)
+- The sensor journal exposes actual sensor availability, ordered timestamps,
+  units and explicit loss over USB or authenticated LAN. Diagnostic capture
+  and export stay bounded and keep raw private data local. [Sensor API](sensor-api.md)
 
-Mouse prioritizes a large relative pad, scroll, motion and click/drag/release.
-Keyboard prioritizes the nine-cell grid, draft and explicit Delete/Space/Send;
-submode and infrequent editing controls are on demand. Audio prioritizes mute,
-volume and true capability/session state. POWER retains hardware power control;
-AI single-click remains contextual, double-click opens the shared menu, and
-long press locks/unlocks. Runtime BOOT access is not assumed.
+## Qualification
 
-Reduce hidden-page work, redundant invalidation and eager object allocation
-without weakening whole-gesture wake, local takeover, stale-event rejection or
-credential clearing. Compare actual LVGL object counts and idle drawing before
-and after the change, and measure target internal/DMA memory separately. A
-sparser layout alone does not prove the existing display failure is repaired.
+Validate source, host behavior, the pinned target build and actual hardware
+at their respective boundaries. Use [validation procedures](test-coverage.md)
+and the [delivery checklist](delivery-checklist.md). Extended powered use
+requires measured timing, resources, thermal behavior and recovery.
 
-Display brightness defaults to 50 percent, with ten-percent steps from 10 to 100.
-Physical touch/button activity resets inactivity; routine sensor, radio and
-status updates do not keep the screen awake. Screen Off is not a lock, system
-sleep or HID cancellation. An AI hold used to wake cannot also unlock. Changing
-the timeout starts a fresh interval; selecting Off wakes the display.
-
-The BQ27220 percentage remains the gauge's reported estimate, not a separately
-validated battery-capacity measurement. The pinned board has no independent
-external-power signal. A lack of USB enumeration must not be presented as proof
-that external power is absent.
-
-The setup hotspot is explicit, expires after ten minutes and uses a fresh local
-password/session. HTTP provisioning is restricted to its local interface with
-bounded input, session validation and escaped output. Saved Wi-Fi passwords are
-never shown or logged. Development flash is not encrypted; do not claim physical
-credential protection. Provisioning security does not qualify the later remote
-control API. Wi-Fi setup must not erase bonds or unrelated settings on failure.
-
-This hotspot is a recovery-only capability, not the normal Wi-Fi setup flow.
-The user's existing router credentials stay inside the private local editor
-and network owner; they never enter the HID preview or require typing a newly
-generated device password on another computer.
-
-## Complete delivery boundary
-
-The latest user request requires all previously accepted modules, including real
-audio/recording, spoken-letter input, configuration, authenticated LAN control,
-MCP, firmware updates, motion refinement and the startup logo, to be completed
-before the next combined submission. Earlier
-published checkpoints remain historical evidence. Module self-tests and
-independent review continue during development; no placeholder or successful
-build counts as a completed physical capability. Preserve explicit hardware and
-host qualification limits, and report any requirement that cannot be implemented
-on the actual board rather than silently dropping it.
-
-The latest delivery instruction defers all device testing and flashing. Complete
-local host/native tests, the pinned target build and independent review, then
-commit and push the combined source. Do not access serial/USB, pair a host,
-install firmware or perform physical tests for this delivery. Physical
-qualification remains pending and is not a source-publication gate. Installation,
-partition migration, acoustic quality, host compatibility and endurance must not
-be reported as verified by source tests. The [delivery checklist](delivery-checklist.md)
-tracks implementation separately from that deferred evidence.
-
-## Connection management and firmware updates
-
-These requirements extend the reviewed single-network provisioning checkpoint;
-they are not claims that the current firmware implements the following services.
-
-All implemented device functions must have typed Wi-Fi API operations or an
-explicitly documented physical-presence exception. Plan the complete operation
-inventory and shared configuration schema before implementing new interfaces.
-Include input, settings, connections, volume/mute, microphone/speaker, recording
-and data access, updates, status and events. Unsupported capabilities must reject
-operations truthfully. API admission is not completion or observed host success.
-
-Use one validated configuration model across local UI, API and MCP: defaults,
-types, units, bounds, capability dependencies, apply/restart semantics, version
-and persistence policy. Make interaction, haptics, display, reconnect/work policy
-and audio/recording parameters configurable where the owning driver permits it.
-Keep board profiles/pins separate from runtime preferences. Immutable resource
-and safety limits remain explicit; configuration cannot invent missing hardware.
-Apply changes transactionally, preserve previous values on rejected validation,
-coalesce actual durable changes and report uncertain storage without fake rollback.
-Do not persist per-frame state or write unchanged defaults on every boot.
-
-- Provide a bounded Wi-Fi scan list with current, saved, secured and unsupported
-  states. Selecting a supported network opens Join or Connect. Keep credentials
-  masked and local, support saved-network ordering, and bound background retries.
-- Provide saved Bluetooth HID targets with explicit selection and priority. A
-  BLE peripheral cannot infer connectable HID hosts from arbitrary advertisements.
-  A nearby scan, if supported, must distinguish discovery from host eligibility;
-  never offer a fake connection action. New pairing still needs the host's Bluetooth
-  settings. Selected-target reconnect must respect the SDK's identity/privacy
-  capabilities and preserve input cancellation across changes.
-- Keep reconnect ordering separate from runtime work priority. Input-first is
-  the default, with balanced and management-first policies where supported.
-  Background scanning, reconnect and transfer work must be bounded; key release,
-  local lock and local override retain priority under every setting.
-- Provide an independently authorized firmware-update API over the management
-  channel. A request identifies an approved HTTPS firmware source and verified
-  artifact identity. Download to an inactive application slot, validate target,
-  board compatibility, size and integrity, and expose progress/error state.
-- Preserve the running image until validation succeeds. Stop remote work and
-  release held input before installation/restart. Interrupted downloads must not
-  replace the bootable image; a failed new-image health check must roll back.
-  Reject concurrent updates and define cancellation, retry and reboot boundaries.
-- Keep credentials, tokens, private download URLs and update logs out of Git and
-  public status. Firmware authenticity needs an explicit trust/provisioning model;
-  a checksum alone is not authorization. Do not silently change secure-boot eFuses.
-- Qualify partition migration and power-loss recovery before exposing installation.
-  Keep the original factory backup and preserve bonds, profiles and preferences.
-- Prefer the existing station LAN connection for subsequent development updates,
-  status inspection and diagnostic capture downloads after authenticated
-  commissioning and device qualification. Ordinary iteration should not require
-  entering USB download mode. USB remains the recovery path when boot or network
-  services are unavailable; the requested no-new-backup procedure remains a
-  separate deployment choice.
-- Provide bounded, authenticated diagnostic exports with explicit capture
-  identity, firmware/configuration identity, sequence/loss accounting and
-  completion/integrity evidence. Network transfer must not block sensor acquisition
-  or input handling, grant input ownership, or silently start audio recording.
-  Interrupted or incomplete exports remain visibly incomplete. Keep private
-  addresses, credentials, input text and audio outside ordinary diagnostic logs.
-- Provide a [live sensor read API](sensor-api.md) over the existing USB and
-  authenticated station LAN transports, independent of Mouse Motion and screen
-  blanking. Expose actual available sensors and observed input events with units,
-  timestamps, source identity and explicit loss/unknown state. Support independent
-  developer readers and bounded host recording without additional sensor owners.
-
-### Shared Bluetooth manager revision (2026-11-04)
-
-One Bluetooth devices page serves system settings and Audio Manage devices, with entry-selected Mouse & Keyboard / Audio purposes. Each purpose lists its actual saved records, search name and pairing state and exposes only owner-supported operations. Names or private addresses do not merge pairing authority. The original mode, keyboard draft and input transport survive management. Audio remains off until separately started. Unsupported Classic single deletion must remain explicit; no address-only optimistic deletion is acceptable. The [native contract](../design/native-bluetooth-devices.md) and [prototype](../design/bluetooth-devices.html) define the 480px flow.
+Host screen capture, automatic unlock, full dictation, air handwriting and
+multi-target HID broadcast are outside the initial release scope.

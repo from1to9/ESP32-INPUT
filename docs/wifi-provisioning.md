@@ -1,6 +1,9 @@
 # Device-side station provisioning
 
-Status: station scan/join service implemented and boundary-tested, 2026-10-21; device UI/coordinator integration and device acceptance are separate. The normal workflow is **device scans -> person selects a network and enters its password on the device -> device joins the existing LAN**. The computer stays on its existing network. A temporary setup hotspot is an explicit fallback, not the default. The expanded station HTTPS/WSS API, remote HID, MCP, eight saved profiles and OTA source are now integrated under the [complete matrix](api-function-matrix.md) and [network/update design](wifi-management-ota.md).
+Open **Settings → Wi-Fi** and scan for an existing network. Select the network
+and enter its password on the device. Wait for station status to show an IP
+address. The controller stays on the existing LAN. The optional recovery
+hotspot requires explicit activation. LAN control requires separate enrollment.
 
 ## Integration contract
 
@@ -21,7 +24,7 @@ At a fresh explicit selection call `app_wifi_select_scan_record` and bind its ti
 
 Ordinary row joins with `selection_id=0` still validate generation/index/SSID and the 30-second list lifetime at admission and execution. A selection ticket is an explicit local editing policy, not a silent bypass or conversion to manual. Manual/hidden WPA2 entry is separately explicit (all three identity fields zero) and needs a corresponding editor before UI exposure. Secrets remain write-only. The same worker now supports save-only, named join/forget and complete priority reorder through `app_wifi_profiles.h`; the join/scan cancellation contract stays separate.
 
-`APP_WIFI_OBTAINING_IP` means association without valid IPv4. `lan_ready` requires actual association with the selected SSID and nonzero station IPv4; it proves neither Internet access nor server readiness. `backend_available/backend_error` are now copied from the actual station TLS owner by the control runtime. Before usable trust/listener readiness they remain unavailable, even with an IP. A running listener is separate from browser trust or successful client authentication. The [native UI extension](../design/native-wifi-ui.md) owns private entry and rendering; the coordinator owns intent/epoch/editor handoff.
+`APP_WIFI_OBTAINING_IP` means association without valid IPv4. `lan_ready` requires actual association with the selected SSID and nonzero station IPv4; it proves neither Internet access nor server readiness. `backend_available/backend_error` are now copied from the actual station TLS owner by the control runtime. Before usable trust/listener readiness they remain unavailable, even with an IP. A running listener is separate from browser trust or successful client authentication. The [native UI extension](interaction.md#status-connectivity-and-display) owns private entry and rendering; the coordinator owns intent/epoch/editor handoff.
 
 The public snapshot contains no credential/token. It distinguishes initialized/configured state, current SSID, IP/RSSI, disconnect/retry/pending state and operation/connection/cleanup/storage errors. `configured` and `ssid` describe runtime selection. `stored_data_known` establishes whether presence is known; `stored_data_present` is meaningful only then. `stored_ssid` is empty for absent, unreadable or uncertain storage. A corrupt record may be known-present without a usable SSID. `storage_uncertain/storage_error` survive radio/setup success; only an explicit successful save/forget/read verification resolves them. Verification never switches the runtime network. Permit forget/recovery even with no configured network or known SSID; never fabricate a name.
 

@@ -10,7 +10,7 @@
 ## Context and collaboration
 
 - Inspect the actual repository root, branch, HEAD and working tree before editing. Preserve unrelated work. Isolate changes when they overlap or validation could disturb another checkout; file count alone does not require a worktree.
-- Read only relevant contracts. [Engineering standards](docs/engineering.md) govern implementation and validation; product behavior belongs in [requirements](docs/requirements.md) and its linked design documents.
+- Read only relevant contracts. [Engineering standards](docs/engineering.md) govern implementation and validation; product behavior belongs in [requirements](docs/requirements.md) and its linked interface contracts.
 - Batch independent reads. Keep dependent edits and shared-state mutations sequential. Delegate only when the user or governing runtime instructions permit it, with bounded ownership and evidence to integrate.
 - Inspect the requested environment directly. Do not infer another machine, checkout, connection or process state from local observations or historical notes. A future-run preference does not authorize restarting healthy active work.
 
@@ -21,7 +21,7 @@
 - Distinguish unknown, unavailable, rejected and successful outcomes. Missing evidence is not success or zero. Fail closed when continuing requires unavailable evidence.
 - Prefer small, cohesive changes with explicit ownership and bounded resources. Preserve durable state and recovery artifacts; ignored files are not automatically disposable.
 - Keep first-party repository content in English. Communicate with the user in their preferred language. Preserve third-party source, license and provenance rather than translating vendored material.
-- Treat the approved product requirements, interaction contract and original UI prototype as implementation acceptance criteria. Do not substitute diagnostic controls for product flows or rewrite the design to justify an implementation gap. Track unsupported capabilities explicitly; verify the actual rendered device UI against the original layout and behavior before delivery.
+- Treat the product requirements and interaction contract as implementation acceptance criteria. Preserve the original UI prototype in local design records and consult it when available. Do not substitute diagnostic controls for product flows or rewrite the design to justify an implementation gap. Track unsupported capabilities explicitly; verify the actual rendered device UI against the layout and behavior defined in the interaction contract before delivery.
 
 ## Validation and delivery
 

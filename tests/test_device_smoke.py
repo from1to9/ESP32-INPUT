@@ -137,7 +137,7 @@ class AudioJobParserTests(unittest.TestCase):
                 self.assertEqual(summary["audio_jobs"]["slots"]["3"]["last_report"]["assessment"], expected)
 
     def test_failure_reasons_and_cleanup_errors_cannot_be_hidden_by_normal_stops(self):
-        for reason in (5, 6, 8, 9, 10, 11, 12, 13):
+        for reason in (5, 6, 8, 9, 10, 11, 12, 13, 15):
             for state in (3, 4, 6, 7):
                 with self.subTest(reason=reason, state=state):
                     summary = result(self.capture([audio_job(state=state, stop_reason=reason, error=13)]))
@@ -161,7 +161,7 @@ class AudioJobParserTests(unittest.TestCase):
 
     def test_enum_boolean_slot_and_counter_domains_reject_poison(self):
         domains = {"slot": (-1, 4, 4294967295), "kind": (-1, 5), "state": (-1, 8, 4294967295),
-                   "stop_reason": (-1, 15), "error": (-1, 19, -1515870811),
+                   "stop_reason": (-1, 16), "error": (-1, 19, -1515870811),
                    "first_frame": (-1, 2, 165), "cleanup": (-1, 2, 165)}
         for field in smoke.AUDIO_JOB_COUNTERS:
             domains[field] = (-1,)
