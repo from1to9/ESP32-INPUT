@@ -1284,7 +1284,8 @@ static input_delta_t motion_sample(interaction_t *m, input_owner_t source,
         cross3(m->aim_forward, up, right);
         cross3(right, m->aim_forward, tangent_up);
         const float scale = 1 / fmaxf(sqrtf(dot3(right, right)), .25f);
-        rates[0] = dot3(gyro, tangent_up) * scale * (m->config.invert_x ? -1.0f : 1.0f);
+        /* Positive rotation about up moves the ray left. HID X increases right. */
+        rates[0] = dot3(gyro, tangent_up) * scale * (m->config.invert_x ? 1.0f : -1.0f);
         rates[1] = dot3(gyro, right) * scale * (m->config.invert_y ? 1.0f : -1.0f);
         /* Keep the saved gain as the fine-motion base and cap fast turns
          * at twice that gain. Use the same response to shorten the filter. */

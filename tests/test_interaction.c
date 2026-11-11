@@ -45,12 +45,12 @@ static input_delta_t motion(interaction_t *m, uint64_t *time, uint64_t dt,
     *time += dt;
     interaction_imu_sample_t s = sample(*time, gx, gy);
     /* Existing scalar pointer tests request horizontal/vertical angular rates.
-     * Mouse fixtures express them as screen-up yaw Z and pitch X; keyboard
+     * Mouse fixtures express right/up as screen-up -Z/+X; keyboard
      * fixtures retain their explicit X/Y selector mapping. */
     if (m->view.mode == INPUT_MOUSE) {
         s.gx_dps = 1 + gy + 2;
         s.gy_dps = -2;
-        s.gz_dps = .5f + gx - 1;
+        s.gz_dps = .5f - (gx - 1);
     }
     return interaction_motion_sample(m, &s);
 }
@@ -1095,7 +1095,7 @@ static void aim_axes_follow_the_held_direction(void)
         const float gravity[] = {-cosf(e) * sinf(r), sinf(e), cosf(e) * cosf(r)};
         const float tangent_up[] = {-sinf(r), 0, cosf(r)};
         const input_delta_t yaw = physical_sample(&m, &time, 10000,
-            100 * tangent_up[0], 0, 100 * tangent_up[2], gravity[0], gravity[1], gravity[2]);
+            -100 * tangent_up[0], 0, -100 * tangent_up[2], gravity[0], gravity[1], gravity[2]);
         fprintf(stderr, "aim at yaw %+d: up=%d cross=%d roll=%d right=%d cross=%d\n",
             direction * 90, pitch, pitch_cross, roll_motion, yaw.x, yaw.y);
         assert(pitch < -100 && pitch_cross == 0 && roll_motion == 0 && yaw.x > 0 && yaw.y == 0);
@@ -1118,7 +1118,7 @@ static void calibrated_projection_and_independent_gains(void)
                 assert(interaction_configure(&m, &config));
                 (void)physical_sample(&m, &time, intervals[rate], 0, 0, 0, 0, sinf(tilt), cosf(tilt));
                 int total_x = 0, total_y = 0;
-                const float yaw = 25 * (float)direction;
+                const float yaw = -25 * (float)direction;
                 for (uint64_t elapsed = 0; elapsed < 1000000; elapsed += intervals[rate]) {
                     const input_delta_t d = physical_sample(&m, &time, intervals[rate], 0,
                         yaw * sinf(tilt), yaw * cosf(tilt), 0, sinf(tilt), cosf(tilt));
@@ -1155,7 +1155,7 @@ static void aiming_turns_stop_and_return_across_angle_wrap(void)
         uint64_t time = physical_grip(&m, 0);
         int displacement = 0;
         for (unsigned direction = 0; direction < 2; ++direction) {
-            const float rate = direction ? -rates[speed] : rates[speed];
+            const float rate = direction ? rates[speed] : -rates[speed];
             for (unsigned i = 0; i < counts[speed]; ++i) {
                 const input_delta_t delta = physical_sample(&m, &time, 10000, 0, 0, rate, 0, 0, 1);
                 assert(m.gravity_ready && delta.y == 0 && (direction ? delta.x <= 0 : delta.x >= 0));
@@ -1185,7 +1185,7 @@ static void aiming_sideways_calibration_and_gravity_only_correction(void)
     assert(interaction_set_motion(&m, true));
     assert(m.gravity_ready && m.aim_forward[2] == 1 && m.world_up[0] == 1);
     (void)physical_sample(&m, &time, 10000, 0, 0, 0, 1, 0, 0);
-    const input_delta_t yaw = physical_sample(&m, &time, 10000, 50, 0, 0, 1, 0, 0);
+    const input_delta_t yaw = physical_sample(&m, &time, 10000, -50, 0, 0, 1, 0, 0);
     assert(yaw.x == 2 && yaw.y == 0);
     /* A smooth accelerometer drift inside the correction gate can change the
      * attitude estimate. Zero gyro still means zero cursor movement. */
@@ -1208,26 +1208,26 @@ static void aiming_default_response_stops_and_reverses_cleanly(void)
     (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
     /* At the default filter, a gentle turn starts moving within 20 ms. */
     for (unsigned i = 1; i <= 2; ++i)
-        assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == (i == 2));
+        assert(physical_sample(&m, &time, 10000, 0, 0, -25, 0, 0, 1).x == (i == 2));
     assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
     int distance = 0;
     for (unsigned i = 0; i < 100; ++i) {
-        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 250, 0, 0, 1);
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, -250, 0, 0, 1);
         assert(d.x >= 9 && d.x <= 20 && !d.y);
         distance += d.x;
     }
     assert(distance >= 1975 && distance <= 1985);
-    assert(physical_sample(&m, &time, 50000, 0, 0, 500, 0, 0, 1).x == 127);
+    assert(physical_sample(&m, &time, 50000, 0, 0, -500, 0, 0, 1).x == 127);
     assert(m.pointer_motion.x == 0);
     for (unsigned i = 0; i < 30; ++i) {
         const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
         assert(!d.x && !d.y);
     }
     for (unsigned i = 0; i < 40; ++i)
-        (void)physical_sample(&m, &time, 10000, 0, 0, 100, 0, 0, 1);
+        (void)physical_sample(&m, &time, 10000, 0, 0, -100, 0, 0, 1);
     int reverse = 0;
     for (unsigned i = 0; i < 10; ++i) {
-        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, -5, 0, 0, 1);
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 5, 0, 0, 1);
         assert(d.x <= 0 && !d.y);
         reverse += d.x;
     }
@@ -1236,7 +1236,7 @@ static void aiming_default_response_stops_and_reverses_cleanly(void)
     config.filter_seconds = 0;
     assert(interaction_configure(&m, &config));
     (void)physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1);
-    assert(physical_sample(&m, &time, 10000, 0, 0, 20, 0, 0, 1).x == 20);
+    assert(physical_sample(&m, &time, 10000, 0, 0, -20, 0, 0, 1).x == 20);
 }
 
 static void gravity_transients_gaps_and_reacquisition(void)
@@ -1245,7 +1245,7 @@ static void gravity_transients_gaps_and_reacquisition(void)
     uint64_t time = physical_grip(&m, 0);
     int total_x = 0;
     for (unsigned i = 0; i < 150; ++i) {
-        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 25, .8f, 0, .6f);
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, -25, .8f, 0, .6f);
         assert(d.x >= 1 && d.x <= 2 && d.y == 0);
         total_x += d.x;
         assert(m.gravity_predicted && m.gravity_ready); /* Norm alone is insufficient. */
@@ -1256,28 +1256,28 @@ static void gravity_transients_gaps_and_reacquisition(void)
     assert(m.gravity_ready && !m.gravity_predicted);
     const float failures[][3] = {{0,0,0}, {0,0,3}, {NAN,0,1}, {0,0,16}};
     for (size_t fault = 0; fault < sizeof failures / sizeof failures[0]; ++fault) {
-        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, 25,
+        const input_delta_t d = physical_sample(&m, &time, 10000, 0, 0, -25,
             failures[fault][0], failures[fault][1], failures[fault][2]);
         assert(d.x == 0 && d.y == 0 && !m.gravity_ready);
         for (unsigned i = 0; i < 15; ++i)
             assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
         assert(m.gravity_ready);
-        assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 1);
+        assert(physical_sample(&m, &time, 10000, 0, 0, -25, 0, 0, 1).x == 1);
     }
-    assert(physical_sample(&m, &time, 50001, 0, 0, 25, 0, 0, 1).x == 0);
+    assert(physical_sample(&m, &time, 50001, 0, 0, -25, 0, 0, 1).x == 0);
     assert(!m.gravity_ready && m.pointer_motion.x == 0);
     for (unsigned i = 0; i < 15; ++i)
         assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
     interaction_set_suppressed(&m, false, false, true, time / 1000);
-    assert(physical_sample(&m, &time, 10000, 0, 0, 100, .8f, 0, .6f).x == 0);
+    assert(physical_sample(&m, &time, 10000, 0, 0, -100, .8f, 0, .6f).x == 0);
     assert(m.gravity_ready && m.gravity_predicted && m.view.motion_enabled);
     interaction_set_suppressed(&m, false, false, false, time / 1000);
     for (unsigned i = 0; i < 20; ++i)
         assert(physical_sample(&m, &time, 10000, 0, 0, 0, 0, 0, 1).x == 0);
-    assert(m.gravity_ready && physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, 1).x == 1);
+    assert(m.gravity_ready && physical_sample(&m, &time, 10000, 0, 0, -25, 0, 0, 1).x == 1);
     interaction_set_suppressed(&m, false, false, true, time / 1000);
     for (unsigned i = 0; i < 26; ++i)
-        assert(physical_sample(&m, &time, 10000, 0, 0, 100, 0, 0, 1).x == 0);
+        assert(physical_sample(&m, &time, 10000, 0, 0, -100, 0, 0, 1).x == 0);
     assert(m.gravity_ready && m.gravity_predicted); /* Gyro propagation continues during vibration. */
 }
 
@@ -1305,7 +1305,7 @@ static void orientation_tracks_during_touch_and_at_vertical_aim(void)
         assert(d.x == 0 && d.y == 0);
         assert(m.gravity_ready && m.view.motion_block_reason == INTERACTION_MOTION_BLOCK_NONE);
     }
-    assert(physical_sample(&m, &time, 10000, 0, 0, -25, 0, 0, -1).x == 1);
+    assert(physical_sample(&m, &time, 10000, 0, 0, 25, 0, 0, -1).x == 1);
     interaction_config_t config = m.config;
     config.freeze_ms = 1000;
     assert(interaction_configure(&m, &config));
@@ -1563,7 +1563,7 @@ static void aim_toggle_and_recenter_preserve_bias_intent_and_fault_history(void)
     assert(!out.x && !out.y && m.aim_aligned);
     /* Body right still produces vertical cursor movement after the yaw. */
     assert(physical_sample(&m, &time, 10000, 50, 0, 0, 0, 0, 1).y < 0);
-    assert(physical_sample(&m, &time, 10000, 0, 0, 12.5f, 0, 0, 1).x == 0);
+    assert(physical_sample(&m, &time, 10000, 0, 0, -12.5f, 0, 0, 1).x == 0);
     assert(m.pointer_motion.x > 0);
     const input_state_t control = m.control;
     const uint64_t last_sample = m.sample_us;

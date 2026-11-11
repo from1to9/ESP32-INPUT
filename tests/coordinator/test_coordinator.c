@@ -1465,9 +1465,9 @@ static void sample_after(uint64_t delay_ms, float x_dps, float y_dps)
 {
     s_now_ms += delay_ms;
     test_sample = (board_imu_sample_t){
-        /* Screen-up display frame: world-up yaw is +Z and pitch is +X.
-         * Board mounting rotation is tested in the board adapter suite. */
-        .timestamp_us = s_now_ms * 1000U, .x_dps = y_dps, .z_dps = x_dps, .z_g = 1
+        /* A rightward turn is -Z and an upward turn is +X in the
+         * screen-up grip. The board suite checks the raw axes. */
+        .timestamp_us = s_now_ms * 1000U, .x_dps = y_dps, .z_dps = -x_dps, .z_g = 1
     };
     test_imu_result = ESP_OK;
     sync_interaction();
@@ -1861,7 +1861,7 @@ static void imu_schedule_delay(TickType_t ticks)
     if (imu_schedule_turns == 32) {
         assert(trace_count == imu_reports_before_stall + 1);
         assert(trace[trace_count - 1].id == HID_ENGINE_MOUSE_REPORT_ID &&
-               (int8_t)trace[trace_count - 1].bytes[1] > 0);
+               (int8_t)trace[trace_count - 1].bytes[1] < 0);
         longjmp(imu_schedule_done, 1);
     }
     imu_schedule_publish_until(test_clock_ms + 10);
@@ -4275,7 +4275,7 @@ static void motion_and_scan_diagnostics_are_bounded_observations(void)
     assert(s_motion_trace.gaps == 1 && s_motion_trace.last_gap_us == 100000);
     assert(s_motion_trace.first_active_gap_known && s_motion_trace.first_active_gap_us == 100000);
     assert(s_motion_trace.max_dt_us == 100000 && s_motion_trace.sample_blocks == 1);
-    assert(s_motion_trace.minimum[2] == 0 && s_motion_trace.maximum[2] == 25000);
+    assert(s_motion_trace.minimum[2] == -25000 && s_motion_trace.maximum[2] == 0);
     const hid_engine_t engine = s_engine;
     const interaction_t interaction = s_interaction;
     const uint64_t last_sample = s_last_imu_us;
@@ -4287,7 +4287,7 @@ static void motion_and_scan_diagnostics_are_bounded_observations(void)
     assert(strstr(test_diagnostic_logs[0], "consumer_gaps=1"));
     assert(strstr(test_diagnostic_logs[0], "last_gap_us=100000"));
     assert(strstr(test_diagnostic_logs[1], "raw_known=1"));
-    assert(strstr(test_diagnostic_logs[1], "gz_max_mdps=25000"));
+    assert(strstr(test_diagnostic_logs[1], "gz_min_mdps=-25000 gz_max_mdps=0"));
     assert(strstr(test_diagnostic_logs[2], "first_known=1 reason=6 active_losses=1"));
     assert(strstr(test_diagnostic_logs[3], "kind=terminal sample_known=1"));
     assert(memcmp(&engine, &s_engine, sizeof engine) == 0);

@@ -845,11 +845,12 @@ static void test_board_to_model_flat_inclined_and_upright_axes(void)
                     const float elapsed = (float)(hw.time_us + 10000 + hw.read_delay_us * 2 - first_us) / 1000000.0f;
                     const float tilt = grips[grip] + (pitch ? rate * .017453292519943295f * elapsed : 0);
                     hw.accel[0] = 0; hw.accel[1] = sinf(tilt); hw.accel[2] = cosf(tilt);
-                    /* Physical yaw is about world-up; pitch is about the
-                     * screen left-right axis. These are not Euler UI labels. */
+                    /* In the flat grip the pointing ray is +Y and up
+                     * is +Z. A rightward turn moves +Y toward +X, so yaw
+                     * about up is negative. The same sign holds tilted. */
                     hw.gyro[0] = pitch ? rate : 0;
-                    hw.gyro[1] = pitch ? 0 : rate * sinf(tilt);
-                    hw.gyro[2] = pitch ? 0 : rate * cosf(tilt);
+                    hw.gyro[1] = pitch ? 0 : -rate * sinf(tilt);
+                    hw.gyro[2] = pitch ? 0 : -rate * cosf(tilt);
                     const input_delta_t delta = board_motion_frame(&model);
                     total_x += delta.x; total_y += delta.y;
                     assert(model.gravity_ready);
