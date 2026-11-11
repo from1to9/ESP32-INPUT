@@ -5,6 +5,9 @@ station connection. The selected USB or Bluetooth HID host remains the input
 target. The device requires an enrolled identity and checks the caller's
 permissions at the operation boundary.
 
+For a browser remote, direct HTTP commands or an AI-assisted input session,
+see [control examples](automation.md).
+
 ## Interface definitions
 
 | File | Use |

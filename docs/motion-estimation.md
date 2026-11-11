@@ -4,9 +4,9 @@ Hold the desired aiming direction during sensor calibration, then rotate the
 device. USB and Bluetooth use relative HID reports. The model runs on the
 device without a screen calibration step.
 
-The orientation and sample-continuity changes below describe the
-`959aabd` Motion candidate. See [validation](validation.md) for the difference
-between native test results and device observations.
+The implementation includes the pointing ray and sample history from
+`959aabd` and the horizontal sign correction in `d8e0701`. See
+[validation](validation.md) for native results and device observations.
 
 ## Current orientation design
 
@@ -22,8 +22,8 @@ frame. The current up direction and the calibrated ray define perpendicular
 right and up tangents. The model projects gyro motion onto these tangents
 for pitch and yaw. Roll about the ray contributes no direct pointer motion.
 Both axes ease toward zero as the ray approaches vertical and azimuth becomes
-ambiguous. By default, raising the ray emits negative HID Y. Independent
-inversion settings can reverse either axis.
+ambiguous. By default, moving the ray right emits positive HID X and raising
+it emits negative HID Y. Independent inversion settings reverse either axis.
 
 The saved base gains are in HID units per degree. The response multiplier is
 `1 + min(speed / 120, 1)`, where speed is the larger absolute projected axis
@@ -70,5 +70,5 @@ informed timestamped gyro propagation, conditional gravity correction and
 calibration. [AimMac](https://github.com/Coolerwave/AimMac/tree/4da2f7c89e33e35610bb2b4ebe807d82038ab760)
 and [WatchPointer](https://github.com/umarz317/WatchPointer/tree/504137a1a8748e3560f1c203d06fbd4e0832d582)
 provided references for timestamped tracking and speed-dependent smoothing.
-ESP32-INPUT uses its own C implementation and relative HID output. The
-candidate incorporates no upstream code or assets.
+ESP32-INPUT uses its own C implementation and relative HID output. It
+incorporates no upstream code or assets from these projects.

@@ -19,8 +19,10 @@ LVGL fixtures.
 - **Board:** ESP-Mosaico (ESP32-S31), with a USB-C data connection or Bluetooth.
 - **Input:** Standard relative mouse and keyboard HID. The target uses a US ANSI
   layout for text and may need accessibility settings for pointer use.
-- **Optional LAN management:** Authenticated browser control, HTTPS/WSS,
-  sensor export, signed update staging and a local MCP companion.
+- **Browser, API and AI control:** Use a phone browser, an HTTPS client or an
+  MCP-capable AI assistant to send mouse and keyboard input to the selected
+  target. The LAN interface also supports sensor export and signed update staging.
+  [Try the control workflows](docs/automation.md)
 - **Validation:** Pinned target builds and host regressions have passed at
   documented checkpoints. Physical Motion, saved Bluetooth audio reconnect
   and audio quality remain open. iPhone, iPad, Windows and macOS are
