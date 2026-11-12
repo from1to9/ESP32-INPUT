@@ -73,6 +73,14 @@ prove its runtime mode; BTDM is the shared owner's explicit precondition.
 
 The audio module must not initialize a second controller or Bluedroid instance.
 
+The S31 profile enables the pinned SDK's controller PSRAM allocation option
+for callers that explicitly mark their allocation eligible. This policy is
+separate from Bluedroid host memory placement and includes BLE data used
+alongside Classic audio. Unmarked allocations, pool bounds and genuine
+allocation failures retain their existing behavior. See the
+[memory policy](../firmware/README.md#display-memory-policy) for configuration,
+scope and remaining limits, and [validation](validation.md) for physical results.
+
 ## Bounded Classic pairing
 
 `bt_audio_pairing_open(ms)` accepts an explicit window up to 300 seconds;

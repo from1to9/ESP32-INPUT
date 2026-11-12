@@ -24,9 +24,11 @@ LVGL fixtures.
   target. The LAN interface also supports sensor export and signed update staging.
   [Try the control workflows](docs/automation.md)
 - **Validation:** Pinned target builds and host regressions have passed at
-  documented checkpoints. Physical Motion, saved Bluetooth audio reconnect
-  and audio quality remain open. iPhone, iPad, Windows and macOS are
-  compatibility targets. [Validation and known issues](docs/validation.md)
+  documented checkpoints. A brief Windows test passed with Bluetooth playback,
+  touchpad input and Motion operating together. Fast-motion response, repeatable
+  saved audio reconnect and sustained audio quality still need qualification.
+  iPhone, iPad, Windows and macOS are compatibility targets.
+  [Validation and known issues](docs/validation.md)
 
 ## Get started
 

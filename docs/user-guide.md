@@ -62,6 +62,31 @@ when finished. For **Speaker**, route the host's playback to the device and
 start Speaker on the board. A Bluetooth speaker job can wait for the host's
 stream. Verify the physical audio at the endpoint you selected.
 
+Speaker playback can continue after returning to **Mouse**, where touchpad and
+Motion use the selected input transport. Bluetooth input and audio require
+both separate links to be ready. A brief combined Windows test has passed;
+see [validation](validation.md) for its limits and remaining issues.
+
+Saved workspace and audio choices can be restored at startup. A previously
+enabled Bluetooth Speaker can wait for fresh audio from its saved host;
+the microphone always requires a new start. **Stop speaker** cancels the
+waiting or active speaker intent. See [startup behavior](bt-audio.md#startup-choices-and-trusted-audio-reconnection)
+for reconnect and storage-failure details.
+
+## Reset saved user data
+
+Open **Menu → Settings → About → Reset device** and read the consequence
+summary. **Reset and restart** requires a second fresh touch within 30 seconds;
+Cancel leaves the data intact. The device stops input and audio, restarts and
+clears its saved pairings, Wi-Fi profiles, user settings, LAN controller access
+credentials and recordings. A visible failure is not a completed reset.
+
+Firmware, OTA security state, hardware identity, factory calibration and shipped
+assets are retained. Remove the old Bluetooth entries on the computer before
+pairing again. Wi-Fi and LAN access must also be set up again. This local reset
+has a broader scope than the remote factory-reset command; see the
+[reset contract](interaction.md#status-connectivity-and-display) for storage and recovery details.
+
 ## Local controls and LAN access
 
 Double-press the AI button to open Menu. Hold it for about one second to stop

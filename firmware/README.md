@@ -42,7 +42,10 @@ python3 tools/idf.py size
 
 The setup helper installs the pinned SDK under `.tools/esp-idf` and its tools under `.tools/espressif`, including CMake and Ninja (on-request tools in this SDK). It does not change shell profiles or global tool installations. The build helper accepts only build/reconfigure/size actions and never accesses a device. The SDK is a development version with preview S31 support; the exact commit matters. Resolved components are pinned by `dependencies.lock`.
 
-Build outputs are in `firmware/build/`. First-party source lives in `main/`, portable components in `../components/`, and all Mosaico BSP calls in `main/board_mosaico.c`. See [porting](../docs/porting.md) for adapter boundaries.
+Build outputs are in `firmware/build/`. Application source lives in `main/`,
+portable components in `../components/`, and board adapters isolate Mosaico BSP
+calls from the portable components. See [porting](../docs/porting.md) for adapter
+boundaries.
 
 The Mosaico profile uses 16 MiB flash with two 6 MiB application slots, a 3 MiB speech-model partition, 64 KiB control storage and 832 KiB recording storage. The layout identity is `esp32s31-16m-ota6-v3`. Signed OTA writes only the inactive compatible application slot. Existing factory-layout devices need a separately authorized migration; an ordinary OTA update rejects an incompatible layout and cannot migrate it. Reproduce a clean configuration after deliberate defaults changes by preserving the existing ignored `firmware/sdkconfig` outside the firmware directory before rebuilding. Do not silently discard a contributor's custom configuration.
 
@@ -51,8 +54,20 @@ The Mosaico profile uses 16 MiB flash with two 6 MiB application slots, a 3 MiB 
 The Mosaico profile in `sdkconfig.defaults` prefers PSRAM for ordinary/UI
 allocations, dynamic Bluetooth host data and eligible Wi-Fi/LWIP data. It
 reserves 64 KiB of internal RAM for requests needing internal/DMA capabilities;
-task stacks remain internal. This reserve is shared, not a guaranteed contiguous
-LCD buffer. Ports without PSRAM need their own qualified resource profile.
+task stacks default to internal RAM. Explicitly opted-in, cache-enabled workers
+may use PSRAM stacks. This reserve is shared, not a guaranteed contiguous LCD
+buffer. Ports without PSRAM need their own qualified resource profile.
+
+The S31 profile also enables `CONFIG_BT_CTRL_ALLOW_MALLOC_FROM_SPIRAM`.
+This is separate from the Bluedroid host allocation preference. The pinned
+controller allocator uses PSRAM only when its caller sets
+`BTDM_OSAL_MALLOC_F_ALLOW_SPIRAM`; unmarked requests keep their internal,
+DMA-capable allocation. Eligible callers include dynamic LE ACL MSYS blocks
+and other controller allocations. The SDK marks this option experimental.
+It reduces competition for internal DMA memory without changing pool limits,
+packet ownership or NULL failure handling. PSRAM or pool exhaustion can still
+reach the SDK's allocation assertions. The [validation summary](../docs/validation.md)
+distinguishes the observed coexistence result from endurance qualification.
 
 The tracked profile sets Wi-Fi static RX buffers and the receive Block Ack
 window to two each, retaining internal DMA headroom at the expense of peak
@@ -71,8 +86,10 @@ alone cannot prove that transfers fit. Inspect both total free memory and the la
 
 Runtime diagnostics retain six startup memory samples and the first allocation
 and Bluetooth failure until reboot, so late CDC attachment does not erase the
-cause. The allocation hook uses fixed storage and lock-free publication, with
-no logging or allocation inside the hook. Health reports include free and
+first observed failure. Periodic exports of a retained failure do not identify
+its occurrence time or count separate failures. The allocation hook uses fixed
+storage and lock-free publication, with no logging or allocation inside the
+hook. Health reports include free and
 largest internal DMA blocks. These observations do not alter input admission,
 retry errors or restart the device. Check actual generated `sdkconfig` after
 changing defaults; an existing configuration keeps its previous values.

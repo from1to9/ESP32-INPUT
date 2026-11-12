@@ -41,5 +41,16 @@ or could not be observed.
    workload. Separate steady-state behavior from reconnect, failure recovery
    and update transitions.
 
+For Bluetooth coexistence, keep both the audio and input links connected to
+the named host. Listen to A2DP playback while first using the touchpad and
+then enabling Motion. Record the actual duration of each phase, audible
+dropouts, cursor response and any white screen or restart. Collect startup
+identity and continuous uptime across the same interval. After a restart,
+classify the reset and use the matching ELF for any retained exception data;
+do not infer a panic from a display symptom alone. First-failure log exports
+are latched observations, not independent failures or precise failure times.
+Successful HID submission and codec output supplement the operator's result;
+they do not replace observation at the host and speaker.
+
 The [validation summary](validation.md) lists observed results and current
 limitations. Keep serial logs, network captures and recordings local.
