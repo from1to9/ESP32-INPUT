@@ -29,6 +29,21 @@ browser session; use one controlling tab at a time. **Forget identity in this
 browser** removes that local credential and closes the current session. Revoke
 its saved permission separately on Mosaico when desired.
 
+## Control an iPad or iPhone
+
+First pair the Mosaico input device ending in `-IN` with the iPad or iPhone
+and enable AssistiveTouch. In Mosaico **Settings → Wi-Fi → Web/API**, open
+the HTTPS address on the controlling phone or computer and complete browser
+pairing above. Check the selected Apple device and choose **Take control**
+to use the browser touchpad and keyboard.
+
+Bluetooth input keeps the Apple device's USB port available for a Mac running
+QuickTime's live preview. The controller page provides input controls; view
+the target screen on the device or through that separate preview. Follow the
+[iPhone and iPad guide](user-guide.md#control-an-ipad-or-iphone) for pointer
+setup, screenshots and Siri actions, or the [automation guide](automation.md#ipad-and-iphone-control)
+for API and MCP clients.
+
 ## Input and outcomes
 
 Mouse uses relative touchpad movement, four direction buttons and explicit left

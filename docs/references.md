@@ -22,6 +22,11 @@ M5 examples target M5StickS3/CoreS3 and cannot simply be flashed to Mosaico. MCU
 - [Mosaico hardware guide](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s31/esp-mosaico/user_guide.html): 480 x 480 display, BMI270, ES8311 and AI/BOOT/POWER. Resolve version differences through the pinned BSP and actual board.
 - [S31 Bluetooth API](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s31/api-reference/bluetooth/index.html): Bluedroid dual-mode direction; verify actual SDK configuration and examples where overview pages lag.
 - [Apple pointer devices](https://support.apple.com/en-us/111775): iPhone AssistiveTouch setup.
+- [QuickTime device capture](https://support.apple.com/en-gb/guide/quicktime-player/qtp356b55534/mac): select a connected iPad or iPhone as the movie source on a Mac.
+- [Image Capture](https://support.apple.com/guide/image-capture/image-capture-imgcp1003/mac): import saved photos and screenshots from a connected Apple device.
+- [iPad keyboard shortcuts](https://support.apple.com/en-us/102393): Command–Shift–3 takes a screenshot.
+- [Run Shortcuts with Siri](https://support.apple.com/guide/shortcuts/run-shortcuts-with-siri-apd07c25bb38/ios): invoke a prepared Shortcut on the Apple device.
+- [libimobiledevice](https://github.com/libimobiledevice/libimobiledevice): optional Mac-side `afcclient` file retrieval over trusted USB; not a firmware dependency or a screen capture API.
 - [Windows Classic Audio](https://learn.microsoft.com/en-us/windows-hardware/drivers/bluetooth/bluetooth-classic-audio): A2DP playback versus HFP duplex voice and endpoint behavior.
 - [USB UAC component](https://github.com/espressif/esp-iot-solution/tree/master/components/usb/usb_device_uac): S31 appears in the manifest, but cross-platform restrictions still require qualification.
 

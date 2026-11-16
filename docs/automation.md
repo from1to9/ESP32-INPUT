@@ -19,12 +19,40 @@ flowchart LR
 | Workflow | Example |
 | --- | --- |
 | Browser remote | Pair a phone browser, then use it as a touchpad for an unlocked tablet paired to Mosaico. Move the pointer, click or compose a short line in the browser and explicitly send it. |
+| iPad or iPhone control | Pair Mosaico over Bluetooth, view the Apple device in QuickTime on a Mac, and send pointer or keyboard input from a browser, script or MCP client. |
 | Presentation control | Keep the slide deck focused on the HID host. Use an approved client to send the app's next or previous slide key. Verify the key mapping in that app. |
 | Repeatable input tests | Drive a disposable editor or a demo app with short pointer movements, key taps and sample text. Observe the actual target result alongside the command result. |
 | AI-assisted control | Connect an MCP-capable AI client to the local companion. Ask it to check the selected host, perform a small named action such as typing a sample line into a focused editor, and release input control. |
 
 See [device and host validation](validation.md) for tested combinations and
 open issues.
+
+## iPad and iPhone control
+
+Use Bluetooth input to pair the Mosaico device ending in `-IN` with the iPad
+or iPhone and enable AssistiveTouch for pointer control. This leaves the
+Apple device's USB port free for a trusted connection to a Mac. Open the
+device in QuickTime Player's **New Movie Recording** source menu for a live
+preview. The [iPhone and iPad guide](user-guide.md#control-an-ipad-or-iphone)
+covers pairing, wired input, QuickTime and screenshot import.
+
+Open Mosaico's **Settings → Wi-Fi → Web/API** HTTPS address and pair and
+approve the browser, or enroll an API/MCP client as described below. Check
+the selected input target before acquiring control. A script or AI client
+can then move the pointer, click and send keyboard input while its operator
+or a separate screen capture tool observes the result.
+
+For a screenshot on iPad, send `⌘⇧3` through the keyboard input path. On
+iPhone, use Siri or AssistiveTouch's Screenshot action. Save the image to
+Photos and import it with Image Capture; automated retrieval of a new
+screenshot with `afcclient` over trusted USB has also been verified on iPad.
+These Mac tools are separate from the MCP companion. A client that needs
+images must obtain and provide them through its own screen or file tooling.
+
+Siri can open an app or run a prepared Shortcut on the Apple device before
+the pointer workflow begins. Mosaico does not invoke Siri or Shortcuts
+through a dedicated API. Keep the target screen visible and use each fresh
+image to decide the next input action.
 
 ## Browser controller
 

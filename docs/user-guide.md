@@ -16,11 +16,71 @@ to both Mouse and Keyboard.
   ending in `-IN` in the host's Bluetooth settings. Confirm readiness on the
   board after pairing. Reconnect saved hosts from the same device list.
 
-On iPhone or iPad, use the host's accessibility pointer settings as needed.
+For iPhone and iPad, follow the [setup below](#control-an-ipad-or-iphone).
 For text, use a US ANSI keyboard layout. First test with a disposable text
 editor and an unlocked host. A saved pairing and a ready HID link are separate
 states. Switching transports cancels pending input. Disconnecting a cable does
 not redirect movement or text to Bluetooth.
+
+## Control an iPad or iPhone
+
+### Connect input
+
+On Mosaico, select Bluetooth input and open **Bluetooth devices → Mouse &
+Keyboard → Add device**. On the iPad or iPhone, pair the displayed name ending
+in `-IN`. Enable **Settings → Accessibility → Touch → AssistiveTouch**, or ask
+Siri to “Turn on AssistiveTouch.” Apple also offers pairing under
+**AssistiveTouch → Devices → Bluetooth Devices**. Confirm input readiness on
+Mosaico, then try moving the pointer and clicking an icon. See Apple's
+[pointer setup](https://support.apple.com/en-gb/111775) for button assignments
+and pointer settings.
+
+For wired input on a USB-C iPad or iPhone, connect Mosaico directly with a
+USB-C data cable and select USB input. Use Bluetooth input when the Apple
+device's port is needed for the Mac screen-viewing connection below.
+
+### View the screen and collect screenshots
+
+Connect the unlocked iPad or iPhone to a Mac over USB and trust the Mac when
+prompted. In QuickTime Player, choose **File → New Movie Recording**, then
+select the connected device from the source menu next to Record. You can
+watch the live preview without starting a recording. See Apple's
+[QuickTime guide](https://support.apple.com/en-gb/guide/quicktime-player/qtp356b55534/mac).
+
+For a still image, send **Command–Shift–3** (`⌘⇧3`) from the ESP keyboard on
+iPad. On iPhone, ask Siri to take a screenshot or use the Screenshot action
+in AssistiveTouch. Save the screenshot to Photos, then use
+[Image Capture](https://support.apple.com/guide/image-capture/image-capture-imgcp1003/mac)
+on the Mac to import it. Apple's [iPad keyboard shortcuts](https://support.apple.com/en-us/102393)
+include the screenshot shortcut.
+
+Scripts can retrieve a newly saved screenshot over trusted USB with
+`afcclient` from [libimobiledevice](https://github.com/libimobiledevice/libimobiledevice).
+This retrieval workflow has been verified on iPad; that observation does not
+establish the same workflow on iPhone. `afcclient` retrieves the saved file;
+the screenshot is still taken on the Apple device.
+
+### Control it from a browser, script or AI client
+
+Join Mosaico to Wi-Fi and open the HTTPS address in **Settings → Wi-Fi →
+Web/API**. Pair the browser, approve its access on Mosaico, check that the
+selected input target is your iPad or iPhone, then choose **Take control**.
+Use the browser touchpad and keyboard while watching the Apple device or
+the QuickTime preview. The [browser guide](browser-controller.md) covers
+certificate trust, pairing and input controls.
+
+Scripts and AI clients use the same input path through the HTTPS API or
+[MCP companion](automation.md#ai-control-over-mcp). Supply screen images to
+the client separately; Mosaico sends mouse and keyboard input and does not
+capture the target's display. See the [iPad and iPhone automation workflow](automation.md#ipad-and-iphone-control).
+
+### Use Siri and Shortcuts
+
+Ask Siri on the iPad or iPhone to open an app or run a Shortcut already in
+your collection, then continue with the ESP pointer. Siri runs on the Apple
+device; no Siri integration is needed in Mosaico. Follow Apple's
+[Run Shortcuts with Siri](https://support.apple.com/guide/shortcuts/run-shortcuts-with-siri-apd07c25bb38/ios)
+guide to prepare the Shortcut.
 
 ## Mouse
 

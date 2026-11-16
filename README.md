@@ -1,10 +1,16 @@
 # ESP32-INPUT
 
-ESP32-INPUT turns an ESP-Mosaico (ESP32-S31) into a handheld mouse and
-keyboard. Use the touchpad for fine movement or rotate the device to aim.
-The on-device keyboard lets you compose and review text before sending it.
-USB and Bluetooth use standard HID, so basic input needs no companion app
-on the target host.
+ESP32-INPUT turns an ESP-Mosaico (ESP32-S31) into a handheld air mouse,
+touchpad and keyboard, with microphone and speaker controls on the same
+touchscreen. Rotate to aim, use touch for fine movement, or compose and review
+text before sending it. USB and Bluetooth use standard HID, so basic input
+needs no companion app on the target phone, tablet or computer.
+
+You can also drive Mosaico from a web browser, an HTTPS API or an AI assistant
+through the MCP companion. It brings the same mouse and keyboard controls to
+an iPad, iPhone or computer while you watch that device's screen separately.
+Use it as a handheld remote, a browser touchpad or a physical input bridge for
+automation.
 
 | Mouse | Keyboard | Audio |
 | :---: | :---: | :---: |
@@ -13,6 +19,46 @@ on the target host.
 
 [Device UI and interaction](docs/ui/README.md) shows the layout from host-rendered
 LVGL fixtures.
+
+## Control an iPad or iPhone
+
+1. **Connect ESP32-INPUT.** On Mosaico, choose Bluetooth input and open
+   **Bluetooth devices → Mouse & Keyboard → Add device**. Pair the device
+   ending in `-IN` on your iPad or iPhone. Enable **Settings → Accessibility
+   → Touch → AssistiveTouch** for pointer control, or ask Siri to
+   “Turn on AssistiveTouch.” On USB-C models, you can instead connect Mosaico
+   directly with a USB-C data cable and select USB input. Bluetooth leaves
+   the Apple device's port free for screen capture on a Mac.
+   [Pointer setup](https://support.apple.com/en-gb/111775)
+
+2. **View the screen on a Mac.** Connect the unlocked iPad or iPhone over
+   USB, trust the Mac, then open QuickTime Player → **File → New Movie
+   Recording**. Choose the device in the source menu next to Record; the
+   preview works without starting a recording. For a still image, send
+   `⌘⇧3` from the ESP keyboard on iPad, or use Siri or AssistiveTouch to take
+   a screenshot on iPhone. Save it to Photos, then import it with Image
+   Capture. Scripts can use `afcclient` over trusted USB to retrieve a new
+   screenshot, as verified on iPad.
+   [QuickTime](https://support.apple.com/en-gb/guide/quicktime-player/qtp356b55534/mac) ·
+   [Image Capture](https://support.apple.com/guide/image-capture/image-capture-imgcp1003/mac) ·
+   [libimobiledevice](https://github.com/libimobiledevice/libimobiledevice)
+
+3. **Send input from the web or an AI client.** Open the HTTPS address
+   shown in Mosaico **Settings → Wi-Fi → Web/API**. Pair your browser,
+   approve it on Mosaico, check the intended input target, and choose
+   **Take control**. The web page provides a touchpad and keyboard. Scripts
+   and AI clients can send input through the HTTPS API or MCP companion.
+   View the screen separately using step 2.
+   [Browser controls](docs/browser-controller.md) · [API and MCP](docs/automation.md)
+
+4. **Use Siri for on-device actions.** Ask Siri on the iPad or iPhone to
+   open an app or run a Shortcut you've already set up. Use the ESP pointer
+   to continue from the screen you can see.
+   [Run Shortcuts with Siri](https://support.apple.com/guide/shortcuts/run-shortcuts-with-siri-apd07c25bb38/ios)
+
+See the [iPhone and iPad guide](docs/user-guide.md#control-an-ipad-or-iphone)
+for setup details and the [automation workflow](docs/automation.md#ipad-and-iphone-control)
+for combining input with a separate screen source.
 
 ## Hardware and status
 
