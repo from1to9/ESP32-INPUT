@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "names_owner_fixture.h"
 #include "../main/passport_wifi.c"
 #include "../main/passport_wifi_text.c"
 #include "../main/passport_wifi_store.c"
@@ -331,9 +332,56 @@ static void test_full_profile_update(void)
     assert(!commits && !memcmp(&store,&old,sizeof(old)));
 }
 
+static void test_scan_names(void)
+{
+    reset_runtime();
+    mock_ble.synced = true;
+    state.scan_known = true;
+    state.scan_revision = 42;
+    state.scan_count = 2;
+    state.rows[0] = (passport_wifi_row_t){.ssid = {.bytes = "AP", .length = 2},
+        .bssid = {0, 0, 0, 0, 0, 11}, .auth = WIFI_AUTH_WPA2_PSK, .security = PW_WPA2};
+    state.rows[1] = state.rows[0];
+    state.rows[1].bssid[5] = 21;
+    passport_name_change_t change = {.key = passport_wifi_ap_name_key(&state.rows[0]),
+                                     .revision = 1, .scan_revision = 41};
+    assert(wifi_name_change(&change, &mock_ble) == PN_STALE);
+    change.scan_revision = 42;
+    mock_ble.locked = true;
+    assert(wifi_name_change(&change, &mock_ble) == PN_LOCKED);
+    mock_ble.locked = false;
+    change.key.ap.auth ^= 1;
+    assert(wifi_name_change(&change, &mock_ble) == PN_NOT_FOUND);
+    change.key = passport_wifi_ap_name_key(&state.rows[0]);
+    queued_name = change;
+    name_queued = true;
+    step(clock_ms);
+    assert(name_result == PN_OK && name_applied == 1);
+    state.scan_known = false;
+    change.clear = true;
+    assert(wifi_name_change(&change, &mock_ble) == PN_OK);
+    state.scan_known = true;
+    change.clear = false;
+    store = (passport_wifi_store_t){.version = 1, .next_id = 3, .count = 1, .preferred = 1,
+        .records = {{.id = 1, .ssid = "AP", .ssid_length = 2, .security = PW_WPA2,
+                     .password = "test1234", .password_length = 8}}};
+    assert(wifi_name_change(&change, &mock_ble) == PN_INVALID);
+    char label[PASSPORT_NAME_BYTES + 1];
+    assert(passport_wifi_scan_label(&state, &state.rows[0], label) == PN_OK && !strcmp(label, "Exact AP"));
+    assert(passport_wifi_scan_label(&state, &state.rows[1], label) == PN_OK && !strcmp(label, "Profile label"));
+    store.records[1] = store.records[0]; store.records[1].id = 2; ++store.count;
+    refresh_profiles();
+    assert(passport_wifi_scan_label(&state, &state.rows[1], label) == PN_NOT_FOUND && !label[0]);
+    name_remove_result = PN_UNCERTAIN;
+    command_local(PW_FORGET, 1, state.revision);
+    assert(name_removals == 1 && removed_name.kind == PN_WIFI_PROFILE && removed_name.profile == 1);
+    assert(store.count == 1 && store.records[0].id == 2 && strstr(state.result, "cleanup failed"));
+}
+
 int main(void)
 {
     test_init(); test_scan_and_ap(); test_join_and_persistence(); test_save_failure(); test_release_and_lock(); test_rejection_and_recovery(); test_profile_store(); test_rejected_switch_preserves_live_network(); test_web_scan_window(); test_full_profile_update();
+    test_scan_names();
     vQueueDelete(commands); vQueueDelete(events);
     puts("PASS: Wi-Fi initialization rollback, AP/DHCP observations, scan cancellation, exact setup confirmation, IP-before-save, reconnect deadline, NVS uncertainty and BLE release boundary");
 }

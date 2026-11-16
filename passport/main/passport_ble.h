@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "passport_names.h"
 
 #define PASSPORT_PEERS 3
 #define PASSPORT_PEER_TEXT 24
@@ -25,6 +26,7 @@ typedef struct {
 typedef struct {
     uint8_t type, address[6];
     char label[PASSPORT_PEER_TEXT];
+    uint8_t bond_id[PASSPORT_BOND_ID_BYTES];
 } passport_peer_t;
 
 typedef struct {

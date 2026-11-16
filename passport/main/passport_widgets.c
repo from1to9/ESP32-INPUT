@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef struct { lv_obj_t *box, *icon, *title, *subtitle; } item_widgets_t;
+typedef struct { lv_obj_t *box, *icon, *title, *subtitle, *scan_summary; } item_widgets_t;
 static lv_obj_t *root, *brand, *radio, *wifi, *title, *target, *notice, *notice_text, *notice_detail;
 static lv_obj_t *panel, *hero, *heading, *body, *footer, *footer_up, *footer_ok, *footer_down;
 static lv_obj_t *qr;
@@ -204,6 +204,11 @@ bool passport_widgets_init(lv_obj_t *screen)
         item->subtitle = label(item->box, &small_text);
         item->icon = label(item->box, &large_text);
         if (!item->title || !item->subtitle || !item->icon) goto fail;
+        if (i < PASSPORT_LIST_ROWS) {
+            item->scan_summary = label(item->box, &small_text);
+            if (!item->scan_summary) goto fail;
+            visible(item->scan_summary, false);
+        }
         lv_obj_add_event_cb(item->icon, draw_icon, LV_EVENT_DRAW_MAIN, NULL);
         visible(item->box, false);
     }
@@ -240,9 +245,9 @@ fail:
     return false;
 }
 
-static void item_geometry(item_widgets_t *item, passport_layout_t layout, unsigned slot)
+static void item_geometry(item_widgets_t *item, passport_layout_t layout, unsigned slot, bool scan_summary)
 {
-    int x = 12, y = 84, width = 216, height = 48;
+    int x = 12, y = 84, width = 216, height = scan_summary ? 50 : 48;
     if (layout == VIEW_HOME) {
         x += (slot % 2) * 112;
         y += (slot / 2) * 78;
@@ -281,8 +286,9 @@ static void item_geometry(item_widgets_t *item, passport_layout_t layout, unsign
         lv_obj_set_style_text_align(item->icon, LV_TEXT_ALIGN_CENTER, 0);
     } else {
         place(item->icon, 10, 14, 22, 22);
-        place(item->title, 40, 6, width - 48, 18);
-        place(item->subtitle, 40, 27, width - 48, 16);
+        place(item->title, 40, scan_summary ? 0 : 6, width - 48, scan_summary ? 16 : 18);
+        place(item->subtitle, 40, scan_summary ? 16 : 27, width - 48, scan_summary ? 15 : 16);
+        if (scan_summary) place(item->scan_summary, 40, 31, width - 48, 15);
     }
     if (!compact) {
         lv_obj_set_style_text_align(item->title, LV_TEXT_ALIGN_LEFT, 0);
@@ -314,15 +320,21 @@ void passport_widgets_update(const passport_view_t *view)
     snprintf(action, sizeof(action), "OK  %s", view->ok);
     text(footer_ok, action);
     lv_obj_set_style_text_color(footer_ok, lv_color_hex(accent), 0);
-    unsigned first = view->layout == VIEW_LIST && view->focus >= 3 ? view->focus - 2 : 0;
-    unsigned old_first = previous.layout == VIEW_LIST && previous.focus >= 3 ? previous.focus - 2 : 0;
+    unsigned first = view->layout == VIEW_LIST && view->focus >= PASSPORT_LIST_ROWS ? view->focus - (PASSPORT_LIST_ROWS - 1) : 0;
+    unsigned old_first = previous.layout == VIEW_LIST && previous.focus >= PASSPORT_LIST_ROWS ? previous.focus - (PASSPORT_LIST_ROWS - 1) : 0;
     geometry_changed |= first != old_first;
     for (unsigned slot = 0; slot < PASSPORT_VIEW_ITEMS; ++slot) {
         unsigned index = first + slot;
-        bool show = index < view->count && (view->layout != VIEW_LIST || slot < 3);
+        bool show = index < view->count && (view->layout != VIEW_LIST || slot < PASSPORT_LIST_ROWS);
         visible(items[slot].box, show);
         if (!show) continue;
-        if (geometry_changed) item_geometry(&items[slot], view->layout, slot);
+        bool scan_summary = view->layout == VIEW_LIST && slot < PASSPORT_LIST_ROWS && view->scan_summary[slot][0];
+        bool had_summary = previous.layout == VIEW_LIST && slot < PASSPORT_LIST_ROWS && previous.scan_summary[slot][0];
+        if (geometry_changed || scan_summary != had_summary) item_geometry(&items[slot], view->layout, slot, scan_summary);
+        if (items[slot].scan_summary) {
+            visible(items[slot].scan_summary, scan_summary);
+            if (scan_summary) text(items[slot].scan_summary, view->scan_summary[slot]);
+        }
         bool selected = index == view->focus;
         if (geometry_changed || theme_changed || view->focus != previous.focus) {
             lv_obj_remove_style(items[slot].box, &focused, 0);
@@ -335,13 +347,15 @@ void passport_widgets_update(const passport_view_t *view)
         text(items[slot].icon, icon_text(item->checked ? ICON_CHECK : item->icon));
         set_icon(items[slot].icon, item->checked ? ICON_CHECK : item->icon);
     }
-    bool show_panel = view->layout == VIEW_MESSAGE || view->layout == VIEW_CONFIRM || view->layout == VIEW_NETWORK_CONFIRM || view->layout == VIEW_DETAILS;
+    bool identity = view->layout == VIEW_IDENTITY;
+    bool details = view->layout == VIEW_DETAILS || identity;
+    bool show_panel = view->layout == VIEW_MESSAGE || view->layout == VIEW_CONFIRM ||
+                      view->layout == VIEW_NETWORK_CONFIRM || details;
     visible(panel, show_panel);
     if (show_panel) {
-        bool details = view->layout == VIEW_DETAILS;
         bool confirmation = view->layout == VIEW_CONFIRM || view->layout == VIEW_NETWORK_CONFIRM;
         bool network = view->layout == VIEW_NETWORK_CONFIRM;
-        place(panel, 12, 84, 216, details ? 156 : 124);
+        place(panel, 12, identity ? 60 : 84, 216, identity ? 180 : details ? 156 : 124);
         visible(hero, !details && !network);
         visible(heading, !details);
         place(hero, 10, 10, 194, 28);
@@ -349,7 +363,7 @@ void passport_widgets_update(const passport_view_t *view)
         lv_obj_set_style_text_color(hero, lv_color_hex(confirmation ? warning : accent), 0);
         place(heading, 10, network ? 6 : 43, 194, 24);
         lv_obj_set_style_text_align(heading, LV_TEXT_ALIGN_CENTER, 0);
-        place(body, 12, details ? 8 : network ? 34 : 70, 190, details ? 142 : network ? 84 : 48);
+        place(body, 12, details ? 8 : network ? 34 : 70, 190, identity ? 166 : details ? 142 : network ? 84 : 48);
         lv_obj_set_style_text_align(body, details ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
         text(hero, view->hero[0] ? view->hero : icon_text(view->hero_icon));

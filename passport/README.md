@@ -9,8 +9,8 @@ factory application. Shared `input_core` and `hid_engine` sources are reused
 without changes to Mosaico.
 
 The implemented subset and internal API are documented in [API.md](API.md).
-Remote input, labels and stable
-cross-device bond fingerprints remain unavailable in this batch. This is a
+Remote input, HTTP display-label editing and cross-device bond identifiers
+remain unavailable in this batch. This is a
 source/host/build candidate; device and operating-system compatibility are
 not qualified.
 
@@ -126,7 +126,7 @@ make the store unavailable; the application never erases NVS to recover.
 The old snapshot may remain after a failed deletion, so an uncertain forget
 requires restart and inspection. Saved rows show the bond's resolved public
 or static-random identity, never a transient RPA. Names/labels are not row
-identifiers. See [API.md](API.md) for the later fingerprint/label boundary.
+identifiers. See [API.md](API.md) for the stable identity and label interface.
 
 ## Native interface and appearance
 
@@ -137,7 +137,11 @@ identity as secondary text; a check and Connected host title mark the actual
 connected saved identity. Pairing has a countdown, removal starts on Cancel,
 and startup, lock, empty hosts and errors have distinct presentations.
 The list scrolls by focus and bounded text truncation never changes identity.
-No user-label editing is exposed in this batch. Wi-Fi controls are described below.
+Saved hosts, saved Wi-Fi profiles, and scanned APs show an available display
+label with the original name or identity underneath. Open Host details or
+Network details to see the full label and the original identity. The current
+Montserrat fonts define the accepted glyphs. The buttons display labels
+and navigate to details. Editing requires the future Web/API adapter.
 
 Appearance selects Dark or Light with the same three-key interaction and
 layout. Dark is the initial default. The `passport_ui/theme` NVS byte is
@@ -146,7 +150,9 @@ and commit; an uncertain save leaves the active theme unchanged and shows
 an error. A failed load uses Dark and reports the failure in Appearance.
 NVS power-loss behavior still needs device verification.
 
-The native renderer owns a fixed pool of 55 objects including the screen.
+The native renderer owns a fixed pool of 58 objects including the screen.
+Three scan metadata labels keep security, signal, and saved status visible
+alongside the label and original SSID.
 Only a changed view reaches LVGL; labels are updated only when text changes,
 and palette updates preserve the object tree. Fonts are Montserrat 12, 14
 and 18. The BSP retains its single 19,200-byte DMA draw buffer. Host object
@@ -157,7 +163,7 @@ counts and target static-memory figures do not establish C3 runtime free heap.
 Wi-Fi prefers the last working 2.4 GHz station profile on boot. Four profiles
 fit in the separate `passport_wifi/profiles` NVS snapshot, with monotonic
 profile IDs and original SSID bytes; display text is never an identity or a
-credential. Future labels must be attached to those IDs separately. Unknown
+credential. Display labels attach separately to stable profile IDs. Unknown
 storage or uncertain writes are reported and prevent further profile changes.
 A failed join keeps the previous working snapshot. New credentials are saved
 only after an exact association and an observed IP event consistent with the

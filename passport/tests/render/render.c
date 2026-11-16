@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "platform.h"
+#include "../names_view_fixture.h"
 #include "../../main/passport_board.c"
 #include "../../main/passport_ui.c"
 static lv_display_t *display;
@@ -52,6 +53,43 @@ static void bounds(lv_obj_t *object)
     }
     for (unsigned i = 0; i < lv_obj_get_child_count(object); ++i) bounds(lv_obj_get_child(object, i));
 }
+static lv_obj_t *find_visible_label(lv_obj_t *object, const char *expected)
+{
+    if (lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN)) return NULL;
+    if (lv_obj_check_type(object, &lv_label_class) && !strcmp(lv_label_get_text(object), expected)) return object;
+    for (unsigned i = 0; i < lv_obj_get_child_count(object); ++i) {
+        lv_obj_t *found = find_visible_label(lv_obj_get_child(object, i), expected);
+        if (found) return found;
+    }
+    return NULL;
+}
+static lv_obj_t *assert_label_fits(const char *expected)
+{
+    lv_obj_t *label = find_visible_label(lv_display_get_screen_active(display), expected);
+    assert(label);
+    lv_point_t size;
+    lv_area_t area, parent;
+    lv_obj_get_content_coords(label, &area);
+    lv_obj_get_content_coords(lv_obj_get_parent(label), &parent);
+    lv_text_get_size(&size, expected, lv_obj_get_style_text_font(label, 0),
+                     lv_obj_get_style_text_letter_space(label, 0), lv_obj_get_style_text_line_space(label, 0),
+                     lv_area_get_width(&area), LV_TEXT_FLAG_NONE);
+    assert(size.x <= lv_area_get_width(&area) && size.y <= lv_area_get_height(&area));
+    assert(area.x1 >= parent.x1 && area.x2 <= parent.x2 && area.y1 >= parent.y1 && area.y2 <= parent.y2);
+    return label;
+}
+
+static void assert_scan_row(const char *title, const char *ssid, const char *summary)
+{
+    lv_obj_t *first = assert_label_fits(title);
+    lv_obj_t *second = assert_label_fits(ssid);
+    lv_obj_t *third = assert_label_fits(summary);
+    assert(lv_obj_get_parent(first) == lv_obj_get_parent(second));
+    assert(lv_obj_get_parent(second) == lv_obj_get_parent(third));
+    assert(lv_obj_get_y2(first) <= lv_obj_get_y(second));
+    assert(lv_obj_get_y2(second) <= lv_obj_get_y(third));
+}
+
 static void capture(const char *name, unsigned count)
 {
     render_ui("Listener created");
@@ -79,6 +117,12 @@ int main(int argc, char **argv)
 {
     bool setup_only = argc == 2 && !strcmp(argv[1], "--setup-only");
     lv_init(); display = lv_display_create(240, 320);
+    assert(passport_names_text_valid(LONG_DISPLAY_LABEL, 16));
+    assert(strlen(MAX_BYTES_LABEL) == PASSPORT_NAME_BYTES &&
+           passport_names_text_valid(MAX_BYTES_LABEL, PASSPORT_NAME_BYTES));
+    assert(passport_names_text_valid("45°", sizeof("45°") - 1));
+    assert(!passport_names_text_valid("\xe5\xad\x97", 3));
+    assert(!passport_names_text_valid("L\xe2\x80\xae", 4));
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(display, pixels, NULL, sizeof(pixels), LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_flush_cb(display, flush);
@@ -91,7 +135,10 @@ int main(int argc, char **argv)
             .ready=true, .peer_count=3, .window_seconds=60};
         snprintf(ble.current, sizeof(ble.current), "C1:22:33:44:55:66/1");
         snprintf(ble.result, sizeof(ble.result), "Connected / input ready");
-        for (unsigned i = 0; i < 3; ++i) snprintf(ble.peers[i].label, sizeof(ble.peers[i].label), "C%u:22:33:44:55:66/1", i);
+        for (unsigned i = 0; i < 3; ++i) {
+            snprintf(ble.peers[i].label, sizeof(ble.peers[i].label), "C%u:22:33:44:55:66/1", i);
+            ble.peers[i].bond_id[0] = i + 1;
+        }
         wifi = (passport_wifi_state_t){.initialized=true,.storage_known=true,.scan_known=true,.scan_count=4,.profile_count=2,.phase=PW_ONLINE,.active_profile=1,.ap_started=true,.dhcp_running=true,.ap_client=true,.ap_lease=true,.setup_open=false,.setup_seconds=0};
         snprintf(wifi.sta_ip,sizeof(wifi.sta_ip),"192.168.1.40"); snprintf(wifi.ap_ip,sizeof(wifi.ap_ip),"192.168.4.1");
         snprintf(wifi.ap_client_ip,sizeof(wifi.ap_client_ip),"192.168.4.2");
@@ -99,6 +146,8 @@ int main(int argc, char **argv)
         for (unsigned n=0;n<4;++n) {
             const char *names[]={"Studio LAN","A long network name with 32 byte","Guest network","Enterprise Wi-Fi"};
             wifi.rows[n]=(passport_wifi_row_t){.security=n==2?PW_OPEN:n==3?PW_UNSUPPORTED:PW_WPA2,.rssi=-42-12*n,.profile_id=n<2?n+1:0,.current=n==0};
+            wifi.rows[n].bssid[5] = n;
+            wifi.rows[n].auth = n == 2 ? 0 : 3;
             wifi.rows[n].ssid.length=strlen(names[n]); memcpy(wifi.rows[n].ssid.bytes,names[n],wifi.rows[n].ssid.length);
             if(n<2) wifi.profiles[n]=(passport_wifi_profile_t){.id=n+1,.ssid=wifi.rows[n].ssid,.security=PW_WPA2};
         }
@@ -129,7 +178,49 @@ int main(int argc, char **argv)
         for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) {
             page = cases[i].page; focus = cases[i].focus;
             wifi.phase = page >= WIFI_AP ? PW_OFFLINE : PW_ONLINE; capture(cases[i].name, count);
+            if (page == WIFI_LIST) {
+                assert_scan_row("Studio profile", "Studio LAN", "WPA2 / -42 dBm / saved");
+                assert_scan_row("Exact AP", "Guest network", "Open / -66 dBm");
+                assert_label_fits("WPA2 / -54 dBm / saved");
+                assert(view.items[0].checked && !view.items[1].checked && !view.items[2].checked);
+            }
         }
+        page = HOST_IDENTITY; focus = 0; capture("host-identity", count);
+        assert(strstr(view.body, LONG_DISPLAY_LABEL) && strstr(view.body, target.label));
+        page = WIFI_IDENTITY; wifi_return = WIFI_LIST; wifi_target = wifi.rows[2];
+        capture("ap-identity", count);
+        assert(strstr(view.body, "Exact AP") && strstr(view.body, "00:00:00:00:00:02"));
+        assert_label_fits(view.body);
+        wifi_target.ssid.length = sizeof(wifi_target.ssid.bytes);
+        memset(wifi_target.ssid.bytes, 0xFF, sizeof(wifi_target.ssid.bytes));
+        memset(wifi_target.bssid, 0xAA, sizeof(wifi_target.bssid) - 1);
+        wifi_target.auth = 3;
+        wifi_target.security = PW_WPA2;
+        capture("max-label-raw-ssid", count);
+        static const char raw_ssid[] = "hex:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
+        assert(strstr(view.body, LONG_DISPLAY_LABEL) && strstr(view.body, raw_ssid));
+        assert(strstr(view.body, "WPA2\nAA:AA:AA:AA:AA:02 / auth 3"));
+        assert_label_fits(view.body);
+        memset(wifi_target.ssid.bytes, 0xDD, sizeof(wifi_target.ssid.bytes));
+        capture("max-label-wide-ssid", count);
+        static const char wide_ssid[] = "hex:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD";
+        assert(strstr(view.body, LONG_DISPLAY_LABEL) && strstr(view.body, wide_ssid));
+        assert(strstr(view.body, "WPA2\nAA:AA:AA:AA:AA:02 / auth 3"));
+        assert_label_fits(view.body);
+        wifi_target.auth = 26;
+        wifi_target.security = PW_UNSUPPORTED;
+        capture("max-byte-label-raw-ssid", count);
+        assert(strstr(view.body, MAX_BYTES_LABEL) && strstr(view.body, wide_ssid));
+        assert(strstr(view.body, "Unsupported\nAA:AA:AA:AA:AA:02 / auth 26"));
+        assert_label_fits(view.body);
+        activate();
+        assert(page == WIFI_ACTION);
+        page = WIFI_IDENTITY;
+        wifi_return = WIFI_SAVED; wifi_target = wifi.rows[0];
+        capture("profile-identity", count);
+        assert(strstr(view.body, "Studio profile") && strstr(view.body, "Studio LAN"));
+        page = WIFI_SAVED; label_storage_known = false; capture("labels-unavailable", count);
+        label_storage_known = true;
         page = APPEARANCE; theme_failed = true;
         snprintf(theme_note, sizeof(theme_note), "Theme save unconfirmed"); capture("appearance-error", count);
         theme_failed = false; theme_note[0] = 0;

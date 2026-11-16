@@ -28,17 +28,21 @@ def sdk_function(source, name):
     return source[match.start():end] + '\n'
 
 
-tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup')
+tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'names')
+fixture = {'startup': 'stubs.h', 'theme': 'theme_stubs.h', 'setup': 'setup_stubs.h',
+           'wifi': 'wifi_stubs.h', 'names': 'names_stubs.h'}
 for test in sys.argv[1:] or tests:
     if test not in tests:
         raise SystemExit(f'Unknown suite: {test}')
     with tempfile.TemporaryDirectory(prefix='passport-test-') as directory:
         work = Path(directory)
         extra = 'host/ble_sm.h services/gap/ble_svc_gap.h services/gatt/ble_svc_gatt.h nvs.h store/config/ble_store_config.h'.split()
+        if test == 'names':
+            extra.append('mbedtls/md.h')
         for header in headers + extra:
             path = work / header
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('#include "' + ('stubs.h' if test == 'startup' else 'theme_stubs.h' if test == 'theme' else 'setup_stubs.h' if test == 'setup' else 'wifi_stubs.h' if test == 'wifi' else 'ble_stubs.h') + '"\n')
+            path.write_text(f'#include "{fixture.get(test, "ble_stubs.h")}"\n')
         defines = []
         if test == 'cccd':
             sdk = root / '.tools/passport-esp-idf/components/bt/host/nimble/nimble/nimble/host'
@@ -67,6 +71,8 @@ for test in sys.argv[1:] or tests:
             sources += [parser]
         if test == 'ble':
             sources += [root / 'components/hid_engine/hid_engine.c', root / 'components/input_core/input_core.c']
+        if test == 'startup':
+            sources += [root / 'passport/main/passport_wifi_text.c']
         binary = work / f'test_{test}'
         subprocess.run([
             os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',

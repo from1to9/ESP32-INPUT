@@ -15,6 +15,7 @@ typedef void *esp_event_handler_instance_t;
 typedef int wifi_auth_mode_t;
 #define WIFI_AUTH_OPEN 0
 #define WIFI_AUTH_WPA_WPA2_PSK 4
+#define WIFI_AUTH_MAX 16
 #define WIFI_MODE_STA 1
 #define WIFI_SCAN_TYPE_ACTIVE 0
 #define ESP_NETIF_DHCP_STARTED 1

@@ -1,6 +1,7 @@
 #include "passport_wifi.h"
 #include "passport_wifi_store.h"
 #include "passport_ble.h"
+#include "passport_names_owner.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +21,7 @@
 #define JOIN_MS 20000
 #define FALLBACK_MS 30000
 #define SCAN_MS 6000
+_Static_assert(WIFI_AUTH_MAX <= UINT8_MAX, "Scan auth identifier must fit in one byte");
 
 typedef struct {
     bool submission, web_scan;
@@ -100,13 +102,18 @@ static void close_setup(void)
     explicit_bzero(&proposed, sizeof(proposed));
     explicit_bzero(setup_token, sizeof(setup_token));
 }
-static void publish(void)
+static void refresh_profiles(void)
 {
-    state.provisioning_available = atomic_load(&provisioning);
     state.profile_count = state.storage_known ? store.count : 0;
     for (unsigned i = 0; i < state.profile_count; ++i) {
         state.profiles[i] = (passport_wifi_profile_t){store.records[i].id, record_ssid(&store.records[i]), store.records[i].security};
     }
+}
+
+static void publish(void)
+{
+    state.provisioning_available = atomic_load(&provisioning);
+    refresh_profiles();
     state.setup_seconds = state.setup_open && setup_deadline > now_ms() ? (setup_deadline - now_ms() + 999) / 1000 : 0;
     portENTER_CRITICAL(&snapshot_lock);
     published = state;
@@ -295,6 +302,7 @@ static void read_scan(const queued_event_t *event)
         memcpy(row->ssid.bytes, record->ssid, row->ssid.length);
         memcpy(row->bssid, record->bssid, 6);
         row->channel = record->primary; row->rssi = record->rssi;
+        row->auth = record->authmode;
         row->security = security(record->authmode);
         unsigned matches = 0;
         for (unsigned p = 0; state.storage_known && p < store.count; ++p) {
@@ -497,13 +505,54 @@ static void handle_command(const passport_wifi_command_t *command, uint64_t now)
         else {
             store = staged_store; ++state.revision; result("Profile forgotten");
             if (joining.id == command->id) fallback("Profile forgotten; local AP selected", now);
+            const passport_name_key_t key = {.kind = PN_WIFI_PROFILE, .profile = command->id};
+            if (passport_names_remove(&key) != PN_OK) result("Profile forgotten; label cleanup failed");
         }
         explicit_bzero(&staged_store, sizeof(staged_store));
     }
 }
+
+static bool wifi_name_retained(const passport_name_key_t *key)
+{
+    return key->kind == PN_SCAN_AP || profile_index(key->profile) >= 0;
+}
+
+static passport_name_result_t wifi_name_change(const passport_name_change_t *change,
+                                               const passport_ble_state_t *ble)
+{
+    if (!state.initialized || !state.storage_known) return PN_UNAVAILABLE;
+    if (!ble->synced || ble->locked) return PN_LOCKED;
+    if (change->key.kind == PN_WIFI_PROFILE && !wifi_name_retained(&change->key)) return PN_NOT_FOUND;
+    if (change->key.kind != PN_SCAN_AP || change->clear) return passport_names_apply(change);
+    if (!state.scan_known || state.scanning || change->scan_revision != state.scan_revision) return PN_STALE;
+    refresh_profiles();
+    for (unsigned i = 0; i < state.scan_count; ++i) {
+        const passport_wifi_row_t *row = &state.rows[i];
+        const passport_name_key_t key = passport_wifi_ap_name_key(row);
+        if (!passport_names_equal(&change->key, &key)) continue;
+        uint32_t profile;
+        if (passport_wifi_profile_matches(&state, row, &profile)) return PN_INVALID;
+        return passport_names_apply(change);
+    }
+    return PN_NOT_FOUND;
+}
+
+static void service_wifi_names(passport_ble_state_t *ble)
+{
+    passport_name_change_t change;
+    if (passport_names_take(PN_WIFI, &change)) {
+        passport_ble_snapshot(ble);
+        passport_names_finish(PN_WIFI, wifi_name_change(&change, ble));
+    }
+}
+
 static void step(uint64_t now)
 {
-    if (!state.initialized) return;
+    if (!state.initialized) {
+        passport_name_change_t change;
+        if (passport_names_take(PN_WIFI, &change)) passport_names_finish(PN_WIFI, PN_UNAVAILABLE);
+        return;
+    }
     passport_ble_state_t ble;
     passport_ble_snapshot(&ble);
     if (state.setup_open && (ble.locked || now >= setup_deadline || !atomic_load(&provisioning))) { close_setup(); result("Setup closed; reopen locally"); }
@@ -565,12 +614,14 @@ static void step(uint64_t now)
         }
     }
     if (ble.locked && state.setup_open) { close_setup(); result("Setup closed by Lock"); }
+    service_wifi_names(&ble);
     publish();
 }
 static void owner_task(void *arg)
 {
     (void)arg;
     state.storage_known = passport_wifi_store_load(&store) == ESP_OK;
+    passport_names_load(PN_WIFI);
     state.revision = 1;
     int preferred = state.storage_known ? profile_index(store.preferred) : -1;
     if (preferred >= 0) {
@@ -579,6 +630,9 @@ static void owner_task(void *arg)
     if (!state.storage_known) result("Profile storage unknown; restart required");
     else result(next_station ? "Connecting last working LAN" : "No saved LAN; starting local AP");
     start_radio(now_ms());
+    if (state.storage_known && passport_names_prune(PN_WIFI, wifi_name_retained) != PN_OK) {
+        result("Network label storage unavailable");
+    }
     for (;;) { step(now_ms()); vTaskDelay(pdMS_TO_TICKS(50)); }
 }
 static esp_err_t create_netif(wifi_interface_t interface, esp_netif_t **out)

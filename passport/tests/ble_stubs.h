@@ -17,7 +17,13 @@ typedef struct { uint8_t type, val[6]; } ble_addr_t;
 #define BLE_STORE_OBJ_TYPE_CSFC 4
 #define BLE_STORE_OBJ_TYPE_PEER_ADDR 5
 #define BLE_STORE_OBJ_TYPE_LOCAL_IRK 6
-struct ble_store_value_sec { ble_addr_t peer_addr; uint8_t ltk_present; uint8_t ltk[16]; };
+struct ble_store_value_sec {
+    ble_addr_t peer_addr;
+    uint8_t ltk_present, key_size, sc;
+    uint16_t ediv;
+    uint64_t rand_num;
+    uint8_t ltk[16];
+};
 struct ble_store_key_sec { ble_addr_t peer_addr; uint8_t idx; };
 union ble_store_key { struct ble_store_key_sec sec; };
 union ble_store_value { struct ble_store_value_sec sec; uint8_t bytes[80]; };

@@ -2,6 +2,7 @@
 #include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
+#include "names_view_fixture.h"
 
 #include "../main/main.c"
 #include "../main/passport_board.c"
@@ -164,9 +165,6 @@ esp_err_t passport_wifi_start(void) { return ESP_OK; }
 void passport_wifi_snapshot(passport_wifi_state_t *out) { *out = mock_wifi; }
 bool passport_wifi_request(const passport_wifi_command_t *command) { assert(wifi_request_count < 16); wifi_requests[wifi_request_count++] = *command; return true; }
 void passport_wifi_ap_credentials(char ssid[32], char password[17]) { snprintf(ssid, 32, "Passport-ABCD"); snprintf(password, 17, "0123456789ABCDEF"); }
-const char *passport_wifi_phase_name(passport_wifi_phase_t value) { (void)value; return "Offline"; }
-const char *passport_wifi_security_name(passport_wifi_security_t value) { (void)value; return "WPA2"; }
-void passport_wifi_ssid_text(const passport_ssid_t *ssid, char *out, size_t capacity) { snprintf(out, capacity, "%.*s", ssid->length, ssid->bytes); }
 
 static void test_main_render_retry(void)
 {
@@ -386,11 +384,28 @@ static void test_visible_state(void)
     assert(!strcmp(view.detail, "Command queue full"));
     page = STATUS; build_view("Unavailable");
     assert(strstr(view.body, "Previous release unknown"));
-    page = HOST; focus = 3; build_view("");
+    page = HOST; focus = 4; build_view("");
     assert(!strcmp(view.ok, "Back"));
     snprintf(target.label, sizeof(target.label), "C1:22:33:44:55:66/1");
     page = CONFIRM_FORGET; focus = 0; build_view("");
     assert(!strcmp(view.ok, "Cancel") && strstr(view.body, target.label));
+}
+
+static void test_label_navigation(void)
+{
+    ble = (passport_ble_state_t){.storage_known = true, .peer_count = 2, .bond_revision = 37,
+        .peers = {{.address = {1}, .bond_id = {1}, .label = "00:00:00:00:00:01/0"},
+                  {.address = {2}, .bond_id = {2}, .label = "00:00:00:00:00:02/0"}}};
+    page = BLUETOOTH; focus = 2;
+    build_view("");
+    assert(!strcmp(view.items[1].title, view.items[2].title));
+    assert(strcmp(view.items[1].subtitle, view.items[2].subtitle));
+    activate();
+    assert(page == HOST && target.address[0] == 2 && target_revision == 37);
+    focus = 3; activate(); build_view("");
+    assert(page == HOST_IDENTITY && strstr(view.body, LONG_DISPLAY_LABEL) && strstr(view.body, target.label));
+    activate();
+    assert(page == HOST);
 }
 
 static void test_wifi_ui(void)
@@ -424,6 +439,7 @@ int main(void)
     test_appearance();
     test_visible_state();
     test_wifi_ui();
+    test_label_navigation();
     puts("PASS: display retry and buffer lifetime, observed-button health, gestures, bounded queue and three asynchronous lock paths, bounded repeats and appearance failures");
     return 0;
 }
