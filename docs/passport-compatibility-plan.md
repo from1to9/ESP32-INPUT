@@ -140,6 +140,30 @@ an explicit local forget action, which releases input first. Ready means the
 required HID service, encryption, bond, subscriptions, and neutral-release
 state are usable; a connected link alone is insufficient.
 
+The three-button Bluetooth page lists saved bonded hosts and marks the
+currently connected host. It offers Pair new, Advertise for selected host,
+Disconnect, Forget selected host, and Back. Selecting Advertise starts a
+bounded reconnect window; a phone, tablet, or computer still initiates
+the BLE connection from its own stack. BLE HID peripheral mode cannot
+enumerate nearby host computers as a normal discovery list. If the stack
+cannot restrict advertising to the selected bond, reject an unexpected
+host before accepting input and display the actual host that connected.
+Forgetting a bond or disconnecting the active host first cancels pending
+input and completes neutral release. Show capacity-full and pairing errors
+without silently deleting another bond.
+
+The three-button Wi-Fi page has a Scan networks action and a scrollable
+2.4 GHz result list. Each row shows a bounded SSID label, security type,
+signal strength, and saved/current marker; UP and DOWN clamp at the list
+ends. OK opens actions for that exact row. A saved network offers Connect
+and Forget with local confirmation. A supported new network offers
+Configure via Passport AP: show the AP join QR and web form for its
+password, then confirm the exact pending SSID on screen before joining.
+The three buttons do not implement full password typing. Refresh, scan
+failure, unsupported security, full saved-profile storage, and Back have
+explicit states. No list row initiates connection merely by receiving
+focus, and a failed join preserves the previous working profile.
+
 The Passport has a 240 x 320 display and UP, DOWN, OK on one ADC ladder.
 No two-button chord is required. The BSP callback queues events; UI,
 network, and HID work run in their owning tasks. Treat a double click
@@ -157,8 +181,11 @@ open network service remains read-only and input stays locked.
 | Mouse | Focus Up, Left, Click, Right, Down, Back | Bounded move or left click | Repeat focused direction only while held |
 | Keys | Focus Esc, Enter, Tab, Backspace, arrows, Back | Send one key tap | Return Home |
 | Connections | Focus Bluetooth, Wi-Fi, Web/API, Sound, Back | Open focus | Return Home |
-| Bluetooth | Focus Pair, saved host, Disconnect, Forget, Back | Open or perform | Return Connections |
-| Wi-Fi | Focus Join LAN, Use Passport Wi-Fi, Forget, Back | Open or perform | Return Connections |
+| Bluetooth | Focus Pair new, saved hosts, Back | Open host actions or pair window | Return Connections |
+| Bluetooth host actions | Focus Advertise, Disconnect, Forget, Back | Apply or open confirmation | Return Bluetooth |
+| Wi-Fi | Focus Scan networks, saved/current network, Use Passport Wi-Fi, Back | Open list or action | Return Connections |
+| Wi-Fi network list | Focus scan result, Refresh, Back | Open exact-row actions | Return Wi-Fi |
+| Wi-Fi network actions | Focus Connect/Configure, Forget, Back | Apply or open confirmation | Return list |
 | Sound | Focus Off, On, Test cue, Back | Apply or preview | Return Connections |
 | Confirmation | Focus Cancel or Confirm; Cancel first | Apply focus | Cancel |
 
@@ -228,6 +255,12 @@ acceptance as specified, never proof that the target OS acted.
 4. Add the responsive browser and direct agent control, then reconcile
    requirements, API, Wi-Fi, browser, build, and validation docs.
    Independently review each batch before publishing.
+5. After the delivered firmware and physical/browser evidence support its
+   actual claims, update the root README, both target build/user guides,
+   repository description, and focused GitHub topics for discoverability.
+   Prepare a bilingual title/summary, cover, public source URL, and verified
+   merged Passport image for the official community publisher. Show the
+   complete proposed listing to the author before its external upload.
 
 Run focused shared state/failure tests and the Mosaico target build when
 its AP integration changes. Build the C3 target with a C3-specific partition
@@ -254,3 +287,4 @@ logs, personal data, local paths, and performance snapshots out of Git.
 - [Passport QR/SoftAP example](https://github.com/kunlun322/Qoder-Passport)
 - [ESP32-C3 coexistence guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-guides/coexist.html)
 - [ESP32-C3 fixed-function USB](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-guides/usb-serial-jtag-console.html)
+- [FoloToy community publication](https://github.com/FoloToy/ai-passport/blob/main/docs/development/release/publish-to-community.zh_CN.md)
