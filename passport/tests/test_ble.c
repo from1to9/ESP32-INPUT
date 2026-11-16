@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "ble_stubs.h"
+#include "names_owner_fixture.h"
 #include "../main/passport_ble.c"
 
 struct ble_config ble_hs_cfg;
@@ -12,6 +13,8 @@ static unsigned adv_calls, terminate_calls, forget_calls, report_count;
 static int filter_policy;
 static ble_addr_t saved[3], allowed;
 static unsigned saved_count;
+static uint8_t fixture_ltk;
+static uint32_t fixture_security_revision;
 static struct ble_gap_conn_desc peer_desc;
 static struct { unsigned handle, length; uint8_t bytes[8]; } reports[128];
 static passport_command_t queue[8];
@@ -23,6 +26,7 @@ int64_t esp_timer_get_time(void) { return clock_ms * 1000; }
 int ble_addr_cmp(const ble_addr_t *a,const ble_addr_t *b) { return memcmp(a,b,sizeof(*a)); }
 int passport_store_init(void) { return 0; }
 bool passport_store_known(void) { return store_ok; }
+uint32_t passport_store_security_revision(void) { return fixture_security_revision; }
 int passport_store_write(int type,const union ble_store_value *value) { (void)type;(void)value;return store_ok?0:BLE_HS_ESTORE_FAIL; }
 int passport_store_forget(const ble_addr_t *peer) {
     ++forget_calls;
@@ -33,7 +37,7 @@ int passport_store_forget(const ble_addr_t *peer) {
 }
 int ble_store_read_our_sec(const struct ble_store_key_sec *key,struct ble_store_value_sec *value) {
     for(unsigned i=0;i<saved_count;i++) if(!ble_addr_cmp(&key->peer_addr,&saved[i])) {
-        *value=(struct ble_store_value_sec){.peer_addr=saved[i],.ltk_present=1};return 0;
+        *value=(struct ble_store_value_sec){.peer_addr=saved[i],.ltk_present=1,.ltk={fixture_ltk}};return 0;
     }
     return BLE_HS_ENOENT;
 }
@@ -92,6 +96,9 @@ static void setup(void) {
     window_end=release_end=lease_end=0;clock_ms=1000;queue_count=0;store_ok=true;send_fail=false;
     stop_error=start_error=whitelist_error=terminate_error=0;
     adv_calls=terminate_calls=forget_calls=report_count=0;saved_count=0;atomic_store(&emergency_lock,false);
+    name_queued = names_reconciled = false;
+    name_applied = name_removals = fixture_ltk = fixture_security_revision = 0;
+    name_remove_result = PN_OK;
     commands=queue;keyboard_handle=10;mouse_handle=20;refresh_peers();
 }
 static passport_command_t action(passport_command_kind_t kind) {
@@ -182,8 +189,39 @@ static void test_input_release(void) {
     tick_once();assert(!published.release_pending && state.ready);
     reset(1);assert(!state.connected&&!state.synced&&engine.state.locked);
 }
+static void test_bond_names(void)
+{
+    setup();
+    saved[0] = (ble_addr_t){.val = {1}};
+    saved_count = 1;
+    fixture_ltk = 5;
+    refresh_peers();
+    queued_name = (passport_name_change_t){.key = {.kind = PN_HID_BOND}, .revision = 1};
+    memcpy(queued_name.key.bond, state.peers[0].bond_id, sizeof(queued_name.key.bond));
+    name_queued = true;
+    service_names();
+    assert(name_result == PN_LOCKED && !name_applied);
+    hid_engine_set_locked(&engine, false);
+    name_queued = true;
+    service_names();
+    assert(name_result == PN_OK && name_applied == 1);
+    // Same address with new local LTK is a different bond incarnation.
+    ++fixture_ltk;
+    ++fixture_security_revision;
+    refresh_peers();
+    name_queued = true;
+    service_names();
+    assert(name_result == PN_NOT_FOUND && name_applied == 1);
+    memcpy(queued_name.key.bond, state.peers[0].bond_id, sizeof(queued_name.key.bond));
+    pending = (passport_command_t){.kind = PASSPORT_FORGET, .peer = {1}, .bond_revision = state.bond_revision};
+    name_remove_result = PN_UNCERTAIN;
+    execute_management();
+    assert(!saved_count && name_removals == 1 && strstr(state.result, "cleanup failed"));
+    assert(!memcmp(queued_name.key.bond, removed_name.bond, sizeof(removed_name.bond)));
+}
+
 int main(void) {
     setup();assert(passport_ble_start()==ESP_OK);assert(ble_hs_cfg.sm_io_cap==BLE_HS_IO_NO_INPUT_OUTPUT&&ble_hs_cfg.sm_bonding);
-    test_security();test_input_release();
+    test_security();test_input_release();test_bond_names();
     puts("PASS: pairing windows, stable identities, whitelist and capacity, two-report release, stale work, lease and failure recovery");
 }

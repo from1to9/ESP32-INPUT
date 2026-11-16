@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "passport_names.h"
 
 #define PASSPORT_WIFI_PROFILES 4
 #define PASSPORT_WIFI_SCAN_ROWS 16
@@ -18,7 +19,7 @@ typedef struct {
 } passport_wifi_profile_t;
 typedef struct {
     passport_ssid_t ssid;
-    uint8_t bssid[6], channel;
+    uint8_t bssid[6], channel, auth;
     int8_t rssi;
     passport_wifi_security_t security;
     uint32_t profile_id;
@@ -71,3 +72,8 @@ const char *passport_wifi_security_name(passport_wifi_security_t security);
 const char *passport_wifi_phase_name(passport_wifi_phase_t phase);
 // Preserve raw SSID bytes; unsupported device glyphs use an explicit hex spelling.
 void passport_wifi_ssid_text(const passport_ssid_t *ssid, char *out, size_t capacity);
+passport_name_key_t passport_wifi_ap_name_key(const passport_wifi_row_t *row);
+unsigned passport_wifi_profile_matches(const passport_wifi_state_t *snapshot, const passport_wifi_row_t *row,
+                                       uint32_t *profile_id);
+passport_name_result_t passport_wifi_scan_label(const passport_wifi_state_t *snapshot,
+                                               const passport_wifi_row_t *row, char *label);

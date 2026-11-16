@@ -28,10 +28,10 @@ def sdk_function(source, name):
     return source[match.start():end] + '\n'
 
 
-tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'sound')
+tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'sound', 'names')
 fixtures = {
     'startup': 'stubs.h', 'theme': 'theme_stubs.h', 'wifi': 'wifi_stubs.h',
-    'setup': 'setup_stubs.h', 'sound': 'sound_stubs.h',
+    'setup': 'setup_stubs.h', 'sound': 'sound_stubs.h', 'names': 'names_stubs.h',
 }
 for test in sys.argv[1:] or tests:
     if test not in tests:
@@ -41,6 +41,8 @@ for test in sys.argv[1:] or tests:
         extra = 'host/ble_sm.h services/gap/ble_svc_gap.h services/gatt/ble_svc_gatt.h nvs.h store/config/ble_store_config.h'.split()
         if test == 'sound':
             extra += ['bsp_i2c.h', 'driver/i2s_std.h']
+        if test == 'names':
+            extra.append('mbedtls/md.h')
         for header in headers + extra:
             path = work / header
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +84,8 @@ for test in sys.argv[1:] or tests:
                               f'#include "{codec / "device/es8311/es8311.c"}"\n')
             sources += [driver, codec / 'esp_codec_dev_if.c', codec / 'esp_codec_dev_vol.c']
             libraries = ['-lm']
+        if test == 'startup':
+            sources += [root / 'passport/main/passport_wifi_text.c']
         binary = work / f'test_{test}'
         subprocess.run([
             os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',

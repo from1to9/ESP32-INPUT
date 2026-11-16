@@ -9,7 +9,7 @@
 #include <string.h>
 #include "esp_timer.h"
 
-typedef enum { HOME, BLUETOOTH, HOST, CONFIRM_FORGET, PAIR_WINDOW, MOUSE, KEYS, STATUS, LOCK_SCREEN, CONNECTIONS, WIFI, APPEARANCE, WIFI_LIST, WIFI_SAVED, WIFI_ACTION, WIFI_CONFIRM, WIFI_AP, WIFI_DETAILS, WIFI_JOIN_QR, WIFI_URL_QR, WIFI_PENDING, SOUND } page_t;
+typedef enum { HOME, BLUETOOTH, HOST, CONFIRM_FORGET, PAIR_WINDOW, MOUSE, KEYS, STATUS, LOCK_SCREEN, CONNECTIONS, WIFI, APPEARANCE, WIFI_LIST, WIFI_SAVED, WIFI_ACTION, WIFI_CONFIRM, WIFI_AP, WIFI_DETAILS, WIFI_JOIN_QR, WIFI_URL_QR, WIFI_PENDING, SOUND, HOST_IDENTITY, WIFI_IDENTITY } page_t;
 static page_t page = LOCK_SCREEN;
 static unsigned focus;
 static passport_peer_t target;
@@ -45,7 +45,6 @@ static const int8_t move_y[] = {-12, 0, 0, 0, 12};
 static const char *const home[] = {"Mouse", "Keys", "Connections", "Status"};
 static const char *const key_names[] = {"Esc", "Enter", "Tab", "Backspace", "Up", "Left", "Right", "Down", "Back"};
 static const uint8_t key_usages[] = {41, 40, 43, 42, 82, 80, 79, 81};
-static const char *const actions[] = {"Advertise", "Disconnect", "Forget", "Back"};
 
 static void request(passport_command_kind_t kind, int x, int y, unsigned usage)
 {
@@ -123,12 +122,12 @@ static unsigned entries(void)
     case APPEARANCE: return 3;
     case SOUND: return 4;
     case BLUETOOTH: return ble.peer_count + 2;
-    case HOST: return 4;
+    case HOST: return 5;
     case CONFIRM_FORGET: return 2;
     case WIFI: return 5;
     case WIFI_LIST: return (wifi.scan_known ? wifi.scan_count : 0) + 2;
     case WIFI_SAVED: return wifi.profile_count + 1;
-    case WIFI_ACTION: return wifi_target.profile_id ? 4 : 2;
+    case WIFI_ACTION: return wifi_target.profile_id ? 5 : 3;
     case WIFI_CONFIRM: case WIFI_PENDING: return 2;
     case WIFI_AP: return 5;
     case MOUSE: return 6;
@@ -205,11 +204,15 @@ static void activate(void)
     case WIFI_ACTION:
         if (!wifi_target.profile_id) {
             if (!focus && wifi_target.security != PW_UNSUPPORTED && wifi_target.ssid.length) { wifi_request(PW_SETUP_OPEN, 0, 0); navigate(WIFI_AP); }
-            else if (focus) navigate(wifi_return);
-        } else if (focus == 3) navigate(wifi_return);
+            else if (focus == 1) navigate(WIFI_IDENTITY);
+            else if (focus == 2) navigate(wifi_return);
+        } else if (focus == 4) navigate(wifi_return);
+        else if (focus == 3) navigate(WIFI_IDENTITY);
         else if (focus == 1) { wifi_request(PW_DISCONNECT, wifi_target.profile_id, wifi_revision); navigate(WIFI); }
         else { wifi_confirmation = focus == 0 ? PW_CONNECT : PW_FORGET; navigate(WIFI_CONFIRM); }
         break;
+    case WIFI_IDENTITY: navigate(WIFI_ACTION); break;
+    case HOST_IDENTITY: navigate(HOST); break;
     case WIFI_CONFIRM:
         if (confirmation_armed && focus == 1) wifi_request(wifi_confirmation, wifi_target.profile_id, wifi_revision);
         navigate(wifi_return);
@@ -240,6 +243,7 @@ static void activate(void)
         if (focus == 0) request(PASSPORT_ADVERTISE, 0, 0, 0);
         else if (focus == 1) request(PASSPORT_DISCONNECT, 0, 0, 0);
         else if (focus == 2) navigate(CONFIRM_FORGET);
+        else if (focus == 3) navigate(HOST_IDENTITY);
         else navigate(BLUETOOTH);
         break;
     case CONFIRM_FORGET:
@@ -326,6 +330,8 @@ static void input(const passport_button_event_t *event)
             } else if (!ble.locked) {
                 if (page == HOME) navigate(CONNECTIONS);
                 else if (page == HOST) navigate(BLUETOOTH);
+                else if (page == HOST_IDENTITY) navigate(HOST);
+                else if (page == WIFI_IDENTITY) navigate(WIFI_ACTION);
                 else if (page == STATUS) navigate(status_return);
                 else if (page == BLUETOOTH || page == WIFI || page == APPEARANCE || page == SOUND) navigate(CONNECTIONS);
                 else if (page == CONFIRM_FORGET) navigate(HOST);
@@ -376,6 +382,28 @@ static void item(unsigned index, const char *name, const char *subtitle, passpor
     snprintf(entry->title, sizeof(entry->title), "%s", name);
     snprintf(entry->subtitle, sizeof(entry->subtitle), "%s", subtitle);
     entry->icon = icon;
+}
+
+static void saved_wifi_label(uint32_t profile, char *label)
+{
+    const passport_name_key_t key = {.kind = PN_WIFI_PROFILE, .profile = profile};
+    passport_names_lookup(&key, label);
+}
+
+static void host_label(const passport_peer_t *peer, char *label)
+{
+    passport_name_key_t key = {.kind = PN_HID_BOND};
+    memcpy(key.bond, peer->bond_id, sizeof(key.bond));
+    passport_names_lookup(&key, label);
+}
+
+static void identity_page(const char *title)
+{
+    view.layout = VIEW_IDENTITY;
+    view.count = 0;
+    snprintf(view.title, sizeof(view.title), "%s", title);
+    view.target[0] = 0;
+    snprintf(view.ok, sizeof(view.ok), "Back");
 }
 
 static void build_view(const char *http)
@@ -442,7 +470,10 @@ static void build_view(const char *http)
         item(0, "Pair new host", "Open a 60-second window", ICON_ADD);
         for (unsigned i = 0; i < ble.peer_count; ++i) {
             bool connected = ble.connected && !strcmp(ble.current, ble.peers[i].label);
-            item(i + 1, connected ? "Connected host" : "Saved host", ble.peers[i].label, ICON_BLUETOOTH);
+            char label[PASSPORT_NAME_BYTES + 1];
+            host_label(&ble.peers[i], label);
+            item(i + 1, label[0] ? label : ble.peers[i].label,
+                 label[0] ? ble.peers[i].label : connected ? "Connected host" : "Saved host", ICON_BLUETOOTH);
             view.items[i + 1].checked = connected;
         }
         item(ble.peer_count + 1, "Back", "Connections", ICON_BACK);
@@ -453,12 +484,21 @@ static void build_view(const char *http)
     case HOST:
         snprintf(view.title, sizeof(view.title), "Saved host");
         snprintf(view.target, sizeof(view.target), "%s", target.label);
-        item(0, actions[0], "Only this host can reconnect", ICON_BLUETOOTH);
-        item(1, actions[1], "Keep the saved bond", ICON_CONNECTIONS);
-        item(2, actions[2], "Review before removal", ICON_STATUS);
-        item(3, actions[3], "Bluetooth hosts", ICON_BACK);
-        snprintf(view.ok, sizeof(view.ok), "%s", (const char *const[]){"Start", "End link", "Forget", "Back"}[focus]);
+        item(0, "Advertise", "Only this host can reconnect", ICON_BLUETOOTH);
+        item(1, "Disconnect", "Keep the saved bond", ICON_CONNECTIONS);
+        item(2, "Forget", "Review before removal", ICON_STATUS);
+        item(3, "Host details", "Label and original identity", ICON_STATUS);
+        item(4, "Back", "Bluetooth hosts", ICON_BACK);
+        snprintf(view.ok, sizeof(view.ok), "%s", (const char *const[]){"Start", "End link", "Forget", "Open", "Back"}[focus]);
         break;
+    case HOST_IDENTITY: {
+        char label[PASSPORT_NAME_BYTES + 1];
+        host_label(&target, label);
+        identity_page("Host details");
+        if (label[0]) snprintf(view.body, sizeof(view.body), "%s\n\nBond identity\n%s", label, target.label);
+        else snprintf(view.body, sizeof(view.body), "Bond identity\n%s", target.label);
+        break;
+    }
     case CONFIRM_FORGET:
         view.layout = VIEW_CONFIRM;
         snprintf(view.title, sizeof(view.title), "Forget host");
@@ -519,20 +559,25 @@ static void build_view(const char *http)
     case WIFI_SAVED: {
         bool saved = page == WIFI_SAVED;
         unsigned count = saved ? wifi.profile_count : wifi.scan_known ? wifi.scan_count : 0;
-        unsigned first = focus >= 3 ? focus - 2 : 0;
+        unsigned first = focus >= PASSPORT_LIST_ROWS ? focus - (PASSPORT_LIST_ROWS - 1) : 0;
         unsigned total = count + (saved ? 1 : 2);
-        view.count = total - first < 3 ? total - first : 3;
+        view.count = total - first < PASSPORT_LIST_ROWS ? total - first : PASSPORT_LIST_ROWS;
         view.focus = focus - first;
         snprintf(view.title, sizeof(view.title), "%s", saved ? "Saved networks" : "Nearby networks");
         for (unsigned slot = 0; slot < view.count; ++slot) {
             unsigned index = first + slot;
             if (index < count) {
-                char name[72], description[48];
+                char name[72], description[sizeof(view.scan_summary[0])], label[PASSPORT_NAME_BYTES + 1];
                 const passport_ssid_t *ssid = saved ? &wifi.profiles[index].ssid : &wifi.rows[index].ssid;
                 passport_wifi_ssid_text(ssid, name, sizeof(name));
                 if (saved) snprintf(description, sizeof(description), "%s / profile %lu", passport_wifi_security_name(wifi.profiles[index].security), (unsigned long)wifi.profiles[index].id);
                 else snprintf(description, sizeof(description), "%s / %d dBm%s", passport_wifi_security_name(wifi.rows[index].security), wifi.rows[index].rssi, wifi.rows[index].profile_id ? " / saved" : "");
-                item(slot, name, description, ICON_WIFI);
+                if (saved) saved_wifi_label(wifi.profiles[index].id, label);
+                else passport_wifi_scan_label(&wifi, &wifi.rows[index], label);
+                item(slot, label[0] ? label : name, label[0] ? name : description, ICON_WIFI);
+                if (!saved && label[0]) {
+                    snprintf(view.scan_summary[slot], sizeof(view.scan_summary[slot]), "%s", description);
+                }
                 view.items[slot].checked = saved ? wifi.active_profile == wifi.profiles[index].id : wifi.rows[index].current;
             } else if (!saved && index == count) item(slot, wifi.scanning ? "Scanning..." : "Refresh", wifi.scanning ? "Please wait" : "Scan again", ICON_WIFI);
             else item(slot, "Back", "Wi-Fi", ICON_BACK);
@@ -548,12 +593,32 @@ static void build_view(const char *http)
             item(0, "Connect", "Confirm the saved network", ICON_WIFI);
             item(1, "Disconnect", "Switch to Passport AP", ICON_CONNECTIONS);
             item(2, "Forget", "Confirm profile removal", ICON_STATUS);
-            item(3, "Back", "Network list", ICON_BACK);
+            item(3, "Network details", "Label and original identity", ICON_STATUS);
+            item(4, "Back", "Network list", ICON_BACK);
+            snprintf(view.ok, sizeof(view.ok), "%s", (const char *const[]){"Review", "End link", "Review", "Open", "Back"}[focus]);
         } else {
+            bool can_setup = wifi_target.security != PW_UNSUPPORTED && wifi_target.ssid.length;
             item(0, "Configure via AP", wifi_target.security == PW_UNSUPPORTED ? "Unsupported security" : !wifi_target.ssid.length ? "Hidden SSID unsupported" : "Use the local web form", ICON_WIFI);
-            item(1, "Back", "Network list", ICON_BACK);
+            item(1, "Network details", "Label and original identity", ICON_STATUS);
+            item(2, "Back", "Network list", ICON_BACK);
+            snprintf(view.ok, sizeof(view.ok), "%s", focus == 2 ? "Back" : focus == 1 ? "Open" : can_setup ? "Setup" : "Blocked");
         }
-        snprintf(view.ok, sizeof(view.ok), "%s", wifi_target.profile_id ? (const char *const[]){"Review","End link","Review","Back"}[focus] : focus ? "Back" : wifi_target.security == PW_UNSUPPORTED || !wifi_target.ssid.length ? "Blocked" : "Setup");
+        break;
+    }
+    case WIFI_IDENTITY: {
+        char name[72], label[PASSPORT_NAME_BYTES + 1], identity[48];
+        passport_wifi_ssid_text(&wifi_target.ssid, name, sizeof(name));
+        if (wifi_return == WIFI_SAVED) {
+            saved_wifi_label(wifi_target.profile_id, label);
+            snprintf(identity, sizeof(identity), "Profile %lu", (unsigned long)wifi_target.profile_id);
+        } else {
+            passport_wifi_scan_label(&wifi, &wifi_target, label);
+            const uint8_t *b = wifi_target.bssid;
+            snprintf(identity, sizeof(identity), "%02X:%02X:%02X:%02X:%02X:%02X / auth %u", b[0], b[1], b[2], b[3], b[4], b[5], wifi_target.auth);
+        }
+        identity_page("Network details");
+        snprintf(view.body, sizeof(view.body), "%s%sOriginal SSID\n%s\n%s\n%s",
+                 label, label[0] ? "\n" : "", name, passport_wifi_security_name(wifi_target.security), identity);
         break;
     }
     case WIFI_CONFIRM:
@@ -615,11 +680,21 @@ static void build_view(const char *http)
         snprintf(view.ok, sizeof(view.ok), "Hold");
         break;
     }
-    if (page == WIFI || (page >= WIFI_LIST && page <= WIFI_PENDING)) {
+    if (page == WIFI || page == WIFI_IDENTITY || (page >= WIFI_LIST && page <= WIFI_PENDING)) {
         snprintf(view.message, sizeof(view.message), "%s", !wifi.initialized ? "Wi-Fi unavailable" : wifi.ap_started && wifi.phase == PW_OFFLINE ? "Passport AP active" : passport_wifi_phase_name(wifi.phase));
         snprintf(view.detail, sizeof(view.detail), "%s", wifi_note[0] && (uint64_t)(esp_timer_get_time() / 1000) < wifi_note_until ? wifi_note : wifi.result);
-        if (page != WIFI_ACTION) snprintf(view.target, sizeof(view.target), "%s", (page >= WIFI_AP && wifi.ap_started) ? wifi.ap_ip : wifi.phase == PW_ONLINE ? wifi.sta_ip : wifi.ap_started ? "Passport AP active" : "No active Wi-Fi address");
+        if (page != WIFI_ACTION && page != WIFI_IDENTITY) snprintf(view.target, sizeof(view.target), "%s", (page >= WIFI_AP && wifi.ap_started) ? wifi.ap_ip : wifi.phase == PW_ONLINE ? wifi.sta_ip : wifi.ap_started ? "Passport AP active" : "No active Wi-Fi address");
         view.tone = !wifi.initialized || !wifi.storage_known ? TONE_ERROR : wifi.phase == PW_ONLINE ? TONE_GOOD : TONE_WAIT;
+    }
+    if ((page == BLUETOOTH || page == HOST_IDENTITY) && ble.storage_known &&
+        !passport_names_catalog(PN_BLE).known) {
+        snprintf(view.detail, sizeof(view.detail), "Label storage unavailable");
+        view.tone = TONE_ERROR;
+    }
+    if ((page == WIFI_LIST || page == WIFI_SAVED || page == WIFI_IDENTITY) && wifi.storage_known &&
+        !passport_names_catalog(PN_WIFI).known) {
+        snprintf(view.detail, sizeof(view.detail), "Label storage unavailable");
+        view.tone = TONE_ERROR;
     }
 
 }

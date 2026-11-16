@@ -1,5 +1,6 @@
 #include "passport_ble.h"
 #include "passport_store.h"
+#include "passport_names_owner.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -33,6 +34,8 @@ static passport_command_t pending;
 static uint64_t window_end, release_end, lease_end;
 static bool link_ready;
 static bool pairing_failed;
+static uint32_t peer_security_revision;
+static bool names_reconciled, bond_ids_known;
 
 static uint64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 static void result(const char *text) { snprintf(state.result, sizeof(state.result), "%s", text); }
@@ -70,6 +73,29 @@ static bool is_saved(const ble_addr_t *peer)
     return saved;
 }
 
+static bool bond_id(const ble_addr_t *peer, uint8_t id[PASSPORT_BOND_ID_BYTES])
+{
+    union ble_store_key key = {.sec = {.peer_addr = *peer}};
+    union ble_store_value value;
+    bool known = false;
+    if (ble_store_read_our_sec(&key.sec, &value.sec) == 0 && value.sec.ltk_present) {
+        // Explicit byte order and domain version. Only immutable pairing fields
+        // are included. NimBLE refresh counters and CCCDs do not affect identity.
+        uint8_t material[36] = {1, peer->type};
+        memcpy(material + 2, peer->val, sizeof(peer->val));
+        material[8] = value.sec.key_size;
+        material[9] = value.sec.sc;
+        material[10] = value.sec.ediv;
+        material[11] = value.sec.ediv >> 8;
+        for (unsigned i = 0; i < 8; ++i) material[12 + i] = value.sec.rand_num >> (i * 8);
+        memcpy(material + 20, value.sec.ltk, sizeof(value.sec.ltk));
+        known = passport_names_bond_id(material, sizeof(material), id);
+        explicit_bzero(material, sizeof(material));
+    }
+    explicit_bzero(&value, sizeof(value));
+    return known;
+}
+
 static void refresh_peers(void)
 {
     passport_peer_t previous[PASSPORT_PEERS];
@@ -80,14 +106,20 @@ static void refresh_peers(void)
     int count = 0;
     state.storage_known = passport_store_known();
     if (!state.storage_known || ble_store_util_bonded_peers(peers, &count, PASSPORT_PEERS)) {
+        bond_ids_known = false;
         state.storage_known = false;
         state.peer_count = 0;
         if (previously_known || previous_count) ++state.bond_revision;
         return;
     }
     state.peer_count = count;
+    const uint32_t revision = passport_store_security_revision();
+    const bool reuse = previously_known && peer_security_revision == revision;
+    if (!reuse) bond_ids_known = true;
+    peer_security_revision = revision;
     for (int i = 0; i < count; ++i) {
         if (!stable_identity(&peers[i])) {
+            bond_ids_known = false;
             state.storage_known = false;
             state.peer_count = 0;
             ++state.bond_revision;
@@ -96,9 +128,49 @@ static void refresh_peers(void)
         state.peers[i].type = peers[i].type;
         memcpy(state.peers[i].address, peers[i].val, 6);
         format_peer(state.peers[i].label, sizeof(state.peers[i].label), &peers[i]);
+        if (reuse && (unsigned)i < previous_count && previous[i].type == peers[i].type &&
+            !memcmp(previous[i].address, peers[i].val, sizeof(peers[i].val))) {
+            memcpy(state.peers[i].bond_id, previous[i].bond_id, PASSPORT_BOND_ID_BYTES);
+        } else {
+            memset(state.peers[i].bond_id, 0, PASSPORT_BOND_ID_BYTES);
+            if (!bond_id(&peers[i], state.peers[i].bond_id)) bond_ids_known = false;
+        }
     }
     if (!previously_known || previous_count != state.peer_count ||
         memcmp(previous, state.peers, state.peer_count * sizeof(previous[0]))) ++state.bond_revision;
+}
+
+static bool bond_retained(const passport_name_key_t *key)
+{
+    for (unsigned i = 0; i < state.peer_count; ++i) {
+        if (!memcmp(key->bond, state.peers[i].bond_id, sizeof(key->bond))) return true;
+    }
+    return false;
+}
+
+static passport_name_result_t remove_bond_name(const ble_addr_t *peer)
+{
+    for (unsigned i = 0; i < state.peer_count; ++i) {
+        const passport_peer_t *record = &state.peers[i];
+        if (record->type != peer->type || memcmp(record->address, peer->val, sizeof(peer->val))) continue;
+        passport_name_key_t key = {.kind = PN_HID_BOND};
+        memcpy(key.bond, record->bond_id, sizeof(key.bond));
+        return bond_ids_known ? passport_names_remove(&key) : PN_UNAVAILABLE;
+    }
+    return PN_UNAVAILABLE;
+}
+
+static void service_names(void)
+{
+    if (!names_reconciled && state.storage_known && bond_ids_known) {
+        names_reconciled = true;
+        if (passport_names_prune(PN_BLE, bond_retained) != PN_OK) result("Host label storage unavailable");
+    }
+    passport_name_change_t change;
+    if (!passport_names_take(PN_BLE, &change)) return;
+    passport_name_result_t outcome = !state.synced || !state.storage_known || !bond_ids_known ? PN_UNAVAILABLE :
+        engine.state.locked ? PN_LOCKED : !bond_retained(&change.key) ? PN_NOT_FOUND : passport_names_apply(&change);
+    passport_names_finish(PN_BLE, outcome);
 }
 
 static int access_hid(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctx, void *arg)
@@ -372,7 +444,12 @@ static void execute_management(void)
         break;
     case PASSPORT_FORGET:
         if (passport_store_forget(&peer)) result("Forget uncertain; restart required");
-        else { result("Bond forgotten"); if (selected_valid && same(&selected, &peer)) selected_valid = false; }
+        else {
+            passport_name_result_t removed = remove_bond_name(&peer);
+            result(removed == PN_OK ? "Bond forgotten" : "Bond forgotten; label cleanup failed");
+            if (selected_valid && same(&selected, &peer)) selected_valid = false;
+            refresh_peers();
+        }
         break;
     default: result("Disconnected; bond retained"); break;
     }
@@ -484,6 +561,7 @@ static void service(struct ble_npl_event *event)
             else disconnect_requested = true;
         }
     }
+    service_names();
     state.locked = engine.state.locked;
     state.release_pending = engine.state.release_pending;
     state.ready = transport_ready && engine.ready && !engine.state.release_pending && !state.locked && !transition;
@@ -554,6 +632,7 @@ esp_err_t passport_ble_start(void)
     if (!rc) rc = ble_gatts_count_cfg(services);
     if (!rc) rc = ble_gatts_add_svcs(services);
     if (rc) { nimble_port_deinit(); vQueueDelete(commands); commands = NULL; return ESP_FAIL; }
+    passport_names_load(PN_BLE);
     ble_hs_cfg.store_write_cb = secure_write;
     ble_hs_cfg.store_status_cb = store_full;
     ble_hs_cfg.sync_cb = synced;

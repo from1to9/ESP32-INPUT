@@ -149,7 +149,7 @@ socket timeout). Parsing depth and static response capacity are bounded.
 The independent BLE and Wi-Fi tasks continue during HTTP waits. These limits
 are engineering bounds, not measured coexistence or runtime stack margins.
 
-## Stable identities and future labels
+## Stable identities and display labels
 
 Saved rows come from the persisted bond store. A public identity or resolved
 static-random identity is displayed as `AA:BB:CC:DD:EE:FF/type`; a rotating
@@ -159,15 +159,46 @@ Controller whitelist filtering limits a saved-host advertisement, and the
 connection callback rechecks the resolved identity against the selected bond.
 Failure to configure filtering does not fall back to unrestricted advertising.
 
-`bond_revision` is an in-boot list revision, not an enduring bond incarnation
-or cross-device ID. The current UI has no user labels, peer-name persistence,
-label edit API, opaque bond fingerprint or cross-device label import. A later
-label implementation must create a stable opaque bond fingerprint tied to the
-persisted bond incarnation, expose it with a fresh revision, and key local/web
-labels and reconnect/forget requests by that fingerprint. It must not derive
-identity from display text, list position, advertised name or an RPA. Forget
-and re-pair must create a new incarnation instead of reusing an old label's
-operation authority.
+`bond_revision` is the in-boot host list revision. `passport_peer_t.bond_id`
+contains a separate device-local 128-bit fingerprint. It is a truncated
+HMAC-SHA256 of the stable peer identity and immutable local pairing material
+stored by the pinned NimBLE SDK. The per-device secret and pairing bytes
+never leave the firmware. A repeated pairing gets new pairing material,
+while reconnect and reboot preserve the fingerprint of an existing bond.
+An all-zero fingerprint means unavailable. `peer.label` and `current` still
+carry the original formatted identity.
+
+The native owner interface is in `passport_names.h`. A future Web/API
+adapter can take `passport_names_catalog` for each domain, enumerate
+`passport_names_entry` with its revision, and use `passport_names_lookup`
+to resolve a typed key. Match the active BLE/profile snapshots when
+presenting live rows. Saved Wi-Fi labels use the stable profile ID.
+`passport_wifi_ap_name_key` builds an exact scan key from the SDK-reported
+SSID bytes, BSSID, and raw auth type. `passport_wifi_scan_label` tries that
+key first, then the label of a unique saved profile with matching SSID and
+compatible security. Retained AP labels are listed by the catalog even
+without a matching current scan. The Wi-Fi SDK exposes a terminated SSID
+array without a separate on-air length.
+
+The caller must validate decoded label bytes with `passport_names_text_valid`
+using the original length and perform the HTTP operation's admission checks.
+Submit a set/clear change with `passport_names_submit` using the catalog
+revision. Setting a scanned AP label also takes the current completed
+`scan_revision` and an exact unsaved key. A retained AP label can be cleared
+without a scan. `PN_OK` from submit means accepted for owner processing.
+Poll `passport_names_result` with the returned ticket for the durable outcome.
+Each domain allows one pending change and retains its latest result. If a
+ticket was superseded, read the current catalog to reconcile. The BLE and
+Wi-Fi owners revalidate identity, Lock, and storage before applying a change.
+The catalog reports storage uncertainty and rejects additional writes after
+an unconfirmed write. The backend adds no HTTP route.
+
+The separate `passport_names` NVS namespace stores the HID and Wi-Fi label
+catalogs. Up to three HID bonds, four profiles and sixteen exact AP keys can
+have labels. Committed forget removes only the attached bond or profile
+label. Boot reconciliation removes orphan saved-identity labels after the
+bond/profile store is known. An AP label stays with its original key. A
+label failure is reported independently of the bond or profile operation.
 
 ## Persistence boundary
 

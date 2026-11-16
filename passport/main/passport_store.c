@@ -20,6 +20,7 @@ static const int types[] = {
 };
 static nvs_handle_t storage;
 static bool known, transaction, snapshot_full;
+static uint32_t security_revision;
 
 static int collect(int type, union ble_store_value *value, void *arg)
 {
@@ -60,6 +61,7 @@ int passport_store_write(int type, const union ble_store_value *value)
     if (!known) return BLE_HS_ESTORE_FAIL;
     int rc = ble_store_config_write(type, value);
     if (!rc && !transaction) rc = persist();
+    if (!rc && type == BLE_STORE_OBJ_TYPE_OUR_SEC) ++security_revision;
     // The SDK may ignore a key-write error after earlier records were written.
     if (rc) known = false;
     return rc;
@@ -70,6 +72,7 @@ static int delete_record(int type, const union ble_store_key *key)
     if (!known) return BLE_HS_ESTORE_FAIL;
     int rc = ble_store_config_delete(type, key);
     if (!rc && !transaction) rc = persist();
+    if (!rc && type == BLE_STORE_OBJ_TYPE_OUR_SEC) ++security_revision;
     return rc;
 }
 
@@ -106,6 +109,7 @@ int passport_store_init(void)
 }
 
 bool passport_store_known(void) { return known; }
+uint32_t passport_store_security_revision(void) { return security_revision; }
 
 int passport_store_forget(const ble_addr_t *peer)
 {

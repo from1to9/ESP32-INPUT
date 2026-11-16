@@ -4,8 +4,9 @@
 #include "passport_theme.h"
 
 #define PASSPORT_VIEW_ITEMS 9
+#define PASSPORT_LIST_ROWS 3
 
-typedef enum { VIEW_HOME, VIEW_LIST, VIEW_MOUSE, VIEW_KEYS, VIEW_MESSAGE, VIEW_CONFIRM, VIEW_DETAILS, VIEW_QR, VIEW_NETWORK_CONFIRM } passport_layout_t;
+typedef enum { VIEW_HOME, VIEW_LIST, VIEW_MOUSE, VIEW_KEYS, VIEW_MESSAGE, VIEW_CONFIRM, VIEW_DETAILS, VIEW_QR, VIEW_NETWORK_CONFIRM, VIEW_IDENTITY } passport_layout_t;
 typedef enum { TONE_MUTED, TONE_GOOD, TONE_WAIT, TONE_ERROR } passport_tone_t;
 typedef enum {
     ICON_NONE, ICON_MOUSE, ICON_KEYS, ICON_CONNECTIONS, ICON_STATUS,
@@ -28,4 +29,5 @@ typedef struct {
     passport_icon_t hero_icon;
     unsigned count, focus;
     passport_item_t items[PASSPORT_VIEW_ITEMS];
+    char scan_summary[PASSPORT_LIST_ROWS][32];
 } passport_view_t;
