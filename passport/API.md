@@ -17,8 +17,7 @@ The BLE report payloads exclude the report ID; characteristics and Report
 Reference descriptors select it. Both input characteristics must be subscribed
 and the connection encrypted and bonded before the initial neutral keyboard
 and mouse reports can complete. The network input API adds bounded ANSI text,
-drag, wheel and left/right/middle click. Boot protocol and sound are not
-exposed. Numeric comparison, passkey entry and repeat pairing are rejected.
+drag, wheel and left/right/middle click. Boot protocol and network sound controls are not exposed. Numeric comparison, passkey entry and repeat pairing are rejected.
 Just Works pairing supplies no numeric-comparison authentication.
 
 ## Internal ownership and state
@@ -172,8 +171,8 @@ while reconnect and reboot preserve the fingerprint of an existing bond.
 An all-zero fingerprint means unavailable. `peer.label` and `current` still
 carry the original formatted identity.
 
-The native owner interface is in `passport_names.h`. A future Web/API
-adapter can take `passport_names_catalog` for each domain, enumerate
+The native owner interface is in `passport_names.h`. The Web/API
+adapter takes `passport_names_catalog` for each domain, enumerate
 `passport_names_entry` with its revision, and use `passport_names_lookup`
 to resolve a typed key. Match the active BLE/profile snapshots when
 presenting live rows. Saved Wi-Fi labels use the stable profile ID.
@@ -195,7 +194,7 @@ Each domain allows one pending change and retains its latest result. If a
 ticket was superseded, read the current catalog to reconcile. The BLE and
 Wi-Fi owners revalidate identity, Lock, and storage before applying a change.
 The catalog reports storage uncertainty and rejects additional writes after
-an unconfirmed write. The backend adds no HTTP route.
+an unconfirmed write. The backend owns storage; the protocol adapter below exposes its results.
 
 The separate `passport_names` NVS namespace stores the HID and Wi-Fi label
 catalogs. Up to three HID bonds, four profiles and sixteen exact AP keys can
@@ -224,10 +223,9 @@ runtime heap/stack margins require physical qualification.
 
 This target explicitly initializes `CP_POLICY_PASSPORT_OPEN_HTTP`. The ordinary
 `cp_initialize` still selects enrolled TLS. No request can change policy. The
-current Passport provider implements only the exact input operations in the
-[compatibility plan](../docs/passport-compatibility-plan.md), with `script` as
-its sole input producer. Connection-management and label providers remain
-unavailable until their separate integration. Operation metadata reports this
+Passport provider implements the exact input, BLE management, Wi-Fi scan and
+display-label operations in the [compatibility plan](../docs/passport-compatibility-plan.md),
+with `script` as its sole input producer. Operation metadata reports provider
 availability; broader scope names do not grant additional operations.
 
 Use the observed numeric LAN/AP address, optionally with `:80`, as Host. A
@@ -287,3 +285,82 @@ the existing NimBLE owner. An HTTP owner timeout reports an unknown outcome;
 its mailbox remains unavailable until that owner completes or discards it.
 Runtime free heap, stack high-water marks, radio coexistence, network timing
 and host input behavior still require physical qualification.
+
+
+## Board-hosted controller and management
+
+`GET /`, `/controller.css` and `/controller.js` serve the embedded controller
+on the same observed LAN/AP listener and exact Host/Origin boundary. Assets
+need no session, external fonts, internet connection or PC relay. The server
+reserves fourteen route slots: health, six setup routes, four API/WS routes,
+and three controller assets. Registration failure stops the listener and
+keeps the existing explicit unavailable state.
+
+The browser uses the open bearer session and the common HTTP command/result
+flow. Tokens stay in memory. Mouse, Keyboard and Connections are separate
+views; theme selection works before login, follows the system by default,
+and stores only an explicit browser preference. It does not change native
+Appearance. Capability discovery disables unavailable controls. Ctrl/Command
+shortcuts send `keyboard.key_tap` with modifiers 1/8 and usage 6 (copy), 25
+(paste) or 29 (undo). Agent `keyboard.shortcut` retains the Passport Ctrl
+semantics; agents targeting Apple hosts should send the explicit GUI modifier.
+
+Movement samples expire after 150 ms locally and use protocol deadlines of
+at most 200 ms. One browser command runs at a time, with no action replay.
+Drag holds use a 1500 ms device deadman refreshed while the contact remains
+active. Release ends the drag; cancellation while a command is in flight,
+Stop during busy/unknown work, blur, page hide and offline close the session
+best effort and discard local samples. Idle Stop releases control. The
+three-second input lease remains the final boundary when the browser cannot
+reach the board. A target/readiness change or lease loss requires explicit
+control acquisition; uncertain replies require explicit reconnect and target
+inspection. These are source and host-tested boundaries, not measured network
+or host delivery guarantees.
+
+Management uses the same v1 envelope, `management_generation` from state,
+and `resource_revision` from the relevant list. No input lease is required.
+The protocol remains the owner of duplicate requests and retained results.
+
+| Read | Identity and revision |
+| --- | --- |
+| `/api/v1/bluetooth/peers` | `revision` is the bond-list revision; `generation` is the observed link generation. Up to three rows preserve `original`, optional `label`, `label_known`, 32-hex `id`, and `current`. Connection, encryption, subscriptions, readiness, pairing, handshake, selected ID and transition are separate fields. |
+| `/api/v1/wifi/profiles` | `revision` is the profile-store revision. Up to four rows have an eight-hex stable profile `id`, raw `ssid_hex`, security, current marker and optional label. |
+| `/api/v1/wifi/scans/current?cursor=0` | Four rows per page; `next_cursor: 0` ends paging. `generation`, `known`, `scanning` and `truncated` describe the scan. Rows preserve SSID hex, BSSID, raw auth, security, RSSI and index. A 64-hex `id` is SHA-256 of length, 16-bit big-endian auth, BSSID and exact SSID bytes, matching the shared AP identity encoding. A labelable row has no matching saved profile. |
+| `/api/v1/display-names?cursor=0` | Eight entries per page, including absent APs. `revision` combines BLE and Wi-Fi catalog revisions as `ble * 4294967296 + wifi`, represented as a decimal string. Counts/capacities do not turn `known: false` into an empty-store success. |
+
+`bluetooth.target.request` and `bluetooth.disconnect` require `peer_id` to be
+the saved bond's 32-hex ID and `generation` to match the peers response, in
+addition to the envelope's bond-list `resource_revision`. Pairing open,
+close and cancel-handshake also require those current generation/revision
+values. Open and target requests accept `window_seconds` from 1 to 300,
+default 60. Target completion requires the exact selected host to become
+input-ready; queue admission and advertising are intermediate observations.
+Timeout, wrong-host rejection, local cancellation, SDK failure and uncertain
+neutral release remain non-success results. Disconnect retains the bond.
+Cancel-handshake retains the original pairing deadline; close ends admission.
+One BLE management command is outstanding at a time. The native transition
+path releases input before disconnecting or advertising.
+
+`wifi.scan.start` and `wifi.scan.cancel` use the scan `generation` as
+`resource_revision`. The Wi-Fi owner rechecks revision, Lock and availability
+and publishes a command-specific receipt. `scan_started` means SDK scan
+admission, not a completed result list; read `known` and `scanning` afterwards.
+The existing six-second scan bound, sixteen retained rows and cancellation
+drain remain in force. The adapter tracks one scan request at a time.
+
+`display_name.set` takes `kind` (`hid_bond`, `wifi_profile`, or `wifi_ap`),
+the ID above, `label` and the catalog `resource_revision`. Saved identities
+also require `owner_revision` from their owner list. Exact APs require the
+current integer `scan_generation` and `scan_index`; the adapter recomputes
+and matches the complete key before submission. Clear takes kind, ID and
+catalog revision, including for a retained AP absent from the latest scan.
+Classic bonds are unavailable on C3. Two label jobs are bounded to one per
+storage domain. Accepted writes are polled through the owners' tickets;
+only confirmed persistence yields `applied`. Stale identity, Lock, capacity,
+unsupported font glyphs, storage uncertainty and a lost result remain distinct
+failures. No font set is expanded by this adapter.
+
+Bond deletion and Wi-Fi credentials/join/forget remain outside the open
+allowlist. The Connections view points to the native Forget/Connect and
+physical AP setup flows. It never substitutes a label, row index or display
+name for the original identity, and renders received text with `textContent`.

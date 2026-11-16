@@ -12,12 +12,13 @@ static passport_control_observation_t observation;
 static cj_document_t document;
 static uint64_t clock_ms;
 static unsigned entropy, seq, reports;
+static uint8_t pressed_modifier, pressed_usage;
 static char token[65],session[33],prefix[17],boot[33],csrf[33],lease[33];
 static char epoch[24],transport[24],revision[24],sequence[24];
 static bool random_bytes(void *u,uint8_t *out,size_t n)
 { (void)u; while(n--) *out++=(uint8_t)++entropy; return true; }
 static bool send_report(void *u,uint8_t id,const uint8_t *data,size_t n)
-{ (void)u;(void)id;(void)data;(void)n;assert(input.state.release_pending || passport_control_report_authorized(clock_ms));++reports;return true; }
+{ (void)u;if(id==1 && n==8 && data[2]){pressed_modifier=data[0];pressed_usage=data[2];}assert(input.state.release_pending || passport_control_report_authorized(clock_ms));++reports;return true; }
 static void tick(void)
 {
     clock_ms+=20;hid_engine_observe_transport(&input,clock_ms,false);
@@ -72,6 +73,10 @@ int main(void)
     setup();acquire();
     assert(command("mode.select","{\"mode\":\"keyboard\"}")==CP_OK);tick();tick();state();
     assert(input.state.mode==INPUT_KEYBOARD && passport_control_report_authorized(clock_ms));
+    assert(command("keyboard.key_tap","{\"usage\":6,\"modifiers\":8}")==CP_OK);tick();tick();
+    assert(pressed_modifier==8&&pressed_usage==6);state();
+    assert(command("keyboard.shortcut","{\"shortcut\":\"paste\"}")==CP_OK);tick();tick();
+    assert(pressed_modifier==1&&pressed_usage==25);state();
     assert(command("keyboard.text.enqueue","{\"text\":\"abcdefghijklmnopqrstuvwxyz012345\"}")==CP_OK);
     char replay[2049],key[24],path[64];strcpy(replay,request.body);parse();field(0,"command_key",key,sizeof(key));
     for(unsigned i=0;i<65;++i)tick();
@@ -112,4 +117,5 @@ int main(void)
     assert(http("GET","/api/v1/state",NULL)==CP_UNAUTHENTICATED); // Same IP cannot preserve an old network session.
     setup();acquire();clock_ms+=3001;passport_control_service(clock_ms);assert(input.state.owner==INPUT_LOCAL&&input.state.release_pending);
     passport_control_deinit();puts("PASS: real open protocol/shared owner/HID integration, release barriers, local takeover, Lock, target/network/session/WS loss, lease and drag expiry");
+    return 0;
 }

@@ -28,11 +28,11 @@ def sdk_function(source, name):
     return source[match.start():end] + '\n'
 
 
-tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'sound', 'names', 'control_http')
+tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'sound', 'names', 'control_http', 'management')
 fixtures = {
     'startup': 'stubs.h', 'theme': 'theme_stubs.h', 'wifi': 'wifi_stubs.h',
     'setup': 'setup_stubs.h', 'sound': 'sound_stubs.h', 'names': 'names_stubs.h',
-    'control_http': 'control_http_stubs.h',
+    'control_http': 'control_http_stubs.h', 'management': 'stubs.h',
 }
 for test in sys.argv[1:] or tests:
     if test not in tests:
@@ -81,7 +81,7 @@ for test in sys.argv[1:] or tests:
             # Keep the actual length/header and payload semantics; substitute socket I/O only.
             (work / 'sdk_ws_receive.inc').write_text(''.join(sdk_function(sdk_ws, name)
                 for name in ('httpd_ws_unmask_payload', 'httpd_ws_recv_frame')))
-        if test in ('ble', 'control_http'):
+        if test in ('ble', 'control_http', 'management'):
             sources += [root / 'components/hid_engine/hid_engine.c', root / 'components/input_core/input_core.c']
             sources += [root / p for p in ('passport/main/passport_control.c', 'firmware/main/app_remote_input.c',
                 'components/interaction/interaction.c', 'components/control_protocol/control_protocol.c',
@@ -89,6 +89,8 @@ for test in sys.argv[1:] or tests:
                 'components/control_protocol/control_sha256.c')]
             defines += ['-D_POSIX_C_SOURCE=200809L', '-DCP_MAX_RESULTS=16U', '-DCP_MAX_ACTIVE_REQUESTS=4U',
                         '-DCJ_CAPACITY=4096U', '-DCJ_TOKENS=192U', '-DAPP_REMOTE_INPUT_JOBS=4U']
+        if test == 'management':
+            sources += [root / 'passport/main/passport_management.c', root / 'passport/main/passport_wifi_text.c']
         if test == 'sound':
             codec = root / 'passport/managed_components/espressif__esp_codec_dev'
             for directory in ('device/include', 'device/priv_include', 'include', 'interface'):
@@ -103,7 +105,7 @@ for test in sys.argv[1:] or tests:
         subprocess.run([
             os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
             '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
-            '-I', str(work), '-I', str(root / 'passport/tests'),
+            '-I', str(work), '-I', str(root / 'passport/tests'), '-I', str(root / 'passport/main'),
             '-I', str(root / 'components/hid_engine/include'), '-I', str(root / 'components/input_core/include'),
             '-I', str(root / 'components/control_protocol/include'), '-I', str(root / 'components/control_protocol'),
             '-I', str(root / 'components/interaction/include'), '-I', str(root / 'firmware/main'),

@@ -20,6 +20,7 @@ static struct { unsigned handle, length; uint8_t bytes[8]; } reports[128];
 static passport_command_t queue[8];
 static unsigned queue_count;
 static struct os_mbuf mbuf;
+void passport_management_install(void) {} // Adapter tested separately; this suite exercises the real BLE backend.
 void passport_control_http_service(uint64_t now) { (void)now; }
 void passport_wifi_snapshot(passport_wifi_state_t *out) { *out=(passport_wifi_state_t){0}; }
 void esp_fill_random(void *out,size_t size) { static uint8_t entropy; uint8_t *p=out; while(size--) *p++=++entropy; }
@@ -70,7 +71,7 @@ int ble_gap_adv_stop(void) { return stop_error; }
 int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *f) { assert(f->name_len==14);return 0; }
 int ble_gap_wl_set(const ble_addr_t *peer,int n) { assert(n==1);allowed=*peer;return whitelist_error; }
 int ble_gap_adv_start(int type,const ble_addr_t *peer,int duration,const struct ble_gap_adv_params *p,int (*cb)(struct ble_gap_event *,void *),void *arg) {
-    (void)peer;(void)arg;assert(type==BLE_OWN_ADDR_PUBLIC&&duration==60000&&cb==gap_event);++adv_calls;filter_policy=p->filter_policy;return start_error;
+    (void)peer;(void)arg;assert(type==BLE_OWN_ADDR_PUBLIC&&duration>0&&duration<=300000&&cb==gap_event);++adv_calls;filter_policy=p->filter_policy;return start_error;
 }
 int ble_gap_conn_find(uint16_t conn,struct ble_gap_conn_desc *desc) { assert(conn==connection);*desc=peer_desc;return 0; }
 int ble_gap_security_initiate(uint16_t conn) { assert(conn==connection);return 0; }
@@ -93,6 +94,7 @@ int xTaskCreate(void (*run)(void *),const char *name,unsigned stack,void *arg,un
 
 static void setup(void) {
     passport_control_deinit();
+    memset(&remote_management,0,sizeof(remote_management));
     state=(passport_ble_state_t){.synced=true,.generation=1,.locked=true};
     connection=BLE_HS_CONN_HANDLE_NONE;hid_engine_init(&engine);hid_engine_set_locked(&engine,true);
     suspended=new_connection=selected_valid=transition=disconnect_requested=closing=link_ready=false;
@@ -118,7 +120,7 @@ static void subscribe(uint16_t handle,bool enabled) {
 }
 static void connect_saved(void) {
     saved[0]=(ble_addr_t){.val={1,2,3,4,5,6}};saved_count=1;selected=saved[0];selected_valid=true;
-    refresh_peers();advertise(false);peer_desc=(struct ble_gap_conn_desc){.peer_id_addr=saved[0],.sec_state={true,true}};
+    refresh_peers();advertise(false,0);peer_desc=(struct ble_gap_conn_desc){.peer_id_addr=saved[0],.sec_state={true,true}};
     gap(BLE_GAP_EVENT_CONNECT);subscribe(keyboard_handle,true);subscribe(mouse_handle,true);issue(PASSPORT_UNLOCK);
     tick_once();assert(!state.ready&&report_count==1&&reports[0].handle==keyboard_handle);
     tick_once();assert(state.ready&&report_count==2&&reports[1].handle==mouse_handle);
@@ -152,15 +154,15 @@ static void test_security(void) {
     command(&cancel,clock_ms);assert(!state.pairing&&terminate_calls==1); // Safety close survives generation change.
     setup();issue(PASSPORT_PAIR);tick_once();passport_ble_emergency_lock();tick_once();assert(!state.pairing&&!state.advertising);
     setup();saved_count=3;for(unsigned i=0;i<3;i++)saved[i]=(ble_addr_t){.val={i+1}};
-    advertise(true);assert(!adv_calls&&!state.pairing&&!forget_calls);
+    advertise(true,0);assert(!adv_calls&&!state.pairing&&!forget_calls);
     setup();connect_saved();assert(filter_policy==BLE_HCI_ADV_FILT_CONN&&!ble_addr_cmp(&allowed,&saved[0]));
     struct ble_gap_event ev={.type=BLE_GAP_EVENT_REPEAT_PAIRING};assert(gap_event(&ev,NULL)==BLE_GAP_REPEAT_PAIRING_IGNORE&&!forget_calls);
     gap(BLE_GAP_EVENT_PASSKEY_ACTION);tick_once();assert(terminate_calls&&!state.ready);
     setup();selected=(ble_addr_t){.val={1}};selected_valid=true;saved[0]=selected;saved_count=1;
-    whitelist_error=1;advertise(false);assert(!adv_calls&&!state.advertising);
-    whitelist_error=0;advertise(false);peer_desc.peer_id_addr=(ble_addr_t){.val={2}};
+    whitelist_error=1;advertise(false,0);assert(!adv_calls&&!state.advertising);
+    whitelist_error=0;advertise(false,0);peer_desc.peer_id_addr=(ble_addr_t){.val={2}};
     gap(BLE_GAP_EVENT_CONNECT);assert(terminate_calls==1&&!new_connection);
-    setup();stop_error=1;advertise(true);assert(!adv_calls&&!state.pairing);
+    setup();stop_error=1;advertise(true,0);assert(!adv_calls&&!state.pairing);
     setup();peer_desc.peer_id_addr=(ble_addr_t){.val={1}};gap(BLE_GAP_EVENT_CONNECT);assert(terminate_calls==1);
 }
 static void test_input_release(void) {
@@ -225,9 +227,53 @@ static void test_bond_names(void)
     assert(!memcmp(queued_name.key.bond, removed_name.bond, sizeof(removed_name.bond)));
 }
 
+static cp_command_t remote_request(cp_operation_id_t op)
+{
+    cp_command_t c={.operation=op,.command_key=42,.resource_revision=state.bond_revision};
+    char id[33];for(unsigned i=0;i<16;++i)snprintf(id+i*2,3,"%02x",state.peers[0].bond_id[i]);
+    if(op==CP_OP_BLUETOOTH_TARGET_REQUEST) snprintf(c.args_json,sizeof(c.args_json),"{\"generation\":\"%u\",\"peer_id\":\"%s\",\"window_seconds\":2}",state.generation,id);
+    else if(op==CP_OP_BLUETOOTH_DISCONNECT) snprintf(c.args_json,sizeof(c.args_json),"{\"generation\":\"%u\",\"peer_id\":\"%s\"}",state.generation,id);
+    else if(op==CP_OP_BLUETOOTH_PAIRING_OPEN) snprintf(c.args_json,sizeof(c.args_json),"{\"generation\":\"%u\",\"window_seconds\":2}",state.generation);
+    else snprintf(c.args_json,sizeof(c.args_json),"{\"generation\":\"%u\"}",state.generation);
+    return c;
+}
+static void test_remote_management(void)
+{
+    cp_result_t r;setup();connect_saved();
+    cp_command_t c=remote_request(CP_OP_BLUETOOTH_DISCONNECT);
+    assert(passport_ble_remote_begin(&c,clock_ms,&r)==CP_OK&&r.state==CP_RESULT_ACCEPTED);
+    assert(!passport_ble_remote_poll(clock_ms,&r));
+    tick_once();assert(!terminate_calls);tick_once();assert(terminate_calls==1);
+    gap(BLE_GAP_EVENT_DISCONNECT);tick_once();assert(passport_ble_remote_poll(clock_ms,&r)&&r.error==CP_OK&&r.state==CP_RESULT_APPLIED);
+    assert(saved_count==1); // Disconnect does not delete or relabel the bond.
+    c=remote_request(CP_OP_BLUETOOTH_TARGET_REQUEST);
+    assert(passport_ble_remote_begin(&c,clock_ms,&r)==CP_OK);tick_once();
+    assert(state.advertising&&!passport_ble_remote_poll(clock_ms,&r));
+    clock_ms+=2100;tick_once();assert(passport_ble_remote_poll(clock_ms,&r)&&r.error==CP_EXPIRED);
+    c=remote_request(CP_OP_BLUETOOTH_TARGET_REQUEST);
+    assert(passport_ble_remote_begin(&c,clock_ms,&r)==CP_OK);tick_once();
+    peer_desc=(struct ble_gap_conn_desc){.peer_id_addr={.val={9}},.sec_state={true,true}};gap(BLE_GAP_EVENT_CONNECT);
+    assert(passport_ble_remote_poll(clock_ms,&r)&&r.error==CP_STALE&&!strcmp(r.reason,"unexpected_host_rejected"));
+    setup();connect_saved();c=remote_request(CP_OP_BLUETOOTH_TARGET_REQUEST);
+    assert(passport_ble_remote_begin(&c,clock_ms,&r)==CP_OK);issue(PASSPORT_LOCK);
+    assert(passport_ble_remote_poll(clock_ms,&r)&&r.error!=CP_OK&&!transition);
+    setup();issue(PASSPORT_UNLOCK);c=remote_request(CP_OP_BLUETOOTH_PAIRING_OPEN);
+    cp_command_t unsupported=c;strcpy(unsupported.args_json,"{\"generation\":\"1\",\"peer_id\":\"arbitrary\"}");
+    assert(passport_ble_remote_begin(&unsupported,clock_ms,&r)==CP_INVALID);
+    assert(passport_ble_remote_begin(&c,clock_ms,&r)==CP_OK);tick_once();
+    assert(passport_ble_remote_poll(clock_ms,&r)&&r.error==CP_OK&&state.pairing&&window_end==clock_ms+2000);
+    peer_desc=(struct ble_gap_conn_desc){.peer_id_addr={.val={9}}};gap(BLE_GAP_EVENT_CONNECT);
+    uint64_t original=window_end;c=remote_request(CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE);
+    assert(passport_ble_remote_begin(&c,clock_ms,&r)==CP_OK&&!passport_ble_remote_poll(clock_ms,&r));
+    gap(BLE_GAP_EVENT_DISCONNECT);clock_ms+=20;
+    assert(passport_ble_remote_poll(clock_ms,&r)&&r.error==CP_OK&&state.pairing&&window_end==original);
+    c=remote_request(CP_OP_BLUETOOTH_PAIRING_CLOSE);assert(passport_ble_remote_begin(&c,clock_ms,&r)==CP_OK);
+    assert(passport_ble_remote_poll(clock_ms,&r)&&r.error==CP_OK&&!state.advertising&&!state.pairing);
+}
+
 int main(void) {
     setup();passport_control_deinit();assert(passport_ble_start()==ESP_OK);assert(ble_hs_cfg.sm_io_cap==BLE_HS_IO_NO_INPUT_OUTPUT&&ble_hs_cfg.sm_bonding);
-    test_security();test_input_release();test_bond_names();
+    test_security();test_input_release();test_bond_names();test_remote_management();
     setup();connect_saved();tick_once();tick_once();
     passport_command_t old=action(PASSPORT_MOVE);old.x=12;
     unsigned revision=state.input_revision;issue(PASSPORT_TAKEOVER);

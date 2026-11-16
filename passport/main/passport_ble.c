@@ -3,6 +3,7 @@
 #include "passport_names_owner.h"
 #include "passport_control.h"
 #include "passport_control_http.h"
+#include "passport_management.h"
 #include "passport_wifi.h"
 
 #include <stdatomic.h>
@@ -42,6 +43,15 @@ static uint32_t peer_security_revision;
 static bool names_reconciled, bond_ids_known;
 static passport_wifi_state_t network;
 static passport_control_observation_t control_state;
+static struct {
+    uint64_t key, deadline;
+    cp_operation_id_t operation;
+    cp_error_t error;
+    bool done, started, uncertain, wrong_host;
+    char target[PASSPORT_PEER_TEXT];
+} remote_management;
+static void remote_management_cancel(cp_error_t error);
+
 
 static uint64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 static void result(const char *text) { snprintf(state.result, sizeof(state.result), "%s", text); }
@@ -299,8 +309,9 @@ static void close_pairing(void)
     }
 }
 
-static void advertise(bool pairing)
+static void advertise(bool pairing, uint32_t duration)
 {
+    if (!duration) duration=WINDOW_MS;
     refresh_peers();
     if (!state.synced || !state.storage_known || connection != BLE_HS_CONN_HANDLE_NONE) {
         result("Bluetooth unavailable");
@@ -324,12 +335,12 @@ static void advertise(bool pairing)
         rc = ble_gap_wl_set(&selected, 1);
         params.filter_policy = BLE_HCI_ADV_FILT_CONN;
     }
-    if (!rc) rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, WINDOW_MS, &params, gap_event, NULL);
+    if (!rc) rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, duration, &params, gap_event, NULL);
     if (rc) { result("Advertising failed"); return; }
     state.advertising = true;
     state.pairing = pairing;
-    window_end = now_ms() + WINDOW_MS;
-    result(pairing ? "Pair on host within 60 seconds" : "Waiting for selected host");
+    window_end = now_ms() + duration;
+    result(pairing ? "Pair in host Bluetooth settings" : "Waiting for selected host");
 }
 
 static bool send_report(void *arg, uint8_t id, const uint8_t *data, size_t length)
@@ -370,6 +381,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         new_connection = state.pairing && now_ms() < window_end && !is_saved(&desc.peer_id_addr);
         if (!new_connection && (!selected_valid || !same(&selected, &desc.peer_id_addr) || !is_saved(&desc.peer_id_addr))) {
             result("Unexpected host rejected");
+            if (remote_management.key) { remote_management.error=CP_STALE; remote_management.done=true; remote_management.wrong_host=true; }
             disconnect_link();
             return 0;
         }
@@ -391,7 +403,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         memset(keyboard, 0, sizeof(keyboard));
         memset(mouse, 0, sizeof(mouse));
         disconnect_requested = false;
-        if (!transition || engine.state.release_pending || engine.count) state.release_unknown = true;
+        if (!transition || engine.state.release_pending || engine.count) { state.release_unknown = true; remote_management.uncertain=true; }
         hid_engine_set_link(&engine, false, false);
         link_ready = false;
         stop_advertising();
@@ -439,15 +451,16 @@ static void execute_management(void)
     if ((pending.kind == PASSPORT_ADVERTISE || pending.kind == PASSPORT_FORGET) &&
         (pending.bond_revision != state.bond_revision || !state.storage_known || !is_saved(&peer))) {
         result("Host list changed; select again");
+        if (remote_management.key) { remote_management.error=CP_STALE; remote_management.done=true; }
         transition = false;
         return;
     }
     switch (pending.kind) {
-    case PASSPORT_PAIR: selected_valid = false; advertise(true); break;
+    case PASSPORT_PAIR: selected_valid = false; advertise(true,pending.window_ms); break;
     case PASSPORT_ADVERTISE:
         selected = peer;
         selected_valid = true;
-        advertise(false);
+        advertise(false,pending.window_ms);
         break;
     case PASSPORT_FORGET:
         if (passport_store_forget(&peer)) result("Forget uncertain; restart required");
@@ -466,6 +479,7 @@ static void execute_management(void)
 
 static void command(const passport_command_t *request, uint64_t now)
 {
+    remote_management_cancel(CP_STALE);
     if (request->kind == PASSPORT_LOCK) {
         passport_control_local(now);
         hid_engine_set_locked(&engine, true);
@@ -521,12 +535,15 @@ static void command(const passport_command_t *request, uint64_t now)
     else { hid_engine_cancel(&engine); result("Input rejected; releasing"); }
 }
 
+#include "passport_ble_control.inc"
+
 static void service(struct ble_npl_event *event)
 {
     (void)event;
     const uint64_t now = now_ms();
     refresh_peers();
     if (atomic_exchange(&emergency_lock, false)) {
+        remote_management_cancel(CP_LOCKED);
         passport_control_local(now);
         hid_engine_set_locked(&engine, true);
         close_pairing();
@@ -590,9 +607,11 @@ static void service(struct ble_npl_event *event)
     if (transition) {
         if (connection == BLE_HS_CONN_HANDLE_NONE) execute_management();
         else if (!disconnect_requested && (!engine.state.release_pending || now >= release_end)) {
-            if (engine.state.release_pending) state.release_unknown = true;
+            if (engine.state.release_pending) { state.release_unknown = true; remote_management.uncertain=true; }
             int rc = disconnect_link();
-            if (rc) { result("Disconnect failed"); transition = false; }
+            if (rc) { result("Disconnect failed"); transition = false;
+                if (remote_management.key) { remote_management.error=CP_UNAVAILABLE; remote_management.done=true; }
+            }
             else disconnect_requested = true;
         }
     }
@@ -600,6 +619,12 @@ static void service(struct ble_npl_event *event)
     state.locked = engine.state.locked;
     state.release_pending = engine.state.release_pending;
     state.ready = transport_ready && engine.ready && !engine.state.release_pending && !state.locked && !transition;
+    state.updating=transition; state.handshake=new_connection;
+    state.selected_id[0]=0;
+    for (unsigned i=0;selected_valid && i<state.peer_count;++i) {
+        if (state.peers[i].type!=selected.type || memcmp(state.peers[i].address,selected.val,6)) continue;
+        for (unsigned j=0;j<16;++j) snprintf(state.selected_id+j*2,3,"%02x",state.peers[i].bond_id[j]);
+    }
     state.window_seconds = window_end > now ? (window_end - now + 999) / 1000 : 0;
     passport_control_view_t view; passport_control_view(&view);
     state.network_available=view.available; state.network_active=view.active;
@@ -618,6 +643,7 @@ static void synced(void)
 
 static void reset(int reason)
 {
+    if (remote_management.key) { remote_management.done=true; remote_management.error=CP_UNAVAILABLE; }
     (void)reason;
     passport_control_network_reset(now_ms());
     state.synced = false;
@@ -677,6 +703,7 @@ esp_err_t passport_ble_start(void)
     passport_names_load(PN_BLE);
     // Failure disables network input explicitly; native BLE controls still work.
     state.network_available=passport_control_init(&engine,random_bytes);
+    if (state.network_available) passport_management_install();
     ble_hs_cfg.store_write_cb = secure_write;
     ble_hs_cfg.store_status_cb = store_full;
     ble_hs_cfg.sync_cb = synced;

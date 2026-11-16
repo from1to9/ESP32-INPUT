@@ -139,7 +139,7 @@ static unsigned entries(void)
 
 static void wifi_request(passport_wifi_action_t action, uint32_t id, uint32_t revision)
 {
-    passport_wifi_command_t command = {action, id, revision};
+    passport_wifi_command_t command = {.action=action, .id=id, .revision=revision};
     if (!wifi.initialized || !passport_wifi_request(&command)) {
         passport_sound_cue(PASSPORT_CUE_ERROR);
         snprintf(wifi_note, sizeof(wifi_note), "%s", wifi.initialized ? "Wi-Fi queue full; try again" : "Wi-Fi unavailable");

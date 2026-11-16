@@ -10,10 +10,9 @@ factory application. It reuses `input_core`, `hid_engine`, `interaction`,
 Mosaico protocol initializer retains enrolled TLS and its existing capacities.
 
 The implemented subset and internal API are documented in [API.md](API.md).
-The full Web controller, remote connection management, HTTP display-label
-editing and cross-device bond identifiers remain unavailable in this batch.
-This is a
-source/host/build candidate; device and operating-system compatibility are
+The board-hosted Web controller, narrow BLE management, Wi-Fi scans and
+HTTP display-label editing are integrated. Bond IDs are device-local, not
+cross-device identities. This is a source/host/build candidate; device and operating-system compatibility are
 not qualified.
 
 ## Build and inspect
@@ -145,7 +144,7 @@ Saved hosts, saved Wi-Fi profiles, and scanned APs show an available display
 label with the original name or identity underneath. Open Host details or
 Network details to see the full label and the original identity. The current
 Montserrat fonts define the accepted glyphs. The buttons display labels
-and navigate to details. Editing requires the future Web/API adapter.
+and navigate to details. Edit labels through the Connections view or typed Web/API operations.
 
 Appearance selects Dark or Light with the same three-key interaction and
 layout. Dark is the initial default. The `passport_ui/theme` NVS byte is
@@ -304,7 +303,7 @@ on intended host OS versions, disconnect/release under congestion and power
 loss, free heap, largest block, task high-water marks, and Wi-Fi/BLE
 coexistence. Speaker output, loudness, Off/On across physical power cycles,
 and cue behavior during concurrent input and radio activity need device testing.
-There are no media services, OTA, or web input controller in this candidate.
+There are no network media services, OTA, phone motion input or USB HID in this target.
 
 ## Direct network input
 
@@ -332,3 +331,50 @@ suite in `passport/tests/run.py` exercises production ingress, pre-handshake
 WS authentication, bounded frames, owner timeout and backpressure with
 substituted socket/RTOS boundaries. Use `--control-only` with the native
 renderer for the changed status, active-controller and Lock views.
+
+
+## Browser control
+
+Open the numeric LAN or AP IP shown on Passport, then select **Connect
+browser** and **Take control**. Unlock on the device and pair the intended
+host from its Bluetooth settings first. The page works directly from the
+board and contains all its assets. Mouse, Keyboard and Connections have
+separate navigation; phone portrait uses one column, while desktop/tablet
+layouts provide a touchpad or keyboard beside host/result cards.
+
+Mouse offers a relative touchpad, all three click buttons, scrolling and
+hold-to-drag. With touch, hold Drag with one finger and move another on the
+pad; with a mouse, hold Drag and move the pointer. Keyboard offers explicit
+keys, bounded US ANSI text and Ctrl/Command shortcuts. Choose Command for
+Mac/iPad/iPhone hosts. Text is never silently shortened, and a reported HID
+send does not prove the host application acted. **Stop** is always visible
+while connected. Loss of focus, page visibility, network, session or target
+ends held input; reconnect does not replay or resume it.
+
+Connections lists BLE hosts and Wi-Fi saved/scanned rows with original
+identities and optional labels. Add device advertises for a new host;
+Connect host waits for the selected saved host to become input-ready.
+Disconnect host retains its bond and does not disconnect the browser.
+Remote Forget and Wi-Fi joining are not enabled: use the explicit native
+confirmation or AP setup route explained on the page. Label changes use
+stable identities and expected revisions; unconfirmed storage stays visible.
+See [the management API](API.md#board-hosted-controller-and-management) for
+agent envelopes, IDs, list pagination and asynchronous result meanings.
+
+Appearance defaults to the browser's system theme, with a persistent
+Dark/Light/System override. Only that preference is stored in the browser;
+session tokens and input remain in memory. The device's own Appearance and
+Sound preferences keep their separate native controls.
+
+Run `node passport/tests/web/control.mjs` for actual Chromium renders and
+interaction checks at desktop, iPhone and iPad viewport sizes in both themes.
+The same `PASSPORT_PLAYWRIGHT` / `PASSPORT_CHROMIUM` installation overrides
+as the setup-page suite apply. `PASSPORT_CONTROL_OUTPUT` selects screenshot
+output; the default is `.agent/local/passport-web/browser`. The fixture
+substitutes HTTP/device observations, including uncertain replies and target
+changes; it does not qualify Safari or a physical Apple device. Run
+`python3 passport/tests/run.py management ble wifi control_http` for protocol,
+management-adapter, actual owner, ingress and failure tests, and
+`python3 passport/tests/control.py` for the shared HID command path including
+explicit Command versus Ctrl reports. Runtime radio coexistence, heap,
+stack high-water, physical keys/display and host outcomes remain unmeasured.

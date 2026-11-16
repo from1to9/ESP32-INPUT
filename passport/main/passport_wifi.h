@@ -27,7 +27,10 @@ typedef struct {
 } passport_wifi_row_t;
 typedef enum { PW_OFFLINE, PW_SWITCHING, PW_CONNECTING, PW_ASSOCIATED, PW_ONLINE } passport_wifi_phase_t;
 typedef enum { PW_REQUEST_NONE, PW_REQUEST_WAITING, PW_REQUEST_JOINING, PW_REQUEST_SAVED, PW_REQUEST_FAILED, PW_REQUEST_CANCELLED } passport_wifi_request_state_t;
+typedef enum { PW_SCAN_ACCEPTED, PW_SCAN_REJECTED, PW_SCAN_STALE, PW_SCAN_LOCKED, PW_SCAN_BUSY } passport_scan_result_t;
 typedef struct {
+    uint64_t scan_request_id;
+    passport_scan_result_t scan_request_result;
     bool initialized, storage_known, scanning, scan_known, scan_truncated, provisioning_available;
     bool ap_started, dhcp_running, ap_client, ap_lease, setup_open, pending;
     passport_wifi_phase_t phase;
@@ -51,6 +54,7 @@ typedef enum {
 typedef struct {
     passport_wifi_action_t action;
     uint32_t id, revision;
+    uint64_t remote_scan_id; // Zero for native/setup requests.
 } passport_wifi_command_t;
 typedef struct {
     uint32_t setup_id, scan_revision, row, request_id;

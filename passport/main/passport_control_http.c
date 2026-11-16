@@ -211,11 +211,33 @@ static esp_err_t websocket(httpd_req_t *req)
     else if (frame.type==HTTPD_WS_TYPE_PING) { frame.type=HTTPD_WS_TYPE_PONG; rc=httpd_ws_send_frame(req,&frame); }
     release(); return rc;
 }
+extern const char controller_html[] __asm__("_binary_controller_html_start");
+extern const char controller_css[] __asm__("_binary_controller_css_start");
+extern const char controller_js[] __asm__("_binary_controller_js_start");
+static esp_err_t web(httpd_req_t *req)
+{
+    if (!begin()) return error(req,"429 Too Many Requests","{\"error\":\"busy\"}");
+    bool allowed=binding(req) && !req->content_len;
+    release();
+    if (!allowed) return error(req,"403 Forbidden","{\"error\":\"origin_or_interface\"}");
+    if (strcmp(req->uri,"/") && strcmp(req->uri,"/controller.css") && strcmp(req->uri,"/controller.js")) return error(req,"404 Not Found","{\"error\":\"not_found\"}");
+    const char *asset=!strcmp(req->uri,"/") ? controller_html : !strcmp(req->uri,"/controller.css") ? controller_css : controller_js;
+    httpd_resp_set_type(req,!strcmp(req->uri,"/") ? "text/html; charset=utf-8" : !strcmp(req->uri,"/controller.css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8");
+    httpd_resp_set_hdr(req,"Cache-Control","no-store");
+    httpd_resp_set_hdr(req,"X-Content-Type-Options","nosniff");
+    httpd_resp_set_hdr(req,"Referrer-Policy","no-referrer");
+    httpd_resp_set_hdr(req,"Cross-Origin-Resource-Policy","same-origin");
+    httpd_resp_set_hdr(req,"Content-Security-Policy","default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+    return httpd_resp_sendstr(req,asset);
+}
 esp_err_t passport_control_http_register(httpd_handle_t server)
 {
     completed=xSemaphoreCreateBinary();
     if (!completed) return ESP_ERR_NO_MEM;
     const httpd_uri_t routes[]={
+        {.uri="/",.method=HTTP_GET,.handler=web},
+        {.uri="/controller.css",.method=HTTP_GET,.handler=web},
+        {.uri="/controller.js",.method=HTTP_GET,.handler=web},
         {.uri="/api/v1/ws",.method=HTTP_GET,.handler=websocket,.is_websocket=true,.handle_ws_control_frames=true,.supported_subprotocol="passport.v1",.ws_pre_handshake_cb=websocket_open},
         {.uri="/api/v1/*",.method=HTTP_GET,.handler=api},
         {.uri="/api/v1/*",.method=HTTP_POST,.handler=api},

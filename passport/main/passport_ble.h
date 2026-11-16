@@ -19,6 +19,7 @@ typedef struct {
     uint32_t generation;
     uint32_t bond_revision;
     uint32_t input_revision;
+    uint32_t window_ms; // Zero selects the native 60-second window.
     bool network_change;
     uint8_t peer_type, peer[6];
     int8_t x, y;
@@ -34,7 +35,8 @@ typedef struct {
 typedef struct {
     bool synced, storage_known, connected, encrypted, bonded;
     bool keyboard_subscribed, mouse_subscribed, ready, locked, advertising, pairing;
-    bool release_unknown, release_pending;
+    bool release_unknown, release_pending, updating, handshake;
+    char selected_id[33];
     bool network_available, network_active;
     char controller[9];
     uint32_t input_revision;
