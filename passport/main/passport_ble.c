@@ -392,7 +392,9 @@ static void command(const passport_command_t *request, uint64_t now)
     if (request->kind == PASSPORT_STOP_PAIR) { close_pairing(); result("Pairing closed"); return; }
     if (request->generation != state.generation) { result("Stale action rejected"); return; }
     if (request->kind == PASSPORT_UNLOCK) { hid_engine_set_locked(&engine, false); result("Unlocked"); return; }
-    if (request->kind == PASSPORT_CANCEL) { hid_engine_cancel(&engine); lease_end = 0; return; }
+    if (request->kind == PASSPORT_CANCEL) {
+        hid_engine_cancel(&engine); lease_end = 0; ++state.cancel_revision; return;
+    }
     if (request->kind <= PASSPORT_FORGET) {
         if ((request->kind == PASSPORT_ADVERTISE || request->kind == PASSPORT_FORGET || request->kind == PASSPORT_DISCONNECT) &&
             request->bond_revision != state.bond_revision) { result("Host list changed; select again"); return; }
@@ -483,6 +485,7 @@ static void service(struct ble_npl_event *event)
         }
     }
     state.locked = engine.state.locked;
+    state.release_pending = engine.state.release_pending;
     state.ready = transport_ready && engine.ready && !engine.state.release_pending && !state.locked && !transition;
     state.window_seconds = window_end > now ? (window_end - now + 999) / 1000 : 0;
     portENTER_CRITICAL(&state_lock);

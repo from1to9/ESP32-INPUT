@@ -10,7 +10,8 @@ This file describes the implemented subset, not the full
 | BLE HID | Report-only keyboard input (ID 1, eight bytes), keyboard LED output (ID 1, one byte), relative mouse input (ID 2, four bytes), report map, HID information and control point |
 | BLE management | One connection, three saved bonds, explicit 60-second pairing or selected-bond advertising, disconnect, individual forget |
 | Local input | 12-unit directional steps, bounded direction repeats, left click, Esc/Enter/Tab/Backspace/arrows; all through the shared engine |
-| HTTP | `GET /health` only; bootstrap diagnostics, no credentials or HID readiness assertion |
+| Wi-Fi | Four saved 2.4 GHz profiles, bounded asynchronous scan, explicit AP, observed STA/AP/DHCP state and local confirmations |
+| HTTP | Read-only `/health`, plus AP-only `/setup` and physically gated Wi-Fi provisioning; no remote input |
 
 The BLE report payloads exclude the report ID; characteristics and Report
 Reference descriptors select it. Both input characteristics must be subscribed
@@ -77,10 +78,76 @@ repeat; no release is needed for the two-second deadline to stop it. A new
 press after release is required for another hold. The unchanged BLE owner
 still applies its admission and lease checks to every repeated command.
 
-Wi-Fi cards expose startup observations only and mark live state unknown.
-They do not imply a usable station, current AP association or DHCP service.
-The Web interface remains the read-only health route; browser input and
-matching browser themes belong to a later batch.
+[passport_wifi.h](main/passport_wifi.h) is the local UI/owner boundary. A
+four-entry copied command queue and sixteen-entry event queue keep SDK event
+callbacks bounded. The Wi-Fi task owns scanning, transitions, pending
+credentials and profile persistence. Queue admission is not connection or
+save success. Event loss makes network state unavailable and requires restart.
+Raw SSID bytes and stable profile IDs remain separate from presentation.
+
+A switch first requests the BLE owner's existing Cancel operation and waits
+for its published cancellation revision and cleared release-pending flag,
+or a disconnected/invalidated link. A 500 ms deadline rejects an unconfirmed
+release instead of switching. This adds two observations to the Passport
+snapshot without changing shared engine behavior. Wi-Fi stop events delimit
+network generations; credential joining can interrupt the AP browser and
+requires reopening at the newly displayed address.
+
+The installed embedded credential provider and its owner protocol
+uses a 120-second physically opened window, an unpredictable token, one
+immutable pending request and an exact local request-ID/window confirmation.
+SSID/BSSID/security are copied from the selected scan generation; passwords
+are never published in snapshots. Lock, timeout and network changes clear
+pending secrets. A confirmed candidate is saved only after association and
+an assigned live IP; uncertain NVS writes block further mutations.
+Its six routes are registered before setup becomes available; registration
+failure stops the listener and leaves provisioning unavailable.
+
+## AP setup HTTP boundary
+
+| Route | Behavior |
+| --- | --- |
+| `GET /setup`, `/setup.css`, `/setup.js` | Embedded dual-theme page and assets; no external dependencies |
+| `GET /api/setup/state` | Current window, scan rows, non-secret status and request receipt; token only while open |
+| `POST /api/setup/scan` | Queue a scan for the exact physical setup session |
+| `POST /api/setup/submit` | Queue credentials for one exact scan row; never confirms or saves remotely |
+
+Every setup route requires the socket's local IPv4 address to equal the
+observed AP address, AP start plus DHCP, and a confirmed unassociated STA.
+Host must be that numeric AP address (optionally `:80`); an Origin, when
+present, must be its exact HTTP origin. This also rejects ambiguous ingress
+when LAN and AP address spaces overlap. No CORS access is enabled.
+
+POST uses `Content-Type: application/json` and `X-Passport-Setup` containing
+the current 32-character window token. Scan accepts only `{"setupId":17}`.
+Submit accepts only `{"setupId":17,"scanRevision":4,"row":0,"password":"example123"}`;
+these values are illustrative, not device credentials. Integer identities,
+unique keys, a flat object, a maximum 512-byte body and ASCII passwords are
+validated. WPA2 requires 8–63 characters; an open network requires an empty
+password. Unicode escapes, embedded NUL, nested values, extra keys and
+unsupported networks are rejected. The owner repeats window/token/scan
+validation after queueing; the HTTP handler cannot change Wi-Fi directly.
+
+HTTP 202 returns `queued` and a generated `requestId`. This confirms queue
+admission only. State exposes `requestId` with `requestState` (0 none, 1 local
+confirmation pending, 2 joining, 3 connected and saved, 4 failed or uncertain,
+5 cancelled), plus `requestResult`. `lastSubmissionId` and
+`submissionAccepted` distinguish owner rejection from queue admission.
+The page claims success only for its matching request ID and saved outcome;
+AP loss during joining instead directs the user to the native result and IP.
+Receipts are in-boot observations, not durable or cross-device identifiers.
+
+Raw SSIDs are hex-encoded in the JSON. The browser displays decoded names as
+literal text and provides the complete raw identity; labels cannot replace
+row identity. No AP/router password is included in state. The token stays in
+page memory, never a URL or browser storage. Responses are `no-store` and use
+a same-origin content security policy with framing disabled. The single
+4096-byte HTTP task serializes three client sockets with LRU idle-session
+purging; receive/send waits are two seconds. Body reading additionally has a
+three-second deadline checked between reads (one read can extend that by its
+socket timeout). Parsing depth and static response capacity are bounded.
+The independent BLE and Wi-Fi tasks continue during HTTP waits. These limits
+are engineering bounds, not measured coexistence or runtime stack margins.
 
 ## Stable identities and future labels
 

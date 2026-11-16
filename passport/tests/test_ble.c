@@ -175,6 +175,11 @@ static void test_input_release(void) {
     setup();connect_saved();r=action(PASSPORT_MOVE);r.x=12;
     for(unsigned i=0;i<8;i++)assert(passport_ble_request(&r));
     assert(!passport_ble_request(&r));tick_once();assert(state.locked&&!queue_count&&!engine.count);
+    setup();connect_saved();
+    unsigned cancelled=state.cancel_revision;
+    r=action(PASSPORT_CANCEL);assert(passport_ble_request(&r));
+    tick_once();assert(published.cancel_revision==cancelled+1 && published.release_pending && !lease_end);
+    tick_once();assert(!published.release_pending && state.ready);
     reset(1);assert(!state.connected&&!state.synced&&engine.state.locked);
 }
 int main(void) {

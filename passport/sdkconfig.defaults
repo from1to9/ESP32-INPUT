@@ -25,3 +25,4 @@ CONFIG_BT_NIMBLE_MAX_BONDS=3
 # Service Changed, keyboard input and mouse input for each of three bonds.
 CONFIG_BT_NIMBLE_MAX_CCCDS=9
 # CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY is not set
+CONFIG_LV_USE_QRCODE=y

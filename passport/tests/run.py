@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+import sys
 
 root = Path(__file__).resolve().parents[2]
 headers = (
@@ -27,14 +28,17 @@ def sdk_function(source, name):
     return source[match.start():end] + '\n'
 
 
-for test in ('startup', 'ble', 'store', 'cccd', 'theme'):
+tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup')
+for test in sys.argv[1:] or tests:
+    if test not in tests:
+        raise SystemExit(f'Unknown suite: {test}')
     with tempfile.TemporaryDirectory(prefix='passport-test-') as directory:
         work = Path(directory)
         extra = 'host/ble_sm.h services/gap/ble_svc_gap.h services/gatt/ble_svc_gatt.h nvs.h store/config/ble_store_config.h'.split()
         for header in headers + extra:
             path = work / header
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('#include "' + ('stubs.h' if test == 'startup' else 'theme_stubs.h' if test == 'theme' else 'ble_stubs.h') + '"\n')
+            path.write_text('#include "' + ('stubs.h' if test == 'startup' else 'theme_stubs.h' if test == 'theme' else 'setup_stubs.h' if test == 'setup' else 'wifi_stubs.h' if test == 'wifi' else 'ble_stubs.h') + '"\n')
         defines = []
         if test == 'cccd':
             sdk = root / '.tools/passport-esp-idf/components/bt/host/nimble/nimble/nimble/host'
@@ -50,6 +54,17 @@ for test in ('startup', 'ble', 'store', 'cccd', 'theme'):
                 raise RuntimeError('CCCD capacity must be explicit for this HID profile')
             defines = [f'-DTEST_BLE_STORE_MAX_CCCDS={capacity.group(1)}']
         sources = [root / f'passport/tests/test_{test}.c']
+        if test == 'setup':
+            sdk_json = root / '.tools/passport-esp-idf/components/json/cJSON'
+            (work / 'cJSON.h').write_text((sdk_json / 'cJSON.h').read_text())
+            (work / 'lwip').mkdir()
+            (work / 'lwip/sockets.h').write_text('#include "setup_stubs.h"\n')
+            # Compile the pinned third-party parser unchanged. Its legacy sprintf
+            # triggers macOS deprecation warnings; first-party files retain -Werror.
+            parser = work / 'cJSON.o'
+            subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-fsanitize=address,undefined',
+                            '-fno-omit-frame-pointer', '-c', str(sdk_json / 'cJSON.c'), '-o', str(parser)], check=True)
+            sources += [parser]
         if test == 'ble':
             sources += [root / 'components/hid_engine/hid_engine.c', root / 'components/input_core/input_core.c']
         binary = work / f'test_{test}'

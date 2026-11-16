@@ -5,7 +5,7 @@
 
 #define PASSPORT_VIEW_ITEMS 9
 
-typedef enum { VIEW_HOME, VIEW_LIST, VIEW_MOUSE, VIEW_KEYS, VIEW_MESSAGE, VIEW_CONFIRM, VIEW_DETAILS } passport_layout_t;
+typedef enum { VIEW_HOME, VIEW_LIST, VIEW_MOUSE, VIEW_KEYS, VIEW_MESSAGE, VIEW_CONFIRM, VIEW_DETAILS, VIEW_QR, VIEW_NETWORK_CONFIRM } passport_layout_t;
 typedef enum { TONE_MUTED, TONE_GOOD, TONE_WAIT, TONE_ERROR } passport_tone_t;
 typedef enum {
     ICON_NONE, ICON_MOUSE, ICON_KEYS, ICON_CONNECTIONS, ICON_STATUS,
@@ -14,7 +14,7 @@ typedef enum {
 } passport_icon_t;
 
 typedef struct {
-    char title[24], subtitle[48];
+    char title[72], subtitle[48];
     passport_icon_t icon;
     bool checked;
 } passport_item_t;
@@ -22,9 +22,9 @@ typedef struct {
 typedef struct {
     passport_theme_t theme;
     passport_layout_t layout;
-    passport_tone_t tone, bluetooth_tone;
+    passport_tone_t tone, bluetooth_tone, wifi_tone;
     char title[28], target[32], bluetooth[12], message[48], detail[64], ok[16];
-    char heading[32], body[224], hero[24];
+    char heading[32], body[224], hero[24], wifi[12], qr[128];
     passport_icon_t hero_icon;
     unsigned count, focus;
     passport_item_t items[PASSPORT_VIEW_ITEMS];

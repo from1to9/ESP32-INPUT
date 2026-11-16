@@ -36,7 +36,7 @@ esp_err_t passport_display_init(void)
     }
     static const passport_view_t starting = {
         .layout = VIEW_MESSAGE, .tone = TONE_WAIT, .hero_icon = ICON_LOCK,
-        .title = "Starting", .heading = "Preparing input", .bluetooth = "BT ?",
+        .title = "Starting", .heading = "Preparing input", .bluetooth = "BT ?", .wifi = "WiFi ?",
         .body = "Starting services...", .message = "Input unavailable", .ok = "Wait",
     };
     passport_widgets_update(&starting);

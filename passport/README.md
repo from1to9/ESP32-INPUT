@@ -1,15 +1,15 @@
 # Passport ESP32-C3 firmware
 
-This independent ESP-IDF project implements the first local BLE HID batch
-of the [Passport compatibility plan](../docs/passport-compatibility-plan.md).
+This independent ESP-IDF project implements the local BLE HID and Wi-Fi owner batches
+and local HTTP provisioning of the [Passport compatibility plan](../docs/passport-compatibility-plan.md).
 It combines the FoloToy 240 × 320 display, three ADC buttons, BLE keyboard
-and relative mouse, persistent bonds, and the existing read-only Wi-Fi health
+and relative mouse, persistent bonds, a Wi-Fi setup page, and a read-only health
 listener. It uses the Passport 8 MiB flash layout with NVS, PHY data, and a
 factory application. Shared `input_core` and `hid_engine` sources are reused
 without changes to Mosaico.
 
 The implemented subset and internal API are documented in [API.md](API.md).
-Remote input, network provisioning, labels and stable
+Remote input, labels and stable
 cross-device bond fingerprints remain unavailable in this batch. This is a
 source/host/build candidate; device and operating-system compatibility are
 not qualified.
@@ -82,10 +82,10 @@ execution overhead, which is included in this revision's size report.
 The device starts on Lock. Release the buttons, then hold OK to unlock.
 UP/DOWN clicks change focus and an OK click selects it. Home opens Mouse,
 Keys, Connections, or Status. Connections contains Bluetooth, read-only
-Wi-Fi details, and Appearance. Hold DOWN from any page to lock and request release.
+Wi-Fi controls, and Appearance. Hold DOWN from any page to lock and request release.
 An unlocked OK hold returns to the parent page, except on Mouse where
 a direction hold repeats movement.
-Double clicks are consumed. The screen dims after 60 seconds of inactivity
+Double clicks are consumed. Outside a bounded local Wi-Fi setup window, the screen dims after 60 seconds of inactivity
 and locks input; the first complete waking gesture only wakes the screen.
 The BSP provides the 500 ms long-press threshold.
 
@@ -137,7 +137,7 @@ identity as secondary text; a check and Connected host title mark the actual
 connected saved identity. Pairing has a countdown, removal starts on Cancel,
 and startup, lock, empty hosts and errors have distinct presentations.
 The list scrolls by focus and bounded text truncation never changes identity.
-No user-label editing or Wi-Fi action controls are exposed in this batch.
+No user-label editing is exposed in this batch. Wi-Fi controls are described below.
 
 Appearance selects Dark or Light with the same three-key interaction and
 layout. Dark is the initial default. The `passport_ui/theme` NVS byte is
@@ -146,7 +146,7 @@ and commit; an uncertain save leaves the active theme unchanged and shows
 an error. A failed load uses Dark and reports the failure in Appearance.
 NVS power-loss behavior still needs device verification.
 
-The native renderer owns a fixed pool of 54 objects including the screen.
+The native renderer owns a fixed pool of 55 objects including the screen.
 Only a changed view reaches LVGL; labels are updated only when text changes,
 and palette updates preserve the object tree. Fonts are Montserrat 12, 14
 and 18. The BSP retains its single 19,200-byte DMA draw buffer. Host object
@@ -154,11 +154,66 @@ counts and target static-memory figures do not establish C3 runtime free heap.
 
 ## Health and validation
 
-Status shows the existing one-client WPA2 AP's fresh SSID and password,
-generated on each boot, and the configured `/health` URL. Station association
-remains idle. DHCP, association, radio coexistence, and physical rendering
-need on-device verification. No HTTP input or configuration endpoint is
-exposed; the sole HTTP route remains `GET /health`.
+Wi-Fi prefers the last working 2.4 GHz station profile on boot. Four profiles
+fit in the separate `passport_wifi/profiles` NVS snapshot, with monotonic
+profile IDs and original SSID bytes; display text is never an identity or a
+credential. Future labels must be attached to those IDs separately. Unknown
+storage or uncertain writes are reported and prevent further profile changes.
+A failed join keeps the previous working snapshot. New credentials are saved
+only after an exact association and an observed IP event consistent with the
+live network interface address.
+
+The native Wi-Fi page offers Scan, Saved networks, Use Passport Wi-Fi, and
+status. Up/Down clamp at scan-list ends. Scans are asynchronous, limited to
+six seconds and sixteen retained strongest results; cancellation waits for
+the SDK scan-done event before another scan. AP+STA scanning leaves the AP
+running. Saved-profile Connect and Forget require Cancel-first local
+confirmation; Disconnect checks the exact active profile. WPA2-Personal and
+open networks are supported. Hidden SSIDs, WEP, enterprise and WPA3-only
+networks are explicitly unsupported. Original non-ASCII SSIDs use a complete
+hex spelling in confirmation because the current device font is Latin-only.
+
+A saved LAN gets at most three connection attempts. Automatic AP fallback
+requires thirty seconds of sustained loss; one transient event does not
+switch networks. Explicit Use Passport Wi-Fi selects the AP immediately.
+Network transitions wait for BLE input cancellation and neutral release,
+then stop/start Wi-Fi across observed stop events. Failed release leaves
+the old network in place. The temporary AP has one client and fresh WPA2
+credentials each boot; only its native details and Wi-Fi join QR expose them.
+A separate address QR opens the device page, with manual SSID/password/IP
+fallback. AP start, DHCP server running, client association and assigned
+lease are distinct observations, as are STA association and assigned IP.
+
+For a new network, use the native Wi-Fi page to select Use Passport Wi-Fi,
+then Open setup. Join that AP using the on-device Wi-Fi QR or manual
+credentials, and open the separate page-address QR (`http://192.168.4.1/setup`
+with the actual AP address shown on screen). The setup window lasts two
+minutes. The embedded page offers a bounded scan, network selection and
+password entry; it works without internet or external assets. Confirm the
+same raw network identity and decimal request number on the device. Cancel
+is initially selected, and confirmation requires a fresh OK press. No full
+password is entered with the three keys. Lock, expiry, a network switch or
+provider removal closes the window and clears pending credentials.
+
+Setup assets and API are AP-only, including when the listener also serves
+health over LAN. An associated station, wrong local socket address, unexpected
+Host or foreign Origin is rejected. A token from the physically opened window
+is required for scans and submissions and is checked again by the Wi-Fi owner.
+HTTP queue admission is displayed separately from owner acceptance, local
+confirmation, association/IP and a successful profile save. Passwords are
+cleared from the form after submission and are not retried automatically.
+The AP can disconnect during a confirmed join; check the device for the final
+result and new LAN address. Network loss alone never means the profile saved.
+
+The page adapts to desktop, phone and tablet widths, using the native dark
+and light color palettes. Its initial theme follows the browser preference;
+the explicit choice is stored in that browser only. It does not change the
+device's saved Appearance setting. No password or setup token is stored in
+browser storage. Scan names are literal text with a raw hexadecimal identity
+view; hidden and unsupported networks cannot be submitted.
+
+Real AP association/DHCP, phone QR scanning, station reconnect, radio
+coexistence, flash power-loss behavior and physical rendering remain untested.
 
 Health reports startup results, NimBLE synchronization, internal free heap
 and largest block, and cumulative observed UP/DOWN/OK presses. HTTP 503
@@ -169,19 +224,24 @@ continuing device health. Applying a view to LVGL is distinct from physical
 screen verification. A failed update is retried after the next bounded
 20 ms button wait. The LVGL lock attempt is bounded at 50 ms.
 
-AP credentials stay in static main-task/view storage and LVGL-owned labels. Temporary entropy and configuration copies are explicitly cleared.
-Credentials are excluded from HTTP. Checked STA/AP netif creation releases
-partial interfaces, Wi-Fi driver and the owned event loop on failure. The
+AP credentials stay in Wi-Fi owner storage and native view/LVGL labels. Temporary entropy and configuration copies are explicitly cleared.
+AP credentials are excluded from HTTP. Router passwords are accepted only by
+the AP setup submission and are never returned in responses or health, placed
+in URLs, or logged. Checked Wi-Fi owner startup releases partial interfaces, queues, event
+handlers, Wi-Fi driver and the owned event loop on failure. The
 SDK TCP/IP stack stays initialized for this boot. A failed display may make
 the ephemeral AP password unavailable.
 
 Run `python3 passport/tests/run.py` for production startup, board, UI, BLE
 owner and bond-store tests with substituted SDK/BSP boundaries and the real
 shared input engine. AddressSanitizer and UndefinedBehaviorSanitizer cover
-network cleanup, render retry, secret clearing, event ordering, lock/wake,
+network cleanup, render retry, event ordering, lock/wake,
 pairing admission, exact identity selection, subscriptions, stale work,
 release ordering, lease expiry, transport failure, bounded repeats, theme
-restore and NVS failure handling.
+restore, Wi-Fi state transitions and NVS failure handling. The setup suite
+compiles the pinned SDK cJSON parser and exercises AP/Host/Origin/window/token
+admission, bounded flat JSON, stale selections, queue results and allocation
+failures. Its socket, HTTP and radio boundaries remain substituted.
 The CCCD capacity regression compiles the pinned SDK functions from the
 dedicated SDK installed above; nine slots cover Service Changed, keyboard
 and mouse subscriptions for all three hosts.
@@ -191,14 +251,24 @@ resolution, SDK flash atomicity, or host interoperability.
 Run `python3 passport/tests/render/run.py` after fetching the pinned LVGL
 with the target build. It uses CMake/Ninja (PATH or the dedicated tools above),
 the real production view and widgets, RGB565 software rendering, and SDK/BSP
-fixtures. PNG captures and contact sheets go to `.agent/local/passport-ui/render`.
+fixtures. PNG captures and contact sheets go to `.agent/local/passport-wifi/render`.
 ASan/UBSan, visible-object bounds, fixed object count and unchanged-frame
 checks cover both palettes. These are actual LVGL renders, not photographs;
 the light palette especially still needs on-device display qualification.
+
+Run `node passport/tests/web/check.mjs` with Playwright and Chromium installed
+for browser checks of the production embedded assets. Optional
+`PASSPORT_PLAYWRIGHT` and `PASSPORT_CHROMIUM` select existing installations;
+`PASSPORT_WEB_OUTPUT` selects the local screenshot directory. The test starts
+and closes a loopback fixture server. It covers desktop, iPhone and iPad
+viewport sizes in both themes, password/open-network submission, exact
+request receipts, storage uncertainty, stale scans, literal SSIDs, closed
+windows and theme persistence. Mobile viewports do not establish Safari or
+physical phone/tablet compatibility.
 
 Hardware qualification still requires the actual display and three keys,
 pairing/reconnect and individual forget across reboots, subscription behavior
 on intended host OS versions, disconnect/release under congestion and power
 loss, free heap, largest block, task high-water marks, and Wi-Fi/BLE coexistence.
-There are no media services, OTA, web controller, STA credential workflow,
+There are no media services, OTA, web input controller,
 or sound cues in this candidate.

@@ -30,7 +30,8 @@ typedef struct {
 typedef struct {
     bool synced, storage_known, connected, encrypted, bonded;
     bool keyboard_subscribed, mouse_subscribed, ready, locked, advertising, pairing;
-    bool release_unknown;
+    bool release_unknown, release_pending;
+    uint32_t cancel_revision;
     uint32_t generation;
     uint32_t bond_revision;
     unsigned peer_count, window_seconds;

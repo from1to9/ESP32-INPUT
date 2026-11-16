@@ -5,6 +5,7 @@
 typedef struct { lv_obj_t *box, *icon, *title, *subtitle; } item_widgets_t;
 static lv_obj_t *root, *brand, *radio, *wifi, *title, *target, *notice, *notice_text, *notice_detail;
 static lv_obj_t *panel, *hero, *heading, *body, *footer, *footer_up, *footer_ok, *footer_down;
+static lv_obj_t *qr;
 static item_widgets_t items[PASSPORT_VIEW_ITEMS];
 static lv_style_t background, card, focused, plain_text, small_text, large_text;
 static passport_view_t previous;
@@ -173,6 +174,14 @@ bool passport_widgets_init(lv_obj_t *screen)
     title = label(root, &large_text);
     target = label(root, &small_text);
     panel = box(root);
+    qr = lv_qrcode_create(root);
+    if (!qr) goto fail;
+    lv_qrcode_set_size(qr, 144);
+    lv_qrcode_set_quiet_zone(qr, true);
+    lv_qrcode_set_dark_color(qr, lv_color_hex(0));
+    lv_qrcode_set_light_color(qr, lv_color_hex(0xFFFFFF));
+    lv_obj_set_pos(qr, 48, 84);
+    visible(qr, false);
     if (!brand || !radio || !wifi || !title || !target || !panel) goto fail;
     hero = label(panel, &large_text);
     heading = label(panel, &large_text);
@@ -247,7 +256,7 @@ static void item_geometry(item_widgets_t *item, passport_layout_t layout, unsign
         y += (slot / 2) * 32;
         width = 104; height = 28;
         if (slot == 8) { x = 12; y = 216; width = 216; height = 24; }
-    } else if (layout == VIEW_CONFIRM) {
+    } else if ((layout == VIEW_CONFIRM || layout == VIEW_NETWORK_CONFIRM)) {
         x += slot * 112; y = 216; width = 104; height = 24;
     } else if (layout == VIEW_MESSAGE) {
         y = 216; height = 24;
@@ -256,7 +265,7 @@ static void item_geometry(item_widgets_t *item, passport_layout_t layout, unsign
     }
     place(item->box, x, y, width, height);
     bool square = layout == VIEW_MOUSE && slot < 5;
-    bool compact = square || layout == VIEW_KEYS || layout == VIEW_CONFIRM || layout == VIEW_MESSAGE || (layout == VIEW_MOUSE && slot == 5);
+    bool compact = square || layout == VIEW_KEYS || layout == VIEW_CONFIRM || layout == VIEW_NETWORK_CONFIRM || layout == VIEW_MESSAGE || (layout == VIEW_MOUSE && slot == 5);
     visible(item->subtitle, !compact);
     visible(item->icon, !compact || square);
     visible(item->title, !square);
@@ -294,6 +303,8 @@ void passport_widgets_update(const passport_view_t *view)
     text(title, view->title);
     text(target, view->target);
     text(radio, view->bluetooth);
+    text(wifi, view->wifi);
+    lv_obj_set_style_text_color(wifi, lv_color_hex(tone_color(view->wifi_tone)), 0);
     lv_obj_set_style_text_color(radio, lv_color_hex(tone_color(view->bluetooth_tone)), 0);
     text(notice_text, view->message);
     text(notice_detail, view->detail);
@@ -324,26 +335,35 @@ void passport_widgets_update(const passport_view_t *view)
         text(items[slot].icon, icon_text(item->checked ? ICON_CHECK : item->icon));
         set_icon(items[slot].icon, item->checked ? ICON_CHECK : item->icon);
     }
-    bool show_panel = view->layout == VIEW_MESSAGE || view->layout == VIEW_CONFIRM || view->layout == VIEW_DETAILS;
+    bool show_panel = view->layout == VIEW_MESSAGE || view->layout == VIEW_CONFIRM || view->layout == VIEW_NETWORK_CONFIRM || view->layout == VIEW_DETAILS;
     visible(panel, show_panel);
     if (show_panel) {
         bool details = view->layout == VIEW_DETAILS;
-        bool confirmation = view->layout == VIEW_CONFIRM;
+        bool confirmation = view->layout == VIEW_CONFIRM || view->layout == VIEW_NETWORK_CONFIRM;
+        bool network = view->layout == VIEW_NETWORK_CONFIRM;
         place(panel, 12, 84, 216, details ? 156 : 124);
-        visible(hero, !details);
+        visible(hero, !details && !network);
         visible(heading, !details);
         place(hero, 10, 10, 194, 28);
         lv_obj_set_style_text_align(hero, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(hero, lv_color_hex(confirmation ? warning : accent), 0);
-        place(heading, 10, 43, 194, 24);
+        place(heading, 10, network ? 6 : 43, 194, 24);
         lv_obj_set_style_text_align(heading, LV_TEXT_ALIGN_CENTER, 0);
-        place(body, 12, details ? 8 : 70, 190, details ? 142 : 48);
+        place(body, 12, details ? 8 : network ? 34 : 70, 190, details ? 142 : network ? 84 : 48);
         lv_obj_set_style_text_align(body, details ? LV_TEXT_ALIGN_LEFT : LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
         text(hero, view->hero[0] ? view->hero : icon_text(view->hero_icon));
         set_icon(hero, view->hero[0] ? ICON_NONE : view->hero_icon);
         text(heading, view->heading);
         text(body, view->body);
+    }
+    bool show_qr = view->layout == VIEW_QR && view->qr[0];
+    visible(qr, show_qr);
+    if (show_qr && (!rendered || strcmp(previous.qr, view->qr))) {
+        if (lv_qrcode_update(qr, view->qr, strlen(view->qr)) != LV_RESULT_OK) {
+            visible(qr, false);
+            text(notice_detail, "QR unavailable; use Manual details");
+        }
     }
     previous = *view;
     rendered = true;

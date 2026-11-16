@@ -26,7 +26,8 @@ void esp_fill_random(void *buffer, size_t size);
 
 typedef struct { int interface; bool live; } esp_netif_t;
 typedef struct { int interface; } esp_netif_config_t;
-typedef struct { unsigned ip; } esp_netif_ip_info_t;
+typedef struct { unsigned addr; } esp_ip4_addr_t;
+typedef struct { esp_ip4_addr_t ip; } esp_netif_ip_info_t;
 typedef int wifi_interface_t;
 typedef struct { int unused; } wifi_init_config_t;
 typedef struct {
@@ -34,6 +35,7 @@ typedef struct {
         uint8_t ssid[32]; uint8_t password[64];
         int ssid_len, channel, authmode, max_connection;
     } ap;
+    struct { uint8_t ssid[32], password[64], bssid[6]; bool bssid_set; struct { int authmode; } threshold; struct { bool capable; } pmf_cfg; } sta;
 } wifi_config_t;
 #define WIFI_IF_STA 0
 #define WIFI_IF_AP 1
@@ -44,7 +46,7 @@ typedef struct {
 #define ESP_NETIF_DEFAULT_WIFI_STA() {WIFI_IF_STA}
 #define ESP_NETIF_DEFAULT_WIFI_AP() {WIFI_IF_AP}
 #define IPSTR "%u"
-#define IP2STR(ip) (*(ip))
+#define IP2STR(ip) ((ip)->addr)
 esp_err_t esp_netif_init(void);
 esp_err_t esp_event_loop_create_default(void);
 esp_err_t esp_event_loop_delete_default(void);
@@ -68,13 +70,13 @@ esp_err_t nvs_flash_init(void);
 #define MALLOC_CAP_8BIT 2
 size_t heap_caps_get_free_size(uint32_t caps);
 size_t heap_caps_get_largest_free_block(uint32_t caps);
-typedef struct { const char *status; const char *body; } httpd_req_t;
+typedef struct { const char *status; const char *body; size_t content_len; } httpd_req_t;
 typedef void *httpd_handle_t;
-typedef struct { int max_open_sockets, max_uri_handlers; } httpd_config_t;
+typedef struct { int max_open_sockets, max_uri_handlers, recv_wait_timeout, send_wait_timeout; bool lru_purge_enable; } httpd_config_t;
 typedef struct {
     const char *uri; int method; esp_err_t (*handler)(httpd_req_t *);
 } httpd_uri_t;
-#define HTTPD_DEFAULT_CONFIG() {7, 8}
+#define HTTPD_DEFAULT_CONFIG() {7, 8, 5, 5, false}
 #define HTTP_GET 0
 esp_err_t httpd_start(httpd_handle_t *server, const httpd_config_t *config);
 esp_err_t httpd_register_uri_handler(httpd_handle_t server, const httpd_uri_t *uri);

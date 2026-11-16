@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Wi-Fi setup · Passport</title>
+  <link rel="stylesheet" href="/setup.css">
+  <script src="/setup.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/setup" aria-label="Passport Wi-Fi setup"><span class="brand-mark" aria-hidden="true">P</span> Passport<span class="model">C3</span></a>
+    <button id="theme" class="quiet" type="button" aria-label="Switch color theme">Light theme</button>
+  </header>
+  <main>
+    <div class="intro"><p class="eyebrow">DEVICE SETUP / WI-FI</p><h1>A familiar network.<br>A connected Passport.</h1><p>Choose a 2.4 GHz network, then confirm on your Passport.<br class="wide-only"> Your existing profiles stay until a new connection works.</p></div>
+    <section class="session" aria-label="Setup session"><span class="status-dot" aria-hidden="true"></span><div><strong id="session-title">Checking Passport…</strong><p id="session-detail">Keep this device connected to the Passport Wi-Fi access point.</p></div><span class="session-tag" id="countdown">LOCAL AP</span></section>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="workspace">
+      <section class="panel networks" aria-labelledby="networks-title">
+        <div class="panel-heading"><div><p class="eyebrow">01 / SELECT</p><h2 id="networks-title">Nearby networks</h2></div><button id="scan" class="quiet" type="button" disabled>Scan again</button></div>
+        <p class="caption" id="scan-detail">2.4 GHz · Open or WPA2 Personal</p>
+        <div id="network-list" class="network-list" role="group" aria-label="Available networks"><p class="empty">Network results will appear here when setup is open.</p></div>
+        <p id="scan-note" class="small"></p>
+      </section>
+      <section class="panel connect" aria-labelledby="connect-title">
+        <div class="panel-heading"><div><p class="eyebrow">02 / CONNECT</p><h2 id="connect-title">Make it your network</h2></div><span class="step-icon" aria-hidden="true">↗</span></div>
+        <div id="selection-empty" class="selection-empty"><span aria-hidden="true">⌁</span><h3>Select a network</h3><p>Choose a nearby network to enter its password here.</p></div>
+        <form id="connect-form" hidden novalidate>
+          <p class="small">SELECTED NETWORK</p><h3 id="selected-name"></h3><p id="selected-security" class="caption"></p>
+          <details><summary>Exact network identity</summary><p class="small">Compare this with the network on Passport. Names are never renamed or normalized.</p><code id="selected-hex"></code></details>
+          <div id="password-group"><label for="password">Network password</label><div class="password-field"><input id="password" name="password" type="password" maxlength="63" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="password-hint form-error"><button id="show-password" class="quiet" type="button" aria-pressed="false">Show</button></div><p id="password-hint" class="small">8–63 ASCII characters. Sent only to this Passport.</p></div>
+          <p id="open-note" class="small" hidden>This is an open network. It has no Wi-Fi password.</p>
+          <p id="form-error" class="error" role="alert" hidden></p>
+          <button id="submit" class="primary" type="submit">Send to Passport <span aria-hidden="true">→</span></button>
+          <p class="small confirmation-note">You’ll approve this exact network and request number using the buttons on Passport.</p>
+        </form>
+        <div id="request-card" class="request-card" hidden><p class="eyebrow">ON YOUR PASSPORT</p><h3 id="request-title"></h3><p id="request-detail"></p><code id="request-number"></code><p class="small">Keep the device screen in view. A closed connection alone does not confirm a saved profile.</p><button id="restart" class="quiet" type="button" hidden>Refresh setup</button></div>
+      </section>
+    </div>
+    <section class="steps" aria-label="Setup steps"><div><span>1</span><p><strong>Stay on Passport Wi-Fi</strong><br>Internet may be unavailable during setup.</p></div><div><span>2</span><p><strong>Confirm on the device</strong><br>UP / DOWN to select, OK to approve.</p></div><div><span>3</span><p><strong>Return to your usual Wi-Fi</strong><br>Check Passport for its new LAN address.</p></div></section>
+    <footer><span>Passport · Local Wi-Fi setup</span><span>Profiles are saved only after connection + IP.</span></footer>
+  </main>
+</body>
+</html>
