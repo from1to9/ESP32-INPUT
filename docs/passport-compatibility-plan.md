@@ -82,12 +82,19 @@ input operations: `control.acquire`, `control.renew`, `control.release`,
 `mouse.drag.refresh`, `mouse.drag.end`, `keyboard.text.enqueue`,
 `keyboard.key_tap`, `keyboard.shortcut`, `mode.select`,
 `input.release_all`, and `input.cancel`. The separate allowlist for reads
-contains only state, capabilities, operation metadata, and the caller's
-request results. Do not infer authority from a broad scope name, provider
-presence, or a hidden web control. Reject `ui.*`, `config.*`,
-`input.transport.select`, remote unlock, Wi-Fi changes, bond deletion,
-firmware update, and media operations. A local Lock rejects new input while
-leaving status and recovery pages reachable.
+contains state, capabilities, operation metadata, the caller's request
+results, saved BLE hosts, Wi-Fi profiles, current scan results, and
+`display_name.list`. Add a separate exact allowlist for `bluetooth.disconnect`,
+`bluetooth.target.request`, `bluetooth.pairing.open`,
+`bluetooth.pairing.close`, `bluetooth.pairing.cancel_handshake`, bounded
+`wifi.scan.start`/`wifi.scan.cancel`, and the typed display-label set/clear
+operations defined below. These operations still pass the owning BLE,
+Wi-Fi, storage, and lock-state admission checks. Do not infer authority
+from a broad scope name, provider presence, or a hidden web control.
+Reject `ui.*`, `config.*`, `input.transport.select`, remote unlock,
+Wi-Fi credentials/join/forget, bond deletion, firmware update, and media
+operations. A local Lock rejects remote mutations while leaving status
+and recovery pages reachable.
 
 Select Passport's open HTTP/WS policy at build and startup, never through a
 request parameter or after a failed Mosaico authentication. Its first-party
@@ -152,6 +159,27 @@ Forgetting a bond or disconnecting the active host first cancels pending
 input and completes neutral release. Show capacity-full and pairing errors
 without silently deleting another bond.
 
+The same BLE HID management is available through the device's web page
+and API on STA and the control AP. `bluetooth.peers.list` returns saved
+hosts, selected target, connection, encryption, subscriptions, pairing
+window, and input-ready state with known/updating/error distinctions.
+`bluetooth.disconnect` leaves the bond intact; `bluetooth.target.request`
+releases old input, disconnects the old host, selects an exact saved bond,
+and opens a bounded reconnect advertisement. The caller sees waiting,
+timeout, wrong-host, failed, and ready outcomes instead of success at
+request admission. `bluetooth.pairing.open/close/cancel_handshake` manage
+the new-host window. Web **Add device** starts advertising; the target
+computer or phone discovers Passport or Mosaico in its own Bluetooth
+settings. It is not a scan of nearby computers by the BLE HID peripheral.
+Web/API actions must not reuse or replay a held key, drag, or old input
+lease, and disconnecting a Bluetooth host must not imply that the browser
+session disconnected. Mosaico retains `connections.manage` enrollment for
+these operations; Passport uses only the narrow open-network allowance
+above. The operation catalog alone is not evidence that either target
+has a wired backend. Show Classic audio peers separately on Mosaico,
+with only actions actually supported by its current audio service;
+Passport has no Classic audio list or scanner.
+
 The three-button Wi-Fi page has a Scan networks action and a scrollable
 2.4 GHz result list. Each row shows a bounded SSID label, security type,
 signal strength, and saved/current marker; UP and DOWN clamp at the list
@@ -163,6 +191,48 @@ The three buttons do not implement full password typing. Refresh, scan
 failure, unsupported security, full saved-profile storage, and Back have
 explicit states. No list row initiates connection merely by receiving
 focus, and a failed join preserves the previous working profile.
+
+Both targets support persistent **display labels** for Bluetooth peers and
+Wi-Fi networks through the web page and typed API set/clear operations.
+The list responses contain both the original name and optional label,
+plus an opaque stable identity and revision. Local and web lists prefer
+the label; details always show the original name and identity needed to
+distinguish duplicate labels. Clearing a label immediately falls back to
+the original. Labels never change an SSID, Wi-Fi credential, BLE broadcast
+name, bond identity, target selection, or a healthy link.
+
+Bind a BLE HID label to its saved bond fingerprint, not the visible name,
+row number, or rotating BLE address. Mosaico Classic audio saved peers use
+a separate Classic identity namespace. Bind a saved Wi-Fi label to its
+stable profile ID, not scan order. Also permit persistent labels on up to
+16 **unsaved** scanned access points, keyed by exact SSID bytes, BSSID,
+and auth type. An AP that changes BSSID is a new row; do not silently
+move its label. A scanned row first uses its exact AP label; otherwise it
+may show a saved profile's label only when one profile matches its exact
+SSID and compatible security. Ambiguous rows show the original SSID.
+`display_name.list` exposes retained labels, identity keys, and capacity
+even when an annotated AP is no longer in the current scan; never evict an
+older label silently. Set/clear requires a stable ID and expected list or
+store revision. Setting an unsaved scan-row label also rechecks its fresh
+generation and exact identity; clearing a retained label can use its
+catalog ID without a current scan. Deleting a confirmed profile or bond
+clears only its attached label; a failed cleanup remains visible as an
+error and cannot relabel a different identity. Unknown/corrupt storage
+and failed writes are not reported as an empty list or success. Re-read
+reconciliation does not disconnect Wi-Fi or HID.
+
+The API accepts at most 48 UTF-8 bytes and 16 Unicode scalar values per
+label, rejects controls, bidi controls, invalid UTF-8, and characters
+absent from the compiled device font instead of truncating or showing
+blank glyphs. Measure the C3 flash/RAM cost of an appropriate
+Chinese-capable font subset before enabling it. The device may ellipsize
+long labels in list rows but must show the complete accepted label in a
+detail view; web output is HTML-escaped text, never interpreted as markup.
+The three-button UI displays labels but does not implement full-text
+editing; users or agents edit them through Web/API. Passport must be able
+to scan during its AP setup window without dropping the controller; the
+Mosaico control AP may report live scans unavailable while still showing
+saved profiles and labels.
 
 The Passport has a 240 x 320 display and UP, DOWN, OK on one ADC ladder.
 No two-button chord is required. The BSP callback queues events; UI,
@@ -220,9 +290,10 @@ Both targets should present the established mouse/keyboard command meanings.
 Passport serves its controller on-device. On desktop, iPhone, and iPad,
 the responsive page offers a touchpad, left/right/middle click, wheel,
 hold-and-drag, text input, on-screen keys, shortcuts, connection status,
-and visible Stop. Use touch-sized controls and support portrait and
-landscape; do not rely on hover or a hardware keyboard. Pointer cancel,
-lost capture, page hide, session loss, network switch, lock, target change,
+visible Stop, Bluetooth host management, and Bluetooth/Wi-Fi display labels.
+Use touch-sized controls and support portrait and landscape; do not rely
+on hover or a hardware keyboard. Pointer cancel, lost capture, page hide,
+session loss, network switch, lock, target change,
 and lease expiry stop held input. Browser release on page hide or network
 loss is best effort; the device's three-second input lease and drag deadman
 are the final stop path. Reconnect never replays an uncertain command or
@@ -230,18 +301,26 @@ resumes a drag. Capability discovery hides or disables unsupported
 Passport operations. The browser does not use phone motion sensors;
 Mosaico keeps its own physical motion mouse.
 
-The agent API remains a direct device IP endpoint. Expose state,
+The Passport agent API remains a direct device IP endpoint. Expose state,
 capabilities, an open Passport session, command submission, result lookup,
-and a WS input channel. Use the existing operation catalog and envelope
-where supported. An acknowledgement means queued or HID transport
-acceptance as specified, never proof that the target OS acted.
+and a WS input channel. Reuse the existing Bluetooth and Wi-Fi list and
+management operation names. Add typed `display_name.set` and
+`display_name.clear` with an explicit HID-bond, Classic-bond,
+Wi-Fi-profile, or exact scanned-AP kind, stable ID, and expected revision;
+their result identifies the confirmed write or storage uncertainty.
+Mosaico requires `connections.manage` for Bluetooth labels and
+`wifi.configure` for Wi-Fi labels, while Passport allows only these exact
+label mutations on its open listener. Use the existing operation catalog
+and envelope where supported. An acknowledgement means queued or HID
+transport acceptance as specified, never proof that the target OS acted.
 
 ## Build, review, and delivery
 
-1. Freeze the target capability matrix and project layout. Keep the
-   Mosaico application and media sources unchanged except minimal AP
-   integration. Add C3-only build configuration and pin the official
-   Passport BSP/dependencies and licenses. First compile a minimal C3
+1. Freeze the target capability matrix and project layout. Preserve
+   unrelated Mosaico application and media behavior while changing only
+   its control AP, connection management, label, and web integration.
+   Add C3-only build configuration and pin the official Passport
+   BSP/dependencies and licenses. First compile a minimal C3
    combination of display, three buttons, NimBLE, STA/AP, and an HTTP
    listener, then inspect actual internal-memory use before expanding it.
 2. Add Mosaico persistent control AP with its enrolled HTTPS policy,
@@ -249,12 +328,15 @@ acceptance as specified, never proof that the target OS acted.
    entry. Review and publish this batch without altering other Mosaico
    features.
 3. Add Passport BLE HID, open-network HTTP input service, STA/AP setup,
-   shared input owner, three-button UI, and optional local cues. Review
-   and publish in cohesive, buildable batches; a partial target must
-   identify unavailable functions honestly.
-4. Add the responsive browser and direct agent control, then reconcile
-   requirements, API, Wi-Fi, browser, build, and validation docs.
-   Independently review each batch before publishing.
+   shared input owner, three-button UI, and optional local cues. Publish
+   cohesive, buildable batches; a partial target must identify unavailable
+   functions honestly.
+4. Wire Bluetooth host management and persistent display labels to real
+   owners on both targets, then add the responsive browser and direct agent
+   control. Reconcile requirements, API, Wi-Fi, browser, build, and
+   validation docs. Reuse the same independent review conversation for
+   fixed, meaningful integration checkpoints rather than creating one
+   review conversation per task.
 5. After the delivered firmware and physical/browser evidence support its
    actual claims, update the root README, both target build/user guides,
    repository description, and focused GitHub topics for discoverability.
@@ -272,6 +354,13 @@ but unstable; AP input therefore needs physical acceptance. Exercise real
 desktop, iPhone, and iPad browsers on STA and AP, and actual host pairing
 and three-button flows. A build or host test alone does not establish
 physical or cross-device qualification.
+Exercise Web/API list unknown/refresh, disconnect without bond deletion,
+target switch while a key or drag is held, wrong or offline selected host,
+pairing-window expiry, independent browser/BLE disconnect, stale label
+revision, duplicate names, unsaved AP label capacity, reboot persistence,
+and storage uncertainty on both targets. Verify the actual device lists
+render accepted labels and raw-name details, and check the responsive
+controls on desktop, iPhone, and iPad in STA and AP modes.
 
 For every accepted batch, stage exact files, inspect the current remote
 head, integrate without force, publish, and verify remote ancestry.
