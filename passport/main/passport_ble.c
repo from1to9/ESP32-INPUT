@@ -1,12 +1,16 @@
 #include "passport_ble.h"
 #include "passport_store.h"
 #include "passport_names_owner.h"
+#include "passport_control.h"
+#include "passport_control_http.h"
+#include "passport_wifi.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -36,6 +40,8 @@ static bool link_ready;
 static bool pairing_failed;
 static uint32_t peer_security_revision;
 static bool names_reconciled, bond_ids_known;
+static passport_wifi_state_t network;
+static passport_control_observation_t control_state;
 
 static uint64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 static void result(const char *text) { snprintf(state.result, sizeof(state.result), "%s", text); }
@@ -329,6 +335,7 @@ static void advertise(bool pairing)
 static bool send_report(void *arg, uint8_t id, const uint8_t *data, size_t length)
 {
     (void)arg;
+    if (engine.state.owner==INPUT_REMOTE && !engine.state.release_pending && !passport_control_report_authorized(now_ms())) return false;
     struct os_mbuf *buffer = ble_hs_mbuf_from_flat(data, length);
     if (!buffer) return false;
     uint16_t handle = id == HID_ENGINE_KEYBOARD_REPORT_ID ? keyboard_handle : mouse_handle;
@@ -460,6 +467,7 @@ static void execute_management(void)
 static void command(const passport_command_t *request, uint64_t now)
 {
     if (request->kind == PASSPORT_LOCK) {
+        passport_control_local(now);
         hid_engine_set_locked(&engine, true);
         close_pairing();
         result("Input locked");
@@ -470,7 +478,17 @@ static void command(const passport_command_t *request, uint64_t now)
     if (request->generation != state.generation) { result("Stale action rejected"); return; }
     if (request->kind == PASSPORT_UNLOCK) { hid_engine_set_locked(&engine, false); result("Unlocked"); return; }
     if (request->kind == PASSPORT_CANCEL) {
+        if (request->network_change) passport_control_network_reset(now);
+        else passport_control_local(now);
         hid_engine_cancel(&engine); lease_end = 0; ++state.cancel_revision; return;
+    }
+    bool local_input=request->kind==PASSPORT_MOVE || request->kind==PASSPORT_CLICK || request->kind==PASSPORT_KEY;
+    if (local_input && request->input_revision!=state.input_revision) { result("Fresh press required"); return; }
+    if (request->kind==PASSPORT_TAKEOVER || (local_input && engine.state.owner==INPUT_REMOTE)) {
+        passport_control_local(now);
+        (void)hid_engine_set_mode(&engine,INPUT_MOUSE);
+        ++state.input_revision; lease_end=now+LEASE_MS;
+        result("Local control; press again"); return;
     }
     if (request->kind <= PASSPORT_FORGET) {
         if ((request->kind == PASSPORT_ADVERTISE || request->kind == PASSPORT_FORGET || request->kind == PASSPORT_DISCONNECT) &&
@@ -483,6 +501,7 @@ static void command(const passport_command_t *request, uint64_t now)
         if (transition) { result("Host change in progress"); return; }
         pending = *request;
         if (!stop_advertising()) return;
+        passport_control_local(now);
         hid_engine_cancel(&engine);
         transition = true;
         release_end = now + RELEASE_MS;
@@ -490,6 +509,10 @@ static void command(const passport_command_t *request, uint64_t now)
         return;
     }
     if (transition || !state.ready) { result("Input unavailable"); return; }
+    if (local_input && engine.state.mode!=INPUT_MOUSE) {
+        (void)hid_engine_set_mode(&engine,INPUT_MOUSE);
+        ++state.input_revision; result("Mouse mode; press again"); return;
+    }
     hid_engine_enqueue_result_t rc = HID_ENGINE_ENQUEUE_INVALID;
     if (request->kind == PASSPORT_MOVE) rc = hid_engine_enqueue_mouse_move(&engine, engine.state.epoch, INPUT_LOCAL, request->x, request->y);
     if (request->kind == PASSPORT_CLICK) rc = hid_engine_enqueue_mouse_click(&engine, engine.state.epoch, INPUT_LOCAL, 1);
@@ -504,6 +527,7 @@ static void service(struct ble_npl_event *event)
     const uint64_t now = now_ms();
     refresh_peers();
     if (atomic_exchange(&emergency_lock, false)) {
+        passport_control_local(now);
         hid_engine_set_locked(&engine, true);
         close_pairing();
         xQueueReset(commands);
@@ -544,9 +568,20 @@ static void service(struct ble_npl_event *event)
     hid_engine_observe_transport(&engine, now, false);
     if (lease_end && now >= lease_end) { hid_engine_cancel(&engine); lease_end = 0; }
     state.ready = transport_ready && !engine.state.release_pending && !engine.state.locked && !transition;
+    passport_wifi_snapshot(&network);
+    control_state=(passport_control_observation_t){.transport_generation=state.generation,
+        .network_generation=network.transport_generation,.local_busy=lease_end>now,.transition=transition};
+    snprintf(control_state.target,sizeof(control_state.target),"%s",state.current);
+    if (network.phase==PW_ONLINE) memcpy(control_state.sta_ip,network.sta_ip,sizeof(control_state.sta_ip));
+    if (network.ap_started && network.dhcp_running) memcpy(control_state.ap_ip,network.ap_ip,sizeof(control_state.ap_ip));
+    passport_control_observe(&control_state,now);
     passport_command_t request;
     for (unsigned i = 0; i < 4 && xQueueReceive(commands, &request, 0) == pdTRUE; ++i) command(&request, now);
+    control_state.local_busy=lease_end>now; control_state.transition=transition;
+    passport_control_observe(&control_state,now);
+    passport_control_http_service(now);
     hid_engine_step_result_t step = hid_engine_step(&engine, send_report, NULL);
+    passport_control_service(now);
     if (step == HID_ENGINE_STEP_RETRY_EXHAUSTED) {
         state.release_unknown = true;
         result("Release unknown; disconnecting");
@@ -566,6 +601,9 @@ static void service(struct ble_npl_event *event)
     state.release_pending = engine.state.release_pending;
     state.ready = transport_ready && engine.ready && !engine.state.release_pending && !state.locked && !transition;
     state.window_seconds = window_end > now ? (window_end - now + 999) / 1000 : 0;
+    passport_control_view_t view; passport_control_view(&view);
+    state.network_available=view.available; state.network_active=view.active;
+    memcpy(state.controller,view.controller,sizeof(state.controller));
     portENTER_CRITICAL(&state_lock);
     published = state;
     portEXIT_CRITICAL(&state_lock);
@@ -581,6 +619,7 @@ static void synced(void)
 static void reset(int reason)
 {
     (void)reason;
+    passport_control_network_reset(now_ms());
     state.synced = false;
     state.connected = state.ready = false;
     state.advertising = state.pairing = false;
@@ -608,6 +647,9 @@ static void host_task(void *arg)
     vTaskDelete(NULL);
 }
 
+static bool random_bytes(void *user, uint8_t *out, size_t length)
+{ (void)user; esp_fill_random(out,length); return true; }
+
 esp_err_t passport_ble_start(void)
 {
     commands = xQueueCreate(8, sizeof(passport_command_t));
@@ -633,6 +675,8 @@ esp_err_t passport_ble_start(void)
     if (!rc) rc = ble_gatts_add_svcs(services);
     if (rc) { nimble_port_deinit(); vQueueDelete(commands); commands = NULL; return ESP_FAIL; }
     passport_names_load(PN_BLE);
+    // Failure disables network input explicitly; native BLE controls still work.
+    state.network_available=passport_control_init(&engine,random_bytes);
     ble_hs_cfg.store_write_cb = secure_write;
     ble_hs_cfg.store_status_cb = store_full;
     ble_hs_cfg.sync_cb = synced;
@@ -640,6 +684,7 @@ esp_err_t passport_ble_start(void)
     ble_npl_callout_init(&tick, nimble_port_get_dflt_eventq(), service, NULL);
     ble_npl_callout_reset(&tick, ble_npl_time_ms_to_ticks32(20));
     if (xTaskCreate(host_task, "nimble_host", NIMBLE_HS_STACK_SIZE, NULL, configMAX_PRIORITIES - 4, NULL) != pdPASS) {
+        passport_control_deinit();
         ble_npl_callout_stop(&tick);
         nimble_port_deinit(); vQueueDelete(commands); commands = NULL;
         return ESP_ERR_NO_MEM;

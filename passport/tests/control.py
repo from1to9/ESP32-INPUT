@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""Exercise the real Passport protocol/remote owner/HID chain under sanitizers."""
+from pathlib import Path
+import os
+import subprocess
+import tempfile
+
+root = Path(__file__).resolve().parents[2]
+sources = ["passport/main/passport_control.c", "firmware/main/app_remote_input.c",
+           "components/input_core/input_core.c", "components/hid_engine/hid_engine.c",
+           "components/interaction/interaction.c", "components/control_protocol/control_protocol.c",
+           "components/control_protocol/control_json.c", "components/control_protocol/control_registry.c",
+           "components/control_protocol/control_sha256.c", "passport/tests/test_control.c"]
+with tempfile.TemporaryDirectory(prefix="passport-control-") as directory:
+    command = [os.environ.get("CC", "cc"), "-std=c11", "-D_POSIX_C_SOURCE=200809L",
+               "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+               "-DCP_MAX_RESULTS=16U", "-DCP_MAX_ACTIVE_REQUESTS=4U", "-DCJ_CAPACITY=4096U",
+               "-DCJ_TOKENS=192U", "-DAPP_REMOTE_INPUT_JOBS=4U"]
+    for path in ["passport/main", "firmware/main", "components/control_protocol"] + [
+            f"components/{component}/include" for component in ["input_core", "hid_engine", "interaction", "control_protocol"]]:
+        command += ["-I", str(root / path)]
+    binary = str(Path(directory) / "control")
+    subprocess.run(command + [str(root / p) for p in sources] + ["-lm", "-o", binary], check=True)
+    subprocess.run([binary], check=True)

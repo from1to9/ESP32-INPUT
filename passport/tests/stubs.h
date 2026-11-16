@@ -70,14 +70,18 @@ esp_err_t nvs_flash_init(void);
 #define MALLOC_CAP_8BIT 2
 size_t heap_caps_get_free_size(uint32_t caps);
 size_t heap_caps_get_largest_free_block(uint32_t caps);
-typedef struct { const char *status; const char *body; size_t content_len; } httpd_req_t;
+typedef struct { const char *status; const char *body; size_t content_len; const char *uri; int method; void *sess_ctx; void (*free_ctx)(void *); void *aux; } httpd_req_t;
 typedef void *httpd_handle_t;
-typedef struct { int max_open_sockets, max_uri_handlers, recv_wait_timeout, send_wait_timeout; bool lru_purge_enable; } httpd_config_t;
+typedef struct { int max_open_sockets, max_uri_handlers, recv_wait_timeout, send_wait_timeout; bool lru_purge_enable; bool (*uri_match_fn)(const char *,const char *,size_t); } httpd_config_t;
 typedef struct {
     const char *uri; int method; esp_err_t (*handler)(httpd_req_t *);
+    bool is_websocket, handle_ws_control_frames;
+    const char *supported_subprotocol;
+    esp_err_t (*ws_pre_handshake_cb)(httpd_req_t *);
 } httpd_uri_t;
-#define HTTPD_DEFAULT_CONFIG() {7, 8, 5, 5, false}
+#define HTTPD_DEFAULT_CONFIG() {.max_open_sockets=7,.max_uri_handlers=8,.recv_wait_timeout=5,.send_wait_timeout=5}
 #define HTTP_GET 0
+bool httpd_uri_match_wildcard(const char *,const char *,size_t);
 esp_err_t httpd_start(httpd_handle_t *server, const httpd_config_t *config);
 esp_err_t httpd_register_uri_handler(httpd_handle_t server, const httpd_uri_t *uri);
 esp_err_t httpd_stop(httpd_handle_t server);

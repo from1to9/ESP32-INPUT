@@ -11,8 +11,12 @@
 #define CP_MAX_RESPONSE_BYTES 4096U
 #define CP_MAX_PRINCIPALS 4U
 #define CP_MAX_SESSIONS 2U
+#ifndef CP_MAX_RESULTS
 #define CP_MAX_RESULTS 64U
+#endif
+#ifndef CP_MAX_ACTIVE_REQUESTS
 #define CP_MAX_ACTIVE_REQUESTS 16U
+#endif
 #define CP_ID_BYTES 16U
 #define CP_SECRET_BYTES 32U
 #define CP_ID_HEX_CAPACITY 33U
@@ -182,10 +186,16 @@ bool cp_command_boolean(const cp_command_t *, const char *key, bool *out);
 bool cp_command_json(const cp_command_t *, const char *key, char *out, size_t capacity);
 
 typedef struct cp_context cp_context_t;
+typedef enum { CP_POLICY_ENROLLED_TLS, CP_POLICY_PASSPORT_OPEN_HTTP } cp_access_policy_t;
+bool cp_policy_allows(cp_access_policy_t, cp_operation_id_t);
 size_t cp_context_size(void);
 /* Caller-owned storage must satisfy both the size and alignment queries. */
 size_t cp_context_alignment(void);
 cp_error_t cp_initialize(void *storage, size_t capacity, const cp_callbacks_t *, cp_context_t **);
+// Trusted startup-only policy. No request changes it; the ordinary initializer
+// always selects enrolled TLS. Passport open access is an exact operation list.
+cp_error_t cp_initialize_policy(void *storage, size_t capacity, const cp_callbacks_t *,
+                                cp_access_policy_t, cp_context_t **);
 void cp_set_device_state(cp_context_t *, const cp_device_state_t *, uint64_t now_ms);
 void cp_tick(cp_context_t *, uint64_t now_ms);
 void cp_shutdown(cp_context_t *, uint64_t now_ms);
@@ -218,27 +228,30 @@ void cp_set_transport_capabilities(cp_context_t *, bool websocket, bool binary_d
 typedef struct {
     bool tls;
     const char *host;
-    const char *origin;        /* NULL only for a separately enrolled native principal. */
+    const char *origin;        /* NULL for a native agent; browser requires the configured origin. */
     const char *authorization; /* Bearer session token, never URL/query secret. */
     const char *cookie;
     const char *csrf;
+    const char *open_request;  /* Exact X-Passport-Open header for open-session only. */
 } cp_http_security_t;
-/* Trusted TLS transport entry points, serialized by the same protocol owner as
+/* Trusted transport entry points, serialized by the same protocol owner as
  * cp_http. Established channel identity is an internal copy from successful
  * authentication, never a client-provided identity or presence assertion. */
 cp_error_t cp_transport_authenticate(cp_context_t *, const cp_http_security_t *, bool mutation,
                                      uint64_t now_ms, cp_identity_t *);
 cp_error_t cp_transport_heartbeat(cp_context_t *, const cp_identity_t *, uint64_t now_ms);
 /* Browser upgrades consume an exact-session 10-second ticket issued through
- * CSRF-protected HTTP. Native upgrades use enrolled Bearer authentication. */
+ * CSRF-protected HTTP. Open-policy browsers present that ticket without cookies
+ * or Authorization; native upgrades use the policy's Bearer authentication. */
 cp_error_t cp_transport_upgrade(cp_context_t *, const cp_http_security_t *, const char *ticket,
                                 uint64_t now_ms, cp_identity_t *);
 /* Dedicated WSS loss revokes only that session's input lease/queued input with
  * STATE_CHANGED. Independent HTTP management/file capture and authentication
  * retain their own liveness/grants. Ordinary HTTP close never calls this. */
 cp_error_t cp_transport_close(cp_context_t *, const cp_identity_t *, uint64_t now_ms);
-/* Server/bridge consume this same bounded HTTP engine. The caller guarantees
- * a real verified station-only TLS listener; tls=false always fails closed.
+/* Server/bridge consume this same bounded HTTP engine. The default policy
+ * requires a real verified TLS listener. Only an explicitly initialized
+ * Passport open policy accepts plaintext HTTP; requests cannot select policy.
  * The response never contains private drafts or an unredacted argument echo. */
 typedef struct {
     unsigned status;

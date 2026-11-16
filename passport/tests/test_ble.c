@@ -20,6 +20,9 @@ static struct { unsigned handle, length; uint8_t bytes[8]; } reports[128];
 static passport_command_t queue[8];
 static unsigned queue_count;
 static struct os_mbuf mbuf;
+void passport_control_http_service(uint64_t now) { (void)now; }
+void passport_wifi_snapshot(passport_wifi_state_t *out) { *out=(passport_wifi_state_t){0}; }
+void esp_fill_random(void *out,size_t size) { static uint8_t entropy; uint8_t *p=out; while(size--) *p++=++entropy; }
 
 void explicit_bzero(void *p, size_t size) { volatile uint8_t *b = p; while(size--) *b++=0; }
 int64_t esp_timer_get_time(void) { return clock_ms * 1000; }
@@ -89,6 +92,7 @@ int xTaskCreate(void (*run)(void *),const char *name,unsigned stack,void *arg,un
 }
 
 static void setup(void) {
+    passport_control_deinit();
     state=(passport_ble_state_t){.synced=true,.generation=1,.locked=true};
     connection=BLE_HS_CONN_HANDLE_NONE;hid_engine_init(&engine);hid_engine_set_locked(&engine,true);
     suspended=new_connection=selected_valid=transition=disconnect_requested=closing=link_ready=false;
@@ -100,9 +104,10 @@ static void setup(void) {
     name_applied = name_removals = fixture_ltk = fixture_security_revision = 0;
     name_remove_result = PN_OK;
     commands=queue;keyboard_handle=10;mouse_handle=20;refresh_peers();
+    assert(passport_control_init(&engine,random_bytes));
 }
 static passport_command_t action(passport_command_kind_t kind) {
-    passport_command_t r={.kind=kind,.generation=state.generation,.bond_revision=state.bond_revision,.peer_type=selected.type};
+    passport_command_t r={.kind=kind,.generation=state.generation,.bond_revision=state.bond_revision,.peer_type=selected.type,.input_revision=state.input_revision};
     memcpy(r.peer,selected.val,6);return r;
 }
 static void issue(passport_command_kind_t kind) { passport_command_t r=action(kind);command(&r,clock_ms); }
@@ -221,7 +226,14 @@ static void test_bond_names(void)
 }
 
 int main(void) {
-    setup();assert(passport_ble_start()==ESP_OK);assert(ble_hs_cfg.sm_io_cap==BLE_HS_IO_NO_INPUT_OUTPUT&&ble_hs_cfg.sm_bonding);
+    setup();passport_control_deinit();assert(passport_ble_start()==ESP_OK);assert(ble_hs_cfg.sm_io_cap==BLE_HS_IO_NO_INPUT_OUTPUT&&ble_hs_cfg.sm_bonding);
     test_security();test_input_release();test_bond_names();
+    setup();connect_saved();tick_once();tick_once();
+    passport_command_t old=action(PASSPORT_MOVE);old.x=12;
+    unsigned revision=state.input_revision;issue(PASSPORT_TAKEOVER);
+    assert(state.input_revision==revision+1 && !engine.count);
+    command(&old,clock_ms);assert(!engine.count);tick_once();tick_once();
+    passport_command_t fresh=action(PASSPORT_MOVE);fresh.x=12;command(&fresh,clock_ms);assert(engine.count==1);
+    passport_control_deinit();
     puts("PASS: pairing windows, stable identities, whitelist and capacity, two-report release, stale work, lease and failure recovery");
 }

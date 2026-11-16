@@ -18,6 +18,7 @@
 #include "passport_ui.h"
 #include "passport_wifi.h"
 #include "passport_setup.h"
+#include "passport_control_http.h"
 #include "nvs_flash.h"
 #include "passport_board.h"
 
@@ -74,7 +75,8 @@ static esp_err_t start_health_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_open_sockets = 3; // HTML, CSS and JS may be fetched concurrently.
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 7;
+    config.max_uri_handlers = 11;
+    config.uri_match_fn = httpd_uri_match_wildcard;
     config.recv_wait_timeout = 2;
     config.send_wait_timeout = 2;
 
@@ -83,6 +85,7 @@ static esp_err_t start_health_server(void)
     const httpd_uri_t health = { .uri = "/health", .method = HTTP_GET, .handler = health_get };
     esp_err_t err = httpd_register_uri_handler(server, &health);
     if (err == ESP_OK) err = passport_setup_register(server);
+    if (err == ESP_OK) err = passport_control_http_register(server);
     if (err != ESP_OK) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_stop(server));
     }

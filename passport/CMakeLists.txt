@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 set(IDF_TARGET "esp32c3")
-set(EXTRA_COMPONENT_DIRS "../components/input_core" "../components/hid_engine")
+set(EXTRA_COMPONENT_DIRS "../components/input_core" "../components/hid_engine" "../components/interaction" "../components/control_protocol")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(MINIMAL_BUILD ON)
+idf_build_set_property(COMPILE_DEFINITIONS "CP_MAX_RESULTS=16U;CP_MAX_ACTIVE_REQUESTS=4U;CJ_CAPACITY=4096U;CJ_TOKENS=192U;APP_REMOTE_INPUT_JOBS=4U" APPEND)
 project(passport_c3)

@@ -44,7 +44,7 @@ size_t heap_caps_get_free_size(uint32_t caps) { (void)caps; return 10000; }
 size_t heap_caps_get_largest_free_block(uint32_t caps) { (void)caps; return 1000; }
 esp_err_t httpd_start(httpd_handle_t *server, const httpd_config_t *config)
 {
-    assert(config->max_uri_handlers == 7 && config->recv_wait_timeout == 2);
+    assert(config->max_uri_handlers == 11 && config->recv_wait_timeout == 2 && config->uri_match_fn==httpd_uri_match_wildcard);
     assert(config->max_open_sockets == 3 && config->lru_purge_enable);
     *server = &label;
     return ESP_OK;
@@ -56,6 +56,8 @@ esp_err_t httpd_register_uri_handler(httpd_handle_t server, const httpd_uri_t *u
 }
 esp_err_t httpd_stop(httpd_handle_t server) { (void)server; return ESP_OK; }
 esp_err_t passport_setup_register(httpd_handle_t server) { assert(server); return ESP_OK; }
+esp_err_t passport_control_http_register(httpd_handle_t server) { assert(server); return ESP_OK; }
+bool httpd_uri_match_wildcard(const char *a,const char *b,size_t length) { (void)a;(void)b;(void)length;return true; }
 esp_err_t httpd_resp_set_status(httpd_req_t *request, const char *status)
 {
     request->status = status;
@@ -127,7 +129,7 @@ int xQueueReceive(QueueHandle_t queue, void *item, TickType_t ticks)
         } else {
             assert(polls == 2 && passport_ui_text_applied());
             assert(strstr(applied_view.body, "STA IP: none"));
-            assert(strstr(applied_view.body, "DHCP: not running"));
+            assert(strstr(applied_view.body, "Network control: unavailable") && strstr(applied_view.body, "AP IP: none"));
             longjmp(main_done, 1);
         }
     }
@@ -361,7 +363,7 @@ static void test_repeat(void)
     event(PASSPORT_OK, PASSPORT_RELEASE);
     event(PASSPORT_OK, PASSPORT_CLICKED);
     assert(request_count == 3); // Long hold does not add a click on release.
-    for (unsigned cause = 0; cause < 6; ++cause) {
+    for (unsigned cause = 0; cause < 7; ++cause) {
         start_repeat();
         switch (cause) {
         case 0: event(PASSPORT_OK, PASSPORT_RELEASE); break;
@@ -370,6 +372,7 @@ static void test_repeat(void)
         case 3: navigate(HOME); break;
         case 4: enter_lock_screen(); break;
         case 5: request_failure = true; break;
+        case 6: ++ble.input_revision; break;
         }
         unsigned before = emergency_count;
         time_ms += 100;
@@ -380,6 +383,41 @@ static void test_repeat(void)
     }
     assert(cue_requests == initial_cues);
     mock_sound.output = PASSPORT_SOUND_OFF;
+}
+
+static void test_network_takeover(void)
+{
+    page=MOUSE;focus=2;awake=true;wake_gesture=false;request_count=0;
+    ble.locked=false;ble.ready=true;ble.network_active=true;atomic_store(&text_applied,true);
+    event(PASSPORT_OK,PASSPORT_PRESS);
+    assert(request_count==1 && requests[0].kind==PASSPORT_TAKEOVER);
+    ble.network_active=false;++ble.input_revision;
+    event(PASSPORT_OK,PASSPORT_LONG);assert(!repeat_active);
+    event(PASSPORT_OK,PASSPORT_RELEASE);event(PASSPORT_OK,PASSPORT_CLICKED);
+    assert(request_count==1);
+    event(PASSPORT_OK,PASSPORT_PRESS);event(PASSPORT_OK,PASSPORT_RELEASE);event(PASSPORT_OK,PASSPORT_CLICKED);
+    assert(request_count==2 && requests[1].kind==PASSPORT_CLICK && requests[1].input_revision==ble.input_revision);
+
+    page=MOUSE;focus=2;request_count=0;ble.network_active=true;
+    event(PASSPORT_DOWN,PASSPORT_PRESS);
+    assert(request_count==1 && requests[0].kind==PASSPORT_TAKEOVER);
+    // A held OK that began before Lock is visible cannot unlock it.
+    event(PASSPORT_OK,PASSPORT_PRESS);
+    ble.network_active=false;
+    unsigned before=request_count;
+    event(PASSPORT_DOWN,PASSPORT_LONG);
+    assert(request_count==before+1 && requests[before].kind==PASSPORT_LOCK && page==LOCK_SCREEN);
+    ble.locked=true;ble.ready=false;
+    event(PASSPORT_DOWN,PASSPORT_RELEASE);event(PASSPORT_DOWN,PASSPORT_CLICKED);
+    assert(request_count==before+1 && page==LOCK_SCREEN && focus==0);
+    render_ui("");++time_ms;
+    event(PASSPORT_OK,PASSPORT_LONG);
+    assert(request_count==before+1 && !unlock_requested);
+    event(PASSPORT_OK,PASSPORT_RELEASE);event(PASSPORT_OK,PASSPORT_CLICKED);
+    event(PASSPORT_OK,PASSPORT_PRESS);event(PASSPORT_OK,PASSPORT_LONG);
+    assert(request_count==before+2 && requests[before+1].kind==PASSPORT_UNLOCK && unlock_requested);
+    event(PASSPORT_OK,PASSPORT_RELEASE);event(PASSPORT_OK,PASSPORT_CLICKED);
+    assert(request_count==before+2 && page==LOCK_SCREEN);
 }
 
 static void test_appearance(void)
@@ -513,6 +551,7 @@ int main(void)
     test_gestures();
     test_async_lock_recovery();
     test_repeat();
+    test_network_takeover();
     test_appearance();
     test_visible_state();
     test_wifi_ui();

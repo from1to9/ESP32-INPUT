@@ -1,4 +1,4 @@
-# Passport local HID batch interface
+# Passport HID and network interface
 
 This file describes the implemented subset, not the full
 [compatibility plan](../docs/passport-compatibility-plan.md).
@@ -11,13 +11,13 @@ This file describes the implemented subset, not the full
 | BLE management | One connection, three saved bonds, explicit 60-second pairing or selected-bond advertising, disconnect, individual forget |
 | Local input | 12-unit directional steps, bounded direction repeats, left click, Esc/Enter/Tab/Backspace/arrows; all through the shared engine |
 | Wi-Fi | Four saved 2.4 GHz profiles, bounded asynchronous scan, explicit AP, observed STA/AP/DHCP state and local confirmations |
-| HTTP | Read-only `/health`, plus AP-only `/setup` and physically gated Wi-Fi provisioning; no remote input |
+| HTTP/WS | Open-session input at the observed LAN/AP IP, read-only `/health`, plus AP-only `/setup` and physically gated Wi-Fi provisioning |
 
 The BLE report payloads exclude the report ID; characteristics and Report
 Reference descriptors select it. Both input characteristics must be subscribed
 and the connection encrypted and bonded before the initial neutral keyboard
-and mouse reports can complete. Boot protocol, text entry, drag, wheel,
-right/middle click, sound, and remote input are not
+and mouse reports can complete. The network input API adds bounded ANSI text,
+drag, wheel and left/right/middle click. Boot protocol and sound are not
 exposed. Numeric comparison, passkey entry and repeat pairing are rejected.
 Just Works pairing supplies no numeric-comparison authentication.
 
@@ -35,14 +35,18 @@ It services the engine every 20 ms, with at most four command admissions and
 one report submission per service. Button callbacks only queue timestamped
 events; the main task owns the UI. Queue loss or a button event older than
 250 ms requests an emergency lock. Local input has a maximum three-second
-lease. No remote lease or takeover path exists in this batch.
+lease. Network input uses the same engine and shared remote owner, with a
+maximum three-second lease. A first physical takeover gesture suppresses
+ordinary input; the next complete press may produce local input. While awake,
+long DOWN still locks during takeover. Queued local
+commands also carry `input_revision` so a held direction cannot cross takeover.
 
 The snapshot separately exposes synchronization, storage availability,
 connection, encryption, bonded state, each input subscription, lock,
 advertising, pairing, release uncertainty and input readiness. Readiness
 also requires exact selected identity, a nonsuspended transport and a
 completed two-report release barrier. Input submission cannot bypass the
-shared engine's local owner, epoch, mode, lock or release gates.
+shared engine's owner, epoch, mode, lock or release gates.
 
 Each connection/security invalidation changes `generation`; input commands
 created against an older value are rejected. Saved-host commands carry the
@@ -215,3 +219,71 @@ Host tests substitute the SDK store and transport boundaries. Actual NVS
 power-loss behavior, controller resolution of changing RPAs, reconnect across
 reboots, host OS subscriptions, hardware rendering, radio coexistence and
 runtime heap/stack margins require physical qualification.
+
+## Direct HTTP and WebSocket input
+
+This target explicitly initializes `CP_POLICY_PASSPORT_OPEN_HTTP`. The ordinary
+`cp_initialize` still selects enrolled TLS. No request can change policy. The
+current Passport provider implements only the exact input operations in the
+[compatibility plan](../docs/passport-compatibility-plan.md), with `script` as
+its sole input producer. Connection-management and label providers remain
+unavailable until their separate integration. Operation metadata reports this
+availability; broader scope names do not grant additional operations.
+
+Use the observed numeric LAN/AP address, optionally with `:80`, as Host. A
+browser's Origin must be exactly `http://` plus that Host; no CORS is enabled.
+POST/DELETE require `application/json` (optionally `; charset=utf-8`). Bodies
+are bounded to 2048 bytes. Wi-Fi passwords, join/forget and bond deletion are
+never accepted by this API; provisioning keeps its separate AP/local-window
+boundary. Lock rejects all remote mutations, including input cancellation
+(the local Lock already releases input), while state/result reads remain usable.
+
+1. Send `POST /api/v1/open-session`, `X-Passport-Open: 1`, and body `{}`.
+   The response contains `session_token`, `session_id`, `boot_id`,
+   `request_prefix`, `csrf` and `next_seq`. No cookie is used. Keep browser
+   credentials in memory; do not put them in URLs or persistent browser storage.
+2. Send `Authorization: Bearer <session_token>` on subsequent HTTP requests.
+   Browser mutations also send the returned `X-CSRF-Token`. Native agents omit
+   Origin. Read `/api/v1/state` before acquire/renew and use its current
+   protocol state, including the server monotonic `now_ms`.
+3. Submit the shared v1 envelope to `POST /api/v1/commands`: `v`, `boot_id`,
+   `session_id`, monotonic `seq`, `request_id` (the 16-hex-character prefix plus
+   the sequence as 16 hexadecimal digits), `deadline_ms`, `op`, `args`,
+   `epoch`, `transport_generation`, `target_id`, and where required
+   `ui_revision` and `lease_id`. Integer state/deadline values use decimal
+   strings. Movement/scroll deadlines are at most 250 ms ahead; other
+   nonsafety requests are at most 2000 ms ahead. Acquire args contain the
+   freshly read `state_sequence`, optionally `lifetime_ms` (up to 3000) and
+   `producer: "script"`. Wait for the neutral barrier and active lease before
+   input. Renew requires a new observed `state_sequence`.
+4. Inspect the result and poll `GET /api/v1/requests/<command_key>` for queued
+   work. `accepted` is admission, and `sent` means NimBLE accepted reports,
+   never observed host delivery. Text reports `started_prefix`,
+   `completed_pairs` and `uncertain_index`; an interrupted key pair is not
+   silently reported as completed. An exact retry preserves the original
+   envelope and sequence. Do not issue a new action to resolve an unknown
+   outcome. Results are bounded to sixteen records; eviction is explicitly
+   `result_unknown`.
+5. For browser WS, obtain `POST /api/v1/ws-ticket` with an empty body and the
+   same Bearer/CSRF headers, then open `/api/v1/ws` with subprotocols
+   `["passport.v1", ticket]`. The single-use ticket expires after ten seconds;
+   only `passport.v1` is echoed. Authentication runs before the SDK sends its
+   upgrade response. Native WS uses `passport.v1` and the Bearer header without
+   Origin. WS accepts complete text frames up to 2048 bytes; binary and
+   fragmented messages close the channel. Frames carry the same command
+   envelope, `{"v":1,"resource":"/api/v1/state"}`, or
+   `{"v":1,"type":"heartbeat"}`. Losing WS releases its input owner while
+   preserving independent HTTP read access. A new channel never resumes input.
+6. `DELETE /api/v1/sessions/current` closes the session and releases its input.
+   Open sessions expire after sixty seconds without authenticated activity or
+   thirty minutes absolute. Two slots are available; opening a third returns
+   busy and never evicts an active controller. HTTP close alone does not end
+   a logical session; the input lease still expires within three seconds.
+
+`GET /api/v1/capabilities` identifies `access_policy: "open_network"` and
+resource bounds. `/api/v1/operations?cursor=0&limit=8` pages the common catalog
+and current provider availability. All transport requests are serialized onto
+the existing NimBLE owner. An HTTP owner timeout reports an unknown outcome;
+its mailbox remains unavailable until that owner completes or discards it.
+Runtime free heap, stack high-water marks, radio coexistence, network timing
+and host input behavior still require physical qualification.

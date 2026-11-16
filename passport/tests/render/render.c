@@ -121,6 +121,7 @@ static void capture(const char *name, unsigned count)
 int main(int argc, char **argv)
 {
     bool setup_only = argc == 2 && !strcmp(argv[1], "--setup-only");
+    bool control_only = argc == 2 && !strcmp(argv[1], "--control-only");
     lv_init(); display = lv_display_create(240, 320);
     assert(passport_names_text_valid(LONG_DISPLAY_LABEL, 16));
     assert(strlen(MAX_BYTES_LABEL) == PASSPORT_NAME_BYTES &&
@@ -160,6 +161,13 @@ int main(int argc, char **argv)
         wifi_confirmation=PW_FORGET;
         target = ble.peers[1];
         wifi.provisioning_available = true;
+        if (control_only) {
+            ble.network_available=true;page=STATUS;focus=0;capture("control-idle",count);
+            ble.network_active=true;strcpy(ble.controller,"13ab45cd");capture("control-active",count);
+            page=MOUSE;capture("control-mouse",count);
+            ble.network_active=false;ble.locked=true;ble.ready=false;strcpy(ble.result,"Input locked");page=LOCK_SCREEN;capture("control-lock",count);
+            continue;
+        }
         if (setup_only) {
             wifi.phase=PW_OFFLINE; wifi.setup_open=true; wifi.setup_seconds=120;
             wifi_pending_id=UINT32_MAX;

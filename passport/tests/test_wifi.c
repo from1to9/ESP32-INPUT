@@ -108,7 +108,8 @@ static void test_scan_and_ap(void)
     event(false,WIFI_EVENT_AP_STACONNECTED);
     queued_event_t lease = {.ip_event=true,.id=IP_EVENT_AP_STAIPASSIGNED,.data.lease={.esp_netif=ap_netif,.ip={43}}};
     handle_event(&lease,clock_ms); assert(state.ap_lease && state.ap_client);
-    event(false,WIFI_EVENT_AP_STADISCONNECTED); assert(!state.ap_lease);
+    uint64_t network_generation=state.transport_generation;
+    event(false,WIFI_EVENT_AP_STADISCONNECTED); assert(!state.ap_lease && state.transport_generation==network_generation+1);
     command_local(PW_SCAN,0,0); assert(state.scanning && scans == 1 && stops == 0);
     command_local(PW_SCAN_CANCEL,0,0); assert(scan_draining && !state.scanning);
     command_local(PW_SCAN,0,0); assert(scans == 1);

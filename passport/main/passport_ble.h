@@ -11,13 +11,15 @@
 typedef enum {
     PASSPORT_STOP_PAIR, PASSPORT_PAIR, PASSPORT_ADVERTISE, PASSPORT_DISCONNECT, PASSPORT_FORGET,
     PASSPORT_LOCK, PASSPORT_UNLOCK, PASSPORT_CANCEL, PASSPORT_MOVE,
-    PASSPORT_CLICK, PASSPORT_KEY
+    PASSPORT_CLICK, PASSPORT_KEY, PASSPORT_TAKEOVER
 } passport_command_kind_t;
 
 typedef struct {
     passport_command_kind_t kind;
     uint32_t generation;
     uint32_t bond_revision;
+    uint32_t input_revision;
+    bool network_change;
     uint8_t peer_type, peer[6];
     int8_t x, y;
     uint8_t usage;
@@ -33,6 +35,9 @@ typedef struct {
     bool synced, storage_known, connected, encrypted, bonded;
     bool keyboard_subscribed, mouse_subscribed, ready, locked, advertising, pairing;
     bool release_unknown, release_pending;
+    bool network_available, network_active;
+    char controller[9];
+    uint32_t input_revision;
     uint32_t cancel_revision;
     uint32_t generation;
     uint32_t bond_revision;
