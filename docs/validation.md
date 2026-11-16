@@ -5,6 +5,29 @@ physical compatibility are recorded separately. A send acknowledgement proves
 submission at the documented boundary. Observed host behavior requires a
 host-side or physical check.
 
+## Passport ESP32-C3 checkpoint
+
+The Passport source candidate combines local three-button BLE HID,
+Wi-Fi station and fallback AP, board-hosted Web and HTTP/WebSocket input,
+connection management, display labels, and optional speaker cues. The pinned
+ESP32-C3 build passes at the Web controller checkpoint. Host regressions
+exercise the shared input engine and HID report path, BLE and Wi-Fi owners,
+HTTP ingress, management transitions, lock and release behavior. Actual
+Chromium renders and interaction checks cover desktop, phone and tablet
+viewports in Dark and Light themes; host LVGL renders cover the 240 × 320
+device interface in both themes. The browser tests do not establish Safari
+or physical iPhone/iPad behavior.
+
+The Web checkpoint's application image is 1,958,320 bytes. Static DRAM is
+206,884 of 321,296 bytes. Twenty-two declared stack paths pass with a
+2,048-byte engineering reserve and at least 1,120 bytes remaining margin.
+These figures do not measure runtime free heap, task high-water marks, radio
+coexistence or display timing. No Passport physical button, screen, BLE host,
+speaker, Wi-Fi or HTTP behavior has yet been observed on hardware. The
+community release gate and hardware cases are listed in the
+[Passport guide](../passport/README.md) and
+[community release requirements](passport-community-release.md).
+
 ## Verified checkpoints
 
 | Scope | Result |

@@ -1,9 +1,13 @@
 # Product requirements
 
-ESP32-INPUT provides standard USB or Bluetooth mouse and keyboard input to
-one unlocked host. Basic input works without host software or Wi-Fi. The
-target board is ESP-Mosaico. Detect the board revision at startup and expose
-actual capabilities. iPhone, iPad, Windows and macOS are qualification targets.
+ESP32-INPUT provides standard mouse and keyboard input to one unlocked host.
+This contract describes the ESP-Mosaico target and its USB or Bluetooth
+transport. Basic Mosaico input works without host software or Wi-Fi. Detect
+its board revision at startup and expose actual capabilities. iPhone, iPad,
+Windows and macOS are qualification targets. The separate ESP32-C3 Passport
+target has the capabilities and boundaries defined in the
+[Passport compatibility contract](passport-compatibility-plan.md) and
+[Passport guide](../passport/README.md).
 
 This document describes required behavior. See [validation](validation.md)
 for the results and [roadmap](roadmap.md) for priorities. The

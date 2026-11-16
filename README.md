@@ -1,6 +1,11 @@
 # ESP32-INPUT
 
-ESP32-INPUT turns an ESP-Mosaico (ESP32-S31) into a handheld air mouse,
+ESP32-INPUT has two firmware targets: ESP-Mosaico (ESP32-S31) and FoloToy
+AI Passport (ESP32-C3). Both send standard Bluetooth mouse and keyboard
+input and expose board-hosted browser and API control. The target device
+needs no companion application or computer relay.
+
+Mosaico turns an ESP-Mosaico into a handheld air mouse,
 touchpad and keyboard, with microphone and speaker controls on the same
 touchscreen. Rotate to aim, use touch for fine movement, or compose and review
 text before sending it. USB and Bluetooth use standard HID, so basic input
@@ -17,8 +22,36 @@ automation.
 | <img src="docs/ui/mouse.png" width="216" alt="Mouse workspace with aiming and touchpad"> | <img src="docs/ui/keyboard.png" width="216" alt="Keyboard workspace with a draft and explicit Send"> | <img src="docs/ui/audio.png" width="216" alt="Audio workspace with separate Mic and Speaker"> |
 | Rotate to aim or use the touchpad, wheel and drag controls. | Compose with touch, motion or confirmed spoken letters. | Choose USB or Bluetooth and control Mic and Speaker independently. |
 
-[Device UI and interaction](docs/ui/README.md) shows the layout from host-rendered
-LVGL fixtures.
+[UI previews](docs/ui/README.md) show Mosaico and Passport layouts from
+host-rendered LVGL and browser fixtures.
+
+## FoloToy AI Passport
+
+Passport uses its 240 × 320 screen and three buttons for a directional mouse,
+click, Esc, Enter, Tab, Backspace, arrow keys, connection management, and
+Lock. The local Bluetooth page lists saved hosts and supports pairing,
+disconnecting, selecting a saved host, and confirmed removal. The local Wi-Fi
+page lists saved and scanned networks. To enter a router password, open the
+temporary Passport Wi-Fi setup page from a phone or computer and confirm the
+exact request on the device; no password typing is required on three buttons.
+
+Passport normally joins a 2.4 GHz LAN and shows its IP. If it cannot join,
+it starts its own password-protected Wi-Fi network and displays connection
+details and QR codes. Visit the displayed board address to use its responsive
+mouse, keyboard, and connections page on a computer, iPhone, or iPad. Agents
+can send the same input through the board's HTTP/WebSocket API. Its browser
+and device interfaces each offer Dark and Light themes. Passport network
+input is open to anyone who can reach its HTTP listener; use its on-device
+Lock when remote input should stop.
+
+Passport retains BLE HID and optional local speaker cues, which start Off.
+It has no native USB HID, motion sensor input, touch input, microphone,
+Bluetooth audio, or media workflow. The ESP32-C3 USB Serial/JTAG port is for
+flashing and diagnostics. This target has passed source, host, browser, and
+ESP32-C3 build checks; physical Passport and host compatibility remain to be
+qualified. [Passport setup, build, and validation](passport/README.md) ·
+[Passport API](passport/API.md) ·
+[Community release requirements](docs/passport-community-release.md)
 
 ## Control an iPad or iPhone
 
@@ -60,14 +93,16 @@ See the [iPhone and iPad guide](docs/user-guide.md#control-an-ipad-or-iphone)
 for setup details and the [automation workflow](docs/automation.md#ipad-and-iphone-control)
 for combining input with a separate screen source.
 
-## Hardware and status
+## Mosaico hardware and status
 
 - **Board:** ESP-Mosaico (ESP32-S31), with a USB-C data connection or Bluetooth.
 - **Input:** Standard relative mouse and keyboard HID. The target uses a US ANSI
   layout for text and may need accessibility settings for pointer use.
 - **Browser, API and AI control:** Use a phone browser, an HTTPS client or an
   MCP-capable AI assistant to send mouse and keyboard input to the selected
-  target. The LAN interface also supports sensor export and signed update staging.
+  target over the LAN or its persistent control hotspot. Mosaico retains its
+  enrolled HTTPS authorization on both networks. Its control interface also
+  supports sensor export and signed update staging.
   [Try the control workflows](docs/automation.md)
 - **Validation:** Pinned target builds and host regressions have passed at
   documented checkpoints. A brief Windows test passed with Bluetooth playback,
@@ -81,14 +116,16 @@ for combining input with a separate screen source.
 - [User guide](docs/user-guide.md) for connecting a host and using the workspaces.
 - [Build and recovery guide](firmware/README.md) for SDK setup, target builds,
   flash layout and device recovery.
+- [Passport guide](passport/README.md) for ESP32-C3 setup, local controls,
+  network control, and its separate build.
 - [API reference](docs/remote-control.md) for enrollment, transport and command
   semantics. See the [companion guide](bridge/README.md) for MCP and release tools.
 - [Architecture](docs/architecture.md) and [board porting](docs/porting.md)
   for code ownership and hardware boundaries.
 
-To compile from a clone, install Git, a C compiler with sanitizers, and
-Python 3.11 or newer. Run from the repository root, using the installed
-Python version in the setup command:
+To compile the Mosaico target from a clone, install Git, a C compiler with
+sanitizers, and Python 3.11 or newer. Run from the repository root, using
+the installed Python version in the setup command:
 
 ```sh
 python3.12 tools/idf.py setup
@@ -105,7 +142,8 @@ separate, backed-up migration before it can run this firmware. Follow the
 
 | Path | Contents |
 | --- | --- |
-| [firmware/](firmware/) | ESP32-S31 application, board adapters and configuration |
+| [firmware/](firmware/) | ESP32-S31 Mosaico application, board adapters and configuration |
+| [passport/](passport/) | ESP32-C3 Passport application, board adapters, Web assets and configuration |
 | [components/](components/) | Portable input, audio, settings and protocol logic |
 | [api/](api/) and [bridge/](bridge/) | Versioned API definitions and host companion |
 | [docs/](docs/) | User guides, interface contracts and validation results |
