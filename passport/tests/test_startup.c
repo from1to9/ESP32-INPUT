@@ -44,7 +44,7 @@ size_t heap_caps_get_free_size(uint32_t caps) { (void)caps; return 10000; }
 size_t heap_caps_get_largest_free_block(uint32_t caps) { (void)caps; return 1000; }
 esp_err_t httpd_start(httpd_handle_t *server, const httpd_config_t *config)
 {
-    assert(config->max_uri_handlers == 11 && config->recv_wait_timeout == 2 && config->uri_match_fn==httpd_uri_match_wildcard);
+    assert(config->max_uri_handlers == 14 && config->recv_wait_timeout == 2 && config->uri_match_fn==httpd_uri_match_wildcard);
     assert(config->max_open_sockets == 3 && config->lru_purge_enable);
     *server = &label;
     return ESP_OK;

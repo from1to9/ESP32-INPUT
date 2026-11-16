@@ -32,3 +32,12 @@ void passport_control_network_reset(uint64_t now_ms);
 void passport_control_local(uint64_t now_ms);
 bool passport_control_report_authorized(uint64_t now_ms);
 void passport_control_view(passport_control_view_t *);
+
+// Optional C3 management adapter. All callbacks run on this same owner task.
+typedef struct {
+    bool (*available)(cp_operation_id_t, char reason[CP_REASON_CAPACITY]);
+    cp_error_t (*dispatch)(const cp_command_t *, uint64_t, cp_result_t *);
+    cp_error_t (*read)(const char *, char *, size_t, size_t *);
+    bool (*poll)(uint64_t, cp_result_t *);
+} passport_control_provider_t;
+void passport_control_set_provider(const passport_control_provider_t *);

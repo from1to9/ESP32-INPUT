@@ -180,6 +180,7 @@ bool cp_policy_allows(cp_access_policy_t policy, cp_operation_id_t id)
     case CP_OP_BLUETOOTH_PAIRING_OPEN: case CP_OP_BLUETOOTH_PAIRING_CLOSE:
     case CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE:
     case CP_OP_WIFI_SCAN_START: case CP_OP_WIFI_SCAN_CANCEL:
+    case CP_OP_DISPLAY_NAME_LIST: case CP_OP_DISPLAY_NAME_SET: case CP_OP_DISPLAY_NAME_CLEAR:
         return true;
     default: return false;
     }
@@ -1636,7 +1637,7 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
         const char *exact[] = {"/api/v1/state", "/api/v1/capabilities", "/api/v1/wifi/profiles", "/api/v1/bluetooth/peers"};
         bool allowed = false;
         for (unsigned i = 0; i < sizeof(exact) / sizeof(exact[0]); ++i) allowed |= !strcmp(resource, exact[i]);
-        const char *prefix[] = {"/api/v1/operations", "/api/v1/requests/", "/api/v1/wifi/scans/"};
+        const char *prefix[] = {"/api/v1/operations", "/api/v1/requests/", "/api/v1/wifi/scans/", "/api/v1/display-names"};
         for (unsigned i = 0; i < sizeof(prefix) / sizeof(prefix[0]); ++i) {
             size_t n = strlen(prefix[i]);
             if (!strncmp(resource, prefix[i], n) && (prefix[i][n - 1] == '/' || !resource[n] || resource[n] == '?')) allowed = true;

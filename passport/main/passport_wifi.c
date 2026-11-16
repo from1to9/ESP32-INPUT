@@ -450,23 +450,29 @@ static void handle_submission(const queued_command_t *message)
 }
 static void handle_command(const passport_wifi_command_t *command, uint64_t now)
 {
+    if (command->remote_scan_id) {
+        state.scan_request_id=command->remote_scan_id; state.scan_request_result=PW_SCAN_REJECTED;
+        if (command->action!=PW_SCAN && command->action!=PW_SCAN_CANCEL) return;
+        if (command->revision!=state.scan_revision) { state.scan_request_result=PW_SCAN_STALE; return; }
+    }
     if (command->action == PW_SETUP_CLOSE || command->action == PW_REJECT) {
         if (command->action == PW_SETUP_CLOSE || (state.pending && command->id == state.pending_id)) { close_setup(); result("Setup request cancelled"); }
         return;
     }
     passport_ble_state_t ble;
     passport_ble_snapshot(&ble);
-    if (ble.locked) { result("Unlock locally to change Wi-Fi"); return; }
-    if (switching) { result("Network switch in progress"); return; }
-    if (command->action == PW_SCAN_CANCEL) { if (cancel_scan()) result("Scan cancelled"); return; }
+    if (ble.locked) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_LOCKED; result("Unlock locally to change Wi-Fi"); return; }
+    if (switching) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_BUSY; result("Network switch in progress"); return; }
+    if (command->action == PW_SCAN_CANCEL) { if (cancel_scan()) { result("Scan cancelled"); if (command->remote_scan_id) state.scan_request_result=PW_SCAN_ACCEPTED; } return; }
     if (command->action == PW_SCAN) {
-        if (state.scanning || scan_draining || (associating && state.phase != PW_ONLINE && state.phase != PW_OFFLINE)) { result("Wait for connection before scanning"); return; }
+        if (state.scanning || scan_draining || (associating && state.phase != PW_ONLINE && state.phase != PW_OFFLINE)) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_BUSY; result("Wait for connection before scanning"); return; }
         wifi_scan_config_t scan = {.show_hidden = true, .scan_type = WIFI_SCAN_TYPE_ACTIVE,
             .scan_time.active = {.min = 30, .max = 120}, .home_chan_dwell_time = 30};
         esp_err_t rc = esp_wifi_scan_start(&scan, false);
         if (rc != ESP_OK) { error("Scan", rc); return; }
         state.scanning = true; state.scan_known = false; state.scan_count = 0;
         ++state.scan_revision; scan_deadline = now + SCAN_MS;
+        if (command->remote_scan_id) state.scan_request_result=PW_SCAN_ACCEPTED;
         result("Scanning 2.4 GHz networks"); return;
     }
     if (command->action == PW_DISCONNECT && (!command->id || command->id != state.active_profile || command->revision != state.revision)) { result("Selected profile is not active"); return; }

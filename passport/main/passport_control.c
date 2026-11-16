@@ -16,6 +16,8 @@ static cp_device_state_t previous;
 static cp_result_t completions[APP_REMOTE_INPUT_JOBS];
 static size_t completion_count;
 static bool known;
+static const passport_control_provider_t *provider;
+void passport_control_set_provider(const passport_control_provider_t *p) { provider=p; }
 
 static bool observe(void *user, app_remote_input_state_t *out)
 {
@@ -64,6 +66,7 @@ static bool available(void *user, cp_operation_id_t op, char reason[CP_REASON_CA
     if (op == CP_OP_STATE_GET || op == CP_OP_CAPABILITIES_GET || op == CP_OP_OPERATIONS_LIST) return true;
     if (app_remote_input_owns(op) && cp_policy_allows(CP_POLICY_PASSPORT_OPEN_HTTP,op))
         return app_remote_input_available(remote,op,reason);
+    if (provider && cp_policy_allows(CP_POLICY_PASSPORT_OPEN_HTTP,op)) return provider->available(op,reason);
     snprintf(reason,CP_REASON_CAPACITY,"provider_unavailable"); return false;
 }
 static cp_error_t dispatch(void *user, const cp_command_t *command, cp_result_t *result)
@@ -73,7 +76,8 @@ static cp_error_t dispatch(void *user, const cp_command_t *command, cp_result_t 
         char producer[24];
         if (cp_command_string(command,"producer",producer,sizeof(producer)) && strcmp(producer,"script")) return CP_UNAVAILABLE;
     }
-    return app_remote_input_execute(remote,command,now,result);
+    if (app_remote_input_owns(command->operation)) return app_remote_input_execute(remote,command,now,result);
+    return provider ? provider->dispatch(command,now,result) : CP_UNAVAILABLE;
 }
 static void safety(void *user, cp_safety_reason_t reason, const cp_identity_t *identity)
 {
@@ -84,7 +88,7 @@ static cp_error_t read_resource(void *user, const cp_identity_t *identity, const
                               char *out, size_t capacity, size_t *length)
 {
     (void)user; (void)identity;
-    if (strcmp(resource,"/api/v1/state")) return CP_UNAVAILABLE;
+    if (strcmp(resource,"/api/v1/state")) return provider ? provider->read(resource,out,capacity,length) : CP_UNAVAILABLE;
     passport_control_view_t view; passport_control_view(&view);
     char sta[100], ap[100];
     if (!cj_escape(observed.sta_ip,sta,sizeof(sta)) || !cj_escape(observed.ap_ip,ap,sizeof(ap))) return CP_INTERNAL;
@@ -97,7 +101,7 @@ bool passport_control_init(hid_engine_t *input, cp_random_fn random)
     if (!input || !random || protocol || remote) return false;
     void *p=calloc(1,cp_context_size()), *r=calloc(1,app_remote_input_bytes());
     if (!p || !r) { free(p); free(r); return false; }
-    engine=input; sequence=ui_revision=allowance=1; known=false; completion_count=0;
+    provider=NULL; engine=input; sequence=ui_revision=allowance=1; known=false; completion_count=0;
     memset(&observed,0,sizeof(observed)); memset(&previous,0,sizeof(previous));
     interaction_init(&interaction);
     app_remote_input_port_t port={.engine=engine,.interaction=&interaction,.observe=observe,
@@ -113,7 +117,7 @@ bool passport_control_init(hid_engine_t *input, cp_random_fn random)
 void passport_control_deinit(void)
 {
     if (protocol) cp_shutdown(protocol,now);
-    free(protocol); free(remote); protocol=NULL; remote=NULL; engine=NULL; known=false;
+    provider=NULL; free(protocol); free(remote); protocol=NULL; remote=NULL; engine=NULL; known=false;
 }
 static void publish(void)
 {
@@ -150,6 +154,8 @@ void passport_control_service(uint64_t time)
     // Completion is outside dispatch; publish the resulting owner/epoch first.
     for (size_t i=0;i<completion_count;++i) (void)cp_complete(protocol,completions[i].command_key,&completions[i],now);
     completion_count=0;
+    cp_result_t result;
+    if (provider && provider->poll(now,&result)) (void)cp_complete(protocol,result.command_key,&result,now);
 }
 void passport_control_execute(passport_control_request_t *request, uint64_t time)
 {

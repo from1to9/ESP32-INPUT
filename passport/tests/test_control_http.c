@@ -1,3 +1,6 @@
+const char controller_html_fixture[] __asm__("_binary_controller_html_start")="<!doctype html>fixture";
+const char controller_css_fixture[] __asm__("_binary_controller_css_start")="body{}";
+const char controller_js_fixture[] __asm__("_binary_controller_js_start")="'use strict';";
 // SPDX-License-Identifier: Apache-2.0
 #include <assert.h>
 #include "../main/passport_control_http.c"
@@ -55,7 +58,7 @@ esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *req,const char *name,char *ou
 int httpd_req_recv(httpd_req_t *req,char *out,size_t count)
 { (void)req;if(count>17)count=17;memcpy(out,input+offset,count);offset+=count;return (int)count; }
 esp_err_t httpd_resp_set_status(httpd_req_t *req,const char *s) { req->status=s;return ESP_OK; }
-esp_err_t httpd_resp_set_type(httpd_req_t *req,const char *s) { (void)req;assert(!strcmp(s,"application/json"));return ESP_OK; }
+esp_err_t httpd_resp_set_type(httpd_req_t *req,const char *s) { (void)req;assert(!strcmp(s,"application/json") || strstr(s,"charset=utf-8"));return ESP_OK; }
 esp_err_t httpd_resp_set_hdr(httpd_req_t *req,const char *name,const char *s)
 { (void)req;assert(name&&s&&strncmp(name,"Access-Control-",15));return ESP_OK; }
 esp_err_t httpd_resp_sendstr(httpd_req_t *req,const char *s) { (void)req;assert(strlen(s)<sizeof(output));strcpy(output,s);return ESP_OK; }
@@ -128,7 +131,11 @@ static void session_open(void)
 }
 int main(void)
 {
-    assert(passport_control_http_register((void *)1)==ESP_OK&&registered==4);
+    assert(passport_control_http_register((void *)1)==ESP_OK&&registered==7);
+    reset();
+    httpd_req_t asset={.uri="/",.method=HTTP_GET};
+    assert(web(&asset)==ESP_OK&&!strcmp(output,controller_html_fixture));
+    host="foreign.example";assert(web(&asset)==ESP_OK&&!strcmp(asset.status,"403 Forbidden"));
     reset();host="evil.test";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
     reset();origin="http://evil.test";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
     reset();local_ip="192.168.1.3";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");

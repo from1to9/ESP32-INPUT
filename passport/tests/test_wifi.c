@@ -72,7 +72,7 @@ esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *data, size_t size) { assert(handle && !strcmp(key,"profiles") && size == sizeof(durable)); if (write_error) return write_error; durable = *(const passport_wifi_store_t *)data; return ESP_OK; }
 esp_err_t nvs_commit(nvs_handle_t handle) { assert(handle); ++commits; if (commit_error) return commit_error; persisted = true; return ESP_OK; }
 static void event(bool ip, int id) { queued_event_t e = {.ip_event = ip, .id = id}; handle_event(&e, clock_ms); }
-static void command_local(passport_wifi_action_t action, uint32_t id, uint32_t revision) { passport_wifi_command_t c = {action,id,revision}; handle_command(&c,clock_ms); }
+static void command_local(passport_wifi_action_t action, uint32_t id, uint32_t revision) { passport_wifi_command_t c = {.action=action,.id=id,.revision=revision}; handle_command(&c,clock_ms); }
 static void reset_runtime(void)
 {
     state = (passport_wifi_state_t){.initialized = true, .storage_known = true, .revision = 1};
@@ -379,10 +379,23 @@ static void test_scan_names(void)
     assert(store.count == 1 && store.records[0].id == 2 && strstr(state.result, "cleanup failed"));
 }
 
+static void test_remote_scan_receipts(void)
+{
+    state.scan_revision=11;state.scanning=false;scan_draining=false;switching=false;associating=false;
+    mock_ble.locked=true;
+    passport_wifi_command_t c={.action=PW_SCAN,.revision=11,.remote_scan_id=91};
+    unsigned before=scans;handle_command(&c,clock_ms);assert(state.scan_request_id==91&&state.scan_request_result==PW_SCAN_LOCKED&&scans==before);
+    mock_ble.locked=false;c.revision=10;handle_command(&c,clock_ms);assert(state.scan_request_result==PW_SCAN_STALE&&scans==before);
+    c.revision=11;handle_command(&c,clock_ms);assert(state.scan_request_result==PW_SCAN_ACCEPTED&&scans==before+1&&state.scanning);
+    c.remote_scan_id=92;c.revision=state.scan_revision;handle_command(&c,clock_ms);assert(state.scan_request_result==PW_SCAN_BUSY&&scans==before+1);
+    c.action=PW_SCAN_CANCEL;handle_command(&c,clock_ms);assert(state.scan_request_result==PW_SCAN_ACCEPTED&&!state.scanning&&scan_draining);
+}
+
 int main(void)
 {
     test_init(); test_scan_and_ap(); test_join_and_persistence(); test_save_failure(); test_release_and_lock(); test_rejection_and_recovery(); test_profile_store(); test_rejected_switch_preserves_live_network(); test_web_scan_window(); test_full_profile_update();
     test_scan_names();
     vQueueDelete(commands); vQueueDelete(events);
+    test_remote_scan_receipts();
     puts("PASS: Wi-Fi initialization rollback, AP/DHCP observations, scan cancellation, exact setup confirmation, IP-before-save, reconnect deadline, NVS uncertainty and BLE release boundary");
 }
