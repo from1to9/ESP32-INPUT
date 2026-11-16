@@ -286,6 +286,7 @@ typedef struct {
      * authentication and saved-identity/admission checks. Latched until down. */
     bool connection_admitted;
     bool reconnect_paused;
+    bool pairing_handshake;
     /* Both input CCCDs enabled on this encrypted, active connection, either by
      * actual writes or restoration of this verified bond's saved subscriptions.
      * A successful encryption event alone never enables subscriptions.
@@ -295,6 +296,8 @@ typedef struct {
      * hid_engine_step while true; a false send means rejection, not queueing. */
     bool congested;
     bool encrypted;
+    bool keyboard_subscribed;
+    bool mouse_subscribed;
     bool suspended;
     uint8_t keyboard_leds;
     /* Current SDK-reported link address; it may be a private/pseudo address.
@@ -304,6 +307,7 @@ typedef struct {
     uint8_t peer_address[6];
     bool advertising;
     bool pairing_open;
+    bool pairing_advertised; /* Start observed for the last opened pairing window. */
     uint32_t pairing_remaining_ms;
     bool bond_count_known;
     uint8_t bond_count;
@@ -408,7 +412,7 @@ esp_err_t ble_hid_target_preferences_request(const ble_hid_target_preferences_re
  * the worker confirms fresh SDK capacity before granting security or initiating
  * pairing. A physical link awaiting that check has no pairing authorization.
  * closing the window stops new admission, not an already admitted handshake.
- * Use disconnect_generation to cancel that handshake. No host name is inferred. */
+ * Use cancel_pairing_handshake to cancel that handshake. No host name is inferred. */
 /* Local management owns a bounded admission reservation while releasing the old
  * host and saving policy. It does not revoke that live host's report generation.
  * Matching release is idempotent; stale/zero tokens cannot release a new owner.
@@ -433,6 +437,16 @@ bool ble_hid_management_ready(uint64_t reservation);
 /* Consumes only this reservation. A non-null target resumes only its manual
  * pause; NULL preserves all pauses. Add never clears unrelated pauses. */
 void ble_hid_management_resume(uint64_t reservation, const ble_hid_target_t *target);
+/* Starts observation of the ordinary saved-target advertising policy. Only
+ * this verified policy and reservation may start the observation. Releasing
+ * the token stops observation while leaving the saved policy in effect. */
+bool ble_hid_management_watch_selected(uint64_t reservation, const ble_hid_target_t *target,
+    uint64_t preference_revision);
+typedef enum {
+    BLE_HID_SELECTED_UNAVAILABLE, BLE_HID_SELECTED_WAITING, BLE_HID_SELECTED_WRONG_PEER,
+    BLE_HID_SELECTED_READY
+} ble_hid_selected_state_t;
+ble_hid_selected_state_t ble_hid_management_selected_state(uint64_t reservation);
 /* Consumes the reservation into a 30-second encryption-only reconnect probe.
  * Unknown callback addresses may reach pre-auth only; SMP grant stays denied.
  * No HID readiness until existing exact durable fingerprint verification.
@@ -510,6 +524,9 @@ bool ble_hid_disconnect_generation(uint64_t generation);
  * only the most recently paused remaining host. Select/Allow reconnect clears
  * only its target, Add preserves pauses, and cancellation preserves them all. */
 bool ble_hid_disconnect_user_generation(uint64_t generation);
+/* Cancels only this in-progress new-host handshake. Leaves admission open
+ * for the remainder of the original pairing window. */
+bool ble_hid_cancel_pairing_handshake(uint64_t generation);
 bool ble_hid_resume_reconnect(void);
 
 #ifdef __cplusplus

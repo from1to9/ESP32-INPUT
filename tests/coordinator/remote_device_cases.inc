@@ -321,6 +321,122 @@ static void remote_device_peer_pages_and_private_reviews_are_truthful(void)
     who.session_id[0] = 99;
     assert(remote_device_state_json(&who,json,sizeof(json),&length)==CP_OK && strstr(json,"\"approval\":null"));
 }
+static void remote_device_disconnect_and_pairing_cancellation_have_separate_effects(void)
+{
+    remote_device_case_setup();
+    test_link.pairing_open = true;
+    test_disconnect_accept = true;
+    cp_command_t command = remote_device_case_command(CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE, 800, "{}");
+    cp_result_t rejected;
+    assert(remote_device_execute(&command, &rejected) == CP_STALE);
+    assert(rejected.state == CP_RESULT_FAILED && rejected.error == CP_STALE && !test_disconnects && test_link.pairing_open);
+
+    test_link.pairing_handshake = true;
+    test_link.connection_admitted = false;
+    test_link.ready = false;
+    (void)remote_device_case_execute(CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE, 801, "{}");
+    assert(test_disconnects == 1 && test_link.pairing_open && !test_link.reconnect_paused);
+    test_link.connected = false;
+    remote_device_case_tick();
+    assert(test_control_result.state == CP_RESULT_COMPLETED);
+
+    remote_device_case_setup();
+    s_input_transport = APP_INPUT_USB;
+    test_disconnect_accept = true;
+    test_link.pairing_open = true;
+    test_bonds.count = 1;
+    unsigned closes = test_pair_closes;
+    cp_result_t disconnect = remote_device_case_execute(CP_OP_BLUETOOTH_DISCONNECT, 802, "{}");
+    assert(disconnect.state == CP_RESULT_RUNNING && test_link.connected && test_link.reconnect_paused);
+    assert(test_disconnects == 1 && s_input_transport == APP_INPUT_USB && test_link.pairing_open);
+    assert(test_pair_closes == closes && !test_pair_forgets && test_bonds.count == 1);
+    test_link.connected = false;
+    remote_device_case_tick();
+    assert(test_control_result.state == CP_RESULT_COMPLETED && test_link.pairing_open && test_pair_closes == closes);
+}
+static void remote_device_target_reports_saved_wait_wrong_peer_and_link_timeout(void)
+{
+    remote_device_case_setup();
+    test_bonds.count = 1;
+    test_bonds.bonds[0] = (ble_hid_bond_t){.bond_id_known = true, .address_type_known = true,
+        .selection_supported = true, .bond_id = {0xa5}};
+    char peer_id[65], args[100];
+    remote_device_hex(test_bonds.bonds[0].bond_id, sizeof(test_bonds.bonds[0].bond_id), peer_id);
+    (void)snprintf(args, sizeof(args), "{\"peer_id\":\"%s\"}", peer_id);
+    s_input_transport = APP_INPUT_USB;
+    cp_result_t accepted = remote_device_case_execute(CP_OP_BLUETOOTH_TARGET_REQUEST, 803, args);
+    assert(accepted.state == CP_RESULT_RUNNING && !strcmp(accepted.reason, "target_preparing"));
+    assert(test_remote_window_ms == 60000 && s_input_transport == APP_INPUT_USB);
+    test_remote_select.preference_saved = true;
+    remote_device_case_tick();
+    assert(test_control_result.state == CP_RESULT_RUNNING && !strcmp(test_control_result.reason, "target_saved_waiting"));
+    test_remote_select.wrong_peer = true;
+    remote_device_case_tick();
+    assert(test_control_result.state == CP_RESULT_RUNNING && !strcmp(test_control_result.reason, "target_wrong_host_rejected"));
+    test_remote_select.active = false;
+    test_remote_select.phase = APP_BT_MANAGE_FAILED;
+    test_remote_select.error = ESP_ERR_TIMEOUT;
+    s_now_ms += 60000;
+    remote_device_case_tick();
+    assert(test_control_result.state == CP_RESULT_FAILED && !strcmp(test_control_result.reason, "target_saved_link_timeout"));
+}
+static void remote_device_pairing_review_precedes_policy_clear_and_advertising_result(void)
+{
+    for (unsigned failure = 0; failure < 2; ++failure) {
+        remote_device_case_setup();
+        test_update_target.selected = true;
+        cp_result_t accepted = remote_device_case_execute(CP_OP_BLUETOOTH_PAIRING_OPEN, 804, "{\"window_seconds\":17}");
+        app_remote_review_view_t view;
+        remote_device_review_view(&view);
+        assert(view.pending && view.can_confirm && strstr(view.details, "Clear the selected host preference and keep all bonds"));
+        assert(accepted.state == CP_RESULT_ACCEPTED && !test_remote_select.remote_attempt && test_update_target.selected);
+        remote_device_case_confirm();
+        assert(test_remote_window_ms == 17000 && test_remote_select.active);
+        test_remote_select.preference_saved = true;
+        remote_device_case_tick();
+        assert(test_control_result.state == CP_RESULT_RUNNING &&
+            !strcmp(test_control_result.reason, "pairing_preference_cleared_starting"));
+        test_remote_select.active = false;
+        test_remote_select.phase = failure ? APP_BT_MANAGE_FAILED : APP_BT_MANAGE_COMPLETE;
+        test_remote_select.error = failure ? ESP_FAIL : ESP_OK;
+        remote_device_case_tick();
+        assert(test_control_result.state == (failure ? CP_RESULT_FAILED : CP_RESULT_APPLIED));
+        assert(!strcmp(test_control_result.reason, failure ?
+            "pairing_preference_cleared_advertising_failed" : "pairing_advertising"));
+    }
+    remote_device_case_setup();
+    (void)remote_device_case_execute(CP_OP_BLUETOOTH_PAIRING_OPEN, 805, "{}");
+    ++test_update_target.revision;
+    app_remote_review_view_t changed;
+    remote_device_review_view(&changed);
+    assert(changed.pending && !changed.can_confirm && !test_remote_select.remote_attempt);
+}
+static void remote_device_bluetooth_timeout_keeps_an_unconfirmed_policy_outcome(void)
+{
+    for (unsigned pairing = 0; pairing < 2; ++pairing) {
+        remote_device_case_setup();
+        if (pairing) {
+            (void)remote_device_case_execute(CP_OP_BLUETOOTH_PAIRING_OPEN, 806, "{}");
+            remote_device_case_confirm();
+        } else {
+            test_bonds.count = 1;
+            test_bonds.bonds[0] = (ble_hid_bond_t){.bond_id_known = true, .address_type_known = true,
+                .selection_supported = true, .bond_id = {0xa5}};
+            char id[65], args[100];
+            remote_device_hex(test_bonds.bonds[0].bond_id, sizeof(test_bonds.bonds[0].bond_id), id);
+            (void)snprintf(args, sizeof(args), "{\"peer_id\":\"%s\"}", id);
+            (void)remote_device_case_execute(CP_OP_BLUETOOTH_TARGET_REQUEST, 806, args);
+        }
+        assert(test_remote_select.active);
+        test_remote_select.active = false;
+        test_remote_select.phase = APP_BT_MANAGE_FAILED;
+        test_remote_select.uncertain = true;
+        test_remote_select.error = ESP_ERR_TIMEOUT;
+        remote_device_case_tick();
+        assert(test_control_result.state == CP_RESULT_FAILED && test_control_result.error == CP_STORAGE_UNCERTAIN);
+        assert(!strcmp(test_control_result.reason, pairing ? "pairing_policy_outcome_unknown" : "target_policy_outcome_unknown"));
+    }
+}
 static void remote_device_bad_diagnostic_parameters_do_not_exhaust_slots(void)
 {
     remote_device_case_setup();
@@ -362,5 +478,9 @@ static void remote_device_stale_and_expired_reviews_remain_locally_cancellable(v
     RUN(remote_device_factory_target_clear_rejects_unknown_or_unreviewed_store); \
     RUN(remote_device_factory_failure_never_advances_to_unreviewed_deletion); \
     RUN(remote_device_peer_pages_and_private_reviews_are_truthful); \
+    RUN(remote_device_disconnect_and_pairing_cancellation_have_separate_effects); \
+    RUN(remote_device_target_reports_saved_wait_wrong_peer_and_link_timeout); \
+    RUN(remote_device_pairing_review_precedes_policy_clear_and_advertising_result); \
+    RUN(remote_device_bluetooth_timeout_keeps_an_unconfirmed_policy_outcome); \
     RUN(remote_device_bad_diagnostic_parameters_do_not_exhaust_slots); \
     RUN(remote_device_stale_and_expired_reviews_remain_locally_cancellable)

@@ -124,3 +124,5 @@ int main(int argc, char **argv)
     assert(test_media_snapshot.audio.route == AE_ROUTE_USB_UAC && !strcmp(s_interaction.view.preview, "AB"));
     return 0;
 }
+
+#include "../display_names/read_boundary.inc"

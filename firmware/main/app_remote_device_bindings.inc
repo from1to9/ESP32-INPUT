@@ -3,6 +3,9 @@
  * One coordinator owns these receipts. SDK/flash/radio work stays in existing
  * managers; this fragment never opens LVGL or performs a hardware operation. */
 #include "app_remote_device.h"
+#include "app_bluetooth_management.h"
+#include "app_display_names.h"
+#include "control_json.h"
 #include "app_device_restart.h"
 #include "app_wifi_profiles.h"
 #include "bt_audio.h"
@@ -27,7 +30,7 @@ typedef struct {
     bool used, applied, name_done, transport_done, disconnect_requested, action_started;
     bool cancelling, stop_requested;
     uint64_t name_id, haptic_id, saved_request, applied_revision;
-    uint64_t target_id, bond_forget_id, restart_id, wifi_id, wifi_revision, target_revision;
+    uint64_t bluetooth_attempt, target_id, bond_forget_id, restart_id, wifi_id, wifi_revision, target_revision;
     unsigned reset_step;
     device_settings_t before;
     app_remote_device_request_t request;
@@ -128,10 +131,13 @@ static bool remote_device_owner_available(void *context, cp_operation_id_t opera
     else if (operation == CP_OP_IMU_CALIBRATE) available = available && board.imu;
     else if (operation >= CP_OP_BLUETOOTH_PAIRING_OPEN && operation <= CP_OP_BLUETOOTH_TARGET_REQUEST) {
         available = available && bluetooth.initialized && !bluetooth.failed;
-        if (operation == CP_OP_BLUETOOTH_TARGET_REQUEST || operation == CP_OP_BLUETOOTH_BOND_FORGET) {
+        if (operation == CP_OP_BLUETOOTH_TARGET_REQUEST || operation == CP_OP_BLUETOOTH_BOND_FORGET ||
+            operation == CP_OP_BLUETOOTH_PAIRING_OPEN) {
             static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
             ble_hid_copy_bond_list(&bonds);
             available = available && bonds.known && !bonds.updating;
+            if (operation == CP_OP_BLUETOOTH_PAIRING_OPEN)
+                available = available && bonds.count < bonds.capacity;
         }
     } else if (operation == CP_OP_HAPTICS_TEST) available = available && board.haptics && board_haptics_enabled();
     else if (operation == CP_OP_HAPTICS_RECOVER) available = available && board_haptics_status().worker_available &&
@@ -290,6 +296,29 @@ static void remote_device_bluetooth_progress(remote_device_binding_job_t *job)
         if (!bluetooth.pairing_open) remote_device_applied(job, bluetooth.generation, false);
         return;
     }
+    if (request->operation == CP_OP_BLUETOOTH_DISCONNECT ||
+        request->operation == CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE) {
+        bool handshake = request->operation == CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE;
+        if (job->disconnect_requested) {
+            if (!bluetooth.connected) remote_device_applied(job, bluetooth.generation, false);
+            return;
+        }
+        if (bluetooth.generation != request->bluetooth_generation ||
+            (handshake ? !bluetooth.pairing_handshake : !bluetooth.connection_admitted)) {
+            remote_device_failed(job, CP_STALE, false);
+            return;
+        }
+        if (!remote_device_session(&request->identity)) {
+            remote_device_failed(job, CP_UNAUTHENTICATED, false);
+            return;
+        }
+        if (!handshake && (bluetooth_release_pending() || bluetooth.congested)) return;
+        bool accepted = handshake ? ble_hid_cancel_pairing_handshake(bluetooth.generation) :
+            ble_hid_disconnect_user_generation(bluetooth.generation);
+        if (!accepted) { remote_device_failed(job, CP_STALE, false); return; }
+        job->disconnect_requested = true;
+        return;
+    }
     if (!job->action_started) {
         if (bluetooth.connected) {
             if (!job->disconnect_requested && bluetooth.generation != request->bluetooth_generation) { remote_device_failed(job, CP_STALE, false); return; }
@@ -303,12 +332,7 @@ static void remote_device_bluetooth_progress(remote_device_binding_job_t *job)
             job->outcome = (app_remote_device_outcome_t){.phase = APP_REMOTE_DEVICE_CANCELLED, .boundary_confirmed = true}; return;
         }
         if (!remote_device_session(&request->identity)) { remote_device_failed(job, CP_UNAUTHENTICATED, false); return; }
-        if (request->operation == CP_OP_BLUETOOTH_DISCONNECT || request->operation == CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE) {
-            remote_device_applied(job, bluetooth.generation, false); return;
-        }
-        if (request->operation == CP_OP_BLUETOOTH_PAIRING_OPEN) {
-            if (!ble_hid_pairing_open(request->window_seconds * 1000U)) { remote_device_failed(job, CP_UNAVAILABLE, false); return; }
-        } else if (request->operation == CP_OP_BLUETOOTH_BONDS_FORGET_ALL) {
+        if (request->operation == CP_OP_BLUETOOTH_BONDS_FORGET_ALL) {
             if (!ble_hid_forget_bonds_without_pairing(bluetooth.generation)) { remote_device_failed(job, CP_UNAVAILABLE, false); return; }
         } else if (request->operation == CP_OP_BLUETOOTH_BOND_FORGET) {
             ble_hid_target_t target;
@@ -316,20 +340,11 @@ static void remote_device_bluetooth_progress(remote_device_binding_job_t *job)
                 ble_hid_forget_bond_request(bluetooth.generation, request->bond_revision, &target, &job->bond_forget_id) != ESP_OK) {
                 remote_device_failed(job, CP_STALE, false); return;
             }
-        } else if (request->operation == CP_OP_BLUETOOTH_TARGET_REQUEST) {
-            ble_hid_target_t target;
-            if (!remote_device_target(request, &target) || ble_hid_target_select(request->bond_revision, &target) != ESP_OK) {
-                remote_device_failed(job, CP_STALE, false); return;
-            }
-            job->target_id = ble_hid_target_snapshot().request_id;
         }
         job->action_started = true;
         return;
     }
-    if (request->operation == CP_OP_BLUETOOTH_PAIRING_OPEN) {
-        if (bluetooth.pairing_open && bluetooth.pairing_remaining_ms <= request->window_seconds * 1000U)
-            remote_device_applied(job, bluetooth.generation, false);
-    } else if (request->operation == CP_OP_BLUETOOTH_BONDS_FORGET_ALL) {
+    if (request->operation == CP_OP_BLUETOOTH_BONDS_FORGET_ALL) {
         if (bluetooth.bond_forget_state == BLE_HID_FORGET_FAILED) remote_device_failed(job, CP_STORAGE_UNCERTAIN, true);
         else if (bluetooth.bond_forget_state == BLE_HID_FORGET_DONE && bluetooth.bond_count_known && !bluetooth.bond_count)
             remote_device_applied(job, remote_device_bond_revision(), true);
@@ -341,16 +356,48 @@ static void remote_device_bluetooth_progress(remote_device_binding_job_t *job)
             remote_device_failed(job, CP_STORAGE_UNCERTAIN, status.status == BLE_HID_BOND_FORGET_UNCERTAIN);
         else if (status.status == BLE_HID_BOND_FORGET_CANCELLED)
             job->outcome = (app_remote_device_outcome_t){.phase = APP_REMOTE_DEVICE_CANCELLED, .boundary_confirmed = true};
-    } else if (request->operation == CP_OP_BLUETOOTH_TARGET_REQUEST) {
-        ble_hid_target_snapshot_t selected = ble_hid_target_snapshot();
-        if (!job->target_id || selected.request_id != job->target_id) remote_device_failed(job, CP_STALE, true);
-        else if (selected.request_status == BLE_HID_TARGET_FAILED || selected.request_status == BLE_HID_TARGET_UNCERTAIN)
-            remote_device_failed(job, CP_STORAGE_UNCERTAIN, selected.request_status == BLE_HID_TARGET_UNCERTAIN);
-        else if (selected.request_status == BLE_HID_TARGET_APPLIED && selected.selected && selected.available && selected.durable) {
-            char id[BLE_HID_BOND_ID_BYTES * 2U + 1U]; remote_device_hex(selected.target.bond_id, sizeof(selected.target.bond_id), id);
-            if (!selected.target.bond_id_known || strcmp(id, request->peer_id)) remote_device_failed(job, CP_STALE, true);
-            else remote_device_applied(job, selected.revision, true);
-        }
+    }
+}
+static bool remote_device_managed_bluetooth(cp_operation_id_t operation)
+{
+    return operation == CP_OP_BLUETOOTH_PAIRING_OPEN || operation == CP_OP_BLUETOOTH_TARGET_REQUEST;
+}
+static void remote_device_managed_bluetooth_progress(remote_device_binding_job_t *job)
+{
+    app_bluetooth_management_snapshot_t selected;
+    app_bluetooth_management_snapshot(&selected);
+    if (!job->bluetooth_attempt || selected.remote_attempt != job->bluetooth_attempt) {
+        remote_device_failed(job, CP_STALE, false);
+        return;
+    }
+    if (selected.active && !remote_device_session(&job->request.identity)) {
+        app_bluetooth_management_cancel();
+        app_bluetooth_management_snapshot(&selected);
+    }
+    bool pairing = job->request.operation == CP_OP_BLUETOOTH_PAIRING_OPEN;
+    job->outcome = (app_remote_device_outcome_t){.phase = APP_REMOTE_DEVICE_PENDING, .durable_confirmed = selected.preference_saved,
+        .resource_revision = pairing ? ble_hid_snapshot().generation : remote_device_bond_revision()};
+    if (selected.active) {
+        job->outcome.reason = pairing ? (selected.preference_saved ? "pairing_preference_cleared_starting" : "pairing_preparing") :
+            !selected.preference_saved ? "target_preparing" :
+            selected.wrong_peer ? "target_wrong_host_rejected" : "target_saved_waiting";
+    } else if (selected.phase == APP_BT_MANAGE_COMPLETE && selected.preference_saved) {
+        job->outcome.phase = APP_REMOTE_DEVICE_COMPLETED;
+        job->outcome.boundary_confirmed = true;
+        job->outcome.reason = pairing ? "pairing_advertising" : "target_ble_ready";
+    } else if (selected.phase == APP_BT_MANAGE_CANCELLED) {
+        job->outcome.phase = APP_REMOTE_DEVICE_CANCELLED;
+        job->outcome.boundary_confirmed = true;
+        job->outcome.reason = selected.preference_saved ? (pairing ? "pairing_preference_cleared_cancelled" : "target_saved_cancelled") :
+            selected.uncertain ? "cancelled_outcome_unknown" : "cancelled";
+    } else {
+        job->outcome.phase = APP_REMOTE_DEVICE_FAILED;
+        job->outcome.error = selected.uncertain ? CP_STORAGE_UNCERTAIN :
+            selected.error == ESP_ERR_TIMEOUT ? CP_EXPIRED : CP_UNAVAILABLE;
+        job->outcome.reason = selected.uncertain ? (pairing ? "pairing_policy_outcome_unknown" : "target_policy_outcome_unknown") :
+            pairing ? (selected.preference_saved ? "pairing_preference_cleared_advertising_failed" : "pairing_failed") :
+            !selected.preference_saved ? "target_failed" :
+            selected.error == ESP_ERR_TIMEOUT ? "target_saved_link_timeout" : "target_saved_link_failed";
     }
 }
 static bool remote_device_microphone_safe(void)
@@ -382,42 +429,75 @@ static void remote_device_display_progress(remote_device_binding_job_t *job)
 }
 
 #include "app_remote_device_maintenance.inc"
+static bool remote_device_current_bond(const char *peer_id)
+{
+    if (!peer_id[0]) return true;
+    static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
+    ble_hid_copy_bond_list(&bonds);
+    if (!bonds.known || bonds.updating || !bonds.current_match_known) return false;
+    for (uint8_t i = 0; i < bonds.count && i < BLE_HID_MAX_BONDS; ++i) {
+        if (!bonds.bonds[i].is_current || !bonds.bonds[i].bond_id_known) continue;
+        char id[65]; remote_device_hex(bonds.bonds[i].bond_id, sizeof(bonds.bonds[i].bond_id), id);
+        if (!strcmp(id, peer_id)) return true;
+    }
+    return false;
+}
+static const remote_device_review_t *remote_device_consumed_review(const app_remote_device_request_t *request)
+{
+    for (size_t i = 0; i < sizeof(s_remote_device_reviews)/sizeof(s_remote_device_reviews[0]); ++i) {
+        const remote_device_review_t *review = &s_remote_device_reviews[i];
+        if (review->used && review->approval.consumed && !strcmp(review->approval.id, request->approval_id) &&
+            remote_device_id_equal(review->approval.action_digest, request->action_digest, 32)) return review;
+    }
+    return NULL;
+}
 static cp_error_t remote_device_submit_action(remote_device_binding_job_t *job, const app_remote_device_request_t *request)
 {
     cp_operation_id_t operation = request->operation;
     if (operation == CP_OP_SYSTEM_RESTART || operation == CP_OP_DEVICE_FACTORY_RESET_REQUEST) {
-        bool found = false;
-        for (size_t i = 0; i < sizeof(s_remote_device_reviews)/sizeof(s_remote_device_reviews[0]); ++i) {
-            remote_device_review_t *review = &s_remote_device_reviews[i];
-            if (review->used && !strcmp(review->approval.id, request->approval_id) && review->approval.consumed &&
-                remote_device_id_equal(review->approval.action_digest, request->action_digest, 32)) {
-                job->wifi_revision = review->wifi_revision; job->target_revision = review->target_revision; found = true; break;
-            }
-        }
-        if (!found || s_remote_device_maintenance_revision == UINT64_MAX) return CP_STALE;
+        const remote_device_review_t *review = remote_device_consumed_review(request);
+        if (!review || s_remote_device_maintenance_revision == UINT64_MAX) return CP_STALE;
+        job->wifi_revision = review->wifi_revision; job->target_revision = review->target_revision;
         ++s_remote_device_maintenance_revision; remote_device_set_maintenance(true);
         cancel_input(); ble_hid_pairing_close(); bt_audio_pairing_close();
         app_media_runtime_stop(AE_STOP_MAINTENANCE); job->stop_requested = true;
         if (operation == CP_OP_SYSTEM_RESTART) { board_haptics_enable(false); remote_device_restart_progress(job); }
         else remote_device_factory_progress(job);
     } else if (request->settings_fields) remote_device_settings_progress(job);
-    else if (operation >= CP_OP_BLUETOOTH_PAIRING_OPEN && operation <= CP_OP_BLUETOOTH_TARGET_REQUEST) {
-        if (operation == CP_OP_BLUETOOTH_TARGET_REQUEST || operation == CP_OP_BLUETOOTH_BOND_FORGET) {
-            ble_hid_target_t target; if (!remote_device_target(request, &target)) return CP_STALE;
-        } else if (request->peer_id[0]) {
-            static EXT_RAM_BSS_ATTR ble_hid_bond_list_t bonds;
-            ble_hid_copy_bond_list(&bonds);
-            ble_hid_snapshot_t link = ble_hid_snapshot();
-            bool matched = false;
-            for (uint8_t i = 0; i < bonds.count && i < BLE_HID_MAX_BONDS; ++i) {
-                char id[65]; remote_device_hex(bonds.bonds[i].bond_id, sizeof(bonds.bonds[i].bond_id), id);
-                if (bonds.known && !bonds.updating && link.connected && bonds.current_match_known &&
-                    bonds.bonds[i].is_current && bonds.bonds[i].bond_id_known && !strcmp(id, request->peer_id)) matched = true;
-            }
-            if (!matched) return CP_STALE;
+    else if (remote_device_managed_bluetooth(operation)) {
+        ble_hid_snapshot_t link = ble_hid_snapshot();
+        if (link.generation != request->bluetooth_generation) return CP_STALE;
+        if (app_connectivity_controls_bluetooth_busy()) return CP_BUSY;
+        uint64_t host = link.connection_admitted ? link.generation : 0;
+        uint32_t window_ms = request->window_seconds * 1000U;
+        esp_err_t error;
+        if (operation == CP_OP_BLUETOOTH_PAIRING_OPEN) {
+            const remote_device_review_t *review = remote_device_consumed_review(request);
+            if (!review || !remote_device_current_bond(request->peer_id)) return CP_STALE;
+            error = app_bluetooth_management_begin_add(host, request->bond_revision, review->target_revision,
+                window_ms, s_now_ms, &job->bluetooth_attempt);
+        } else {
+            ble_hid_target_t target;
+            ble_hid_target_snapshot_t policy = ble_hid_target_snapshot();
+            if (!remote_device_target(request, &target)) return CP_STALE;
+            error = app_bluetooth_management_begin_select(host, request->bond_revision, policy.revision,
+                &target, window_ms, s_now_ms, &job->bluetooth_attempt);
         }
-        ble_hid_pairing_close();
-        if (operation != CP_OP_BLUETOOTH_PAIRING_CLOSE) cancel_input();
+        if (error != ESP_OK) return CP_STALE;
+        if (s_input_transport == APP_INPUT_BLUETOOTH) {
+            app_remote_input_revoke(s_remote_input, CP_SAFETY_STATE_CHANGED, NULL, s_now_ms);
+            cancel_input();
+        }
+        remote_device_managed_bluetooth_progress(job);
+    } else if (operation >= CP_OP_BLUETOOTH_PAIRING_OPEN && operation <= CP_OP_BLUETOOTH_BOND_FORGET) {
+        if (operation == CP_OP_BLUETOOTH_BOND_FORGET) {
+            ble_hid_target_t target; if (!remote_device_target(request, &target)) return CP_STALE;
+        } else if (!remote_device_current_bond(request->peer_id)) return CP_STALE;
+        if (operation == CP_OP_BLUETOOTH_DISCONNECT && !ble_hid_snapshot().connection_admitted) return CP_STALE;
+        if (operation != CP_OP_BLUETOOTH_DISCONNECT && operation != CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE)
+            ble_hid_pairing_close();
+        if (operation != CP_OP_BLUETOOTH_PAIRING_CLOSE && operation != CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE &&
+            s_input_transport == APP_INPUT_BLUETOOTH) cancel_input();
         remote_device_bluetooth_progress(job);
     } else if (operation == CP_OP_IMU_CALIBRATE) {
         cancel_input(); interaction_calibrate(&s_interaction); ++s_ui_revision;
@@ -501,7 +581,8 @@ static bool remote_device_poll(void *context, uint64_t token, app_remote_device_
     if (operation == CP_OP_SYSTEM_RESTART) remote_device_restart_progress(job);
     else if (operation == CP_OP_DEVICE_FACTORY_RESET_REQUEST) remote_device_factory_progress(job);
     else if (job->request.settings_fields) remote_device_settings_progress(job);
-    else if (operation >= CP_OP_BLUETOOTH_PAIRING_OPEN && operation <= CP_OP_BLUETOOTH_TARGET_REQUEST) remote_device_bluetooth_progress(job);
+    else if (remote_device_managed_bluetooth(operation)) remote_device_managed_bluetooth_progress(job);
+    else if (operation >= CP_OP_BLUETOOTH_PAIRING_OPEN && operation <= CP_OP_BLUETOOTH_BOND_FORGET) remote_device_bluetooth_progress(job);
     else if (operation == CP_OP_IMU_CALIBRATE) {
         if (!board_capabilities().imu) remote_device_failed(job, CP_UNAVAILABLE, false);
         else if (!s_interaction.view.calibrating && s_interaction.view.calibrated) remote_device_applied(job, s_ui_revision, false);
@@ -532,6 +613,13 @@ static cp_error_t remote_device_cancel(void *context, uint64_t token)
         return board_haptics_cancel(job->haptic_id) == ESP_OK ? CP_OK : CP_TOO_LATE;
     if (job->request.operation == CP_OP_BLUETOOTH_BOND_FORGET && job->bond_forget_id)
         return ble_hid_forget_bond_cancel(job->bond_forget_id) == ESP_OK ? CP_OK : CP_TOO_LATE;
+    if (remote_device_managed_bluetooth(job->request.operation)) {
+        app_bluetooth_management_snapshot_t selected;
+        app_bluetooth_management_snapshot(&selected);
+        if (selected.remote_attempt != job->bluetooth_attempt || !selected.active) return CP_TOO_LATE;
+        app_bluetooth_management_cancel();
+        return CP_OK;
+    }
     if (job->request.operation == CP_OP_IMU_CALIBRATE) {
         interaction_calibration_cancel(&s_interaction);
         job->outcome = (app_remote_device_outcome_t){.phase = APP_REMOTE_DEVICE_CANCELLED, .boundary_confirmed = true}; return CP_OK;
@@ -624,6 +712,9 @@ static cp_error_t remote_device_approval_claim(void *context, const app_remote_d
             review->approval.management_generation != s_management_generation ||
             !remote_device_id_equal(approval->action_digest, review->approval.action_digest, 32)) return CP_STALE;
         if (review->request.settings_revision != s_settings_revision) return CP_STALE;
+        if (review->request.operation == CP_OP_BLUETOOTH_PAIRING_OPEN &&
+            (remote_device_bond_revision() != review->request.bond_revision ||
+             ble_hid_target_snapshot().revision != review->target_revision)) return CP_STALE;
         if (review->request.operation == CP_OP_DEVICE_FACTORY_RESET_REQUEST) {
             static EXT_RAM_BSS_ATTR app_wifi_profiles_snapshot_t wifi;
             app_wifi_profiles_snapshot(&wifi);
@@ -660,7 +751,7 @@ static void remote_device_review_view(app_remote_review_view_t *view)
         (void)snprintf(view->details, sizeof(view->details), "%s", details);
         if (a->operation == CP_OP_BLUETOOTH_PAIRING_OPEN)
             (void)snprintf(view->details, sizeof(view->details),
-                "Release input; disconnect LE host %s; open new-device pairing for %u seconds. Existing bonds remain. Confirm locally to admit new trust.",
+                "Release input and disconnect LE host %s. Clear the selected host preference and keep all bonds. Open new-host pairing for %u seconds.",
                 review->request.peer_id[0] ? review->request.peer_id : "current", (unsigned)review->request.window_seconds);
         else if (a->operation == CP_OP_BLUETOOTH_BOND_FORGET)
             (void)snprintf(view->details, sizeof(view->details),
@@ -675,7 +766,9 @@ static void remote_device_review_view(app_remote_review_view_t *view)
         view->can_confirm = view->pending && view->complete && s_now_ms < a->expires_ms && !s_engine.state.locked &&
             remote_device_session(&a->owner) && s_overlay == APP_OVERLAY_CONFIRM && s_ui_revision == review->ui_revision &&
             remote_device_observe(NULL, a->operation, &current) && current.management_generation == a->management_generation &&
-            current.resource_revision == a->resource_revision && current.settings_revision == review->request.settings_revision;
+            current.resource_revision == a->resource_revision && current.settings_revision == review->request.settings_revision &&
+            (a->operation != CP_OP_BLUETOOTH_PAIRING_OPEN || (current.bond_revision == review->request.bond_revision &&
+                ble_hid_target_snapshot().revision == review->target_revision));
         return;
     }
 }

@@ -27,6 +27,8 @@ typedef struct {
     uint8_t address[6];           /* Actual saved BR/EDR address, never a HID key. */
     bool name_known;             /* SDK bond-list export has no saved names. */
     char name[BT_AUDIO_PEER_NAME_MAX_BYTES + 1U];
+    bool bond_id_known;
+    bt_classic_bond_id_t bond_id;
     bool hfp_current;
     bool a2dp_current;
 } bt_audio_bond_t;

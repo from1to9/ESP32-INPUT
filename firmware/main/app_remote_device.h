@@ -85,6 +85,7 @@ typedef struct {
     bool boundary_confirmed; /* Real owner acknowledgement, never submit success. */
     bool durable_confirmed;  /* Required before durable config can complete. */
     bool irreversible;
+    const char *reason; /* Optional stable, static result reason. */
     char approval_id[CP_ID_HEX_CAPACITY];
 } app_remote_device_outcome_t;
 

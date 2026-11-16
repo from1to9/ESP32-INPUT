@@ -2829,6 +2829,9 @@ int main(void) {
     test_advertising_diagnostics_name_fault_classification();
     test_advertising_diagnostics_name_benign_and_late_drain();
     native_management_selected_add_and_reconnect();
+    remote_target_waits_for_exact_secure_link();
+    remote_pairing_reports_clear_separately_from_advertising();
+    remote_management_timeout_does_not_discard_an_accepted_policy_write();
     native_management_all_and_single_removal();
     native_management_generation_and_replacement();
     native_management_cancellation_failure_and_stale();

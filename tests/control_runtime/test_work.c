@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "app_control_runtime.h"
+#include "app_display_names.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
@@ -24,6 +25,10 @@ static unsigned reordered;
 static cp_error_t update_authority_status;
 static app_update_authority_t published_authority;
 static unsigned update_host_calls;
+app_display_names_status_t app_display_names_status(void) { return (app_display_names_status_t){0}; }
+static cp_error_t display_name_command(const cp_command_t *command, app_display_name_entry_t *entry)
+{ (void)command; (void)entry; assert(false); return CP_UNAVAILABLE; }
+static void display_name_apply(work_t *work) { (void)work; assert(false); }
 void *heap_caps_calloc(size_t n, size_t bytes, unsigned caps)
 { return test_heap_calloc(4, n, bytes, caps); }
 void *heap_caps_aligned_calloc(size_t alignment, size_t n, size_t bytes, unsigned caps)

@@ -73,16 +73,14 @@ execution overhead, which is included in this revision's size report.
   bundled third-party notices.
 - The lockfile pins LVGL 9.5.0 (MIT) and Espressif's button 4.2.0,
   esp_lvgl_port 2.9.0, esp_codec_dev 1.6.2, and cmake_utilities 1.1.1
-  (Apache-2.0). Each distribution carries its own license. The upstream BSP
-  brings in the codec component at build time; the application calls only
-  the display and button APIs.
+  (Apache-2.0). Each distribution carries its own license.
 
 ## Local interaction
 
 The device starts on Lock. Release the buttons, then hold OK to unlock.
 UP/DOWN clicks change focus and an OK click selects it. Home opens Mouse,
-Keys, Connections, or Status. Connections contains Bluetooth, read-only
-Wi-Fi controls, and Appearance. Hold DOWN from any page to lock and request release.
+Keys, Connections, or Status. Connections contains Bluetooth, Wi-Fi, Sound,
+and Appearance. Hold DOWN from any page to lock and request release.
 An unlocked OK hold returns to the parent page, except on Mouse where
 a direction hold repeats movement.
 Double clicks are consumed. Outside a bounded local Wi-Fi setup window, the screen dims after 60 seconds of inactivity
@@ -145,6 +143,25 @@ separate from bonds. A new theme is applied only after a successful write
 and commit; an uncertain save leaves the active theme unchanged and shows
 an error. A failed load uses Dark and reports the failure in Appearance.
 NVS power-loss behavior still needs device verification.
+
+Sound offers Off, On, Test cue, and Back. Off is the default on a fresh
+installation. The preference is stored in `passport_ui/sound` and restored
+on boot. The screen shows the saved setting and current output state
+independently. An unconfirmed Off save stops output for this session and
+reports uncertainty about the next boot. Test cue plays a short fixed-volume
+tone when the output is ready. Selected menu actions, observed BLE input
+readiness or Wi-Fi IP acquisition, and certain errors have distinct tones.
+HID hold-repeat is silent.
+
+Only On starts the cue task. It uses the BSP's shared I²C bus and ES8311
+speaker wiring, 16 kHz stereo I²S TX, and three 128-frame DMA buffers. The
+[ES8311 register definitions](https://download.kamami.pl/p1199750-ES8311.DS.pdf)
+are used to keep the codec ADC reset, unclocked, and powered down across
+the pinned DAC driver's writes. Cues last 32–64 ms and one pending cue is
+retained when output is busy. Off stops playback and releases the task and
+output resources. The shared bus belongs to the BSP. If firmware cannot
+identify the codec or initialize output, the screen reports Speaker
+unavailable. The codec ID check cannot detect a disconnected speaker.
 
 The native renderer owns a fixed pool of 55 objects including the screen.
 Only a changed view reaches LVGL; labels are updated only when text changes,
@@ -238,10 +255,13 @@ shared input engine. AddressSanitizer and UndefinedBehaviorSanitizer cover
 network cleanup, render retry, event ordering, lock/wake,
 pairing admission, exact identity selection, subscriptions, stale work,
 release ordering, lease expiry, transport failure, bounded repeats, theme
-restore, Wi-Fi state transitions and NVS failure handling. The setup suite
+restore, Wi-Fi state transitions, NVS failure handling, and sound preference
+and output failures. The setup suite
 compiles the pinned SDK cJSON parser and exercises AP/Host/Origin/window/token
 admission, bounded flat JSON, stale selections, queue results and allocation
 failures. Its socket, HTTP and radio boundaries remain substituted.
+The Sound suite requires the managed dependencies from the target build. It
+runs the pinned ES8311 codec driver against I²C and TX fixtures.
 The CCCD capacity regression compiles the pinned SDK functions from the
 dedicated SDK installed above; nine slots cover Service Changed, keyboard
 and mouse subscriptions for all three hosts.
@@ -269,6 +289,7 @@ physical phone/tablet compatibility.
 Hardware qualification still requires the actual display and three keys,
 pairing/reconnect and individual forget across reboots, subscription behavior
 on intended host OS versions, disconnect/release under congestion and power
-loss, free heap, largest block, task high-water marks, and Wi-Fi/BLE coexistence.
-There are no media services, OTA, web input controller,
-or sound cues in this candidate.
+loss, free heap, largest block, task high-water marks, and Wi-Fi/BLE
+coexistence. Speaker output, loudness, Off/On across physical power cycles,
+and cue behavior during concurrent input and radio activity need device testing.
+There are no media services, OTA, or web input controller in this candidate.

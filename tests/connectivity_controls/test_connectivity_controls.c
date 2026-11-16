@@ -37,6 +37,10 @@ esp_err_t ble_hid_management_select_current(uint64_t reservation, uint64_t gener
     const ble_hid_target_preferences_request_t *request, uint64_t *id)
 { assert(reservation && generation == bluetooth.generation); return ble_hid_target_preferences_request(request, id); }
 void ble_hid_management_resume(uint64_t reservation, const ble_hid_target_t *target) { (void)reservation; (void)target; }
+bool ble_hid_management_watch_selected(uint64_t reservation, const ble_hid_target_t *target, uint64_t revision)
+{ (void)reservation; (void)target; (void)revision; assert(false); return false; }
+ble_hid_selected_state_t ble_hid_management_selected_state(uint64_t reservation)
+{ (void)reservation; assert(false); return BLE_HID_SELECTED_UNAVAILABLE; }
 void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *target) { (void)reservation; (void)target; }
 bool ble_hid_management_ready(uint64_t reservation) { return reservation && !bluetooth.connected && !bluetooth.advertising; }
 bool ble_hid_management_pairing_open(uint64_t reservation, uint32_t milliseconds)
@@ -160,9 +164,25 @@ static void wifi_join(void)
 }
 static void wifi_forget(void)
 {
-    setup(); app_connectivity_controls_effect_t effect = handle(wifi_intent(APP_SAVED_WIFI_FORGET_REQUEST, 3));
+    setup();
+    app_connectivity_controls_effect_t detail = handle(wifi_intent(APP_SAVED_WIFI_DETAILS, 3));
+    assert(detail.overlay == APP_OVERLAY_WIFI_PROFILE && !forgets && !joins);
+    apply_overlay(detail);
+    assert(view.saved_wifi.detail_known && !view.saved_wifi.reviewing &&
+        !strcmp(view.saved_wifi.detail.id, profiles.profiles[3].id) &&
+        !strcmp(view.saved_wifi.detail.original_ssid, profiles.profiles[3].ssid));
+    context.overlay = APP_OVERLAY_WIFI_PROFILES;
+    ++context.ui_revision;
+    app_connectivity_controls_context(&context);
+    app_connectivity_controls_effect_t effect = handle(wifi_intent(APP_SAVED_WIFI_FORGET_REQUEST, 3));
     assert(!forgets && effect.confirmation == APP_CONFIRM_WIFI_FORGET); apply_overlay(effect);
+    assert(view.saved_wifi.reviewing && view.saved_wifi.detail_known && view.saved_wifi.review_current &&
+        !strcmp(view.saved_wifi.detail.id, profiles.profiles[3].id) &&
+        !strcmp(view.saved_wifi.detail.original_ssid, profiles.profiles[3].ssid));
+    strcpy(profiles.profiles[3].ssid, "New profile identity");
     ++profiles.revision; poll_at(1010);
+    assert(view.saved_wifi.reviewing && !view.saved_wifi.review_current &&
+        strcmp(view.saved_wifi.detail.original_ssid, profiles.profiles[3].ssid));
     app_intent_t confirm = {.action = APP_CONFIRM, .epoch = context.epoch, .ui_revision = context.ui_revision, .x = 1};
     effect = handle(confirm); assert(!forgets); apply_overlay(effect);
     effect = handle(wifi_intent(APP_SAVED_WIFI_FORGET_REQUEST, 4)); apply_overlay(effect);
@@ -567,3 +587,5 @@ int main(int argc, char **argv)
     }
     return 2;
 }
+
+#include "../display_names/read_boundary.inc"

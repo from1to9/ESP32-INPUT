@@ -13,6 +13,13 @@
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#else
+#ifndef EXT_RAM_BSS_ATTR
+#define EXT_RAM_BSS_ATTR
+#endif
+#endif
 
 #if SOC_BT_CLASSIC_SUPPORTED && CONFIG_BT_CLASSIC_ENABLED
 #include "esp_gap_bt_api.h"
@@ -71,6 +78,10 @@ static struct {
 #endif
     ae_id_t boot_id;
     uint8_t classic_bonds[BT_AUDIO_CLASSIC_BONDS_MAX][6];
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+    uint32_t classic_identity_known;
+    bt_classic_bond_id_t classic_identities[BT_AUDIO_CLASSIC_BONDS_MAX];
+#endif
     bool bond_refresh_pending, pairing_claimed, scan_pending, scan_submitted;
     bool name_pending;
     uint64_t name_started_us;
@@ -477,6 +488,14 @@ static void service_classic_pairing(void)
             if (count < 0 || count > (int)BT_AUDIO_CLASSIC_BONDS_MAX || esp_bt_gap_get_bond_device_num() != count)
                 error = ESP_ERR_INVALID_STATE;
         }
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+        static EXT_RAM_BSS_ATTR bt_classic_bond_id_t identities[BT_AUDIO_CLASSIC_BONDS_MAX];
+        uint32_t identity_known = 0;
+        memset(identities, 0, sizeof(identities));
+        for (int i = 0; error == ESP_OK && i < count; ++i)
+            if (bt_classic_forget_review(bonds[i], &identities[i]) == ESP_OK)
+                identity_known |= UINT32_C(1) << i;
+#endif
         portENTER_CRITICAL(&audio_lock);
         if (revision == audio.bond_revision) {
             audio.bond_refresh_pending = false;
@@ -484,6 +503,12 @@ static void service_classic_pairing(void)
             audio.classic_list_error = error;
             bool changed = !audio.classic_list_revision || error != ESP_OK ||
                 count != audio.public.classic_bond_count || memcmp(audio.classic_bonds, bonds, (size_t)count * 6U) != 0;
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+            changed |= audio.classic_identity_known != identity_known ||
+                memcmp(audio.classic_identities, identities, sizeof(identities)) != 0;
+            audio.classic_identity_known = identity_known;
+            memcpy(audio.classic_identities, identities, sizeof(identities));
+#endif
             if (changed) advance_bond_list_locked();
             if (error == ESP_OK) {
                 memcpy(audio.classic_bonds, bonds, (size_t)count * 6U);
@@ -1217,6 +1242,12 @@ void bt_audio_copy_bond_list(bt_audio_bond_list_t *out)
     out->capacity = audio.public.classic_bond_capacity;
     for (unsigned int i = 0; i < out->count; ++i) {
         memcpy(out->bonds[i].address, audio.classic_bonds[i], 6);
+#if CONFIG_APP_CLASSIC_SCAN_COORDINATION
+        if (out->known && !out->refreshing && (audio.classic_identity_known & (UINT32_C(1) << i))) {
+            out->bonds[i].bond_id_known = true;
+            out->bonds[i].bond_id = audio.classic_identities[i];
+        }
+#endif
         out->bonds[i].hfp_current = out->known && audio.public.hfp_connected && audio.public.hfp_peer_known &&
             peer_matches(out->bonds[i].address, audio.public.hfp_peer);
         out->bonds[i].a2dp_current = out->known && audio.public.a2dp_connected && audio.public.a2dp_peer_known &&

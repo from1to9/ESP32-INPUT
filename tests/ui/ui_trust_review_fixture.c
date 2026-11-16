@@ -37,6 +37,10 @@ esp_err_t ble_hid_management_select_current(uint64_t reservation, uint64_t gener
 }
 void ble_hid_management_release(uint64_t reservation) { (void)reservation; assert(false); }
 void ble_hid_management_resume(uint64_t reservation, const ble_hid_target_t *target) { (void)reservation; (void)target; assert(false); }
+bool ble_hid_management_watch_selected(uint64_t reservation, const ble_hid_target_t *target, uint64_t revision)
+{ (void)reservation; (void)target; (void)revision; assert(false); return false; }
+ble_hid_selected_state_t ble_hid_management_selected_state(uint64_t reservation)
+{ (void)reservation; assert(false); return BLE_HID_SELECTED_UNAVAILABLE; }
 void ble_hid_management_reconnect(uint64_t reservation, const ble_hid_target_t *target)
 { (void)reservation; (void)target; assert(false); }
 bool ble_hid_management_ready(uint64_t reservation) { (void)reservation; assert(false); return false; }
@@ -111,3 +115,5 @@ void ui_trust_fixture_finish(app_view_t *view)
     memcpy(fixture_runtime.trust.active_digest, fixture_review.digest, 65); fixture_refresh(view);
 }
 unsigned ui_trust_fixture_approvals(void) { return fixture_approvals; }
+
+#include "../display_names/read_boundary.inc"

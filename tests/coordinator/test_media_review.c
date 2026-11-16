@@ -174,3 +174,5 @@ int main(void)
     puts("PASS: coordinator reviews and read-only first-boot device navigation; mutations and paused navigation blocked");
     return 0;
 }
+
+#include "../display_names/read_boundary.inc"

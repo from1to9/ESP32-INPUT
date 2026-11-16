@@ -22,6 +22,7 @@ static const char *icon_text(passport_icon_t icon)
     case ICON_BLUETOOTH: return LV_SYMBOL_BLUETOOTH;
     case ICON_WIFI: return LV_SYMBOL_WIFI;
     case ICON_APPEARANCE: return LV_SYMBOL_TINT;
+    case ICON_SOUND: return LV_SYMBOL_VOLUME_MID;
     case ICON_ADD: return LV_SYMBOL_PLUS;
     case ICON_BACK: return LV_SYMBOL_LEFT;
     case ICON_UP: return LV_SYMBOL_UP;

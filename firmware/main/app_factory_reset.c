@@ -82,6 +82,7 @@ static esp_err_t clear_owned_namespaces(const char *partition)
         {"nvs", "hid_cccd"}, {"nvs", "bt_config.conf"},
         {"nvs", "nvs.net80211"}, {"nvs", "misc"}, /* Both SDK Wi-Fi stores. */
         {"control", "ctrl_v1"}, {"control", "ctrl_access"}, {"control", "record_audio"},
+        {"control", "display_names"},
     };
     for (size_t i = 0; i < sizeof(owned) / sizeof(owned[0]); ++i) {
         if (strcmp(partition, owned[i].partition)) continue;

@@ -1,6 +1,7 @@
 #include "passport_ui.h"
 #include "passport_board.h"
 #include "passport_ble.h"
+#include "passport_sound.h"
 #include "passport_wifi.h"
 
 #include <stdatomic.h>
@@ -8,7 +9,7 @@
 #include <string.h>
 #include "esp_timer.h"
 
-typedef enum { HOME, BLUETOOTH, HOST, CONFIRM_FORGET, PAIR_WINDOW, MOUSE, KEYS, STATUS, LOCK_SCREEN, CONNECTIONS, WIFI, APPEARANCE, WIFI_LIST, WIFI_SAVED, WIFI_ACTION, WIFI_CONFIRM, WIFI_AP, WIFI_DETAILS, WIFI_JOIN_QR, WIFI_URL_QR, WIFI_PENDING } page_t;
+typedef enum { HOME, BLUETOOTH, HOST, CONFIRM_FORGET, PAIR_WINDOW, MOUSE, KEYS, STATUS, LOCK_SCREEN, CONNECTIONS, WIFI, APPEARANCE, WIFI_LIST, WIFI_SAVED, WIFI_ACTION, WIFI_CONFIRM, WIFI_AP, WIFI_DETAILS, WIFI_JOIN_QR, WIFI_URL_QR, WIFI_PENDING, SOUND } page_t;
 static page_t page = LOCK_SCREEN;
 static unsigned focus;
 static passport_peer_t target;
@@ -34,6 +35,7 @@ static passport_view_t view, rendered_view;
 static passport_theme_t theme = PASSPORT_DARK, pending_theme;
 static bool theme_pending, theme_failed;
 static char theme_note[48];
+static bool sound_pending, pending_sound, sound_save_failed;
 static bool repeat_active, ok_held;
 static uint64_t ok_pressed_at, repeat_until, repeat_next;
 static uint32_t repeat_generation;
@@ -83,6 +85,8 @@ static void enter_lock_screen(void)
 
 static void observe_owner(void)
 {
+    const bool was_ready = ble.ready, release_was_unknown = ble.release_unknown;
+    const passport_wifi_phase_t previous_phase = wifi.phase;
     passport_ble_snapshot(&ble);
     if (ble.locked && (!owner_was_locked || owner_generation != ble.generation || page != LOCK_SCREEN)) {
         enter_lock_screen();
@@ -94,6 +98,15 @@ static void observe_owner(void)
     owner_was_locked = ble.locked;
     owner_generation = ble.generation;
     passport_wifi_snapshot(&wifi);
+    if (awake && page != LOCK_SCREEN && !ble.locked) {
+        if ((!was_ready && ble.ready) || (previous_phase != PW_ONLINE && wifi.phase == PW_ONLINE)) {
+            passport_sound_cue(PASSPORT_CUE_SUCCESS);
+        } else if ((!release_was_unknown && ble.release_unknown) ||
+                   ((previous_phase == PW_CONNECTING || previous_phase == PW_ASSOCIATED) &&
+                    wifi.phase == PW_OFFLINE && wifi.disconnect_reason)) {
+            passport_sound_cue(PASSPORT_CUE_ERROR);
+        }
+    }
     if (wifi.pending && wifi.pending_id != wifi_pending_id && page != LOCK_SCREEN) {
         wifi_pending_id = wifi.pending_id;
         navigate(WIFI_PENDING);
@@ -106,8 +119,9 @@ static unsigned entries(void)
 {
     switch (page) {
     case HOME: return 4;
-    case CONNECTIONS: return 4;
+    case CONNECTIONS: return 5;
     case APPEARANCE: return 3;
+    case SOUND: return 4;
     case BLUETOOTH: return ble.peer_count + 2;
     case HOST: return 4;
     case CONFIRM_FORGET: return 2;
@@ -127,6 +141,7 @@ static void wifi_request(passport_wifi_action_t action, uint32_t id, uint32_t re
 {
     passport_wifi_command_t command = {action, id, revision};
     if (!wifi.initialized || !passport_wifi_request(&command)) {
+        passport_sound_cue(PASSPORT_CUE_ERROR);
         snprintf(wifi_note, sizeof(wifi_note), "%s", wifi.initialized ? "Wi-Fi queue full; try again" : "Wi-Fi unavailable");
         wifi_note_until = esp_timer_get_time() / 1000 + 3000;
     } else wifi_note[0] = 0;
@@ -151,7 +166,15 @@ static void activate(void)
         navigate((page_t[]){MOUSE, KEYS, CONNECTIONS, STATUS}[focus]);
         break;
     case CONNECTIONS:
-        navigate((page_t[]){BLUETOOTH, WIFI, APPEARANCE, HOME}[focus]);
+        navigate((page_t[]){BLUETOOTH, WIFI, SOUND, APPEARANCE, HOME}[focus]);
+        break;
+    case SOUND:
+        if (focus == 3) navigate(CONNECTIONS);
+        else if (focus == 2) passport_sound_cue(PASSPORT_CUE_CONFIRM);
+        else if (focus == 0 || passport_sound_state().output != PASSPORT_SOUND_STOPPING) {
+            pending_sound = focus == 1;
+            sound_pending = true;
+        }
         break;
     case APPEARANCE:
         if (focus == 2) navigate(CONNECTIONS);
@@ -304,7 +327,7 @@ static void input(const passport_button_event_t *event)
                 if (page == HOME) navigate(CONNECTIONS);
                 else if (page == HOST) navigate(BLUETOOTH);
                 else if (page == STATUS) navigate(status_return);
-                else if (page == BLUETOOTH || page == WIFI || page == APPEARANCE) navigate(CONNECTIONS);
+                else if (page == BLUETOOTH || page == WIFI || page == APPEARANCE || page == SOUND) navigate(CONNECTIONS);
                 else if (page == CONFIRM_FORGET) navigate(HOST);
                 else if (page == WIFI_ACTION || page == WIFI_CONFIRM) navigate(wifi_return);
                 else if (page == WIFI_LIST || page == WIFI_SAVED || page == WIFI_AP) navigate(WIFI);
@@ -325,7 +348,12 @@ static void input(const passport_button_event_t *event)
     else if (event->button == PASSPORT_DOWN) focus = bounded_list ? (focus + 1 < entries() ? focus + 1 : focus) : (focus + 1) % entries();
     else {
         if ((page == WIFI_CONFIRM || page == WIFI_PENDING) && !confirmation_armed) return;
+        page_t previous = page;
         activate();
+        if (page != previous && (previous == HOME || previous == CONNECTIONS ||
+                                 previous == BLUETOOTH || previous == SOUND)) {
+            passport_sound_cue(PASSPORT_CUE_CONFIRM);
+        }
     }
 }
 
@@ -381,10 +409,34 @@ static void build_view(const char *http)
         snprintf(view.title, sizeof(view.title), "Connections");
         item(0, "Bluetooth", ble.connected ? "Host connected" : ble.pairing ? "Pairing window" : "Saved hosts + pairing", ICON_BLUETOOTH);
         item(1, "Wi-Fi", wifi.ap_started && wifi.phase == PW_OFFLINE ? "Passport AP active" : passport_wifi_phase_name(wifi.phase), ICON_WIFI);
-        item(2, "Appearance", theme == PASSPORT_DARK ? "Dark theme" : "Light theme", ICON_APPEARANCE);
-        item(3, "Back", "Your controls", ICON_BACK);
-        snprintf(view.ok, sizeof(view.ok), "%s", focus == 3 ? "Back" : "Open");
+        item(2, "Sound", "Local speaker cues", ICON_SOUND);
+        item(3, "Appearance", theme == PASSPORT_DARK ? "Dark theme" : "Light theme", ICON_APPEARANCE);
+        item(4, "Back", "Your controls", ICON_BACK);
+        snprintf(view.ok, sizeof(view.ok), "%s", focus == 4 ? "Back" : "Open");
         break;
+    case SOUND: {
+        passport_sound_state_t sound = passport_sound_state();
+        const bool ready = sound.output == PASSPORT_SOUND_READY;
+        static const char *const messages[] = {
+            "Sound off", "Starting speaker...", "Sound on", "Stopping speaker...", "Speaker unavailable",
+        };
+        snprintf(view.title, sizeof(view.title), "Sound");
+        snprintf(view.target, sizeof(view.target), "Local speaker");
+        item(0, "Off", "Mute interaction cues", ICON_SOUND);
+        item(1, "On", "Enable interaction cues", ICON_SOUND);
+        item(2, "Test cue", ready ? "Play a short tone" :
+             sound.output == PASSPORT_SOUND_OFF ? "Enable sound to play" : "Speaker must be ready", ICON_SOUND);
+        item(3, "Back", "Connections", ICON_BACK);
+        if (sound.preference_known) view.items[sound.enabled ? 1 : 0].checked = true;
+        snprintf(view.ok, sizeof(view.ok), "%s", focus == 3 ? "Back" : focus == 2 ? ready ? "Play" : "Blocked" :
+                 focus == 1 && sound.output == PASSPORT_SOUND_STOPPING ? "Wait" : "Apply");
+        snprintf(view.message, sizeof(view.message), "%s", sound_pending ? "Saving sound preference..." : messages[sound.output]);
+        snprintf(view.detail, sizeof(view.detail), "%s", sound_save_failed ? "Sound save unconfirmed" :
+                 !sound.preference_known ? "Sound preference unavailable" : "");
+        view.tone = !sound.preference_known || sound.output == PASSPORT_SOUND_UNAVAILABLE ? TONE_ERROR :
+                    sound_pending ? TONE_WAIT : ready ? TONE_GOOD : sound.output == PASSPORT_SOUND_OFF ? TONE_MUTED : TONE_WAIT;
+        break;
+    }
     case BLUETOOTH:
         snprintf(view.title, sizeof(view.title), "Bluetooth");
         item(0, "Pair new host", "Open a 60-second window", ICON_ADD);
@@ -563,7 +615,7 @@ static void build_view(const char *http)
         snprintf(view.ok, sizeof(view.ok), "Hold");
         break;
     }
-    if (page == WIFI || page >= WIFI_LIST) {
+    if (page == WIFI || (page >= WIFI_LIST && page <= WIFI_PENDING)) {
         snprintf(view.message, sizeof(view.message), "%s", !wifi.initialized ? "Wi-Fi unavailable" : wifi.ap_started && wifi.phase == PW_OFFLINE ? "Passport AP active" : passport_wifi_phase_name(wifi.phase));
         snprintf(view.detail, sizeof(view.detail), "%s", wifi_note[0] && (uint64_t)(esp_timer_get_time() / 1000) < wifi_note_until ? wifi_note : wifi.result);
         if (page != WIFI_ACTION) snprintf(view.target, sizeof(view.target), "%s", (page >= WIFI_AP && wifi.ap_started) ? wifi.ap_ip : wifi.phase == PW_ONLINE ? wifi.sta_ip : wifi.ap_started ? "Passport AP active" : "No active Wi-Fi address");
@@ -582,8 +634,17 @@ static void apply_theme(void)
         snprintf(theme_note, sizeof(theme_note), "Theme saved");
     } else {
         theme_failed = true;
+        passport_sound_cue(PASSPORT_CUE_ERROR);
         snprintf(theme_note, sizeof(theme_note), "Theme save unconfirmed");
     }
+}
+
+static void apply_sound(void)
+{
+    if (!sound_pending || !atomic_load(&text_applied)) return;
+    sound_pending = false;
+    sound_save_failed = passport_sound_set(pending_sound) != ESP_OK;
+    if (sound_save_failed && pending_sound) passport_sound_cue(PASSPORT_CUE_ERROR);
 }
 
 static void service_repeat(uint64_t now)
@@ -626,6 +687,7 @@ void passport_ui_run(const char *http, bool buttons_available)
         theme_failed = true;
         snprintf(theme_note, sizeof(theme_note), "Theme load failed; using dark");
     }
+    passport_sound_load();
     bool pairing_sent = false;
     for (;;) {
         observe_owner();
@@ -635,6 +697,7 @@ void passport_ui_run(const char *http, bool buttons_available)
         }
         render_ui(http);
         apply_theme();
+        apply_sound();
         // The pairing explanation must be applied to the screen before opening the window.
         if (page == PAIR_WINDOW && !pairing_sent && atomic_load(&text_applied)) {
             request(PASSPORT_PAIR, 0, 0, 0);

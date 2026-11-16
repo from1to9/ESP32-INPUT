@@ -27,6 +27,10 @@ static unsigned web_random, web_completed;
 static size_t web_cancel_after;
 static uint8_t web_banks[2][1024];
 static size_t web_bank_sizes[2];
+static bool web_management, web_scanned;
+static uint64_t web_label_revision;
+static char web_label[49];
+static const char web_ap[] = "3333333333333333333333333333333333333333333333333333333333333333";
 
 size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *name)
 {
@@ -108,6 +112,84 @@ bool app_control_server_client_connected(const uint8_t principal[16])
 
 static bool web_random_source(void *user, uint8_t *out, size_t length)
 { (void)user; for (size_t i = 0; i < length; ++i) out[i] = (uint8_t)(++web_random * 17U + 1U); return true; }
+static bool web_test_owner(cp_operation_id_t op)
+{
+    return web_management && (op == CP_OP_WIFI_SCAN_START || op == CP_OP_WIFI_PROFILE_SAVE ||
+        op == CP_OP_WIFI_PROFILE_JOIN || op == CP_OP_WIFI_PROFILE_FORGET ||
+        op == CP_OP_DISPLAY_NAME_SET || op == CP_OP_DISPLAY_NAME_CLEAR);
+}
+static bool web_available(void *user, cp_operation_id_t op, char reason[CP_REASON_CAPACITY])
+{
+    return web_test_owner(op) || app_command_bridge_available(user, op, reason);
+}
+static cp_error_t web_dispatch(void *user, const cp_command_t *command, cp_result_t *result)
+{
+    if (!web_test_owner(command->operation)) return app_command_bridge_submit(user, command, result);
+    assert(command->identity.scopes & CP_SCOPE_WIFI_CONFIGURE);
+    *result = (cp_result_t){.command_key = command->command_key, .state = CP_RESULT_APPLIED, .uncertain_index = -1};
+    if (command->operation == CP_OP_WIFI_SCAN_START) web_scanned = true;
+    else if (command->operation == CP_OP_WIFI_PROFILE_SAVE) {
+        char ssid[33], password[64];
+        bool keep, enabled, join;
+        assert(command->resource_revision == 44 &&
+            cp_command_string(command, "ssid", ssid, sizeof(ssid)) && !strcmp(ssid, "Guest WLAN") &&
+            cp_command_string(command, "password", password, sizeof(password)) && !strcmp(password, "fixture-passphrase") &&
+            cp_command_boolean(command, "keep_password", &keep) && !keep &&
+            cp_command_boolean(command, "enabled", &enabled) && enabled &&
+            cp_command_boolean(command, "join", &join) && !join);
+        clear(password, sizeof(password));
+        result->resource_revision = 45;
+    }
+    else if (command->operation == CP_OP_DISPLAY_NAME_SET || command->operation == CP_OP_DISPLAY_NAME_CLEAR) {
+        char id[65], kind[16];
+        assert(command->resource_revision == web_label_revision &&
+            cp_command_string(command, "kind", kind, sizeof(kind)) && !strcmp(kind, "wifi_ap") &&
+            cp_command_string(command, "id", id, sizeof(id)) && !strcmp(id, web_ap));
+        if (command->operation == CP_OP_DISPLAY_NAME_SET) {
+            int64_t generation, index;
+            assert(cp_command_integer(command, "scan_generation", &generation) && generation == 101 &&
+                cp_command_integer(command, "scan_index", &index) && index == 0 &&
+                cp_command_string(command, "label", web_label, sizeof(web_label)));
+            strcpy(result->reason, "label_saved");
+        } else {
+            web_label[0] = 0;
+            strcpy(result->reason, "label_cleared");
+        }
+        result->resource_revision = ++web_label_revision;
+    }
+    return CP_OK;
+}
+static cp_error_t web_read(void *user, const cp_identity_t *who, const char *resource,
+    char *json, size_t capacity, size_t *length)
+{
+    int wrote;
+    if (!web_management) return app_command_bridge_read(user, who, resource, json, capacity, length);
+    if (!strcmp(resource, "/api/v1/wifi/profiles")) {
+        wrote = snprintf(json, capacity, "{\"known\":true,\"revision\":\"44\",\"capacity\":8,\"profiles\":["
+            "{\"id\":\"11111111111111111111111111111111\",\"ssid\":\"Studio Wi-Fi\",\"label\":\"Workshop network\","
+            "\"enabled\":true,\"current\":true,\"priority\":1,\"labelable\":true}]}");
+    } else if (!strcmp(resource, "/api/v1/wifi/scans/0") || !strncmp(resource, "/api/v1/display-names", 21)) {
+        char label[101] = "null";
+        if (web_label[0]) assert(cj_escape(web_label, label, sizeof(label)));
+        if (!strncmp(resource, "/api/v1/display-names", 21)) {
+            char row[250] = {0};
+            if (web_label[0]) (void)snprintf(row, sizeof(row),
+                "{\"kind\":\"wifi_ap\",\"id\":\"%s\",\"original_ssid\":\"Guest WLAN\",\"label\":%s}", web_ap, label);
+            wrote = snprintf(json, capacity, "{\"known\":true,\"revision\":\"%llu\",\"ap_count\":%u,\"ap_capacity\":16,"
+                "\"labels\":[%s],\"next_cursor\":0}", (unsigned long long)web_label_revision, web_label[0] ? 1U : 0U, row);
+        } else {
+            char row[384] = {0};
+            if (web_scanned) (void)snprintf(row, sizeof(row),
+                "{\"index\":0,\"ssid\":\"Guest WLAN\",\"label\":%s,\"display_id\":\"%s\",\"labelable\":true,"
+                "\"bssid\":\"021122334455\",\"rssi_dbm\":-48,\"security\":3,\"join_availability\":0}", label, web_ap);
+            wrote = snprintf(json, capacity, "{\"state\":%u,\"generation\":101,\"records\":[%s],\"next_index\":0}",
+                web_scanned ? 4U : 0U, row);
+        }
+    } else return app_command_bridge_read(user, who, resource, json, capacity, length);
+    if (wrote < 0 || (size_t)wrote >= capacity) return CP_TOO_LARGE;
+    *length = (size_t)wrote;
+    return CP_OK;
+}
 static bool web_principal(void *user, const uint8_t id[16], cp_principal_t *out)
 { (void)user; return app_control_access_principal(id, out); }
 static bool web_input_authorized(void *user, const cp_identity_t *who)
@@ -143,15 +225,42 @@ static void web_service(void)
 }
 static void web_fixture(httpd_req_t *r)
 {
-    if (!strcmp(r->uri, "/_fixture/approve")) {
+    if (!strcmp(r->uri, "/_fixture/approve") || !strcmp(r->uri, "/_fixture/approve-management")) {
+        web_management = !strcmp(r->uri, "/_fixture/approve-management");
+        if (web_management) {
+            test_bonds = (ble_hid_bond_list_t){.known = true, .revision = 31, .capacity = 15, .count = 1};
+            test_bonds.bonds[0] = (ble_hid_bond_t){.bond_id_known = true, .bond_id = {0xa5},
+                .selection_supported = true, .address_type_known = true};
+            test_classic_bonds = (bt_audio_bond_list_t){.known = true, .revision = 8, .count = 1};
+            test_classic_bonds.bonds[0].address[0] = 0x5a;
+            test_update_target = (ble_hid_target_snapshot_t){.available = true, .loaded = true, .durable = true, .revision = 51};
+            test_link.keyboard_subscribed = test_link.mouse_subscribed = true;
+        }
         app_control_access_snapshot_t view; app_control_access_snapshot(&view); assert(view.pending);
         app_control_access_request_t request = {.action = APP_CONTROL_ACCESS_APPROVE,
             .expected_revision = view.revision, .pairing_request = view.pairing_request,
-            .permissions = APP_CONTROL_ACCESS_INPUT, .duration = APP_CONTROL_ACCESS_SIX_HOURS};
+            .permissions = web_management ? APP_CONTROL_ACCESS_MANAGE : APP_CONTROL_ACCESS_INPUT,
+            .duration = APP_CONTROL_ACCESS_SIX_HOURS};
         memcpy(request.client_id, view.proposal.id, 16); uint64_t receipt;
         assert(app_control_access_submit(&request, &receipt) == CP_OK);
         app_control_access_service(true); app_control_access_snapshot(&view);
         assert(view.receipt_request == receipt && view.receipt_state == CP_RESULT_APPLIED);
+    } else if (!strcmp(r->uri, "/_fixture/confirm-pairing")) {
+        assert(web_management);
+        remote_device_case_confirm();
+        assert(test_remote_select.operation == APP_BT_MANAGE_ADD && test_remote_window_ms == 60000U);
+        test_remote_select.preference_saved = true;
+        test_remote_select.active = false;
+        test_remote_select.phase = APP_BT_MANAGE_COMPLETE;
+        test_link.pairing_open = true;
+        test_link.pairing_remaining_ms = test_remote_window_ms;
+    } else if (!strcmp(r->uri, "/_fixture/finish-target")) {
+        assert(web_management && test_remote_select.operation == APP_BT_MANAGE_SELECT);
+        test_remote_select.preference_saved = true;
+        test_remote_select.active = false;
+        test_remote_select.phase = APP_BT_MANAGE_FAILED;
+        test_remote_select.error = ESP_ERR_TIMEOUT;
+        test_link.pairing_open = false;
     } else if (!strcmp(r->uri, "/_fixture/takeover")) {
         remote_local_override(false); cp_physical_override(web_server.protocol, false, s_now_ms);
     } else if (!strcmp(r->uri, "/_fixture/partial")) {
@@ -194,8 +303,8 @@ int main(int argc, char **argv)
     assert(app_control_access_init() == ESP_OK);
     void *storage = calloc(1, cp_context_size()); assert(storage);
     cp_callbacks_t callbacks = {.user = s_command_bridge, .random = web_random_source,
-        .available = app_command_bridge_available, .dispatch = app_command_bridge_submit,
-        .safety = app_command_bridge_safety, .read = app_command_bridge_read,
+        .available = web_available, .dispatch = web_dispatch,
+        .safety = app_command_bridge_safety, .read = web_read,
         .principal = web_principal, .input_authorized = web_input_authorized, .pairing = web_pairing};
     assert(cp_initialize(storage, cp_context_size(), &callbacks, &web_server.protocol) == CP_OK);
     assert(cp_http_configure(web_server.protocol, web_host, web_origin) == CP_OK);

@@ -420,6 +420,39 @@ bool app_connectivity_controls_bluetooth_revisions(uint64_t *bond, uint64_t *pre
     *bond = test_bonds.revision; *preference = test_update_target.revision; return true;
 }
 bool app_connectivity_controls_bluetooth_busy(void) { return test_native_management_active; }
+static app_bluetooth_management_snapshot_t test_remote_select;
+static uint32_t test_remote_window_ms;
+esp_err_t app_bluetooth_management_begin_select(uint64_t generation, uint64_t bond, uint64_t preference,
+    const ble_hid_target_t *target, uint32_t wait_ms, uint64_t now, uint64_t *attempt)
+{
+    (void)now;
+    assert(generation == (test_link.connection_admitted ? test_link.generation : 0));
+    assert(bond == test_bonds.revision && preference == test_update_target.revision);
+    assert(target->bond_id_known && target->bond_id[0] == 0xa5);
+    test_remote_window_ms = wait_ms;
+    test_remote_select = (app_bluetooth_management_snapshot_t){.active = true, .remote_attempt = 83,
+        .phase = APP_BT_MANAGE_RELEASE, .operation = APP_BT_MANAGE_SELECT};
+    *attempt = test_remote_select.remote_attempt;
+    return ESP_OK;
+}
+esp_err_t app_bluetooth_management_begin_add(uint64_t generation, uint64_t bond, uint64_t preference,
+    uint32_t window_ms, uint64_t now, uint64_t *attempt)
+{
+    (void)now;
+    assert(generation == (test_link.connection_admitted ? test_link.generation : 0));
+    assert(bond == test_bonds.revision && preference == test_update_target.revision);
+    test_remote_window_ms = window_ms;
+    test_remote_select = (app_bluetooth_management_snapshot_t){.active = true, .remote_attempt = 83,
+        .phase = APP_BT_MANAGE_RELEASE, .operation = APP_BT_MANAGE_ADD};
+    *attempt = test_remote_select.remote_attempt;
+    return ESP_OK;
+}
+void app_bluetooth_management_snapshot(app_bluetooth_management_snapshot_t *out) { *out = test_remote_select; }
+void app_bluetooth_management_cancel(void)
+{
+    test_remote_select.active = false;
+    test_remote_select.phase = APP_BT_MANAGE_CANCELLED;
+}
 bool app_connectivity_controls_bluetooth_start(app_pairing_operation_t operation, uint64_t generation,
     uint64_t bond, uint64_t preference, app_connectivity_controls_effect_t *effect)
 {
@@ -863,6 +896,12 @@ bool ble_hid_resume_reconnect(void)
 { if (test_link.connection_admitted || !test_link.reconnect_paused) return false; test_link.reconnect_paused = false; return true; }
 bool ble_hid_disconnect_user_generation(uint64_t generation)
 { bool accepted = test_link.connection_admitted && ble_hid_disconnect_generation(generation); if (accepted) test_link.reconnect_paused = true; return accepted; }
+bool ble_hid_cancel_pairing_handshake(uint64_t generation)
+{
+    if (!test_link.pairing_handshake || test_link.connection_admitted || !ble_hid_disconnect_generation(generation)) return false;
+    test_link.pairing_handshake = false;
+    return true;
+}
 bool ble_hid_disconnect_generation(uint64_t generation)
 {
     ++test_disconnects;
@@ -1234,6 +1273,8 @@ static void setup(input_mode_t mode)
     test_pair_opens = test_pair_closes = test_pair_forgets = test_disconnects = 0;
     test_native_management_starts = test_native_management_stops = 0;
     test_native_management_active = test_native_start_release_pending = false;
+    test_remote_select = (app_bluetooth_management_snapshot_t){0};
+    test_remote_window_ms = 0;
     test_disconnect_generation = test_forget_generation = 0;
     test_disconnect_trace_count = 0;
     test_bonds = (ble_hid_bond_list_t){0};
@@ -6399,7 +6440,9 @@ static void remote_transport_rechecks_authority_at_effect_boundary(void)
 }
 static void remote_device_routes_and_state_survive_missing_media(void)
 {
-    setup(INPUT_MOUSE); remote_control_init(false); test_control_session_alive = true; remote_control_service();
+    setup(INPUT_MOUSE);
+    test_bonds = (ble_hid_bond_list_t){.known = true, .revision = 31, .capacity = 32};
+    remote_control_init(false); test_control_session_alive = true; remote_control_service();
     app_remote_device_state_t state;
     assert(remote_device_observe(NULL, CP_OP_BLUETOOTH_PAIRING_OPEN, &state));
     cp_command_t command = remote_test_command(CP_OP_BLUETOOTH_PAIRING_OPEN, 10, "{\"window_seconds\":120}");
@@ -7007,3 +7050,5 @@ app_ui_touch_context_t app_ui_touch_context(void)
     .x1 = 12, .y1 = 64, .x2 = 407, .y2 = 355}; }
 esp_err_t board_touch_observe(board_touch_snapshot_fn observer)
 { (void)observer; return ESP_ERR_INVALID_STATE; }
+
+#include "../display_names/read_boundary.inc"

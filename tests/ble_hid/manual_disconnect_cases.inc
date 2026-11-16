@@ -50,6 +50,24 @@ static void manual_authenticated_pause(void)
     gatts_callback(ESP_GATTS_CONNECT_EVT, 7, &event); drain(); authorize_peer(true);
     assert(!state.public.ready && !state.public.failed && state.link_fault);
 }
+static void manual_cancel_cannot_close_an_admitted_host_or_the_window(void)
+{
+    manual_setup();
+    assert(ble_hid_pairing_open(10000));
+    active_peer = 0xc3; connect_peer(); drain(); authorize_peer(true); subscribe();
+    assert(ble_hid_snapshot().ready);
+    assert(!ble_hid_cancel_pairing_handshake(ble_hid_snapshot().generation));
+    assert(ble_hid_snapshot().ready && ble_hid_snapshot().pairing_open && close_calls == 0);
+
+    disconnect_peer(); active_peer = 0x57; connect_peer(); drain();
+    ble_hid_snapshot_t pending = ble_hid_snapshot();
+    assert(pending.pairing_handshake && !pending.connection_admitted);
+    assert(!ble_hid_cancel_pairing_handshake(pending.generation - 1));
+    assert(ble_hid_cancel_pairing_handshake(pending.generation));
+    worker_cycle(); disconnect_peer();
+    assert(ble_hid_snapshot().pairing_open && !ble_hid_snapshot().reconnect_paused);
+    assert(fake_bond_count == 2 && !remove_calls);
+}
 static void manual_resume_is_scoped(void)
 {
     manual_setup(); manual_pause_peer(0xc3); manual_pause_peer(0xc2);
@@ -190,6 +208,7 @@ static void manual_disconnect_cases(void)
     if (!selected || !strcmp(selected, "select")) manual_select_is_scoped();
     if (!selected || !strcmp(selected, "forget")) manual_forget_preserves_other_pause();
     if (!selected || !strcmp(selected, "auth")) manual_authenticated_pause();
+    if (!selected || !strcmp(selected, "cancel-handshake")) manual_cancel_cannot_close_an_admitted_host_or_the_window();
     if (!selected || !strcmp(selected, "resume")) manual_resume_is_scoped();
     if (!selected || !strcmp(selected, "private")) manual_forget_then_private_reconnect();
     if (!selected || !strcmp(selected, "provisional")) manual_provisional_management();

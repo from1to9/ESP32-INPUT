@@ -5512,6 +5512,122 @@
       "safety": false,
       "sensitive": false,
       "resource": "/api/v1/sensors/samples"
+    },
+    {
+      "id": 152,
+      "name": "display_name.list",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false,
+      "resource": "/api/v1/display-names"
+    },
+    {
+      "id": 153,
+      "name": "display_name.set",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "hid_bond",
+              "classic_bond",
+              "wifi_profile",
+              "wifi_ap"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 48,
+            "minLength": 1
+          },
+          "owner_revision": {
+            "type": "string",
+            "maxLength": 20,
+            "format": "uint64",
+            "minLength": 1
+          },
+          "scan_generation": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "scan_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 31
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
+    },
+    {
+      "id": 154,
+      "name": "display_name.clear",
+      "scopes": [
+        "view"
+      ],
+      "arguments": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "hid_bond",
+              "classic_bond",
+              "wifi_profile",
+              "wifi_ap"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "read_only": false,
+      "initial_v1_supported": true,
+      "input": false,
+      "ui_context": false,
+      "safety": false,
+      "sensitive": false
     }
   ],
   "configuration": [

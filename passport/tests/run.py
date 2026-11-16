@@ -28,18 +28,24 @@ def sdk_function(source, name):
     return source[match.start():end] + '\n'
 
 
-tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup')
+tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'sound')
+fixtures = {
+    'startup': 'stubs.h', 'theme': 'theme_stubs.h', 'wifi': 'wifi_stubs.h',
+    'setup': 'setup_stubs.h', 'sound': 'sound_stubs.h',
+}
 for test in sys.argv[1:] or tests:
     if test not in tests:
         raise SystemExit(f'Unknown suite: {test}')
     with tempfile.TemporaryDirectory(prefix='passport-test-') as directory:
         work = Path(directory)
         extra = 'host/ble_sm.h services/gap/ble_svc_gap.h services/gatt/ble_svc_gatt.h nvs.h store/config/ble_store_config.h'.split()
+        if test == 'sound':
+            extra += ['bsp_i2c.h', 'driver/i2s_std.h']
         for header in headers + extra:
             path = work / header
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('#include "' + ('stubs.h' if test == 'startup' else 'theme_stubs.h' if test == 'theme' else 'setup_stubs.h' if test == 'setup' else 'wifi_stubs.h' if test == 'wifi' else 'ble_stubs.h') + '"\n')
-        defines = []
+            path.write_text(f'#include "{fixtures.get(test, "ble_stubs.h")}"\n')
+        defines, libraries = [], []
         if test == 'cccd':
             sdk = root / '.tools/passport-esp-idf/components/bt/host/nimble/nimble/nimble/host'
             source = (sdk / 'store/config/src/ble_store_config.c').read_text()
@@ -67,12 +73,21 @@ for test in sys.argv[1:] or tests:
             sources += [parser]
         if test == 'ble':
             sources += [root / 'components/hid_engine/hid_engine.c', root / 'components/input_core/input_core.c']
+        if test == 'sound':
+            codec = root / 'passport/managed_components/espressif__esp_codec_dev'
+            for directory in ('device/include', 'device/priv_include', 'include', 'interface'):
+                defines += ['-I', str(codec / directory)]
+            driver = work / 'es8311_host.c'
+            driver.write_text('#include <stdlib.h>\n#pragma GCC diagnostic ignored "-Wsign-compare"\n'
+                              f'#include "{codec / "device/es8311/es8311.c"}"\n')
+            sources += [driver, codec / 'esp_codec_dev_if.c', codec / 'esp_codec_dev_vol.c']
+            libraries = ['-lm']
         binary = work / f'test_{test}'
         subprocess.run([
             os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
             '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
             '-I', str(work), '-I', str(root / 'passport/tests'),
             '-I', str(root / 'components/hid_engine/include'), '-I', str(root / 'components/input_core/include'),
-            *defines, *map(str, sources), '-o', str(binary),
+            *defines, *map(str, sources), *libraries, '-o', str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True)

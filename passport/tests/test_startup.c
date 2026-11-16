@@ -12,6 +12,10 @@ static unsigned lock_calls, fail_lock_call;
 static lv_obj_t label;
 static passport_view_t applied_view;
 static esp_err_t theme_save_result;
+static passport_sound_state_t mock_sound = {.preference_known = true};
+static esp_err_t sound_save_result;
+static unsigned sound_requests, cue_requests;
+static passport_cue_t last_cue;
 static bool request_failure;
 static passport_wifi_state_t mock_wifi;
 static passport_wifi_command_t wifi_requests[16];
@@ -157,6 +161,24 @@ esp_err_t passport_theme_save(passport_theme_t value)
 {
     assert(!locked && value <= PASSPORT_LIGHT);
     return theme_save_result;
+}
+void passport_sound_load(void) {}
+passport_sound_state_t passport_sound_state(void) { return mock_sound; }
+esp_err_t passport_sound_set(bool enabled)
+{
+    assert(!locked);
+    ++sound_requests;
+    if (sound_save_result == ESP_OK) mock_sound.enabled = enabled;
+    mock_sound.preference_known = sound_save_result == ESP_OK;
+    if (!enabled) mock_sound.output = PASSPORT_SOUND_OFF;
+    return sound_save_result;
+}
+bool passport_sound_cue(passport_cue_t cue)
+{
+    if (mock_sound.output != PASSPORT_SOUND_READY) return false;
+    ++cue_requests;
+    last_cue = cue;
+    return true;
 }
 
 void passport_wifi_prepare(void) {}
@@ -326,6 +348,8 @@ static void start_repeat(void)
 
 static void test_repeat(void)
 {
+    mock_sound.output = PASSPORT_SOUND_READY;
+    unsigned initial_cues = cue_requests;
     start_repeat();
     service_repeat(time_ms + 99);
     assert(request_count == 1);
@@ -356,6 +380,8 @@ static void test_repeat(void)
         if (cause == 5) assert(emergency_count == before + 1);
         request_failure = false;
     }
+    assert(cue_requests == initial_cues);
+    mock_sound.output = PASSPORT_SOUND_OFF;
 }
 
 static void test_appearance(void)
@@ -414,6 +440,57 @@ static void test_wifi_ui(void)
     mock_wifi.pending=false; observe_owner(); assert(page==WIFI_AP);
 }
 
+static void test_sound_ui(void)
+{
+    page = CONNECTIONS;
+    focus = 2;
+    mock_sound = (passport_sound_state_t){.preference_known = true};
+    render_ui("");
+    event(PASSPORT_OK, PASSPORT_PRESS);
+    event(PASSPORT_OK, PASSPORT_CLICKED);
+    build_view("");
+    assert(page == SOUND && view.count == 4 && view.items[0].checked);
+    assert(!strcmp(view.message, "Sound off"));
+    focus = 1;
+    activate();
+    atomic_store(&text_applied, false);
+    apply_sound();
+    assert(sound_pending && sound_requests == 0);
+    render_ui("");
+    apply_sound();
+    assert(sound_requests == 1 && mock_sound.enabled);
+    mock_sound.output = PASSPORT_SOUND_READY;
+    focus = 2;
+    activate();
+    assert(cue_requests == 1 && last_cue == PASSPORT_CUE_CONFIRM);
+    ble.ready = false;
+    mock_ble.ready = true;
+    observe_owner();
+    assert(cue_requests == 2 && last_cue == PASSPORT_CUE_SUCCESS);
+    mock_wifi.phase = wifi.phase = PW_CONNECTING;
+    mock_wifi.phase = PW_OFFLINE;
+    mock_wifi.disconnect_reason = 201;
+    observe_owner();
+    assert(cue_requests == 3 && last_cue == PASSPORT_CUE_ERROR);
+    observe_owner();
+    assert(cue_requests == 3);
+    mock_sound.output = PASSPORT_SOUND_UNAVAILABLE;
+    activate();
+    build_view("");
+    assert(cue_requests == 3 && !strcmp(view.message, "Speaker unavailable"));
+    assert(view.items[1].checked && view.tone == TONE_ERROR);
+    sound_save_result = ESP_FAIL;
+    focus = 0;
+    activate();
+    render_ui("");
+    apply_sound();
+    build_view("");
+    assert(!view.items[1].checked && strstr(view.detail, "unconfirmed"));
+    event(PASSPORT_OK, PASSPORT_PRESS);
+    event(PASSPORT_OK, PASSPORT_LONG);
+    assert(page == CONNECTIONS);
+}
+
 int main(void)
 {
     test_main_render_retry();
@@ -424,6 +501,7 @@ int main(void)
     test_appearance();
     test_visible_state();
     test_wifi_ui();
-    puts("PASS: display retry and buffer lifetime, observed-button health, gestures, bounded queue and three asynchronous lock paths, bounded repeats and appearance failures");
+    test_sound_ui();
+    puts("PASS: display retry and buffer lifetime, observed-button health, gestures, bounded queue and three asynchronous lock paths, bounded repeats, appearance and sound");
     return 0;
 }

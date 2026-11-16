@@ -74,6 +74,90 @@ static void native_finish(void)
             (unsigned)receipt.phase, receipt.active, receipt.error, receipt.message);
     assert(!receipt.active && receipt.phase == APP_BT_MANAGE_COMPLETE && receipt.error == ESP_OK);
 }
+static void remote_target_waits_for_exact_secure_link(void)
+{
+    for (unsigned offline = 0; offline < 2; ++offline) {
+        native_setup(true);
+        ble_hid_target_t target = native_target(0xc2);
+        uint64_t attempt = 0;
+        assert(app_bluetooth_management_begin_select(native_host_generation(), ble_hid_bond_list().revision,
+            ble_hid_target_snapshot().revision, &target, 1000, native_now, &attempt) == ESP_OK);
+        for (unsigned i = 0; i < 30 && !native_receipt().preference_saved; ++i) native_step(false);
+        assert(attempt && native_receipt().active && native_receipt().preference_saved);
+        assert(state.advertising && !state.public.ready && !state.public.pairing_open && !remove_calls);
+        if (offline) {
+            app_bluetooth_management_service(&native_context, native_now + 1000);
+            assert(native_receipt().phase == APP_BT_MANAGE_FAILED && native_receipt().error == ESP_ERR_TIMEOUT);
+            assert(native_receipt().preference_saved && !native_receipt().wrong_peer);
+            assert(state.advertising && ble_hid_target_snapshot().selected && !state.selected_watch_owner);
+            continue;
+        }
+        active_peer = 0xc3; connect_peer(); native_step(false);
+        assert(native_receipt().active && native_receipt().wrong_peer && !state.public.connected);
+        disconnect_peer(); native_step(false);
+        active_peer = 0xc2; connect_peer(); drain(); native_step(false);
+        assert(native_receipt().active && !state.public.ready);
+        authorize_peer(true); native_step(false);
+        assert(native_receipt().phase == APP_BT_MANAGE_COMPLETE && state.public.ready && !state.selected_watch_owner);
+    }
+}
+static void remote_pairing_reports_clear_separately_from_advertising(void)
+{
+    for (unsigned failure = 0; failure < 2; ++failure) {
+        native_setup(true);
+        uint64_t attempt = 0;
+        assert(app_bluetooth_management_begin_add(native_host_generation(), ble_hid_bond_list().revision,
+            ble_hid_target_snapshot().revision, 17000, native_now, &attempt) == ESP_OK);
+        for (unsigned i = 0; i < 30 && native_receipt().phase != APP_BT_MANAGE_ADVERTISING; ++i) {
+            app_bluetooth_management_service(&native_context, ++native_now);
+            worker_cycle();
+            if (state.adv_stop_pending) advertising_stopped(ESP_BT_STATUS_SUCCESS);
+        }
+        ble_hid_snapshot_t link = ble_hid_snapshot();
+        assert(attempt && native_receipt().active && native_receipt().preference_saved &&
+            native_receipt().phase == APP_BT_MANAGE_ADVERTISING && state.adv_pending);
+        assert(link.pairing_open && link.pairing_remaining_ms == 17000 && !link.pairing_advertised);
+        assert(!ble_hid_target_snapshot().selected && fake_bond_count == 2 && !remove_calls);
+        app_bluetooth_management_service(&native_context, ++native_now);
+        assert(native_receipt().active);
+        esp_ble_gap_cb_param_t started = {.adv_start_cmpl.status = failure ? 1U : ESP_BT_STATUS_SUCCESS};
+        gap_callback(ESP_GAP_BLE_ADV_START_COMPLETE_EVT, &started);
+        app_bluetooth_management_service(&native_context, ++native_now);
+        assert(native_receipt().phase == (failure ? APP_BT_MANAGE_FAILED : APP_BT_MANAGE_COMPLETE));
+        assert(native_receipt().preference_saved && !native_receipt().uncertain);
+        assert(!ble_hid_target_snapshot().selected && fake_bond_count == 2);
+    }
+}
+static void remote_management_timeout_does_not_discard_an_accepted_policy_write(void)
+{
+    for (unsigned pairing = 0; pairing < 2; ++pairing) {
+        native_setup(true);
+        ble_hid_target_t target = native_target(0xc2);
+        uint64_t attempt = 0;
+        const uint64_t revision = ble_hid_target_snapshot().revision;
+        const uint64_t bonds = ble_hid_bond_list().revision;
+        esp_err_t started = pairing ?
+            app_bluetooth_management_begin_add(native_host_generation(), bonds, revision, 17000, native_now, &attempt) :
+            app_bluetooth_management_begin_select(native_host_generation(), bonds, revision, &target, 60000, native_now, &attempt);
+        assert(started == ESP_OK && attempt);
+        worker_cycle();
+        if (state.adv_stop_pending) advertising_stopped(ESP_BT_STATUS_SUCCESS);
+        app_bluetooth_management_service(&native_context, ++native_now);
+        assert(native_receipt().phase == APP_BT_MANAGE_POLICY);
+        assert(ble_hid_target_snapshot().request_status == BLE_HID_TARGET_PENDING);
+
+        app_bluetooth_management_service(&native_context, native_now + 30000U);
+        app_bluetooth_management_snapshot_t timed_out = native_receipt();
+        assert(timed_out.phase == APP_BT_MANAGE_FAILED && timed_out.error == ESP_ERR_TIMEOUT &&
+            timed_out.uncertain && !timed_out.preference_saved);
+        worker_cycle();
+        ble_hid_target_snapshot_t applied = ble_hid_target_snapshot();
+        assert(applied.request_status == BLE_HID_TARGET_APPLIED && applied.durable && applied.revision > revision);
+        assert(applied.selected == !pairing);
+        if (!pairing) assert(!memcmp(applied.target.bond_id, target.bond_id, sizeof(target.bond_id)));
+        assert(!ble_hid_snapshot().pairing_open && fake_bond_count == 2 && !remove_calls);
+    }
+}
 static void native_review_former_unbonded_add(void)
 {
     native_setup(false); assert(ble_hid_target_select(ble_hid_bond_list().revision, NULL) == ESP_OK); worker_cycle();

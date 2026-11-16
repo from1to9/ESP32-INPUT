@@ -31,6 +31,11 @@ bool passport_ble_request(const passport_command_t *r) { (void)r; return true; }
 void passport_ble_emergency_lock(void) {}
 esp_err_t passport_theme_load(passport_theme_t *out) { *out = PASSPORT_DARK; return ESP_OK; }
 esp_err_t passport_theme_save(passport_theme_t value) { (void)value; return ESP_OK; }
+static passport_sound_state_t sound_state;
+void passport_sound_load(void) {}
+passport_sound_state_t passport_sound_state(void) { return sound_state; }
+esp_err_t passport_sound_set(bool enabled) { (void)enabled; return ESP_OK; }
+bool passport_sound_cue(passport_cue_t cue) { (void)cue; return false; }
 
 void passport_wifi_snapshot(passport_wifi_state_t *out) { (void)out; }
 bool passport_wifi_request(const passport_wifi_command_t *c) { (void)c; return true; }
@@ -117,7 +122,7 @@ int main(int argc, char **argv)
         }
         const struct { const char *name; page_t page; unsigned focus; } cases[] = {
             {"home",HOME,0}, {"mouse",MOUSE,3}, {"keys",KEYS,3},
-            {"connections",CONNECTIONS,1}, {"bluetooth",BLUETOOTH,1},
+            {"connections",CONNECTIONS,2}, {"bluetooth",BLUETOOTH,1},
             {"bluetooth-scroll",BLUETOOTH,3}, {"host",HOST,2},
             {"forget",CONFIRM_FORGET,0}, {"wifi",WIFI,0}, {"status",STATUS,0},
             {"appearance",APPEARANCE,palette},
@@ -130,6 +135,16 @@ int main(int argc, char **argv)
             page = cases[i].page; focus = cases[i].focus;
             wifi.phase = page >= WIFI_AP ? PW_OFFLINE : PW_ONLINE; capture(cases[i].name, count);
         }
+        page = SOUND; focus = 0;
+        sound_state = (passport_sound_state_t){.preference_known = true};
+        capture("sound-off", count);
+        focus = 2;
+        sound_state = (passport_sound_state_t){PASSPORT_SOUND_READY, true, true};
+        capture("sound-on", count);
+        sound_state.output = PASSPORT_SOUND_UNAVAILABLE;
+        capture("sound-unavailable", count);
+        focus = 3;
+        capture("sound-back", count);
         page = APPEARANCE; theme_failed = true;
         snprintf(theme_note, sizeof(theme_note), "Theme save unconfirmed"); capture("appearance-error", count);
         theme_failed = false; theme_note[0] = 0;

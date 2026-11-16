@@ -4,13 +4,19 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Mosaico · Remote input</title>
+  <title>Mosaico · Control console</title>
   <link rel="stylesheet" href="/controller.css">
   <script type="module" src="/controller.js"></script>
 </head>
 <body>
   <main>
-    <header><div><p class="eyebrow">MOSAICO / LOCAL NETWORK</p><h1>Remote input</h1></div><span id="connection" class="badge">Disconnected</span></header>
+    <header class="masthead">
+      <div><p class="product">Mosaico</p><h1>Control console</h1></div>
+      <div class="toolbar">
+        <p id="connection" class="connection" role="status" data-state="offline">Disconnected</p>
+        <label class="theme-control" for="theme"><span>Theme</span><select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+      </div>
+    </header>
     <details id="pairing" open>
       <summary id="pair-title">Connect this browser</summary>
       <p>Approve this browser on Mosaico. Compare the fingerprint on both screens. Access is separate from taking control of the mouse and keyboard.</p>
@@ -20,11 +26,16 @@
       <div class="actions"><button id="pair">Pair this browser</button><button id="check">Check approval</button><button id="connect">Connect saved browser</button></div>
       <p id="approval" role="status">Default approval is 6 hours. Choose permissions and duration on Mosaico.</p>
     </details>
+    <nav class="jump-links" aria-label="Console sections">
+      <a href="#target-title">Input</a><a href="#bluetooth-title">Bluetooth</a><a href="#wifi-title">Wi-Fi</a><a href="#labels-title">Labels</a>
+    </nav>
+    <div class="dashboard">
+      <div class="column">
     <section aria-labelledby="target-title">
       <div class="section-head"><h2 id="target-title">Input target</h2><button id="refresh" class="quiet">Refresh</button></div>
       <p id="target" class="target">Unavailable</p><p id="readiness">Connect to read the actual input state.</p>
       <div class="actions"><button id="acquire" class="primary" disabled>Take control</button><button id="stop" disabled>Stop control</button><button id="disconnect" class="quiet" disabled>Disconnect browser</button></div>
-      <p class="hint">Local touch, lock, a target change or a lost connection stops control. Reconnecting never resumes input. Mosaico must allow remote input.</p>
+      <p class="hint">Control ends on local takeover, lock, a target change, or loss of connection. Take control again to resume.</p>
     </section>
     <section aria-labelledby="input-title">
       <h2 id="input-title">Mouse &amp; keyboard</h2>
@@ -45,7 +56,40 @@
       </fieldset>
     </section>
     <section aria-labelledby="result-title"><div class="section-head"><h2 id="result-title">Last action</h2><button id="result-check" class="quiet" disabled>Check result</button></div><p id="result" role="status" aria-live="polite">Nothing sent.</p><p class="hint">“Sent” means the HID transport accepted the key/button reports and releases. The target application's response is not observed. An unknown reply is never replayed automatically.</p></section>
-    <footer><button id="forget" class="quiet">Forget identity in this browser</button><p>For the station HTTPS address only. Provisioning Wi-Fi does not provide remote input. Manage or revoke permissions on Mosaico.</p></footer>
+      </div>
+      <div class="column" id="connections">
+        <p id="management-result" class="notice" role="status" aria-live="polite" hidden></p>
+        <section aria-labelledby="bluetooth-title">
+          <div class="section-head"><div><h2 id="bluetooth-title">Bluetooth</h2><p id="ble-link" class="hint">Connect this browser to read Bluetooth state.</p></div><button id="refresh-connections" class="quiet" disabled>Refresh lists</button></div>
+          <label class="pair-duration" for="pair-duration">Pairing window
+            <select id="pair-duration"><option value="30">30 seconds</option><option value="60">1 minute</option><option value="120" selected>2 minutes</option><option value="300">5 minutes</option></select>
+          </label>
+          <div class="actions" id="bluetooth-actions"></div>
+          <h3>Saved input hosts</h3><div id="ble-peers" class="collection"></div>
+          <h3>Classic audio</h3><div id="classic-peers" class="collection"></div>
+        </section>
+        <section aria-labelledby="wifi-title">
+          <div class="section-head"><div><h2 id="wifi-title">Wi-Fi</h2><p id="wifi-status" class="hint">Connect this browser to read saved networks.</p></div><button id="scan" disabled>Scan networks</button></div>
+          <h3>Saved networks</h3><div id="wifi-profiles" class="collection"></div>
+          <div id="scan-panel" hidden><h3>Nearby networks</h3><div id="wifi-scan" class="collection"></div></div>
+        </section>
+        <section aria-labelledby="labels-title">
+          <div class="section-head"><div><h2 id="labels-title">Display labels</h2><p id="label-capacity" class="hint">Saved labels appear after connecting.</p></div></div>
+          <div id="retained-labels" class="collection"></div>
+        </section>
+      </div>
+    </div>
+    <dialog id="editor">
+      <form id="editor-form">
+        <h2 id="editor-title"></h2>
+        <p id="editor-detail" class="hint"></p>
+        <label id="editor-label" for="editor-value"></label>
+        <input id="editor-value" spellcheck="false" autocapitalize="off" required>
+        <p id="editor-error" class="hint" role="status"></p>
+        <div class="actions"><button type="submit" class="primary" id="editor-save">Save</button><button type="button" id="editor-cancel">Cancel</button></div>
+      </form>
+    </dialog>
+    <footer><p>Use Mosaico’s trusted HTTPS address over Wi-Fi or the device’s control hotspot.</p><button id="forget" class="quiet">Forget identity in this browser</button></footer>
   </main>
 </body>
 </html>

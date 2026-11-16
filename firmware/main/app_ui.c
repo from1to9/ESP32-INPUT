@@ -1781,7 +1781,8 @@ static void create_overlay(app_overlay_t kind, app_settings_page_t page)
         create_media_panel(body, title, kind);
     } else if (kind == APP_OVERLAY_CONTROLLERS || kind == APP_OVERLAY_CONTROLLER_ACCESS) {
         create_controller_panel(body, title, kind);
-    } else if (kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS) {
+    } else if ((kind >= APP_OVERLAY_API_CONNECTION && kind <= APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS) ||
+        kind == APP_OVERLAY_WIFI_PROFILE) {
         create_connection_panel(body, title, kind);
     } else if (kind == APP_OVERLAY_RECORDING_STORAGE) {
         label_text(title, "Recording storage");
@@ -2023,7 +2024,7 @@ static void render_extension(const app_view_t *view, bool hid_ready)
             visible(s_scan_rows[i], show);
             if (!show) continue;
             const app_wifi_row_view_t *row = &scan->rows[i];
-            text(s_scan_rows[i], *row->label ? row->label : "Unnamed network");
+            text(s_scan_rows[i], *row->display_name ? row->display_name : *row->label ? row->label : "Unnamed network");
             char signal[24];
             if (row->rssi_valid) snprintf(signal, sizeof(signal), "%d dBm", row->rssi_dbm);
             else snprintf(signal, sizeof(signal), "Signal unknown");
@@ -2047,9 +2048,11 @@ static void render_extension(const app_view_t *view, bool hid_ready)
     if (view->overlay == APP_OVERLAY_WIFI_NETWORK) {
         const app_wifi_selection_view_t *selection = &view->wifi_selection;
         const app_wifi_row_view_t *row = &selection->network;
-        label_text(s_network_name, selection->valid ? row->label : "Network selection expired");
-        label_format(s_network_detail, "%s%s%s\n%s", security_name(row->security),
+        if (selection->valid && *row->display_name) label_format(s_network_name, "%s\nSSID: %s", row->display_name, row->label);
+        else label_text(s_network_name, selection->valid ? row->label : "Network selection expired");
+        label_format(s_network_detail, "%s%s%s\n%s%s\n%s", security_name(row->security),
             row->current ? " / current" : "", row->remembered ? " / saved" : "",
+            selection->valid && *row->bssid ? "BSSID: " : "", selection->valid ? row->bssid : "",
             selection->valid ? join_reason(row->availability) : "Return to the list and refresh.");
         label_text(s_network_note, *selection->message ? selection->message :
             "Joins your existing Wi-Fi network.\nYour computer stays on its Wi-Fi.\nWeb/API availability is shown separately.");
@@ -2295,7 +2298,7 @@ static void render_device(const app_view_t *view, const char *link)
     const char *title = "Confirm action";
     const char *detail = "No action is pending. Return to Settings.";
     const char *accept = "Confirm";
-    char pairing_detail[192];
+    char pairing_detail[256];
     switch (view->confirmation) {
     case APP_CONFIRM_DEVICE_RESET:
         title = "Reset this device?";
@@ -2335,7 +2338,16 @@ static void render_device(const app_view_t *view, const char *link)
         break;
     case APP_CONFIRM_WIFI_FORGET:
         title = "Forget Wi-Fi network?";
-        detail = "The saved Wi-Fi network will be removed.\nIt disconnects if currently in use.\nSet up this network again to reconnect.";
+        if (view->saved_wifi.reviewing) {
+            const app_saved_wifi_row_t *row = &view->saved_wifi.detail;
+            if (view->saved_wifi.detail_known) {
+                const char *alias = row->has_label ? row->label : "None";
+                snprintf(pairing_detail, sizeof(pairing_detail), "Display label: %.48s\nOriginal SSID: %s\nProfile ID: %s\n\n%s",
+                    alias, row->original_ssid, row->id, view->saved_wifi.review_current ?
+                    "This removes the saved network and disconnects it if in use." : "Network changed. Review it again before forgetting.");
+                detail = pairing_detail;
+            } else detail = "The selected network identity is unavailable.";
+        } else detail = "The saved Wi-Fi network will be removed.\nIt disconnects if currently in use.\nSet up this network again to reconnect.";
         accept = "Forget network";
         break;
     case APP_CONFIRM_RECORDING_STORAGE_PREPARE:
@@ -2355,6 +2367,8 @@ static void render_device(const app_view_t *view, const char *link)
     label_text(s_confirm_detail, detail);
     text(s_confirm_accept, accept);
     enabled(s_confirm_accept, view->confirmation != APP_CONFIRM_NONE &&
+        (view->confirmation != APP_CONFIRM_WIFI_FORGET || !view->saved_wifi.reviewing ||
+            (view->saved_wifi.detail_known && view->saved_wifi.review_current)) &&
         (view->confirmation != APP_CONFIRM_RECORDING_STORAGE_PREPARE || recording_storage_can_prepare(view)));
 }
 
@@ -2420,9 +2434,13 @@ void app_ui_render(const app_view_t *view)
     s_view.wifi_scan.message[64] = '\0';
     if (s_view.wifi_scan.row_count > APP_UI_WIFI_ROWS_PER_PAGE)
         s_view.wifi_scan.row_count = APP_UI_WIFI_ROWS_PER_PAGE;
-    for (unsigned i = 0; i < APP_UI_WIFI_ROWS_PER_PAGE; ++i)
+    for (unsigned i = 0; i < APP_UI_WIFI_ROWS_PER_PAGE; ++i) {
         s_view.wifi_scan.rows[i].label[APP_UI_WIFI_LABEL_CAPACITY - 1] = '\0';
+        s_view.wifi_scan.rows[i].display_name[sizeof(s_view.wifi_scan.rows[i].display_name) - 1U] = '\0';
+    }
     s_view.wifi_selection.network.label[APP_UI_WIFI_LABEL_CAPACITY - 1] = '\0';
+    s_view.wifi_selection.network.display_name[sizeof(s_view.wifi_selection.network.display_name) - 1U] = '\0';
+    s_view.wifi_selection.network.bssid[sizeof(s_view.wifi_selection.network.bssid) - 1U] = '\0';
     s_view.wifi_selection.message[64] = '\0';
     s_view.wifi_stored_label[APP_UI_WIFI_LABEL_CAPACITY - 1] = '\0';
     s_view.wifi_lan_service_message[64] = '\0';
