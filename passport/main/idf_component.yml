@@ -1,0 +1,8 @@
+dependencies:
+  idf: "==5.5.3"
+  bsp:
+    git: "https://github.com/FoloToy/ai-passport.git"
+    path: "components/bsp"
+    version: "c27304afe8c4a704b86699f1f6382bde91db86a6"
+  lvgl/lvgl: "==9.5.0"
+  espressif/cmake_utilities: "==1.1.1"
