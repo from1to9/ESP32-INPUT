@@ -197,6 +197,7 @@ static bool cancel_scan(void)
 }
 static void start_radio(uint64_t now)
 {
+    ++state.transport_generation;
     desired_station = next_station; desired_ap = next_ap;
     joining = target_record; explicit_bzero(&target_record, sizeof(target_record));
     new_profile = target_new; pin_bssid = target_pin;
@@ -248,7 +249,7 @@ static void begin_switch(bool station, bool ap, uint64_t now)
     release_deadline = now + 500;
     if (!ble.connected) waiting_release = false;
     else {
-        passport_command_t cancel = {.kind = PASSPORT_CANCEL, .generation = ble.generation};
+        passport_command_t cancel = {.kind = PASSPORT_CANCEL, .generation = ble.generation, .network_change = true};
         if (!passport_ble_request(&cancel)) {
             abort_switch();
             result("Input queue busy; network unchanged");
@@ -345,7 +346,7 @@ static void handle_event(const queued_event_t *event, uint64_t now)
 {
     if (!event->ip_event) {
         if (event->id == WIFI_EVENT_STA_STOP) stop_mask &= ~1u;
-        if (event->id == WIFI_EVENT_AP_STOP) { stop_mask &= ~2u; state.ap_started = state.dhcp_running = state.ap_client = state.ap_lease = false; state.ap_client_ip[0] = 0; }
+        if (event->id == WIFI_EVENT_AP_STOP) { stop_mask &= ~2u; if (state.ap_started) ++state.transport_generation; state.ap_started = state.dhcp_running = state.ap_client = state.ap_lease = false; state.ap_client_ip[0] = 0; }
         if (event->id == WIFI_EVENT_SCAN_DONE) { read_scan(event); return; }
         // Until release succeeds, the old radio is still authoritative. Observe
         // its association/IP changes so a rejected switch cannot restore stale facts.
@@ -365,7 +366,7 @@ static void handle_event(const queued_event_t *event, uint64_t now)
             else if (setup_requested) open_setup(now);
         }
         if (event->id == WIFI_EVENT_AP_STACONNECTED) { state.ap_client = true; state.ap_lease = false; }
-        if (event->id == WIFI_EVENT_AP_STADISCONNECTED) { state.ap_client = state.ap_lease = false; state.ap_client_ip[0] = 0; }
+        if (event->id == WIFI_EVENT_AP_STADISCONNECTED) { if (state.ap_client) ++state.transport_generation; state.ap_client = state.ap_lease = false; state.ap_client_ip[0] = 0; }
         if (event->id == WIFI_EVENT_STA_CONNECTED && desired_station && associating) {
             const wifi_event_sta_connected_t *c = &event->data.connected;
             if (c->ssid_len != joining.ssid_length || memcmp(c->ssid, joining.ssid, c->ssid_len) ||
@@ -378,6 +379,7 @@ static void handle_event(const queued_event_t *event, uint64_t now)
             result("Associated; waiting for DHCP address");
         }
         if (event->id == WIFI_EVENT_STA_DISCONNECTED && desired_station) {
+            ++state.transport_generation;
             state.disconnect_reason = event->data.disconnected.reason;
             state.phase = PW_OFFLINE; state.sta_ip[0] = 0; state.active_profile = 0;
             associating = false;
@@ -403,6 +405,7 @@ static void handle_event(const queued_event_t *event, uint64_t now)
         if (event->id == IP_EVENT_STA_LOST_IP && state.phase == PW_ONLINE) {
             esp_netif_ip_info_t current;
             if (esp_netif_get_ip_info(station_netif, &current) == ESP_OK && current.ip.addr) return;
+            ++state.transport_generation;
             state.phase = PW_ASSOCIATED; state.sta_ip[0] = 0; state.active_profile = 0;
             fallback_at = now + FALLBACK_MS;
             result("LAN address lost; waiting for DHCP");

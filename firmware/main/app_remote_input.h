@@ -4,7 +4,9 @@
 #include "hid_engine.h"
 #include "interaction.h"
 
+#ifndef APP_REMOTE_INPUT_JOBS
 #define APP_REMOTE_INPUT_JOBS 8U
+#endif
 #define APP_REMOTE_INPUT_LEASE_MAX_MS 3000U
 #define APP_REMOTE_INPUT_DRAG_MAX_MS 30000U
 

@@ -13,6 +13,7 @@ root = source.parents[2]
 parser = argparse.ArgumentParser()
 parser.add_argument('--output', type=Path, default=root / '.agent/local/passport-wifi/render')
 parser.add_argument('--setup-only', action='store_true', help='Render only the enabled setup window, details, URL QR and confirmation')
+parser.add_argument('--control-only', action='store_true', help='Render network controller status, active mouse and Lock')
 args = parser.parse_args()
 out = args.output.resolve()
 out.mkdir(parents=True, exist_ok=True)
@@ -37,7 +38,7 @@ target_include_directories(render PRIVATE "{headers}" "{source}")
 ''')
 subprocess.run([cmake, '-S', str(out), '-B', str(out / 'build'), '-G', 'Ninja', f'-DCMAKE_MAKE_PROGRAM={ninja}'], check=True)
 subprocess.run([cmake, '--build', str(out / 'build'), '-j', '4'], check=True)
-subprocess.run([str(out / 'build/render')] + (['--setup-only'] if args.setup_only else []), cwd=out, check=True)
+subprocess.run([str(out / 'build/render')] + (['--setup-only'] if args.setup_only else ['--control-only'] if args.control_only else []), cwd=out, check=True)
 
 def chunk(kind, data):
     return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
@@ -49,7 +50,7 @@ def png(path, width, height, data):
 for path in out.glob('*.ppm'):
     data = path.read_bytes().split(b'\n', 3)[3]
     png(path.with_suffix('.png'), 240, 320, data)
-if args.setup_only:
+if args.setup_only or args.control_only:
     sys.exit(0)
 for theme in ('dark', 'light'):
     names = ('home', 'mouse', 'keys', 'connections', 'bluetooth-scroll', 'forget', 'pair', 'appearance', 'appearance-error', 'bluetooth-empty', 'wifi', 'lock')

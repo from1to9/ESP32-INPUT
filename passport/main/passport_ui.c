@@ -23,7 +23,7 @@ static bool confirmation_armed;
 static uint64_t confirmation_visible_after = UINT64_MAX;
 static char ap_ssid[32], ap_password[17], wifi_note[64];
 static uint64_t wifi_note_until;
-static bool suppress_click[3], awake = true, wake_gesture, down_held, unlock_armed;
+static bool suppress_click[3], awake = true, wake_gesture, takeover_gesture, down_held, unlock_armed;
 static bool unlock_requested;
 static uint64_t last_activity;
 static uint64_t lock_visible_after = UINT64_MAX;
@@ -37,6 +37,7 @@ static char theme_note[48];
 static bool repeat_active, ok_held;
 static uint64_t ok_pressed_at, repeat_until, repeat_next;
 static uint32_t repeat_generation;
+static uint32_t repeat_input_revision;
 static unsigned repeat_direction;
 static const int8_t move_x[] = {0, -12, 0, 12, 0};
 static const int8_t move_y[] = {-12, 0, 0, 0, 12};
@@ -49,7 +50,7 @@ static void request(passport_command_kind_t kind, int x, int y, unsigned usage)
 {
     passport_command_t command = {
         .kind = kind, .generation = ble.generation, .peer_type = target.type,
-        .bond_revision = target_revision,
+        .bond_revision = target_revision, .input_revision = ble.input_revision,
         .x = x, .y = y, .usage = usage,
     };
     memcpy(command.peer, target.address, 6);
@@ -74,7 +75,7 @@ static void enter_lock_screen(void)
 {
     page = LOCK_SCREEN;
     focus = 0;
-    unlock_armed = unlock_requested = down_held = wake_gesture = false;
+    unlock_armed = unlock_requested = down_held = wake_gesture = takeover_gesture = false;
     repeat_active = ok_held = false;
     memset(suppress_click, true, sizeof(suppress_click));
     lock_visible_after = UINT64_MAX;
@@ -250,6 +251,10 @@ static void input(const passport_button_event_t *event)
         passport_backlight(true);
     }
     if (event->kind == PASSPORT_PRESS) {
+        if (ble.network_active) {
+            request(PASSPORT_TAKEOVER,0,0,0);
+            repeat_active=false; takeover_gesture=true;
+        }
         if (event->button == PASSPORT_OK && !ok_held) {
             ok_held = true;
             ok_pressed_at = event->time_ms;
@@ -257,14 +262,14 @@ static void input(const passport_button_event_t *event)
             repeat_active = false;
             request(PASSPORT_CANCEL, 0, 0, 0);
         }
-        if (!wake_gesture) suppress_click[event->button] = false;
+        if (!wake_gesture && !takeover_gesture) suppress_click[event->button] = false;
         if (event->button != PASSPORT_OK) confirmation_armed = false;
         if (event->button == PASSPORT_OK && (page == WIFI_CONFIRM || page == WIFI_PENDING)) {
-            confirmation_armed = !wake_gesture && atomic_load(&text_applied) && event->time_ms > confirmation_visible_after;
+            confirmation_armed = !wake_gesture && !takeover_gesture && atomic_load(&text_applied) && event->time_ms > confirmation_visible_after;
         }
         if (event->button == PASSPORT_DOWN) down_held = true;
         if (event->button == PASSPORT_OK && page == LOCK_SCREEN && ble.locked &&
-            !down_held && !wake_gesture && atomic_load(&text_applied) &&
+            !down_held && !wake_gesture && !takeover_gesture && atomic_load(&text_applied) &&
             event->time_ms > lock_visible_after) unlock_armed = true;
     }
     if (event->kind == PASSPORT_RELEASE && event->button == PASSPORT_DOWN) down_held = false;
@@ -275,10 +280,11 @@ static void input(const passport_button_event_t *event)
             request(PASSPORT_CANCEL, 0, 0, 0);
         }
     }
-    if (wake_gesture) {
-        if (event->kind == PASSPORT_CLICKED || event->kind == PASSPORT_DOUBLE) wake_gesture = false;
-        // A long waking hold is consumed through release. The next full press is required.
-        if (event->kind == PASSPORT_RELEASE) { wake_gesture = false; suppress_click[event->button] = true; }
+    // Takeover consumes ordinary input, but the awake DOWN safety hold still locks.
+    if (wake_gesture || (takeover_gesture && !(event->kind == PASSPORT_LONG && event->button == PASSPORT_DOWN))) {
+        if (event->kind == PASSPORT_CLICKED || event->kind == PASSPORT_DOUBLE) wake_gesture = takeover_gesture = false;
+        // Waking and ordinary takeover holds require a new press after release.
+        if (event->kind == PASSPORT_RELEASE) { wake_gesture = takeover_gesture = false; suppress_click[event->button] = true; }
         return;
     }
     if (event->kind == PASSPORT_LONG) {
@@ -297,6 +303,7 @@ static void input(const passport_button_event_t *event)
                     repeat_active = true;
                     repeat_direction = focus;
                     repeat_generation = ble.generation;
+                    repeat_input_revision = ble.input_revision;
                     repeat_until = ok_pressed_at + 2000;
                     repeat_next = event->time_ms;
                 }
@@ -365,6 +372,10 @@ static void build_view(const char *http)
     snprintf(view.bluetooth, sizeof(view.bluetooth), "%s", !ble.synced ? "BT ?" : ble.ready ? "BT ready" : ble.pairing ? "BT pair" : ble.connected ? "BT link" : ble.advertising ? "BT adv" : "BT idle");
     snprintf(view.message, sizeof(view.message), "%s", readiness());
     snprintf(view.detail, sizeof(view.detail), "%s", ble.result);
+    if (ble.network_active) {
+        snprintf(view.message,sizeof(view.message),"Network control: open");
+        snprintf(view.detail,sizeof(view.detail),"%s / press to take over",ble.controller);
+    }
     snprintf(view.ok, sizeof(view.ok), "Open");
     if (ble.connected) snprintf(view.target, sizeof(view.target), "Host  %s", ble.current);
     else snprintf(view.target, sizeof(view.target), "No active host");
@@ -550,7 +561,10 @@ static void build_view(const char *http)
         if (page == WIFI_DETAILS) {
             passport_wifi_ap_credentials(ap_ssid, ap_password);
             snprintf(view.body, sizeof(view.body), "SSID: %s\nPassword: %s\nAP IP: %s\nDHCP server: %s\nClient lease: %s\nhttp://%s/%s", ap_ssid, ap_password, wifi.ap_started ? wifi.ap_ip : "unavailable", wifi.dhcp_running ? "running" : "unavailable", wifi.ap_lease ? wifi.ap_client_ip : "not observed", wifi.ap_ip, wifi.provisioning_available ? "setup" : "health");
-        } else snprintf(view.body, sizeof(view.body), "%s\nSTA IP: %s\nAP: %s\nDHCP: %s\nClient lease: %s\nHTTP: %s%s", passport_wifi_phase_name(wifi.phase), wifi.sta_ip[0] ? wifi.sta_ip : "none", wifi.ap_started ? wifi.ap_ip : "not started", wifi.dhcp_running ? "running" : "not running", wifi.ap_lease ? "assigned" : "not observed", http, ble.release_unknown ? "\nPrevious release unknown" : "");
+        } else snprintf(view.body, sizeof(view.body), "Network control: %s\nController: %s\nSTA IP: %s\nAP IP: %s\nLock: %s (hold DOWN)\nHTTP: %.32s%s",
+            ble.network_available ? "open" : "unavailable", ble.network_active ? ble.controller : "none",
+            wifi.sta_ip[0] ? wifi.sta_ip : "none", wifi.ap_started ? wifi.ap_ip : "none",
+            ble.locked ? "on" : "off", http, ble.release_unknown ? "\nPrevious release unknown" : "");
         snprintf(view.ok, sizeof(view.ok), "Back");
         break;
     case LOCK_SCREEN:
@@ -589,7 +603,8 @@ static void apply_theme(void)
 static void service_repeat(uint64_t now)
 {
     if (!repeat_active) return;
-    if (!ok_held || page != MOUSE || !ble.ready || ble.generation != repeat_generation || now >= repeat_until) {
+    if (!ok_held || page != MOUSE || !ble.ready || ble.generation != repeat_generation ||
+        ble.input_revision != repeat_input_revision || now >= repeat_until) {
         repeat_active = false;
         request(PASSPORT_CANCEL, 0, 0, 0);
     } else if (now >= repeat_next) {

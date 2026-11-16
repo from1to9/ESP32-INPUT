@@ -31,6 +31,7 @@ typedef struct {
     bool ap_started, dhcp_running, ap_client, ap_lease, setup_open, pending;
     passport_wifi_phase_t phase;
     uint32_t revision, scan_revision, active_profile, pending_id, setup_id;
+    uint64_t transport_generation; // Invalidates sessions even after a same-address reconnect.
     unsigned profile_count, scan_count, setup_seconds, disconnect_reason;
     uint32_t last_submission_id;
     bool submission_accepted;

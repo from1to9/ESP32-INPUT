@@ -1,15 +1,16 @@
 # Passport ESP32-C3 firmware
 
 This independent ESP-IDF project implements the local BLE HID and Wi-Fi owner batches
-and local HTTP provisioning of the [Passport compatibility plan](../docs/passport-compatibility-plan.md).
+and local HTTP provisioning and direct HTTP/WS input of the [Passport compatibility plan](../docs/passport-compatibility-plan.md).
 It combines the FoloToy 240 × 320 display, three ADC buttons, BLE keyboard
 and relative mouse, persistent bonds, a Wi-Fi setup page, and a read-only health
 listener. It uses the Passport 8 MiB flash layout with NVS, PHY data, and a
-factory application. Shared `input_core` and `hid_engine` sources are reused
-without changes to Mosaico.
+factory application. It reuses `input_core`, `hid_engine`, `interaction`,
+`control_protocol`, and the shared `app_remote_input` owner. The ordinary
+Mosaico protocol initializer retains enrolled TLS and its existing capacities.
 
 The implemented subset and internal API are documented in [API.md](API.md).
-Remote input, labels and stable
+The full Web controller, remote connection management, labels and stable
 cross-device bond fingerprints remain unavailable in this batch. This is a
 source/host/build candidate; device and operating-system compatibility are
 not qualified.
@@ -59,7 +60,9 @@ or radio coexistence.
 
 For an existing generated configuration, select `ESP_SYSTEM_USE_FRAME_POINTER`
 in `idf.py -C passport menuconfig` before rebuilding this revision. The checked-in
-defaults select it for fresh configurations. Panic register and frame-pointer
+defaults select it for fresh configurations. Also enable `HTTPD_WS_SUPPORT`,
+`HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT`, and set `BT_NIMBLE_HOST_TASK_STACK_SIZE`
+to 6144 for an existing configuration. Panic register and frame-pointer
 backtrace diagnostics remain enabled. The frame-pointer option adds code and
 execution overhead, which is included in this revision's size report.
 
@@ -109,7 +112,9 @@ Tab, Backspace, and four arrows, each as a down/up tap. A limited list scrolls
 by focus. The connection identity and readiness appear before input actions.
 The firmware requires a saved bond, encryption, both report subscriptions,
 and completion of the shared engine's two-report neutral barrier. Input is
-local-owner-only with a three-second lease and no automatic input replay.
+shared between local and network owners with a three-second maximum lease
+and no automatic input replay. A physical press takes over an active network
+controller and consumes ordinary input from that gesture; release and press again for local input.
 
 The NimBLE task owns the engine and all BLE changes. The BSP callback queues
 16 timestamped button events; the UI queues at most eight copied commands.
@@ -270,5 +275,31 @@ Hardware qualification still requires the actual display and three keys,
 pairing/reconnect and individual forget across reboots, subscription behavior
 on intended host OS versions, disconnect/release under congestion and power
 loss, free heap, largest block, task high-water marks, and Wi-Fi/BLE coexistence.
-There are no media services, OTA, web input controller,
-or sound cues in this candidate.
+There are no media services, OTA, web input controller, or sound cues in this candidate.
+
+## Direct network input
+
+The board's observed LAN or AP IP accepts the [open session API](API.md#direct-http-and-websocket-input).
+Anyone who can reach this listener can request input; bearer tokens bind
+sessions, request results and leases, not trusted clients. HTTP does not
+provide confidentiality or integrity against an on-path peer. The display
+shows `Network control: open`, the active controller, IP and Lock. Lock
+rejects remote mutations while status and local recovery remain available.
+No HTTP downgrade is enabled on Mosaico.
+
+Passport uses two sessions, sixteen retained results, four active requests,
+four remote jobs, a 2048-byte input frame and a single transport mailbox.
+The compact parser and owner settings apply only to the Passport target.
+Network callbacks never call the engine: the NimBLE task processes one
+bounded mailbox item per 20 ms service and remains the sole report sender.
+Timeout leaves an explicit unknown outcome and prevents mailbox reuse until
+the owner has finished or discarded the request. Session/WS loss, network
+change, Lock, local takeover and target changes use the shared release path.
+
+Run `python3 passport/tests/control.py` for the real protocol/remote-owner/HID
+chain, including mode changes, maximum text, exact duplicate replay, partial
+text results, local takeover and release boundaries. The `control_http`
+suite in `passport/tests/run.py` exercises production ingress, pre-handshake
+WS authentication, bounded frames, owner timeout and backpressure with
+substituted socket/RTOS boundaries. Use `--control-only` with the native
+renderer for the changed status, active-controller and Lock views.

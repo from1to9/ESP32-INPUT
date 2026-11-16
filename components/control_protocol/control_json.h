@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "control_protocol.h"
+#ifndef CJ_CAPACITY
 #define CJ_CAPACITY 8192U
+#endif
+#ifndef CJ_TOKENS
 #define CJ_TOKENS 384U
+#endif
 #define CJ_NONE UINT16_MAX
 
 typedef enum { CJ_NULL, CJ_BOOL, CJ_INTEGER, CJ_NUMBER, CJ_STRING, CJ_OBJECT, CJ_ARRAY } cj_type_t;

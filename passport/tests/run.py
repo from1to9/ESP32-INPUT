@@ -16,7 +16,7 @@ headers = (
     'esp_log.h esp_timer.h lvgl.h'
 ).split()
 def sdk_function(source, name):
-    match = re.search(r'(?m)^(?:static )?(?:int|void)\n' + re.escape(name) + r'\(', source)
+    match = re.search(r'(?m)^(?:static )?(?:int|void|esp_err_t)\s+' + re.escape(name) + r'\(', source)
     if not match:
         raise RuntimeError(f'Missing pinned SDK function: {name}')
     start = source.index('{', match.start())
@@ -28,17 +28,17 @@ def sdk_function(source, name):
     return source[match.start():end] + '\n'
 
 
-tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup')
+tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'control_http')
 for test in sys.argv[1:] or tests:
     if test not in tests:
         raise SystemExit(f'Unknown suite: {test}')
     with tempfile.TemporaryDirectory(prefix='passport-test-') as directory:
         work = Path(directory)
-        extra = 'host/ble_sm.h services/gap/ble_svc_gap.h services/gatt/ble_svc_gatt.h nvs.h store/config/ble_store_config.h'.split()
+        extra = 'host/ble_sm.h services/gap/ble_svc_gap.h services/gatt/ble_svc_gatt.h nvs.h store/config/ble_store_config.h freertos/semphr.h'.split()
         for header in headers + extra:
             path = work / header
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('#include "' + ('stubs.h' if test == 'startup' else 'theme_stubs.h' if test == 'theme' else 'setup_stubs.h' if test == 'setup' else 'wifi_stubs.h' if test == 'wifi' else 'ble_stubs.h') + '"\n')
+            path.write_text('#include "' + ('stubs.h' if test == 'startup' else 'theme_stubs.h' if test == 'theme' else 'control_http_stubs.h' if test == 'control_http' else 'setup_stubs.h' if test == 'setup' else 'wifi_stubs.h' if test == 'wifi' else 'ble_stubs.h') + '"\n')
         defines = []
         if test == 'cccd':
             sdk = root / '.tools/passport-esp-idf/components/bt/host/nimble/nimble/nimble/host'
@@ -65,14 +65,29 @@ for test in sys.argv[1:] or tests:
             subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-fsanitize=address,undefined',
                             '-fno-omit-frame-pointer', '-c', str(sdk_json / 'cJSON.c'), '-o', str(parser)], check=True)
             sources += [parser]
-        if test == 'ble':
+        if test == 'control_http':
+            (work / 'lwip').mkdir()
+            (work / 'lwip/sockets.h').write_text('#include "control_http_stubs.h"\n')
+            sdk_ws = (root / '.tools/passport-esp-idf/components/esp_http_server/src/httpd_ws.c').read_text()
+            # Keep the actual length/header and payload semantics; substitute socket I/O only.
+            (work / 'sdk_ws_receive.inc').write_text(''.join(sdk_function(sdk_ws, name)
+                for name in ('httpd_ws_unmask_payload', 'httpd_ws_recv_frame')))
+        if test in ('ble', 'control_http'):
             sources += [root / 'components/hid_engine/hid_engine.c', root / 'components/input_core/input_core.c']
+            sources += [root / p for p in ('passport/main/passport_control.c', 'firmware/main/app_remote_input.c',
+                'components/interaction/interaction.c', 'components/control_protocol/control_protocol.c',
+                'components/control_protocol/control_json.c', 'components/control_protocol/control_registry.c',
+                'components/control_protocol/control_sha256.c')]
+            defines += ['-D_POSIX_C_SOURCE=200809L', '-DCP_MAX_RESULTS=16U', '-DCP_MAX_ACTIVE_REQUESTS=4U',
+                        '-DCJ_CAPACITY=4096U', '-DCJ_TOKENS=192U', '-DAPP_REMOTE_INPUT_JOBS=4U']
         binary = work / f'test_{test}'
         subprocess.run([
             os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',
             '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
             '-I', str(work), '-I', str(root / 'passport/tests'),
             '-I', str(root / 'components/hid_engine/include'), '-I', str(root / 'components/input_core/include'),
-            *defines, *map(str, sources), '-o', str(binary),
+            '-I', str(root / 'components/control_protocol/include'), '-I', str(root / 'components/control_protocol'),
+            '-I', str(root / 'components/interaction/include'), '-I', str(root / 'firmware/main'),
+            *defines, *map(str, sources), '-lm', '-o', str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True)
