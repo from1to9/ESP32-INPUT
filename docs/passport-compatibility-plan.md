@@ -1,7 +1,7 @@
 # AI Passport compatibility firmware plan
 
-Status: design proposal. No Passport firmware or hardware qualification is
-claimed by this document.
+Status: staged implementation plan. This document does not claim completed
+Passport behavior or hardware qualification.
 
 ## Two firmware targets in one repository
 
@@ -9,9 +9,10 @@ Keep the current `firmware/` ESP32-S3/S31 Mosaico target and its USB HID,
 Bluetooth HID, touch, motion, audio, and enrolled-control behavior. Add a
 separate ESP32-C3 FoloToy AI Passport target with its own BSP, SDK
 configuration, partition table, BLE adapter, screen, and hardware services.
-Only the Mosaico changes necessary to add its requested persistent control
-hotspot belong in this work. Do not refactor its unrelated input or media
-paths as part of the Passport port.
+Mosaico changes in this work cover its persistent control hotspot,
+Bluetooth/Wi-Fi management and labels, and the connected Web controller.
+Do not refactor unrelated Mosaico input or media paths as part of the
+Passport port.
 
 Reuse the existing `input_core`, `hid_engine`, `interaction`, and
 `control_protocol` sources where their contracts apply. The portable
@@ -250,14 +251,47 @@ open network service remains read-only and input stays locked.
 | Home | Focus Mouse, Keys, Connections, Status | Open focus | Open Connections |
 | Mouse | Focus Up, Left, Click, Right, Down, Back | Bounded move or left click | Repeat focused direction only while held |
 | Keys | Focus Esc, Enter, Tab, Backspace, arrows, Back | Send one key tap | Return Home |
-| Connections | Focus Bluetooth, Wi-Fi, Web/API, Sound, Back | Open focus | Return Home |
+| Connections | Focus Bluetooth, Wi-Fi, Web/API, Sound, Appearance, Back | Open focus | Return Home |
 | Bluetooth | Focus Pair new, saved hosts, Back | Open host actions or pair window | Return Connections |
 | Bluetooth host actions | Focus Advertise, Disconnect, Forget, Back | Apply or open confirmation | Return Bluetooth |
 | Wi-Fi | Focus Scan networks, saved/current network, Use Passport Wi-Fi, Back | Open list or action | Return Connections |
 | Wi-Fi network list | Focus scan result, Refresh, Back | Open exact-row actions | Return Wi-Fi |
 | Wi-Fi network actions | Focus Connect/Configure, Forget, Back | Apply or open confirmation | Return list |
 | Sound | Focus Off, On, Test cue, Back | Apply or preview | Return Connections |
+| Appearance | Focus Dark, Light, Back | Save the selected theme | Return Connections |
 | Confirmation | Focus Cancel or Confirm; Cancel first | Apply focus | Cancel |
+
+### Visual system and theme acceptance
+
+The original FoloToy hardware-test menu is a reference for the BSP, not an
+application screen to copy. Passport Input needs its own graphical LVGL
+interface. A single label containing the whole page or a plain text menu is
+not an acceptable finished UI. Use a compact status strip, a main action
+area, and a fixed three-key navigation footer within the 240 x 320 panel.
+The status strip shows only observed BLE, Wi-Fi and input readiness; do not
+invent a clock, battery level or connection state. Home uses large focusable
+Mouse, Keys, Connections and Status cards. The Connections card shows the
+observed Bluetooth and Wi-Fi state. Mouse uses a drawn directional pad
+with a distinct focused direction and center click. Keys use keycap-shaped
+rows. Bluetooth and Wi-Fi show bounded, scrollable cards with the display
+label as title, original identity as secondary text, and a real connection
+badge. Pairing, confirmation, loading, empty and error states each have a
+dedicated visual treatment. Long names truncate within the card without
+changing the row identity or focus. The footer labels UP, OK and DOWN and
+updates the OK action for the focused item.
+
+Provide dark and light palettes with the same layout and interaction
+semantics. Dark defaults to a near-black/graphite field with high-contrast
+text and a bright cyan/teal focus accent. Light uses an off-white field,
+dark ink text and the same accent family. Focus must remain obvious without
+color alone, using a border or shape as well as fill. The Appearance screen
+lets the user switch themes with three keys and stores the selection; a
+failed save is shown as an error rather than a successful preference change.
+Keep the selected theme through reboot. Build the interface from bounded
+LVGL objects and fonts, update changed widgets rather than recreating the
+whole screen on each input tick, and measure flash and internal heap on C3.
+Both palettes require actual 240 x 320 render captures; the light palette
+also needs on-device display qualification before claiming physical quality.
 
 The Mouse page is a focusable directional grid, not a touch screen.
 Each OK click sends one bounded relative step; holding OK repeats at a
@@ -300,6 +334,21 @@ are the final stop path. Reconnect never replays an uncertain command or
 resumes a drag. Capability discovery hides or disables unsupported
 Passport operations. The browser does not use phone motion sensors;
 Mosaico keeps its own physical motion mouse.
+
+The Web controller is a designed application, not a diagnostic form. Use the
+same visual tokens as the device while respecting each target's capabilities:
+a clear connection/target header, prominent touchpad, keyboard and action
+areas, status and result feedback, and card-based Bluetooth/Wi-Fi lists.
+Desktop and iPad landscape use a spacious two-column control layout;
+phone portrait uses one column with visible Mouse, Keyboard and Connections
+navigation. Controls need at least 44 px touch targets and safe-area padding.
+Provide dark and light palettes with system preference as the initial choice
+and an explicit, persistent browser override. The theme switch must work
+before a control session is established. Focus, pressed, disabled and pending
+states need distinct shapes or borders as well as color. Keep command
+semantics, keyboard accessibility and stop/release behavior identical across
+both palettes. Capture desktop, iPhone-sized and iPad-sized renders in each
+theme for visual review; inspect the actual browser layout, not CSS alone.
 
 The Passport agent API remains a direct device IP endpoint. Expose state,
 capabilities, an open Passport session, command submission, result lookup,
@@ -371,7 +420,10 @@ logs, personal data, local paths, and performance snapshots out of Git.
 ## Sources
 
 - [FoloToy Passport BSP](https://github.com/FoloToy/ai-passport)
+- [FoloToy application UI guidance](https://github.com/FoloToy/ai-passport#start-development-with-one-requirement)
 - [FoloToy hardware guide](https://github.com/FoloToy/ai-passport/blob/main/docs/hardware-design/AI_HARDWARE_DEVELOPMENT_GUIDE.md)
+- [PassportOS three-key UI reference](https://github.com/zh30/PassportOS)
+- [Passport-OS dark UI reference](https://github.com/iCurrer/Passport-OS)
 - [Passport BLE HID example](https://github.com/lewangdev/ai-passport-iphone-agent)
 - [Passport QR/SoftAP example](https://github.com/kunlun322/Qoder-Passport)
 - [ESP32-C3 coexistence guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-guides/coexist.html)

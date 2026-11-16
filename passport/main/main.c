@@ -14,8 +14,8 @@
 #include "esp_wifi_default.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "host/ble_hs.h"
-#include "nimble/nimble_port.h"
+#include "passport_ble.h"
+#include "passport_ui.h"
 #include "nvs_flash.h"
 #include "passport_board.h"
 
@@ -23,8 +23,7 @@ static const char *TAG = "passport";
 static esp_err_t display_status;
 static esp_err_t button_status;
 static esp_err_t nimble_status;
-static atomic_bool nimble_synced;
-static atomic_bool display_text_applied;
+
 // Main-task-owned credential storage stays outside the raw task stack dump.
 static wifi_config_t ap_config;
 static char network_text[224];
@@ -105,52 +104,13 @@ fail:
     return ret;
 }
 
-static void on_nimble_sync(void)
-{
-    atomic_store(&nimble_synced, true);
-}
-
-static void on_nimble_reset(int reason)
-{
-    atomic_store(&nimble_synced, false);
-    ESP_LOGW(TAG, "NimBLE host reset (%d)", reason);
-}
-
-static void run_nimble(void *arg)
-{
-    (void)arg;
-    nimble_port_run();
-    atomic_store(&nimble_synced, false);
-    vTaskDelete(NULL);
-}
-
-static esp_err_t start_nimble(void)
-{
-    ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "NimBLE initialization");
-    ble_hs_cfg.sync_cb = on_nimble_sync;
-    ble_hs_cfg.reset_cb = on_nimble_reset;
-    // Use the SDK host stack and priority, with an observable task creation result.
-    if (xTaskCreate(run_nimble, "nimble_host", NIMBLE_HS_STACK_SIZE,
-                    NULL, configMAX_PRIORITIES - 4, NULL) != pdPASS) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(nimble_port_deinit());
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
-}
-
-static const char *nimble_text(bool synced)
-{
-    if (nimble_status != ESP_OK) {
-        return esp_err_to_name(nimble_status);
-    }
-    return synced ? "Host synchronized" : "Waiting for host sync";
-}
-
 static esp_err_t health_get(httpd_req_t *request)
 {
-    const bool synced = atomic_load(&nimble_synced);
+    passport_ble_state_t ble;
+    passport_ble_snapshot(&ble);
+    const bool synced = ble.synced;
     const unsigned observed = passport_buttons_observed();
-    const bool applied = atomic_load(&display_text_applied);
+    const bool applied = passport_ui_text_applied();
     if (display_status != ESP_OK || !applied || button_status != ESP_OK ||
         observed != PASSPORT_ALL_BUTTONS || !synced) {
         httpd_resp_set_status(request, "503 Service Unavailable");
@@ -173,7 +133,8 @@ static esp_err_t health_get(httpd_req_t *request)
              esp_err_to_name(button_status),
              observed & PASSPORT_BUTTON_UP ? "yes" : "pending",
              observed & PASSPORT_BUTTON_DOWN ? "yes" : "pending",
-             observed & PASSPORT_BUTTON_OK ? "yes" : "pending", nimble_text(synced),
+             observed & PASSPORT_BUTTON_OK ? "yes" : "pending", synced ? "Host synchronized" :
+             (nimble_status == ESP_OK ? "Synchronization pending" : esp_err_to_name(nimble_status)),
              heap_caps_get_free_size(caps), heap_caps_get_largest_free_block(caps));
 
     httpd_resp_set_type(request, "text/html; charset=utf-8");
@@ -210,7 +171,7 @@ void app_main(void)
     esp_err_t wifi_status = nvs_flash_init();
     nimble_status = wifi_status;
     if (wifi_status == ESP_OK) {
-        nimble_status = start_nimble();
+        nimble_status = passport_ble_start();
         wifi_status = start_wifi(&ap_config, &ip);
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(nimble_status);
@@ -230,21 +191,5 @@ void app_main(void)
     }
     explicit_bzero(&ap_config, sizeof(ap_config));
 
-    bool synced = atomic_load(&nimble_synced);
-    bool update_pending = true;
-    for (;;) {
-        if (update_pending) {
-            const bool applied = passport_show_status(network_text, http_status,
-                                                       nimble_text(synced), button_status);
-            atomic_store(&display_text_applied, applied);
-            update_pending = !applied;
-        }
-        const bool pressed = passport_wait_for_button();
-        const bool now_synced = atomic_load(&nimble_synced);
-        if (pressed || now_synced != synced) {
-            synced = now_synced;
-            update_pending = true;
-            atomic_store(&display_text_applied, false);
-        }
-    }
+    passport_ui_run(network_text, http_status, button_status == ESP_OK);
 }

@@ -1,22 +1,20 @@
 #include "passport_board.h"
 #include <stdatomic.h>
-#include <stdio.h>
+#include "passport_widgets.h"
 
 #include "bsp_button.h"
 #include "bsp_display.h"
 #include "bsp_pins.h"
-#include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 
-static lv_obj_t *status_label;
+static bool display_ready;
 static QueueHandle_t button_queue;
-static const char *last_button = "Waiting for a press";
+static atomic_bool overflow;
 static atomic_uint observed_buttons;
-// Only change the persistent LVGL text while holding its lock.
-static char status_text[512];
 
 esp_err_t passport_display_init(void)
 {
@@ -31,14 +29,17 @@ esp_err_t passport_display_init(void)
     if (!bsp_lvgl_lock(1000)) {
         return ESP_ERR_TIMEOUT;
     }
-    status_label = lv_label_create(lv_display_get_screen_active(display));
-    if (!status_label) {
+    display_ready = passport_widgets_init(lv_display_get_screen_active(display));
+    if (!display_ready) {
         bsp_lvgl_unlock();
         return ESP_ERR_NO_MEM;
     }
-    lv_obj_set_width(status_label, BSP_LCD_W - 40);
-    lv_obj_align(status_label, LV_ALIGN_TOP_MID, 0, 32);
-    lv_label_set_text_static(status_label, "Passport C3 health\nStarting...");
+    static const passport_view_t starting = {
+        .layout = VIEW_MESSAGE, .tone = TONE_WAIT, .hero_icon = ICON_LOCK,
+        .title = "Starting", .heading = "Preparing input", .bluetooth = "BT ?",
+        .body = "Starting services...", .message = "Input unavailable", .ok = "Wait",
+    };
+    passport_widgets_update(&starting);
     bsp_lvgl_unlock();
     bsp_display_backlight(60);
     return ESP_OK;
@@ -46,21 +47,23 @@ esp_err_t passport_display_init(void)
 
 static void button_pressed(bsp_btn_t button, bsp_btn_ev_t event, void *user)
 {
-    if (event == BSP_BTN_PRESS) {
-        static const unsigned bits[] = {
-            [BSP_BTN_UP] = PASSPORT_BUTTON_UP,
-            [BSP_BTN_DOWN] = PASSPORT_BUTTON_DOWN,
-            [BSP_BTN_OK] = PASSPORT_BUTTON_OK,
-        };
-        atomic_fetch_or(&observed_buttons, bits[button]);
-        // A single slot keeps the newest observation during startup or rendering.
-        xQueueOverwrite((QueueHandle_t)user, &button);
-    }
+    static const unsigned bits[] = {PASSPORT_BUTTON_UP, PASSPORT_BUTTON_DOWN, PASSPORT_BUTTON_OK};
+    static const passport_button_kind_t kinds[] = {
+        [BSP_BTN_PRESS] = PASSPORT_PRESS, [BSP_BTN_CLICK] = PASSPORT_CLICKED,
+        [BSP_BTN_DOUBLE] = PASSPORT_DOUBLE, [BSP_BTN_LONG] = PASSPORT_LONG,
+        [BSP_BTN_RELEASE] = PASSPORT_RELEASE,
+    };
+    if (event == BSP_BTN_PRESS) atomic_fetch_or(&observed_buttons, bits[button]);
+    const passport_button_event_t input = {
+        .button = (passport_button_t)button, .kind = kinds[event],
+        .time_ms = esp_timer_get_time() / 1000,
+    };
+    if (xQueueSend((QueueHandle_t)user, &input, 0) != pdTRUE) atomic_store(&overflow, true);
 }
 
 esp_err_t passport_buttons_init(void)
 {
-    button_queue = xQueueCreate(1, sizeof(bsp_btn_t));
+    button_queue = xQueueCreate(16, sizeof(passport_button_event_t));
     if (!button_queue) {
         return ESP_ERR_NO_MEM;
     }
@@ -77,38 +80,25 @@ unsigned passport_buttons_observed(void)
     return atomic_load(&observed_buttons);
 }
 
-bool passport_show_status(const char *network_text, const char *http_status,
-                          const char *nimble_status, esp_err_t button_status)
+bool passport_render(const passport_view_t *view)
 {
-    if (status_label && bsp_lvgl_lock(1000)) {
-        snprintf(status_text, sizeof(status_text),
-                 "Passport C3 health\n%s\nHTTP: %s\nBLE: %s\nKey: %s",
-                 network_text, http_status, nimble_status,
-                 button_status == ESP_OK ? last_button : esp_err_to_name(button_status));
-        lv_label_set_text_static(status_label, status_text);
-        bsp_lvgl_unlock();
-        return true;
-    }
-    return false;
+    if (!display_ready || !bsp_lvgl_lock(50)) return false;
+    passport_widgets_update(view);
+    bsp_lvgl_unlock();
+    return true;
 }
 
-bool passport_wait_for_button(void)
+bool passport_next_button(passport_button_event_t *event)
 {
-    const TickType_t display_poll = pdMS_TO_TICKS(1000);
-    if (!button_queue) {
-        vTaskDelay(display_poll);
-        return false;
-    }
-    bsp_btn_t button;
-    if (xQueueReceive(button_queue, &button, display_poll) == pdTRUE) {
-        static const char *const names[] = {
-            [BSP_BTN_UP] = "UP",
-            [BSP_BTN_DOWN] = "DOWN",
-            [BSP_BTN_OK] = "OK",
-        };
-        last_button = names[button];
-        ESP_LOGI("passport_buttons", "Pressed %s", last_button);
-        return true;
-    }
-    return false;
+    if (!button_queue) { vTaskDelay(pdMS_TO_TICKS(20)); return false; }
+    return xQueueReceive(button_queue, event, pdMS_TO_TICKS(20)) == pdTRUE;
 }
+
+bool passport_button_overflow(void)
+{
+    bool lost = atomic_exchange(&overflow, false);
+    if (lost && button_queue) xQueueReset(button_queue);
+    return lost;
+}
+
+void passport_backlight(bool on) { bsp_display_backlight(on ? 60 : 0); }

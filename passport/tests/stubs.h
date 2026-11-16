@@ -84,7 +84,6 @@ esp_err_t httpd_resp_set_type(httpd_req_t *request, const char *type);
 esp_err_t httpd_resp_set_hdr(httpd_req_t *request, const char *name, const char *value);
 esp_err_t httpd_resp_sendstr(httpd_req_t *request, const char *body);
 
-extern struct ble_config { void (*sync_cb)(void); void (*reset_cb)(int); } ble_hs_cfg;
 #define NIMBLE_HS_STACK_SIZE 4096
 #define configMAX_PRIORITIES 25
 #define pdPASS 1
@@ -101,7 +100,9 @@ esp_err_t nimble_port_deinit(void);
 void nimble_port_run(void);
 QueueHandle_t xQueueCreate(unsigned length, unsigned size);
 void vQueueDelete(QueueHandle_t queue);
-int xQueueOverwrite(QueueHandle_t queue, const void *item);
+int xQueueSend(QueueHandle_t queue, const void *item, TickType_t ticks);
+int xQueueReset(QueueHandle_t queue);
+int64_t esp_timer_get_time(void);
 int xQueueReceive(QueueHandle_t queue, void *item, TickType_t ticks);
 
 typedef enum { BSP_BTN_UP, BSP_BTN_DOWN, BSP_BTN_OK } bsp_btn_t;

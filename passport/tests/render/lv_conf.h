@@ -1,0 +1,8 @@
+#pragma once
+#define LV_COLOR_DEPTH 16
+#define LV_USE_STDLIB_MALLOC LV_STDLIB_CLIB
+#define LV_USE_OS LV_OS_NONE
+#define LV_FONT_MONTSERRAT_12 1
+#define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_MONTSERRAT_18 1
+#define LV_FONT_DEFAULT &lv_font_montserrat_14

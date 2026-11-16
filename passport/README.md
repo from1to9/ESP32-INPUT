@@ -1,11 +1,18 @@
 # Passport ESP32-C3 firmware
 
-This independent ESP-IDF project is the first buildability batch in the
-[Passport compatibility plan](../docs/passport-compatibility-plan.md). It
-starts the FoloToy 240 × 320 display and three ADC buttons, the NimBLE host
-and controller, Wi-Fi in STA/AP mode, and an on-board read-only HTTP listener
-in one image. It uses the Passport 8 MiB flash layout with NVS, PHY data,
-and a factory application.
+This independent ESP-IDF project implements the first local BLE HID batch
+of the [Passport compatibility plan](../docs/passport-compatibility-plan.md).
+It combines the FoloToy 240 × 320 display, three ADC buttons, BLE keyboard
+and relative mouse, persistent bonds, and the existing read-only Wi-Fi health
+listener. It uses the Passport 8 MiB flash layout with NVS, PHY data, and a
+factory application. Shared `input_core` and `hid_engine` sources are reused
+without changes to Mosaico.
+
+The implemented subset and internal API are documented in [API.md](API.md).
+Remote input, network provisioning, labels and stable
+cross-device bond fingerprints remain unavailable in this batch. This is a
+source/host/build candidate; device and operating-system compatibility are
+not qualified.
 
 ## Build and inspect
 
@@ -70,49 +77,128 @@ execution overhead, which is included in this revision's size report.
   brings in the codec component at build time; the application calls only
   the display and button APIs.
 
-## Health image behavior
+## Local interaction
 
-The display shows the last observed UP, DOWN, or OK press and the configured
-health address. The one-client WPA2 AP generates a fresh SSID and password
-on each boot and displays them locally. Station initialization leaves
-association idle. The AP and URL are labeled as configured. DHCP and client
-association need on-device verification. Once associated, open the displayed
-`http://<address>/health` URL. The sole HTTP route is `GET /health`.
+The device starts on Lock. Release the buttons, then hold OK to unlock.
+UP/DOWN clicks change focus and an OK click selects it. Home opens Mouse,
+Keys, Connections, or Status. Connections contains Bluetooth, read-only
+Wi-Fi details, and Appearance. Hold DOWN from any page to lock and request release.
+An unlocked OK hold returns to the parent page, except on Mouse where
+a direction hold repeats movement.
+Double clicks are consumed. The screen dims after 60 seconds of inactivity
+and locks input; the first complete waking gesture only wakes the screen.
+The BSP provides the 500 ms long-press threshold.
 
-The page reports initialization results, NimBLE synchronization, current
-internal heap, and the largest block. Button setup success leaves each key
-pending until its actual press callback is observed. This covers the pinned
-button component's unchecked timer creation/start results without changing
-the dependency. Press observations are cumulative since boot. HTTP 503
-continues until all three keys have produced a press, display initialization
-and status-text application have succeeded, and NimBLE is synchronized.
-HTTP 200 describes those checks. Physical rendering, ongoing key polling,
-AP association, and DHCP reliability still require hardware observation.
+Bluetooth lists up to three saved identity addresses, plus Pair new and Back.
+Pair new displays its explanation before requesting a 60-second Just Works
+pairing window. Leaving that page or locking closes new-pair admission. Advertise on a saved host opens a 60-second window restricted
+to that exact bond. It does not scan for computers or phones. Disconnect
+retains the bond; Forget has a Cancel-first confirmation and removes only
+the selected identity. Re-pairing requires explicit forget. Full capacity,
+unsupported passkey/numeric-comparison methods, and storage errors are
+reported without silently evicting a bond or approving a number.
 
-Status text uses a fixed persistent buffer under the LVGL lock. A timed-out
-update is retried on the next main-loop iteration, with a one-second queue
-wait between attempts. Application of text to LVGL is reported separately
-from physical display validation. AP credentials reside in main-task-owned
-static storage and the LVGL-locked text buffer. Temporary random bytes and
-the AP configuration copy are explicitly cleared after use. Credentials
-remain in RAM for the screen and Wi-Fi driver during this boot.
+Mouse is a focusable Up/Left/Click/Right/Down grid and Back. Each OK click
+requests one 12-unit relative step or left-button tap. A direction hold
+repeats at most once per 100 ms after the BSP long event, with no catch-up
+burst and a two-second limit from the original press. Release, navigation,
+lock, connection generation change, loss of readiness or queue pressure
+stops repetition. Another repeat needs a fresh press after release. The
+center click and keys never repeat. Keys offers Esc, Enter,
+Tab, Backspace, and four arrows, each as a down/up tap. A limited list scrolls
+by focus. The connection identity and readiness appear before input actions.
+The firmware requires a saved bond, encryption, both report subscriptions,
+and completion of the shared engine's two-report neutral barrier. Input is
+local-owner-only with a three-second lease and no automatic input replay.
 
-STA/AP netif creation uses checked allocation, attachment, and handler
-registration APIs. Failures release the partially created interfaces, Wi-Fi
-driver, and owned event loop. The global TCP/IP stack remains initialized
-for this boot, as ESP-IDF does not support its deinitialization. Later
-asynchronous DHCP/interface failures remain unverified in this minimal
-image. A display initialization failure can also prevent retrieving the
-ephemeral password, so the HTTP diagnostic may be unreachable.
+The NimBLE task owns the engine and all BLE changes. The BSP callback queues
+16 timestamped button events; the UI queues at most eight copied commands.
+The owner checks connection generations and fresh bond-list revisions.
+Page changes, lock, expiry, transport loss, queue pressure, and host changes
+cancel queued input. Management waits for both zero reports before
+requesting disconnect, with a 300 ms limit; unavailable or exhausted release
+is marked unknown. Successful notification submission means NimBLE accepted
+the report, not that the host OS processed it.
 
-Run `python3 passport/tests/run.py` for focused host fault tests. They exercise
-the production startup and board adapter with substituted SDK/BSP boundaries,
-covering network cleanup, display lock retry and text lifetime, credential
-clearing, and observed-key HTTP status. The tests use AddressSanitizer and
-UndefinedBehaviorSanitizer.
+Bonds are saved in one NVS snapshot under `passport_bonds`, using the pinned
+SDK's record ABI. Unknown schema, restore failures, and uncertain commits
+make the store unavailable; the application never erases NVS to recover.
+The old snapshot may remain after a failed deletion, so an uncertain forget
+requires restart and inspection. Saved rows show the bond's resolved public
+or static-random identity, never a transient RPA. Names/labels are not row
+identifiers. See [API.md](API.md) for the later fingerprint/label boundary.
 
-The image has no HID service or advertising, browser input, STA credential
-workflow, production UI, media services, or OTA. Hardware still needs to
-confirm the display and all three buttons, AP association and HTTP behavior,
-NimBLE synchronization, heap and stack headroom, and radio coexistence
-under traffic.
+## Native interface and appearance
+
+The 240 x 320 interface uses retained LVGL cards, directional controls,
+keycaps, a BLE/Wi-Fi status strip, and a fixed UP/OK/DOWN footer. Focus has
+both a thicker border and a changed fill. Bluetooth cards keep the canonical
+identity as secondary text; a check and Connected host title mark the actual
+connected saved identity. Pairing has a countdown, removal starts on Cancel,
+and startup, lock, empty hosts and errors have distinct presentations.
+The list scrolls by focus and bounded text truncation never changes identity.
+No user-label editing or Wi-Fi action controls are exposed in this batch.
+
+Appearance selects Dark or Light with the same three-key interaction and
+layout. Dark is the initial default. The `passport_ui/theme` NVS byte is
+separate from bonds. A new theme is applied only after a successful write
+and commit; an uncertain save leaves the active theme unchanged and shows
+an error. A failed load uses Dark and reports the failure in Appearance.
+NVS power-loss behavior still needs device verification.
+
+The native renderer owns a fixed pool of 54 objects including the screen.
+Only a changed view reaches LVGL; labels are updated only when text changes,
+and palette updates preserve the object tree. Fonts are Montserrat 12, 14
+and 18. The BSP retains its single 19,200-byte DMA draw buffer. Host object
+counts and target static-memory figures do not establish C3 runtime free heap.
+
+## Health and validation
+
+Status shows the existing one-client WPA2 AP's fresh SSID and password,
+generated on each boot, and the configured `/health` URL. Station association
+remains idle. DHCP, association, radio coexistence, and physical rendering
+need on-device verification. No HTTP input or configuration endpoint is
+exposed; the sole HTTP route remains `GET /health`.
+
+Health reports startup results, NimBLE synchronization, internal free heap
+and largest block, and cumulative observed UP/DOWN/OK presses. HTTP 503
+continues until all three press callbacks have occurred, the display and
+buttons initialized, the UI view was applied to LVGL, and NimBLE synchronized.
+HTTP 200 describes those bootstrap observations, not HID readiness or
+continuing device health. Applying a view to LVGL is distinct from physical
+screen verification. A failed update is retried after the next bounded
+20 ms button wait. The LVGL lock attempt is bounded at 50 ms.
+
+AP credentials stay in static main-task/view storage and LVGL-owned labels. Temporary entropy and configuration copies are explicitly cleared.
+Credentials are excluded from HTTP. Checked STA/AP netif creation releases
+partial interfaces, Wi-Fi driver and the owned event loop on failure. The
+SDK TCP/IP stack stays initialized for this boot. A failed display may make
+the ephemeral AP password unavailable.
+
+Run `python3 passport/tests/run.py` for production startup, board, UI, BLE
+owner and bond-store tests with substituted SDK/BSP boundaries and the real
+shared input engine. AddressSanitizer and UndefinedBehaviorSanitizer cover
+network cleanup, render retry, secret clearing, event ordering, lock/wake,
+pairing admission, exact identity selection, subscriptions, stale work,
+release ordering, lease expiry, transport failure, bounded repeats, theme
+restore and NVS failure handling.
+The CCCD capacity regression compiles the pinned SDK functions from the
+dedicated SDK installed above; nine slots cover Service Changed, keyboard
+and mouse subscriptions for all three hosts.
+These substitutions do not simulate radio timing, controller privacy
+resolution, SDK flash atomicity, or host interoperability.
+
+Run `python3 passport/tests/render/run.py` after fetching the pinned LVGL
+with the target build. It uses CMake/Ninja (PATH or the dedicated tools above),
+the real production view and widgets, RGB565 software rendering, and SDK/BSP
+fixtures. PNG captures and contact sheets go to `.agent/local/passport-ui/render`.
+ASan/UBSan, visible-object bounds, fixed object count and unchanged-frame
+checks cover both palettes. These are actual LVGL renders, not photographs;
+the light palette especially still needs on-device display qualification.
+
+Hardware qualification still requires the actual display and three keys,
+pairing/reconnect and individual forget across reboots, subscription behavior
+on intended host OS versions, disconnect/release under congestion and power
+loss, free heap, largest block, task high-water marks, and Wi-Fi/BLE coexistence.
+There are no media services, OTA, web controller, STA credential workflow,
+or sound cues in this candidate.
