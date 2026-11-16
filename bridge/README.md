@@ -42,6 +42,26 @@ This command opens the selected serial port and is a separate device action. It 
 
 The `control` NVS partition is separate from existing Wi-Fi/bond storage. TLS material and trust use versioned checked banks. A failed write may already have applied and remains uncertain until verified/replaced. At-rest protection is reported from actual partition status; a private partition label is not encryption evidence. Existing devices without the approved partition table require a separately authorized migration. Nothing here performs that migration.
 
+### Control hotspot enrollment
+
+For Mosaico, add `--control-hotspot` to the `create` command above and keep
+the intended station hostname or IP in `--host`. The command generates a
+random hotspot DNS name for the browser and includes that name, the station
+identity and the fixed IP `192.168.4.1` in the certificate SANs. Enroll each
+package on one unit. The name is saved with the certificate and appears in
+the USB enrollment review. The hotspot advertises it through its local DNS.
+The command also writes `hotspot-client-profile.json` for native clients at
+`192.168.4.1`. Both native profiles use the same enrolled principal, port,
+certificate, fingerprint and TLS validation.
+
+If the installed leaf lacks the hotspot DNS or IP SAN, create a new package in a
+fresh private directory, reproduce the desired scopes and any policies, and
+use the same local USB enrollment and review workflow above. Trust the new
+certificate on the controllers, replace the native client profiles and
+review new browser pairings. Re-enrollment replaces the trust identity, its
+credentials and grants, and the hotspot browser name. Rebooting and switching
+the Wi-Fi mode preserve an installed identity and its hotspot name.
+
 ## MCP connection
 
 Configure an MCP stdio server with this interpreter, script, and public profile:
@@ -65,7 +85,7 @@ for ordered raw sensor observations.
 
 ## HTTP and media
 
-The station-only HTTPS server has no provisioning-AP route. OpenAPI is generated in [`api/openapi.json`](../api/openapi.json). GET `/api/v1/sessions/current` is an authenticated heartbeat; media operational liveness expires five seconds after authenticated client activity. `/api/v1/capture/grants` returns only the principal's enrolled grants. Clock status stays unknown after boot until a real SNTP callback and exposes unauthenticated SNTP quality separately.
+The enrolled HTTPS server serves station Wi-Fi or the persistent control hotspot. The recovery hotspot serves its own provisioning routes. OpenAPI is generated in [`api/openapi.json`](../api/openapi.json). GET `/api/v1/sessions/current` is an authenticated heartbeat; media operational liveness expires five seconds after authenticated client activity. `/api/v1/capture/grants` returns only the principal's enrolled grants. Clock status stays unknown after boot until a real SNTP callback and exposes unauthenticated SNTP quality separately.
 
 WSS `/api/v1/channel` requires authentication **before** upgrade. Enable `CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT`; without it WSS is unavailable. Native clients send their Bearer header. Browsers first send an empty `POST /api/v1/ws-ticket` with `Content-Type: application/json`, the secure session cookie, exact Origin and `X-CSRF-Token`. The returned 64-hex ticket is bound to that session, replaces its prior ticket, expires after 10 seconds and is consumed before upgrade. Pass subprotocols `esp32-control-v1` and `ticket.<ticket>`; never put it in a URL or log. Reusable CSRF values cannot authorize a WSS upgrade. Each opened channel has a new internal generation. Closing it revokes its input lease/queued input and exact live network media, including a producer with no queued PCM. The same logical HTTP session, independent management and file recording keep their own liveness and grants. A replacement channel requires a fresh input acquire; old callbacks or queued PCM cannot bind to it. Text frames carry the same command envelope, `{ "v": 1, "type": "heartbeat" }`, or `{ "v": 1, "resource": "/api/v1/state" }`. Fragmented/oversized frames are rejected. Send a heartbeat at least once per second while owning media.
 

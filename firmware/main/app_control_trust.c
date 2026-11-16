@@ -18,7 +18,8 @@
 #define BANK_HEADER 48U
 #define BANK_BYTES (BANK_HEADER + APP_CONTROL_TRUST_PACKAGE_BYTES)
 typedef struct {
-    char host[129], certificate[APP_CONTROL_TRUST_CERT_BYTES + 1],
+    char host[129], hotspot_name[APP_CONTROL_HOTSPOT_NAME_CAPACITY],
+        certificate[APP_CONTROL_TRUST_CERT_BYTES + 1],
         key[APP_CONTROL_TRUST_KEY_BYTES + 1];
     uint16_t port;
     cp_principal_t principals[CP_MAX_PRINCIPALS];
@@ -230,6 +231,31 @@ static bool parse_grant(const cj_document_t *d, uint16_t o, package_t *p)
     ++p->grant_count;
     return true;
 }
+static void control_hotspot_name(package_t *p, const mbedtls_x509_crt *leaf)
+{
+    static const uint8_t ap_ip[] = {192, 168, 4, 1};
+    bool ip_present = false, ambiguous = false;
+    for (const mbedtls_x509_sequence *san = &leaf->subject_alt_names; san; san = san->next) {
+        const uint8_t *name = san->buf.p;
+        if (san->buf.tag == (MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_X509_SAN_IP_ADDRESS) &&
+            san->buf.len == sizeof(ap_ip) && !memcmp(name, ap_ip, sizeof(ap_ip))) {
+            ip_present = true;
+        }
+        if (san->buf.tag != (MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_X509_SAN_DNS_NAME) ||
+            san->buf.len != APP_CONTROL_HOTSPOT_NAME_CAPACITY - 1 ||
+            memcmp(name, "m-", 2) || memcmp(name + 26, ".test", 5)) continue;
+        char digits[25] = {0};
+        uint8_t entropy[12];
+        memcpy(digits, name + 2, 24);
+        if (!decode(digits, entropy, sizeof(entropy))) continue;
+        if (strlen(p->host) == san->buf.len && !memcmp(name, p->host, san->buf.len)) continue;
+        if (p->hotspot_name[0] && memcmp(p->hotspot_name, name, san->buf.len)) ambiguous = true;
+        memcpy(p->hotspot_name, name, san->buf.len);
+        p->hotspot_name[san->buf.len] = '\0';
+    }
+    if (!ip_present || ambiguous) p->hotspot_name[0] = '\0';
+}
+
 static esp_err_t parse_package(const char *json, size_t length, package_t *p)
 {
     static const char *const keys[] = {"v",
@@ -426,6 +452,7 @@ static esp_err_t parse_package(const char *json, size_t length, package_t *p)
                 mbedtls_pk_parse_key(&key, (const unsigned char *)p->key, strlen(p->key) + 1, NULL,
                                      0) == 0 &&
                 mbedtls_pk_check_pair(&certificate.pk, &key) == 0;
+        if (valid) control_hotspot_name(p, &certificate);
         mbedtls_pk_free(&key);
         mbedtls_x509_crt_free(&certificate);
     }
@@ -665,6 +692,7 @@ esp_err_t app_control_trust_stage(const uint8_t token[32], const char *json, siz
                                          .capture_grant_count = (uint8_t)candidate->grant_count};
         strcpy(trust->review.digest, trust->view.candidate_digest);
         strcpy(trust->review.host, candidate->host);
+        strcpy(trust->review.hotspot_name, candidate->hotspot_name);
         trust->review.port = candidate->port;
         trust->review.clock_server_count = (uint8_t)candidate->clock_count;
         memcpy(trust->review.clock_servers, candidate->clocks, sizeof(candidate->clocks));
@@ -833,10 +861,12 @@ void app_control_trust_snapshot(app_control_trust_snapshot_t *out)
         close_locked();
     }
     *out = trust->view;
+    out->control_ap_compatible = out->known && out->present && !out->uncertain &&
+        trust->current.hotspot_name[0] != '\0';
     out->window_remaining_ms = out->import_window ? (uint32_t)(trust->until - now) : 0;
     portEXIT_CRITICAL(&trust_lock);
 }
-esp_err_t app_control_trust_start_server(const cp_callbacks_t *callbacks)
+esp_err_t app_control_trust_start_server(const cp_callbacks_t *callbacks, bool control_ap)
 {
     if (!trust || !callbacks) {
         return ESP_ERR_INVALID_STATE;
@@ -853,18 +883,22 @@ esp_err_t app_control_trust_start_server(const cp_callbacks_t *callbacks)
     }
     portEXIT_CRITICAL(&trust_lock);
     esp_err_t error = ESP_ERR_INVALID_STATE;
-    if (valid) {
+    if (valid && control_ap && !p->hotspot_name[0]) {
+        error = ESP_ERR_NOT_SUPPORTED;
+    } else if (valid) {
         char host[140], origin[150];
+        const char *name = control_ap ? p->hotspot_name : p->host;
         if (p->port == 443) {
-            snprintf(host, sizeof(host), "%s", p->host);
+            snprintf(host, sizeof(host), "%s", name);
         } else {
-            snprintf(host, sizeof(host), "%s:%u", p->host, p->port);
+            snprintf(host, sizeof(host), "%s:%u", name, p->port);
         }
         snprintf(origin, sizeof(origin), "https://%s", host);
         app_control_server_config_t config = {.abi_version = APP_CONTROL_SERVER_ABI,
-                                              .station_ifkey = "WIFI_STA_DEF",
+                                              .interface_key = control_ap ? "WIFI_AP_DEF" : "WIFI_STA_DEF",
                                               .allowed_host = host,
                                               .browser_origin = origin,
+                                              .hotspot_name = control_ap ? p->hotspot_name : NULL,
                                               .certificate_pem = (const uint8_t *)p->certificate,
                                               .certificate_length = strlen(p->certificate) + 1,
                                               .private_key_pem = (const uint8_t *)p->key,

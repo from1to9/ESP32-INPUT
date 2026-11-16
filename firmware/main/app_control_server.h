@@ -5,12 +5,14 @@
 #include "control_protocol.h"
 
 #define APP_CONTROL_SERVER_ABI 1U
+#define APP_CONTROL_HOTSPOT_NAME_CAPACITY 32U
 
 typedef struct {
     uint32_t abi_version;
-    const char *station_ifkey;  /* e.g. WIFI_STA_DEF; never provisioning AP. */
+    const char *interface_key;  /* WIFI_STA_DEF or the persistent control AP's WIFI_AP_DEF. */
     const char *allowed_host;   /* Exact Host, including non-default port. */
     const char *browser_origin; /* Exact HTTPS origin; no wildcard/null origin. */
+    const char *hotspot_name;   /* AP only. DNS SAN and exclusive browser host. */
     const uint8_t *certificate_pem;
     size_t certificate_length;
     const uint8_t *private_key_pem;

@@ -2,6 +2,7 @@
 """Exercise real companion code with substituted Keychain/HTTP/serial boundaries."""
 import asyncio
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 import stat
@@ -290,6 +291,7 @@ class CompanionTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE((destination / "device-package.json").stat().st_mode), 0o600)
             self.assertFalse((destination / "client-secret-backup.json").exists())
+            self.assertFalse((destination / "hotspot-client-profile.json").exists())
             certificate = x509.load_pem_x509_certificate(profile["certificate_pem"].encode())
             self.assertEqual(certificate.fingerprint(hashes.SHA256()).hex(), profile["certificate_der_sha256"])
             PinnedHTTPS(profile)  # Constructs real SSL verification with explicit CA/hostname/pin.
@@ -310,6 +312,29 @@ class CompanionTests(unittest.TestCase):
             with self.assertRaises(BridgeError): session.invoke("wifi_join", {"context": {}, "args": {"password": "do-not-echo"}})
             self.assertEqual(len(http.commands), 2)
             session.close()
+
+    def test_control_hotspot_enrollment(self):
+        with tempfile.TemporaryDirectory(prefix="control-hotspot-") as directory:
+            destination = Path(directory) / "owner"
+            keychain = FakeKeychain()
+            first = create_package(destination, "device.test", 8443, ["view"], [], [], keychain,
+                                   control_hotspot=True)
+            station = json.loads((destination / "client-profile.json").read_bytes())
+            hotspot = json.loads((destination / "hotspot-client-profile.json").read_bytes())
+            self.assertEqual(hotspot, dict(station, host="192.168.4.1"))
+            self.assertEqual(len(keychain.values), 1)
+            certificate = x509.load_pem_x509_certificate(hotspot["certificate_pem"].encode())
+            names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            self.assertRegex(first["hotspot_name"], r"^m-[a-f0-9]{24}\.test$")
+            self.assertEqual(names.get_values_for_type(x509.DNSName), ["device.test", first["hotspot_name"]])
+            self.assertEqual(names.get_values_for_type(x509.IPAddress), [ipaddress.IPv4Address("192.168.4.1")])
+            self.assertTrue(PinnedHTTPS(hotspot).context.check_hostname)
+            second = create_package(Path(directory) / "other-unit", "device.test", 8443,
+                                    ["view"], [], [], keychain, control_hotspot=True)
+            self.assertNotEqual(first["hotspot_name"], second["hotspot_name"])
+            second_profile = json.loads((Path(directory) / "other-unit" / "client-profile.json").read_bytes())
+            second_certificate = x509.load_pem_x509_certificate(second_profile["certificate_pem"].encode())
+            self.assertNotEqual(certificate.subject, second_certificate.subject)
 
     def test_exact_decimal_schema(self):
         schema = next(tool["inputSchema"] for tool in TOOLS if tool["name"] == "config_stage")

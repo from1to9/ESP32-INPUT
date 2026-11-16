@@ -418,19 +418,22 @@ static void field(const char *json, const char *name, char *out, size_t size)
     const char *s = cj_string(d, cj_get(d, 0, name)); assert(s && strlen(s) < size);
     strcpy(out, s); free(d);
 }
-static void protocol_pairing_and_live_revocation(void)
+static void protocol_pairing_and_live_revocation(bool control_ap)
 {
     reset(); random_value = revoked_sessions = input_revocations = dispatch_count = 0;
+    const char *host = control_ap ? "m-0123456789abcdef01234567.test:8443" : "device.test";
+    const char *origin = control_ap ? "https://m-0123456789abcdef01234567.test:8443" : "https://device.test";
+    clock_known = !control_ap;
     cp_callbacks_t callbacks = {.random = random_source, .principal = principal_source,
         .input_authorized = input_authorized, .pairing = pairing, .available = available,
         .dispatch = dispatch, .safety = safety};
     cp_context_t *context; void *memory = calloc(1, cp_context_size()); assert(memory);
     assert(cp_initialize(memory, cp_context_size(), &callbacks, &context) == CP_OK);
-    assert(cp_http_configure(context, "device.test", "https://device.test") == CP_OK);
+    assert(cp_http_configure(context, host, origin) == CP_OK);
     cp_device_state_t state = {.management_generation = 1, .input_epoch = 2, .transport_generation = 3,
         .ui_revision = 4, .state_sequence = 5, .allowance_generation = 1, .input_ready = true};
     strcpy(state.target_id, "test-target"); strcpy(state.mode, "mouse"); cp_set_device_state(context, &state, clock_ms);
-    cp_http_security_t security = {.tls = true, .host = "device.test", .origin = "https://device.test"};
+    cp_http_security_t security = {.tls = true, .host = host, .origin = origin};
     cp_http_response_t *response = calloc(1, sizeof(*response)); assert(response);
     char client[33], secret[65], digest[65], body[2048];
     uint8_t bytes[32], id[16], hash[32]; memset(bytes, 0x34, 32); memset(id, 0x33, 16);
@@ -440,7 +443,13 @@ static void protocol_pairing_and_live_revocation(void)
     assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
     security.origin = "https://evil.test";
     assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
-    security.origin = "https://device.test";
+    security.origin = origin;
+    security.host = "192.168.4.1";
+    assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
+    security.host = host;
+    security.tls = false;
+    assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
+    security.tls = true;
     assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_OK && response->status == 202);
     assert(strstr(response->body, digest));
     snprintf(body, sizeof(body), "{\"client_id\":\"%s\",\"credential\":\"%s\"}", client, secret);
@@ -485,7 +494,9 @@ int main(void)
     suspended_expiry_survives_failed_edit_but_not_explicit_renewal();
     finite_expiry_is_terminal_and_renewal_is_explicit(); expiry_write_failures_keep_this_boot_closed();
     concurrent_expiry_is_not_lost_during_storage();
-    pairing_duration_and_storage(); races_expiry_and_faults(); runtime_update_and_capture(); protocol_pairing_and_live_revocation();
+    pairing_duration_and_storage(); races_expiry_and_faults(); runtime_update_and_capture();
+    protocol_pairing_and_live_revocation(false);
+    protocol_pairing_and_live_revocation(true);
     heap_caps_free(access_state); access_state = NULL; assert(!test_heap_live && !critical);
     puts("PASS: production credential pairing, durable duration/revoke, coherent snapshots, native policy migration and runtime update/capture authority");
     return 0;

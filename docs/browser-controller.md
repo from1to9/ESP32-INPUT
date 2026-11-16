@@ -1,15 +1,18 @@
 # Mosaico browser input
 
-The station HTTPS listener serves a same-origin controller at `/`, with only
+The enrolled HTTPS listener serves a same-origin controller at `/`, with
 `/controller.css` and `/controller.js` as static dependencies. It works with a
-desktop mouse and a phone touchscreen. The provisioning hotspot is not a
-controller. The listener still requires its actual installed TLS identity and
-station connection; this page does not create an insecure HTTP fallback.
+desktop mouse and a phone touchscreen over station Wi-Fi or the locally
+selected [control hotspot](wifi-provisioning.md#persistent-control-hotspot).
 
 ## Connect and take control
 
-1. Open the station HTTPS address shown by Mosaico. The browser must trust the
-   installed certificate. Use the same hostname and port on later visits.
+1. Open the HTTPS address shown in Mosaico **Settings → Wi-Fi → Web/API**.
+   For the control hotspot, join the displayed Wi-Fi network and use its
+   DHCP-provided DNS. Open the full device-specific name and port from
+   Web/API, such as `https://m-0123456789abcdef01234567.test`. Trust the enrolled
+   certificate. An old certificate needs [USB re-enrollment](../bridge/README.md#control-hotspot-enrollment)
+   if it lacks the hotspot name.
 2. Name the browser and choose **Pair this browser**. Web Crypto creates an
    independent random client ID and credential, saved only in that origin's
    browser storage. Compare the complete SHA-256 fingerprint with the proposal
@@ -28,6 +31,13 @@ independently. A new login for the same browser identity replaces its own older
 browser session; use one controlling tab at a time. **Forget identity in this
 browser** removes that local credential and closes the current session. Revoke
 its saved permission separately on Mosaico when desired.
+
+The station and hotspot URLs are separate origins and need separate browser
+pairing. Each independently enrolled unit has its own hotspot browser origin.
+After a mode change, sign in on the selected network and
+take control again. When the device has no usable time, an offline browser
+needs a valid permanent grant. Local approval must explicitly select that
+duration for a new offline pairing.
 
 ## Control an iPad or iPhone
 

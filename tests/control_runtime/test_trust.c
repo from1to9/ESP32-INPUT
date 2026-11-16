@@ -95,9 +95,24 @@ const esp_partition_t *esp_partition_find_first(unsigned type, unsigned subtype,
 }
 void mbedtls_x509_crt_init(mbedtls_x509_crt *p) { memset(p, 0, sizeof(*p)); }
 void mbedtls_x509_crt_free(mbedtls_x509_crt *p) { (void)p; }
+static bool ap_ip_san, ap_dns_san;
+#define TEST_HOTSPOT_NAME "m-0123456789abcdef01234567.test"
 int mbedtls_x509_crt_parse(mbedtls_x509_crt *p, const unsigned char *s, size_t n)
 {
-    (void)p;
+    if (ap_ip_san) {
+        static unsigned char address[] = {192, 168, 4, 1};
+        p->subject_alt_names.buf.tag = MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_X509_SAN_IP_ADDRESS;
+        p->subject_alt_names.buf.len = sizeof(address);
+        p->subject_alt_names.buf.p = address;
+    }
+    if (ap_dns_san) {
+        static unsigned char name[] = TEST_HOTSPOT_NAME;
+        static mbedtls_x509_sequence dns;
+        dns.buf.tag = MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_X509_SAN_DNS_NAME;
+        dns.buf.len = sizeof(name) - 1;
+        dns.buf.p = name;
+        p->subject_alt_names.next = &dns;
+    }
     return n == 5 && !memcmp(s, "CERT", 5) ? 0 : -1;
 }
 void mbedtls_pk_init(mbedtls_pk_context *p) { memset(p, 0, sizeof(*p)); }
@@ -121,8 +136,16 @@ void app_control_server_snapshot(app_control_server_snapshot_t *out)
 }
 esp_err_t app_control_server_start(const app_control_server_config_t *config)
 {
-    assert(config->port == 443 && !strcmp(config->allowed_host, "device.test") &&
-           config->principal_count == 1);
+    assert(config->port == 443 && config->principal_count == 1);
+    if (!strcmp(config->interface_key, "WIFI_AP_DEF")) {
+        assert(!strcmp(config->hotspot_name, TEST_HOTSPOT_NAME) &&
+               !strcmp(config->allowed_host, TEST_HOTSPOT_NAME) &&
+               !strcmp(config->browser_origin, "https://" TEST_HOTSPOT_NAME));
+    } else {
+        assert(!strcmp(config->interface_key, "WIFI_STA_DEF") &&
+               !strcmp(config->allowed_host, "device.test") &&
+               !strcmp(config->browser_origin, "https://device.test"));
+    }
     ++starts;
     return ESP_OK;
 }
@@ -249,7 +272,15 @@ int main(void)
     assert(app_control_trust_import(token, package, strlen(package)) == ESP_ERR_INVALID_STATE &&
            writes == 1);
     cp_callbacks_t callbacks = {0};
-    assert(app_control_trust_start_server(&callbacks) == ESP_OK && starts == 1);
+    assert(app_control_trust_start_server(&callbacks, false) == ESP_OK && starts == 1);
+    assert(app_control_trust_start_server(&callbacks, true) == ESP_ERR_NOT_SUPPORTED && starts == 1);
+    ap_ip_san = true;
+    assert(app_control_trust_verify() == ESP_OK);
+    assert(app_control_trust_start_server(&callbacks, true) == ESP_ERR_NOT_SUPPORTED && starts == 1);
+    ap_dns_san = true;
+    assert(app_control_trust_verify() == ESP_OK);
+    assert(app_control_trust_start_server(&callbacks, true) == ESP_OK && starts == 2);
+    ap_ip_san = ap_dns_san = false;
     uint8_t principal[16];
     memset(principal, 0x11, 16);
     cp_capture_grant_t grants[8];

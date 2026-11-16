@@ -287,6 +287,15 @@ Recovery hotspot option. Its passcode and local browser URL appear only on the
 setup page; leaving, Stop, expiry or locking closes it. Forget still requires
 local confirmation. Failed setup never enables remote-control/MCP authority.
 
+**Use control hotspot** selects a persistent WPA2 control network. On the
+Wi-Fi page, show its actual readiness, network name and local password.
+**Web/API** shows the device-specific HTTPS name after DHCP, DNS and the
+enrolled listener are ready. A certificate that lacks the hotspot SANs
+prompts for USB re-enrollment. While a switch is pending, show that remote
+input and sessions are closing. **Return to Wi-Fi network** resumes the last
+confirmed station configuration. A stored mode that could not be read back
+shows **Verify hotspot mode** for explicit read-only reconciliation.
+
 Settings > Device name edits the shared base and previews the full mouse/keyboard and audio search names. The Bluetooth device options link opens the same settings page.
 Name and Wi-Fi password entry share a local-only editor with separate bounded
 buffers and purpose/session identity. Passwords are masked, never prefilled and
@@ -298,7 +307,7 @@ See [Wi-Fi provisioning](wifi-provisioning.md) for service limits and states.
 
 ### Browser controller permissions
 
-In Settings → Wi-Fi → Web/API, open the displayed station HTTPS address on
+In Settings → Wi-Fi → Web/API, open the displayed HTTPS address on
 the controller and request pairing. On the device, open **Wi-Fi controllers**,
 choose the request and compare its full credential fingerprint with the browser.
 A new approval starts with Keyboard & mouse for six hours. Management and

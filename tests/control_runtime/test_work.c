@@ -253,6 +253,22 @@ int main(void)
                published_authority.observation.runtime_status == (int32_t)statuses[i] &&
                published_authority.observation.observed_ms == clock_ms);
     }
+    char reason[CP_REASON_CAPACITY] = {0};
+    native_state.state = APP_WIFI_IDLE;
+    assert(available(NULL, CP_OP_WIFI_SCAN_START, reason));
+    native_state.control_switch = 12;
+    assert(!available(NULL, CP_OP_WIFI_JOIN, reason) && !strcmp(reason, "wifi_mode_change_pending"));
+    native_state.control_switch = 0;
+    native_state.control_ap = true;
+    const cp_operation_id_t writes[] = {CP_OP_WIFI_SCAN_START, CP_OP_WIFI_JOIN, CP_OP_WIFI_SETUP_START,
+        CP_OP_WIFI_STORAGE_VERIFY, CP_OP_WIFI_PROFILE_JOIN, CP_OP_WIFI_PROFILE_SAVE, CP_OP_WIFI_PROFILES_REORDER};
+    for (size_t i = 0; i < sizeof(writes) / sizeof(writes[0]); ++i)
+        assert(!available(NULL, writes[i], reason) &&
+               !strcmp(reason, "station_wifi_actions_unavailable_in_control_hotspot"));
+    assert(available(NULL, CP_OP_WIFI_SCAN_RESULTS, reason) &&
+           available(NULL, CP_OP_WIFI_PROFILES_LIST, reason));
+    native_state.control_ap = false;
+    assert(available(NULL, CP_OP_WIFI_PROFILE_JOIN, reason));
     puts("PASS: actual queued runtime work rechecks session/scopes/lock/generation/deadline; "
          "input-only loss stays scoped and started effects retain truthful results");
     return 0;

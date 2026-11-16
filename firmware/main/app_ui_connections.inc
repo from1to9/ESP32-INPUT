@@ -239,6 +239,7 @@ static void render_connection_panel(void)
             label_text(s_connection_state, !api->known ? "Web/API status unavailable" : api->ready && api->tls ? "HTTPS service ready" :
                 api->commissioning_open ? "Local USB enrollment open" : "HTTPS service not ready");
             label_text(s_connection_detail, api->known && api->ready && api->tls && *api->url ? api->url :
+                s_view.wifi_control_ap ? "HTTPS is unavailable on the control hotspot." :
                 "No confirmed HTTPS address.\nConnect this device to your existing Wi-Fi.");
             if (api->remaining_known && api->commissioning_open)
                 label_format(s_connection_reason, "USB import open: %us left. Review the imported identity here.\n%.96s", api->remaining_seconds, api->reason);

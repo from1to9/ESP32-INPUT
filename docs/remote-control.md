@@ -1,9 +1,20 @@
 # LAN control API
 
-The ESP-Mosaico firmware exposes HTTPS and WebSocket control on its Wi-Fi
-station connection. The selected USB or Bluetooth HID host remains the input
-target. The device requires an enrolled identity and checks the caller's
-permissions at the operation boundary.
+The ESP-Mosaico firmware exposes HTTPS and WebSocket control over the
+station connection or the locally selected [control hotspot](wifi-provisioning.md#persistent-control-hotspot).
+The selected USB or Bluetooth HID host remains the input target. The device
+requires an enrolled identity and checks the caller's permissions at the
+operation boundary.
+
+Use the address shown in Web/API. In control hotspot mode the browser uses
+the exact enrolled hotspot DNS name and port for Host, Origin and TLS. The
+fixed IP `192.168.4.1` is reserved for native TLS clients using credential
+login and Bearer authorization. Browser assets, cookies, pairing and WS
+tickets are served at the device-specific name. A mode switch retires the previous sessions
+and input lease. Open a fresh session and acquire a new lease on the selected
+network. Time-limited authorization is unavailable after an offline cold
+boot until the device has usable time. Valid permanent grants follow their
+existing enrollment and permission rules.
 
 For a browser remote, direct HTTP commands or an AI-assisted input session,
 see [control examples](automation.md).

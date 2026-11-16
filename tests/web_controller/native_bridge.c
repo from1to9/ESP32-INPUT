@@ -15,10 +15,13 @@ typedef void *SemaphoreHandle_t;
 typedef struct {
     cp_context_t *protocol;
     SemaphoreHandle_t mutex;
+    char host[129], hotspot_ip_host[APP_WIFI_IP_CAPACITY + 6];
+    bool stop_requested;
     char body[CP_MAX_FRAME_BYTES + 1U];
     cp_http_response_t response;
 } server_t;
 static server_t web_server;
+static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static char web_host[129], web_origin[193];
 static unsigned web_random, web_completed;
 static size_t web_cancel_after;
@@ -182,7 +185,11 @@ static void web_reply(httpd_req_t *r)
 }
 int main(int argc, char **argv)
 {
-    assert(argc == 3); snprintf(web_host, sizeof(web_host), "%s", argv[1]); snprintf(web_origin, sizeof(web_origin), "%s", argv[2]);
+    assert(argc == 3 || argc == 4);
+    snprintf(web_host, sizeof(web_host), "%s", argv[1]);
+    snprintf(web_origin, sizeof(web_origin), "%s", argv[2]);
+    snprintf(web_server.host, sizeof(web_server.host), "%s", web_host);
+    if (argc == 4) snprintf(web_server.hotspot_ip_host, sizeof(web_server.hotspot_ip_host), "%s", argv[3]);
     setup(INPUT_MOUSE); remote_control_init(false); test_control_session_alive = true; assert(!s_remote_allowed);
     assert(app_control_access_init() == ESP_OK);
     void *storage = calloc(1, cp_context_size()); assert(storage);

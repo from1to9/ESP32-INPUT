@@ -125,7 +125,7 @@ static app_local_edit_purpose_t s_built_editor_purpose;
 static lv_obj_t *s_scan_rows[4], *s_scan_meta[4], *s_scan_state, *s_scan_empty;
 static lv_obj_t *s_scan_previous, *s_scan_next, *s_scan_page, *s_scan_refresh;
 static lv_obj_t *s_network_name, *s_network_detail, *s_network_note, *s_network_join[2];
-static lv_obj_t *s_wifi_find, *s_wifi_saved, *s_wifi_backend, *s_name_edit, *s_tap_click;
+static lv_obj_t *s_wifi_find, *s_wifi_saved, *s_wifi_backend, *s_wifi_control_ap, *s_name_edit, *s_tap_click;
 static lv_obj_t *s_motion_detail, *s_common_context, *s_common_modifiers, *s_common_keys[COMMON_KEY_BUTTONS];
 static lv_obj_t *s_motion_values[5], *s_motion_sliders[5], *s_motion_nudges[5][2];
 static lv_obj_t *s_motion_presets[2][3], *s_motion_invert[2], *s_motion_reference;
@@ -660,6 +660,7 @@ static void on_action(lv_event_t *event)
     if (action == APP_BLUETOOTH_PAGE) value += (int)s_view.bluetooth_page;
     if (action == APP_WIFI_SCAN_PAGE) value += (int)s_built_scan_page;
     if (binding->object == s_scan_refresh) value = s_view.wifi_scan.can_cancel ? 0 : 1;
+    if (action == APP_WIFI_CONTROL_AP) value = !s_view.wifi_control_ap;
     if (action == APP_SEND && s_view.sending) action = APP_STOP;
     if (action == APP_VOICE_START && s_view.voice_candidate) action = APP_VOICE_CONFIRM;
     bool accepted = submit_identity(action, value, 0, binding->wifi_generation, binding->wifi_record);
@@ -1376,7 +1377,8 @@ static void create_settings(lv_obj_t *settings, app_settings_page_t page)
         s_wifi_note = label(wifi, "", 0, 192, 448, MUTED);
         lv_obj_set_style_text_font(s_wifi_note, META_FONT, 0);
         lv_obj_set_height(s_wifi_note, 32);
-        s_wifi_find = button(wifi, "Find networks", 0, 232, 448, 44, APP_WIFI_SCAN, 1);
+        s_wifi_find = button(wifi, "Find networks", 0, 232, 220, 44, APP_WIFI_SCAN, 1);
+        s_wifi_control_ap = button(wifi, "Use control hotspot", 228, 232, 220, 44, APP_WIFI_CONTROL_AP, 0);
         s_wifi_setup = button(wifi, "Recovery hotspot", 0, 284, 220, 44, APP_WIFI_SETUP, 1);
         s_wifi_forget = button(wifi, "Forget network", 228, 284, 220, 44, APP_WIFI_FORGET_REQUEST, 0);
         return;
@@ -1552,7 +1554,7 @@ static void clear_panel_bindings(void)
     s_scan_state = s_scan_empty = s_scan_previous = s_scan_next = s_scan_page = s_scan_refresh = NULL;
     s_network_name = s_network_detail = s_network_note = NULL;
     s_names_base = s_names_input = s_names_audio = s_names_state = NULL;
-    s_wifi_find = s_wifi_saved = s_wifi_backend = s_name_edit = s_tap_click = NULL;
+    s_wifi_find = s_wifi_saved = s_wifi_backend = s_wifi_control_ap = s_name_edit = s_tap_click = NULL;
     s_motion_detail = s_common_context = s_common_modifiers = NULL;
     s_navigation = s_reset_grip = NULL;
     memset(s_motion_values, 0, sizeof(s_motion_values));
@@ -2066,7 +2068,8 @@ static void render_device(const app_view_t *view, const char *link)
         snprintf(battery, sizeof(battery), "%s %u%%%s", icon, view->battery_percent,
                  view->battery_state == APP_BATTERY_CHARGING ? " " LV_SYMBOL_CHARGE : "");
     } else snprintf(battery, sizeof(battery), LV_SYMBOL_BATTERY_EMPTY " --");
-    const char *wifi_status = view->wifi_state == APP_UI_WIFI_CONNECTED ? "connected" :
+    const char *wifi_status = view->wifi_control_ap ? (view->wifi_control_ap_ready ? "control hotspot" : "hotspot starting") :
+        view->wifi_state == APP_UI_WIFI_CONNECTED ? "connected" :
         view->wifi_state == APP_UI_WIFI_UNAVAILABLE ? "unavailable" :
         view->wifi_state == APP_UI_WIFI_ERROR ? "error" :
         view->wifi_state == APP_UI_WIFI_CONNECTING ? "connecting" :
@@ -2202,20 +2205,26 @@ static void render_device(const app_view_t *view, const char *link)
             view->bluetooth_name.save_state == APP_SAVE_VOLATILE ? "temporary name / not saved" : "save unconfirmed");
         foreground(s_save_status, view->bluetooth_name.uncertain || view->bluetooth_name.save_state == APP_SAVE_ERROR ? WARNING : MUTED, 0);
     }
-    const char *wifi = view->wifi_state == APP_UI_WIFI_CONNECTED ? "Connected" :
+    const char *wifi = view->wifi_control_ap ? (view->wifi_control_ap_ready ? "Control hotspot active" : "Control hotspot starting") :
+        view->wifi_state == APP_UI_WIFI_CONNECTED ? "Connected" :
         view->wifi_state == APP_UI_WIFI_CONNECTING ? "Connecting" :
         view->wifi_state == APP_UI_WIFI_OBTAINING_IP ? "Getting address" :
         view->wifi_state == APP_UI_WIFI_RETRYING ? "Reconnecting" :
         view->wifi_state == APP_UI_WIFI_ERROR ? "Connection error" :
         view->wifi_state == APP_UI_WIFI_DISCONNECTED ? "Disconnected" : "Unavailable";
-    snprintf(summary, sizeof(summary), "%s%s%s", wifi, *view->wifi_ssid ? " / " : "", view->wifi_ssid);
+    bool show_ssid = *view->wifi_ssid && (!view->wifi_control_ap || *view->wifi_control_ap_password);
+    snprintf(summary, sizeof(summary), "%s%s%s", wifi, show_ssid ? " / " : "", show_ssid ? view->wifi_ssid : "");
     label_text(s_wifi_summary, *view->wifi_message ? view->wifi_message : summary);
     foreground(s_wifi_summary, *view->wifi_message ? WARNING : MUTED, 0);
     label_text(s_wifi_state, wifi);
-    label_text(s_wifi_ssid, *view->wifi_ssid ? view->wifi_ssid : "No network");
+    label_text(s_wifi_ssid, show_ssid ? view->wifi_ssid : view->wifi_control_ap ? "" : "No network");
     label_text(s_wifi_note, *view->wifi_message ? view->wifi_message :
+               view->wifi_control_ap ? "Join the hotspot, then open Web/API." :
                "Join here; keep your computer on its Wi-Fi.");
-    if (view->wifi_rssi_valid && view->wifi_state == APP_UI_WIFI_CONNECTED)
+    if (view->wifi_control_ap)
+        snprintf(summary, sizeof(summary), "%s%s", *view->wifi_control_ap_password ? "Password " : "Hotspot password unavailable",
+                 view->wifi_control_ap_password);
+    else if (view->wifi_rssi_valid && view->wifi_state == APP_UI_WIFI_CONNECTED)
         snprintf(summary, sizeof(summary), "%d dBm / %s", view->wifi_rssi_dbm,
                  *view->wifi_ipv4 ? view->wifi_ipv4 : "IP unavailable");
     else if (view->wifi_state == APP_UI_WIFI_CONNECTED)
@@ -2230,15 +2239,20 @@ static void render_device(const app_view_t *view, const char *link)
         view->wifi_lan_service == APP_UI_LAN_SERVICE_STARTING ? "Web/API starting" :
         view->wifi_lan_service == APP_UI_LAN_SERVICE_DISABLED ? "Web/API disabled" :
         view->wifi_lan_service == APP_UI_LAN_SERVICE_ERROR ? "Web/API error" : "Web/API unavailable";
-    label_format(s_wifi_backend, "%s / %s%s%s", view->wifi_lan_ready ? "LAN connected" : "LAN not ready", backend,
+    label_format(s_wifi_backend, "%s / %s%s%s", view->wifi_control_ap ?
+        (view->wifi_control_ap_ready ? "Hotspot ready" : "Hotspot not ready") :
+        (view->wifi_lan_ready ? "LAN connected" : "LAN not ready"), backend,
         view->wifi_lan_service == APP_UI_LAN_SERVICE_READY && *view->wifi_lan_service_url ? "\n" :
         *view->wifi_lan_service_message ? "\n" : "",
         view->wifi_lan_service == APP_UI_LAN_SERVICE_READY ? view->wifi_lan_service_url : view->wifi_lan_service_message);
     enabled(s_wifi_find, view->wifi_scan.can_start && !view->wifi_operation_pending);
+    text(s_wifi_control_ap, view->wifi_control_storage_uncertain ? "Verify hotspot mode" :
+        view->wifi_control_ap ? "Return to Wi-Fi network" : "Use control hotspot");
+    enabled(s_wifi_control_ap, view->wifi_control_switch_available);
     text(s_wifi_setup, view->wifi_setup_active ? "View recovery hotspot" : view->wifi_operation_pending ? "Please wait..." : "Recovery hotspot");
-    enabled(s_wifi_setup, view->wifi_state != APP_UI_WIFI_UNAVAILABLE &&
+    enabled(s_wifi_setup, !view->wifi_control_ap && view->wifi_state != APP_UI_WIFI_UNAVAILABLE &&
             (!view->wifi_operation_pending || view->wifi_setup_active));
-    enabled(s_wifi_forget, view->wifi_state != APP_UI_WIFI_UNAVAILABLE &&
+    enabled(s_wifi_forget, !view->wifi_control_ap && view->wifi_state != APP_UI_WIFI_UNAVAILABLE &&
             (!view->wifi_stored_known || view->wifi_stored_present || view->wifi_storage_uncertain) && !view->wifi_operation_pending);
     if (view->brightness_available) label_format(s_brightness_text, "%u%%", view->brightness_percent);
     else label_text(s_brightness_text, "Unavailable");
@@ -2393,6 +2407,7 @@ void app_ui_render(const app_view_t *view)
     s_view.wifi_ssid[32] = '\0';
     s_view.wifi_ipv4[15] = '\0';
     s_view.wifi_message[64] = '\0';
+    s_view.wifi_control_ap_password[24] = '\0';
     s_view.wifi_setup_ssid[32] = '\0';
     s_view.wifi_setup_passcode[24] = '\0';
     s_view.wifi_setup_url[63] = '\0';
@@ -2437,6 +2452,10 @@ void app_ui_render(const app_view_t *view)
     for (unsigned i = 0; i < APP_UI_BOND_CAPACITY; ++i) {
         s_view.bluetooth_hosts[i].identity[23] = '\0';
         s_view.bluetooth_hosts[i].name[32] = '\0';
+    }
+    if (!s_view.wifi_control_ap_ready || s_view.overlay != APP_OVERLAY_SETTINGS ||
+        s_view.settings_page != APP_SETTINGS_WIFI || s_view.locked || s_view.screen_off) {
+        memset(s_view.wifi_control_ap_password, 0, sizeof(s_view.wifi_control_ap_password));
     }
     if (!s_view.wifi_setup_active || s_view.overlay != APP_OVERLAY_WIFI_SETUP ||
         s_view.locked || s_view.screen_off) {

@@ -21,6 +21,7 @@ def main():
     code+=section('static void cache_sessions(', 'static bool cached_authority(')
     code+=section('static void publish(', 'static bool random_source(')
     code+=section('static bool principal_source(', 'static bool available(')
+    code+=section('static const char *accepted_control_host(', '#include "app_control_server_media.inc"')
     code+=section('static esp_err_t initialize(', 'esp_err_t app_control_server_start(')
     code+=section('esp_err_t app_control_server_start(', 'esp_err_t app_control_server_stop(')
     code+=fixture.split('/* TESTS */')[1]
@@ -36,6 +37,7 @@ def main():
             binary=temporary/name
             command=[compiler,'-std=c11','-D_DEFAULT_SOURCE','-Wall','-Wextra','-Werror','-pedantic','-g','-fsanitize=address,undefined', '-fno-sanitize-recover=all','-fno-omit-frame-pointer','-I'+str(temporary),'-I'+str(SUITE/'stubs'),'-I'+str(ROOT/'firmware/main'),'-I'+str(ROOT/'components/control_protocol/include'),str(test)]
             command+=[str(ROOT/'components/control_protocol'/p) for p in ['control_protocol.c','control_json.c','control_registry.c','control_sha256.c']]
+            command+=[str(ROOT/'firmware/main/app_control_dns.c')]
             subprocess.run(command+defines+['-lm','-o',str(binary)],check=True)
             subprocess.run([str(binary)],check=True)
 

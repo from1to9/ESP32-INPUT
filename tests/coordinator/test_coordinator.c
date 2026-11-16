@@ -61,6 +61,8 @@ static device_settings_t test_saved_request;
 static esp_err_t test_storage_error;
 static unsigned test_storage_requests;
 static app_wifi_snapshot_t test_wifi;
+static bool test_wifi_listener_closed;
+static uint32_t test_wifi_input_ack;
 static app_wifi_scan_diagnostics_t test_scan_diagnostics;
 static app_control_runtime_snapshot_t test_control_runtime;
 static bool test_media_snapshot_unavailable;
@@ -507,6 +509,27 @@ void app_wifi_get_snapshot(app_wifi_snapshot_t *snapshot)
 {
     assert(snapshot);
     *snapshot = test_wifi;
+}
+esp_err_t app_wifi_select_control_ap(bool enabled, uint32_t *request)
+{
+    assert(request && enabled != test_wifi.control_ap && !test_wifi.control_switch);
+    *request = test_wifi.control_switch = 17;
+    return ESP_OK;
+}
+uint32_t app_wifi_control_switch_request(bool *release_requested)
+{
+    *release_requested = test_wifi_listener_closed;
+    return test_wifi.control_switch;
+}
+void app_wifi_control_input_released(uint32_t request)
+{
+    assert(test_wifi.control_switch == request && test_wifi_listener_closed);
+    test_wifi_input_ack = request;
+}
+esp_err_t app_wifi_get_control_ap_info(app_wifi_setup_info_t *info)
+{
+    memset(info, 0, sizeof(*info));
+    return ESP_ERR_INVALID_STATE;
 }
 void app_wifi_get_scan_diagnostics(app_wifi_scan_diagnostics_t *out) { *out = test_scan_diagnostics; }
 esp_err_t app_wifi_get_setup_info(app_wifi_setup_info_t *info)
@@ -1201,6 +1224,8 @@ static void setup(input_mode_t mode)
     test_storage_error = ESP_OK;
     test_storage_requests = 0;
     test_wifi = (app_wifi_snapshot_t){0};
+    s_wifi_runtime_ready = test_wifi_listener_closed = false;
+    s_wifi_input_switch.request = test_wifi_input_ack = 0;
     test_wifi_info = (app_wifi_setup_info_t){0};
     test_wifi_start_error = test_wifi_stop_error = test_wifi_forget_error = ESP_ERR_INVALID_STATE;
     test_wifi_info_error = ESP_ERR_INVALID_STATE;
@@ -3909,6 +3934,57 @@ static void final_release_admission_refreshes_transport_completion_evidence(void
         assert(!s_transport_switch_pending && s_input_transport == to);
         assert(test_usb_enable_count == 1 && test_storage_requests == 1);
     }
+}
+
+static void expect_wifi_switch_after_release(app_input_transport_t transport, bool fault)
+{
+    transport_setup(INPUT_KEYBOARD, transport);
+    settings_page(APP_SETTINGS_WIFI);
+    s_wifi_runtime_ready = true;
+    action(APP_WIFI_CONTROL_AP, 1);
+    assert(s_wifi_input_switch.request == 17 && s_wifi_input_switch.transport == transport &&
+           s_wifi_input_switch.generation == input_link_snapshot(&test_link).generation);
+    service_wifi_input_release();
+    assert(!test_wifi_input_ack);
+    test_wifi_listener_closed = true;
+    cancel_input();
+    const uint8_t zero[8] = {0};
+    expect_report(1, zero, 8);
+    if (transport == APP_INPUT_USB) test_usb_after_accept = mark_usb_admission_in_flight;
+    else test_ble_after_accept = mark_ble_admission_in_flight;
+    expect_report(2, zero, 4);
+    assert(!s_engine.state.release_pending);
+    service_wifi_input_release();
+    assert(!test_wifi_input_ack); /* The last report is still in the adapter. */
+    if (transport == APP_INPUT_USB) test_usb.congested = false;
+    else test_link.congested = false;
+    if (fault) {
+        if (transport == APP_INPUT_USB) {
+            ++test_usb.generation;
+            test_usb.failed = true;
+            test_usb.ready = false;
+        } else {
+            ++test_link.generation;
+            test_link.ready = false;
+        }
+        service_wifi_input_release();
+        assert(!test_wifi_input_ack); /* Faulted, still physically connected. */
+        if (transport == APP_INPUT_USB) test_usb.mounted = false;
+        else test_link.connected = test_link.connection_admitted = false;
+    }
+    service_wifi_input_release();
+    assert(test_wifi_input_ack == 17);
+    test_wifi.control_switch = 0;
+    service_wifi_input_release();
+    assert(!s_wifi_input_switch.request);
+}
+
+static void wifi_switch_waits_for_old_adapter_completion(void)
+{
+    expect_wifi_switch_after_release(APP_INPUT_BLUETOOTH, false);
+    expect_wifi_switch_after_release(APP_INPUT_BLUETOOTH, true);
+    expect_wifi_switch_after_release(APP_INPUT_USB, false);
+    expect_wifi_switch_after_release(APP_INPUT_USB, true);
 }
 
 static void ble_target_failure_after_final_usb_release_aborts_selection(void)
@@ -6844,6 +6920,7 @@ int main(int argc, char **argv)
     RUN(usb_selection_rearms_only_a_reset_cleared_selected_adapter);
     RUN(usb_reset_rearm_discards_stale_work_before_fresh_reports);
     RUN(final_release_admission_refreshes_transport_completion_evidence);
+    RUN(wifi_switch_waits_for_old_adapter_completion);
     RUN(ble_target_failure_after_final_usb_release_aborts_selection);
     RUN(pairing_disconnect_waits_for_fresh_final_release_completion);
     RUN(bluetooth_management_ignores_unrelated_usb_release);

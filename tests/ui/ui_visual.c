@@ -306,6 +306,61 @@ static bool contains_text(lv_obj_t *object, const char *value)
     return false;
 }
 
+static void wifi_control_hotspot_checks(void)
+{
+    app_view_t original = s_state;
+    s_state.overlay = APP_OVERLAY_SETTINGS;
+    s_state.settings_page = APP_SETTINGS_WIFI;
+    s_state.wifi_control_switch_available = true;
+    screenshot("wifi-control-hotspot-selection");
+    lv_area_t mode, back;
+    lv_obj_get_coords(control("Use control hotspot"), &mode);
+    lv_obj_get_coords(control("Back"), &back);
+    assert(mode.y2 < back.y1);
+    clear_intents();
+    tap_control("Use control hotspot");
+    assert(action_count(APP_WIFI_CONTROL_AP) == 1 && last_action(APP_WIFI_CONTROL_AP)->x == 1);
+
+    s_state.wifi_control_ap = s_state.wifi_control_ap_ready = true;
+    s_state.wifi_state = APP_UI_WIFI_DISCONNECTED;
+    s_state.wifi_rssi_valid = false;
+    s_state.wifi_lan_service = APP_UI_LAN_SERVICE_READY;
+    strcpy(s_state.wifi_lan_service_url, "https://m-0123456789abcdef01234567.test:8443");
+    strcpy(s_state.wifi_ssid, "Mosaico-Control-abc123");
+    strcpy(s_state.wifi_control_ap_password, "0123456789abcdef01234567");
+    screenshot("wifi-control-hotspot-active");
+    assert(has_visible_label(lv_screen_active(), s_state.wifi_ssid));
+    assert(has_visible_label(lv_screen_active(), s_state.wifi_control_ap_password));
+    assert(has_visible_label(lv_screen_active(), s_state.wifi_lan_service_url));
+    clear_intents();
+    tap_control("Recovery hotspot");
+    assert(!action_count(APP_WIFI_SETUP));
+    tap_control("Return to Wi-Fi network");
+    assert(action_count(APP_WIFI_CONTROL_AP) == 1 && last_action(APP_WIFI_CONTROL_AP)->x == 0);
+    s_state.wifi_control_switch_available = false;
+    s_state.wifi_lan_service = APP_UI_LAN_SERVICE_DISABLED;
+    s_state.wifi_lan_service_url[0] = '\0';
+    strcpy(s_state.wifi_message, "Closing remote control and releasing input.");
+    memset(s_state.wifi_control_ap_password, 0, sizeof(s_state.wifi_control_ap_password));
+    screenshot("wifi-control-hotspot-switching");
+    assert(!has_visible_label(lv_screen_active(), "No network"));
+    clear_intents();
+    tap_control("Return to Wi-Fi network");
+    assert(!action_count(APP_WIFI_CONTROL_AP));
+    s_state.wifi_control_storage_uncertain = true;
+    s_state.wifi_control_switch_available = true;
+    strcpy(s_state.wifi_message, "Saved hotspot mode uncertain. Verify it here.");
+    screenshot("wifi-control-hotspot-verify");
+    clear_intents();
+    tap_control("Verify hotspot mode");
+    assert(action_count(APP_WIFI_CONTROL_AP) == 1);
+    s_state.overlay = APP_OVERLAY_API_CONNECTION;
+    render();
+    assert(!has_visible_label(lv_screen_active(), "0123456789abcdef01234567"));
+    s_state = original;
+    render();
+}
+
 static void device_settings_checks(void)
 {
     app_view_t before_boot_check = s_state;
@@ -1548,6 +1603,7 @@ int main(int argc, char **argv)
             continue;
         }
         if (argc == 3 && !strcmp(argv[2], "controllers")) {
+            wifi_control_hotspot_checks();
             connection_checks();
             controller_permission_checks();
             continue;
@@ -1652,6 +1708,7 @@ int main(int argc, char **argv)
         grid_groups();
         geometry_checks();
         device_settings_checks();
+        wifi_control_hotspot_checks();
         about_metadata_checks();
         about_reset_checks();
         pairing_capacity_checks();

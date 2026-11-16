@@ -549,7 +549,8 @@ void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out)
 }
 static esp_err_t profile_admit(profile_action_t action, uint64_t expected)
 {
-    if (s_maintenance || !s_snapshot.initialized || s_snapshot.operation_pending || s_commands ||
+    if (s_maintenance || !s_snapshot.initialized || s_snapshot.control_ap || !s_radio_mode_ready ||
+        s_snapshot.operation_pending || s_commands ||
         s_snapshot.setup_active || s_snapshot.cleanup_pending || s_scan_wait_event ||
         s_scan.cleanup_pending || s_scan.state == APP_WIFI_SCAN_QUEUED ||
         expected != s_profiles.revision || s_profile_request_counter == UINT64_MAX) {

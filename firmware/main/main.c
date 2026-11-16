@@ -203,6 +203,13 @@ static uint64_t s_remote_allowance_generation = 1;
 static bool s_remote_allowed;
 static app_remote_input_t *s_remote_input;
 static app_command_bridge_t *s_command_bridge;
+static bool s_wifi_runtime_ready;
+static struct {
+    uint32_t request;
+    app_input_transport_t transport;
+    uint64_t generation;
+    bool had_link;
+} s_wifi_input_switch;
 static bool s_applying_remote_safety;
 static void remote_local_override(bool locked);
 static bool set_remote_allowance(bool allowed);
@@ -598,9 +605,10 @@ static bool bluetooth_release_pending(void)
     return s_input_transport == APP_INPUT_BLUETOOTH && s_engine.state.release_pending;
 }
 
-static input_link_t input_link_snapshot(const ble_hid_snapshot_t *bluetooth)
+static input_link_t input_transport_snapshot(app_input_transport_t transport,
+                                             const ble_hid_snapshot_t *bluetooth)
 {
-    if (s_input_transport == APP_INPUT_USB) {
+    if (transport == APP_INPUT_USB) {
         usb_hid_snapshot_t usb = usb_hid_snapshot();
         return (input_link_t){.kind = APP_INPUT_USB, .initialized = usb.initialized,
             .connected = usb.mounted, .ready = usb.ready, .congested = usb.congested,
@@ -612,6 +620,17 @@ static input_link_t input_link_snapshot(const ble_hid_snapshot_t *bluetooth)
         .congested = bluetooth->congested, .failed = bluetooth->failed,
         .suspended = bluetooth->suspended, .keyboard_leds = bluetooth->keyboard_leds,
         .generation = bluetooth->connection_admitted ? bluetooth->generation : 0};
+}
+
+static input_link_t input_link_snapshot(const ble_hid_snapshot_t *bluetooth)
+{
+    return input_transport_snapshot(s_input_transport, bluetooth);
+}
+
+static bool input_release_complete(const input_link_t *link)
+{
+    return !link->connected || (!link->congested && !link->suspended && !link->failed &&
+        (link->kind != s_input_transport || !s_engine.state.release_pending));
 }
 
 static void service_usb_selection(void)
@@ -1315,7 +1334,8 @@ static bool allowed_in_overlay(app_action_t action)
         return action == APP_PAIRING_REQUEST || action == APP_BLUETOOTH_PAGE ||
             action == APP_BLUETOOTH_TARGET_CONTROL;
     case APP_SETTINGS_WIFI:
-        return action == APP_WIFI_SETUP || action == APP_WIFI_FORGET_REQUEST || action == APP_WIFI_SCAN;
+        return action == APP_WIFI_SETUP || action == APP_WIFI_FORGET_REQUEST ||
+            action == APP_WIFI_SCAN || action == APP_WIFI_CONTROL_AP;
     default: return false;
     }
 }
@@ -1397,8 +1417,7 @@ static void service_transport_switch(void)
     /* A disconnected old host cannot accept releases; explicit selection is
      * allowed without claiming they arrived. Otherwise wait for BOTH report
      * admission and adapter completion, including its final zero report. */
-    if (old.connected && (s_engine.state.release_pending || old.congested ||
-                          old.suspended || old.failed)) return;
+    if (!input_release_complete(&old)) return;
     bool old_disconnected = !old.connected;
     hid_engine_set_link(&s_engine, false, false);
     usb_hid_set_enabled(s_requested_transport == APP_INPUT_USB);
@@ -2063,6 +2082,22 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
         }
         return;
     }
+    case APP_WIFI_CONTROL_AP:
+        if (s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_WIFI &&
+            (intent->x == 0 || intent->x == 1)) {
+            const ble_hid_snapshot_t current = ble_hid_snapshot();
+            const input_link_t old = input_link_snapshot(&current);
+            uint32_t request;
+            if (s_wifi_runtime_ready && !s_transport_switch_pending &&
+                app_wifi_select_control_ap(intent->x == 1, &request) == ESP_OK) {
+                s_wifi_input_switch.request = request;
+                s_wifi_input_switch.transport = old.kind;
+                s_wifi_input_switch.generation = old.generation;
+                s_wifi_input_switch.had_link = old.connected;
+                s_message = "Closing the control session and releasing input.";
+            } else s_message = "Wi-Fi mode change unavailable.";
+        }
+        return;
     case APP_WIFI_SETUP: {
         if ((s_overlay != APP_OVERLAY_SETTINGS || s_settings_page != APP_SETTINGS_WIFI) &&
             s_overlay != APP_OVERLAY_WIFI_SETUP) return;
@@ -2822,13 +2857,17 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
     view->wifi_scan.cleanup_pending = scan.cleanup_pending;
     view->wifi_scan.seconds_left = (scan.remaining_ms + 999U) / 1000U;
     view->wifi_scan.retry_seconds = (scan.retry_in_ms + 999U) / 1000U;
-    bool radio_idle = wifi->initialized && !wifi->operation_pending && !wifi->setup_active &&
+    bool radio_idle = wifi->initialized && !wifi->control_ap && !wifi->operation_pending && !wifi->setup_active &&
         !wifi->cleanup_pending && !scan.cleanup_pending && wifi->state != APP_WIFI_CONNECTING &&
         wifi->state != APP_WIFI_OBTAINING_IP;
     view->wifi_scan.can_start = radio_idle && scan.retry_in_ms == 0 &&
         scan.state != APP_WIFI_SCAN_QUEUED && scan.state != APP_WIFI_SCAN_RUNNING &&
         scan.state != APP_WIFI_SCAN_CANCELLING;
     view->wifi_scan.can_cancel = scan.state == APP_WIFI_SCAN_QUEUED || scan.state == APP_WIFI_SCAN_RUNNING;
+    view->wifi_control_switch_available = s_wifi_runtime_ready && !s_transport_switch_pending &&
+        wifi->initialized && !wifi->operation_pending && !wifi->setup_active &&
+        !wifi->cleanup_pending && !scan.cleanup_pending && !view->wifi_scan.can_cancel &&
+        scan.state != APP_WIFI_SCAN_CANCELLING;
     if (scan.error != ESP_OK || scan.cleanup_error != ESP_OK)
         (void)snprintf(view->wifi_scan.message, sizeof(view->wifi_scan.message), "Scan: %s",
             esp_err_to_name(scan.cleanup_error != ESP_OK ? scan.cleanup_error : scan.error));
@@ -3048,9 +3087,22 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
     view.wifi_saved_network = wifi.configured || wifi.stored_data_present ||
         wifi.storage_uncertain || (wifi.initialized && !wifi.stored_data_known);
     view.wifi_operation_pending = wifi.operation_pending || wifi.cleanup_pending;
+    view.wifi_control_ap = wifi.control_ap;
+    view.wifi_control_ap_ready = wifi.control_ap_ready;
+    view.wifi_control_storage_uncertain = wifi.control_storage_uncertain;
     (void)snprintf(view.wifi_ssid, sizeof(view.wifi_ssid), "%s", wifi.ssid);
     (void)snprintf(view.wifi_ipv4, sizeof(view.wifi_ipv4), "%s", wifi.ip);
-    if (wifi.cleanup_pending)
+    if (wifi.control_switch)
+        (void)snprintf(view.wifi_message, sizeof(view.wifi_message), "Closing remote control and releasing input.");
+    else if (wifi.control_storage_uncertain)
+        (void)snprintf(view.wifi_message, sizeof(view.wifi_message), "Saved hotspot mode uncertain. Verify it here.");
+    else if (wifi.control_ap_error != ESP_OK)
+        (void)snprintf(view.wifi_message, sizeof(view.wifi_message), "Hotspot network: %s", esp_err_to_name(wifi.control_ap_error));
+    else if (wifi.control_storage_error != ESP_OK)
+        (void)snprintf(view.wifi_message, sizeof(view.wifi_message), "Hotspot storage: %s", esp_err_to_name(wifi.control_storage_error));
+    else if (wifi.initialized && !s_wifi_runtime_ready)
+        (void)snprintf(view.wifi_message, sizeof(view.wifi_message), "Control service unavailable. Mode change disabled.");
+    else if (wifi.cleanup_pending)
         (void)snprintf(view.wifi_message, sizeof(view.wifi_message), "Setup closing; retrying shutdown.");
     else if (wifi.storage_uncertain)
         (void)snprintf(view.wifi_message, sizeof(view.wifi_message), "Saved network uncertain; set up again or forget.");
@@ -3064,6 +3116,19 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
         (void)snprintf(view.wifi_message, sizeof(view.wifi_message), "Retry in %u seconds", (unsigned)((wifi.retry_in_ms + 999U) / 1000U));
     view.wifi_setup_active = wifi.setup_active;
     view.wifi_setup_seconds_left = (wifi.setup_remaining_ms + 999U) / 1000U;
+    if (wifi.control_ap && s_overlay == APP_OVERLAY_SETTINGS && s_settings_page == APP_SETTINGS_WIFI) {
+        app_wifi_setup_info_t hotspot;
+        if (!s_engine.state.locked && !s_idle.asleep &&
+            app_wifi_get_control_ap_info(&hotspot) == ESP_OK) {
+            memcpy(view.wifi_ssid, hotspot.ssid, sizeof(view.wifi_ssid));
+            memcpy(view.wifi_control_ap_password, hotspot.password, sizeof(view.wifi_control_ap_password));
+            memcpy(view.wifi_ipv4, hotspot.ip, sizeof(view.wifi_ipv4));
+        } else {
+            view.wifi_ssid[0] = '\0';
+        }
+        volatile unsigned char *bytes = (volatile unsigned char *)&hotspot;
+        for (size_t i = 0; i < sizeof(hotspot); ++i) bytes[i] = 0;
+    }
     if (s_overlay == APP_OVERLAY_WIFI_SETUP && !s_engine.state.locked) {
         app_wifi_setup_info_t setup;
         if (app_wifi_get_setup_info(&setup) == ESP_OK) {

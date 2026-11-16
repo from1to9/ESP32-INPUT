@@ -27,7 +27,7 @@ def build(directory, protocol, log):
         shutil.copyfile(protocol / "firmware/main/app_control_access.h", directory / "app_control_access.h")
     source = (ROOT / "firmware/main/app_control_server.c").read_text()
     header = source[source.index("static bool header("):source.index('#include "app_control_server_media.inc"')]
-    handler = source[source.index("static esp_err_t handle_request("):source.index("static esp_err_t initialize(")]
+    handler = source[source.index("static esp_err_t handle_request("):source.index("static esp_err_t hotspot_dns_start(")]
     (directory / "web_http_adapter.inc").write_text(header + handler)
     subprocess.run([sys.executable, ROOT / "tools/build_identity.py", "--root", ROOT,
                     "--output", directory / "app_build_identity.h"], check=True)

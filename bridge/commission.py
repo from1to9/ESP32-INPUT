@@ -21,6 +21,7 @@ from secure_transport import BridgeError, MacKeychain, Keychain, strict_json
 
 ROOT = Path(__file__).resolve().parents[1]
 SCOPES = set(json.loads((ROOT / "api/control-v1.json").read_text())["scopes"])
+CONTROL_HOTSPOT_IP = ipaddress.IPv4Address("192.168.4.1")
 
 def write_private(path: Path, data: bytes) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -32,7 +33,8 @@ def write_private(path: Path, data: bytes) -> None:
 def create_package(output: Path, host: str, port: int, scopes: list[str],
                    time_servers: list[str], grants: list[dict], keychain: Keychain,
                    export_client_secret: bool = False, update_source: dict | None = None,
-                   update_policy: dict | None = None, replace_unknown_store: bool = False) -> dict:
+                   update_policy: dict | None = None, replace_unknown_store: bool = False,
+                   control_hotspot: bool = False) -> dict:
     output = output.expanduser().resolve()
     if output == ROOT or ROOT in output.parents:
         raise BridgeError("Private enrollment output must be outside this repository")
@@ -45,16 +47,23 @@ def create_package(output: Path, host: str, port: int, scopes: list[str],
     if len(grants) > 8:
         raise BridgeError("At most eight capture grants")
     key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
+    hotspot_name = "m-" + secrets.token_hex(12) + ".test" if control_hotspot else None
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hotspot_name or host)])
     try:
         san = x509.IPAddress(ipaddress.ip_address(host))
     except ValueError:
         san = x509.DNSName(host)
+    names = [san]
+    hotspot_san = x509.IPAddress(CONTROL_HOTSPOT_IP)
+    if hotspot_name:
+        names.append(x509.DNSName(hotspot_name))
+    if control_hotspot and san != hotspot_san:
+        names.append(hotspot_san)
     now = dt.datetime.now(dt.timezone.utc)
     certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
                    .public_key(key.public_key()).serial_number(x509.random_serial_number())
                    .not_valid_before(now - dt.timedelta(days=1)).not_valid_after(now + dt.timedelta(days=365))
-                   .add_extension(x509.SubjectAlternativeName([san]), critical=False)
+                   .add_extension(x509.SubjectAlternativeName(names), critical=False)
                    .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
                    .sign(key, hashes.SHA256()))
     pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
@@ -99,13 +108,20 @@ def create_package(output: Path, host: str, port: int, scopes: list[str],
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
     write_private(output / "device-package.json", encoded)
     write_private(output / "client-profile.json", json.dumps(profile, indent=2).encode() + b"\n")
+    if control_hotspot:
+        hotspot_profile = dict(profile, host=str(CONTROL_HOTSPOT_IP))
+        write_private(output / "hotspot-client-profile.json",
+                      json.dumps(hotspot_profile, indent=2).encode() + b"\n")
     if export_client_secret:
         write_private(output / "client-secret-backup.json", json.dumps({"principal_id": principal, "credential": secret}).encode())
     keychain.put(service, principal, secret)
     # This summary is safe to display; keys, credentials and candidate payload
     # are intentionally absent. The device Review displays its parsed summary.
-    return {"package_sha256": hashlib.sha256(encoded).hexdigest(), "certificate_pem_sha256": hashlib.sha256(pem.encode()).hexdigest(), "certificate_der_sha256": profile["certificate_der_sha256"],
-            "principal_id": principal, "capture_grants": [g["id"] for g in prepared]}
+    summary = {"package_sha256": hashlib.sha256(encoded).hexdigest(), "certificate_pem_sha256": hashlib.sha256(pem.encode()).hexdigest(), "certificate_der_sha256": profile["certificate_der_sha256"],
+               "principal_id": principal, "capture_grants": [g["id"] for g in prepared]}
+    if hotspot_name:
+        summary["hotspot_name"] = hotspot_name
+    return summary
 
 def validate_grant(g: dict, scopes: list[str]) -> None:
     required = {"id", "principal_id", "revision", "expires_unix_seconds", "source", "purpose", "maximum_bytes",
@@ -213,6 +229,8 @@ def main():
     create.add_argument("--update-source", type=Path)
     create.add_argument("--update-policy", type=Path)
     create.add_argument("--replace-unknown-store", action="store_true")
+    create.add_argument("--control-hotspot", action="store_true",
+                        help="Include the Mosaico control hotspot IP SAN and write its client profile")
     send = sub.add_parser("send")
     send.add_argument("--package", type=Path, required=True)
     send.add_argument("--port", required=True)
@@ -224,7 +242,7 @@ def main():
                                              grants, MacKeychain(), args.export_client_secret,
                                              strict_json(args.update_source.read_bytes()) if args.update_source else None,
                                              strict_json(args.update_policy.read_bytes()) if args.update_policy else None,
-                                             args.replace_unknown_store)))
+                                             args.replace_unknown_store, args.control_hotspot)))
         else:
             data = args.package.read_bytes()
             if not 0 < len(data) <= 8192:

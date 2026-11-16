@@ -7,6 +7,7 @@
 
 #define APP_WIFI_SSID_CAPACITY 33U
 #define APP_WIFI_IP_CAPACITY 16U
+#define APP_WIFI_CONTROL_AP_IP "192.168.4.1"
 #define APP_WIFI_SETUP_PASSWORD_CAPACITY 25U
 #define APP_WIFI_SETUP_TIMEOUT_MS 600000U
 #define APP_WIFI_PASSWORD_CAPACITY 64U
@@ -165,7 +166,11 @@ typedef struct {
     bool rssi_valid;
     /* Valid station IPv4, not Internet reachability or a running backend. */
     bool lan_ready;
-    /* Actual station HTTPS owner observation, independent from DHCP. */
+    bool control_ap, control_ap_ready;
+    uint32_t control_switch;
+    bool control_storage_uncertain;
+    esp_err_t control_storage_error, control_ap_error;
+    /* Actual HTTPS owner observation, independent from DHCP. */
     bool backend_available;
     esp_err_t backend_error;
     /* Presence is meaningful only while known. These may differ from configured.
@@ -205,10 +210,10 @@ typedef struct {
 } app_wifi_setup_info_t;
 
 /* Call once from startup, after shared nvs_flash_init(). Owns Wi-Fi and its
- * default STA netif; the fallback AP netif is created only on explicit setup.
- * Does not erase NVS, initialize Bluetooth or start AP.
+ * STA netif. The worker creates the AP netif on demand and restores a saved
+ * control hotspot selection. Recovery setup requires a fresh explicit request.
  * ESP_OK means the low-priority worker was created; inspect initialized and
- * last_error for actual SDK/storage initialization. Reconnects saved WPA2 credentials.
+ * last_error for actual SDK/storage initialization. STA reconnects saved WPA2 credentials.
  * Do not call from a Bluetooth, UI, interrupt or sensor callback. */
 esp_err_t app_wifi_init(void);
 
@@ -218,6 +223,16 @@ esp_err_t app_wifi_init(void);
  * Stop/forget take priority and invalidate old HTTP submissions. */
 esp_err_t app_wifi_start_setup(void);
 esp_err_t app_wifi_stop_setup(void);
+/* Local Settings intent. The Wi-Fi worker persists the selection after the
+ * runtime closes the listener and the input coordinator finishes releases. */
+/* When the durable mode is uncertain, a local selection requests read-only
+ * reconciliation through the same switch barrier. */
+esp_err_t app_wifi_select_control_ap(bool enabled, uint32_t *request);
+void app_wifi_control_listener_closed(uint32_t request);
+uint32_t app_wifi_control_switch_request(bool *release_requested);
+void app_wifi_control_input_released(uint32_t request);
+/* Local display only. As with setup info, never export or log the passcode. */
+esp_err_t app_wifi_get_control_ap_info(app_wifi_setup_info_t *info);
 /* Explicit recovery is allowed even when configured is false or stored presence
  * is unknown. The caller must not gate this operation on configured alone. */
 esp_err_t app_wifi_forget_network(void);

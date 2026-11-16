@@ -6,7 +6,8 @@ static bool remote_authorize(void *context, const cp_identity_t *identity, cp_op
 {
     (void)context;
     cp_principal_t current;
-    if (!identity || !app_control_access_principal(identity->principal_id, &current) || !current.enabled ||
+    if (s_wifi_input_switch.request || !identity ||
+        !app_control_access_principal(identity->principal_id, &current) || !current.enabled ||
         !(current.scopes & CP_SCOPE_INPUT_CONTROL) ||
         !app_control_runtime_session_alive(identity->session_id, identity->principal_id)) return false;
     return app_control_access_managed(identity->principal_id) ? app_control_access_input(identity) :
@@ -306,6 +307,30 @@ static bool set_remote_allowance(bool allowed)
     }
     return true;
 }
+static void service_wifi_input_release(void)
+{
+    if (!s_wifi_input_switch.request) return;
+    bool listener_closed;
+    uint32_t request = app_wifi_control_switch_request(&listener_closed);
+    if (request != s_wifi_input_switch.request) {
+        s_wifi_input_switch.request = 0;
+        return;
+    }
+    if (!listener_closed) return;
+    app_remote_input_revoke(s_remote_input, CP_SAFETY_SESSION_LOST, NULL, s_now_ms);
+    /* Sample after the final neutral report was queued. USB faults can advance
+     * the generation while mounted, and a failed BLE confirmation can drain
+     * the queue while making the old link unready. Neither proves release. */
+    const ble_hid_snapshot_t bluetooth = ble_hid_snapshot();
+    input_link_t old = input_transport_snapshot(s_wifi_input_switch.transport, &bluetooth);
+    bool disconnected = old.kind == APP_INPUT_USB ? !old.connected : !bluetooth.connected;
+    bool released = old.generation == s_wifi_input_switch.generation &&
+        old.ready && input_release_complete(&old);
+    if (s_engine.state.owner != INPUT_REMOTE &&
+        (!s_wifi_input_switch.had_link || disconnected || released))
+        app_wifi_control_input_released(request);
+}
+
 static void remote_control_service(void)
 {
     if (!s_command_bridge) return;
@@ -313,6 +338,7 @@ static void remote_control_service(void)
     remote_device_service();
     app_remote_media_service(s_remote_media, s_now_ms);
     app_command_bridge_service(s_command_bridge);
+    service_wifi_input_release();
     (void)remote_transport_admit();
     if (s_remote_transport_pending && (s_remote_transport_cancelled || s_remote_transport_effect || !s_transport_switch_pending)) {
         cp_result_t result = s_remote_transport_result;
@@ -352,6 +378,7 @@ static void remote_control_init(bool usb_available)
         .safety = app_command_bridge_safety, .read = app_command_bridge_read,
         .update_authority = remote_update_authority};
     esp_err_t error = app_control_runtime_init(&host);
+    s_wifi_runtime_ready = error == ESP_OK;
     if (error == ESP_OK && usb_available) error = app_control_runtime_attach_usb_stdio();
     if (error != ESP_OK) ESP_LOGW(TAG, "Remote control unavailable: %s", esp_err_to_name(error));
 }

@@ -25,7 +25,7 @@
  * at-rest protection is reported truthfully, not inferred from a private label. */
 typedef struct {
     bool initialized, known, present, uncertain, import_window;
-    bool at_rest_protected;
+    bool at_rest_protected, control_ap_compatible;
     uint64_t revision;
     esp_err_t error;
     uint32_t window_remaining_ms;
@@ -40,6 +40,7 @@ typedef struct {
 } app_control_principal_review_t;
 typedef struct {
     char digest[65], host[129];
+    char hotspot_name[APP_CONTROL_HOTSPOT_NAME_CAPACITY];
     uint16_t port;
     uint8_t clock_server_count;
     char clock_servers[APP_CLOCK_SERVER_CAPACITY][129];
@@ -70,9 +71,9 @@ esp_err_t app_control_trust_import(const uint8_t token[CP_SECRET_BYTES], const c
                                    size_t length);
 esp_err_t app_control_trust_verify(void);
 void app_control_trust_snapshot(app_control_trust_snapshot_t *);
-/* Loads/validates the protected store and starts the actual station TLS server
- * with coordinator callbacks. Unavailable/uncertain storage fails closed. */
-esp_err_t app_control_trust_start_server(const cp_callbacks_t *coordinator);
+/* Starts the enrolled TLS server on the selected control interface. A control
+ * AP requires the unit-specific DNS name and fixed IP SANs in the enrolled leaf. */
+esp_err_t app_control_trust_start_server(const cp_callbacks_t *coordinator, bool control_ap);
 size_t app_control_trust_grants(const uint8_t principal[CP_ID_BYTES],
                                 cp_capture_grant_t out[CP_MAX_CAPTURE_GRANTS]);
 bool app_control_trust_grant(const uint8_t id[CP_ID_BYTES], cp_capture_grant_t *);

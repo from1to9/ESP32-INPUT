@@ -130,6 +130,11 @@ static bool available(void *unused, cp_operation_id_t op, char reason[CP_REASON_
     if (owned(op)) {
         app_wifi_snapshot_t s;
         app_wifi_get_snapshot(&s);
+        if (s.control_ap || s.control_switch) {
+            strcpy(reason, s.control_switch ? "wifi_mode_change_pending" :
+                "station_wifi_actions_unavailable_in_control_hotspot");
+            return false;
+        }
         bool yes = supported_native(op) && s.initialized && s.state != APP_WIFI_UNAVAILABLE;
         if (!yes) {
             strcpy(reason, "wifi_unavailable");
@@ -1147,7 +1152,9 @@ static void worker(void *unused)
         }
         app_control_server_snapshot_t server;
         app_control_server_snapshot(&server);
-        app_wifi_set_backend_state(server.state == APP_CONTROL_READY && server.tls,
+        bool network_ready = !wifi.control_switch &&
+            (wifi.control_ap ? wifi.control_ap_ready : wifi.lan_ready);
+        app_wifi_set_backend_state(network_ready && server.state == APP_CONTROL_READY && server.tls,
                                    server.state == APP_CONTROL_READY ? ESP_OK
                                    : server.error != ESP_OK          ? server.error
                                    : trust_view.error != ESP_OK      ? trust_view.error
@@ -1159,7 +1166,12 @@ static void worker(void *unused)
         cp_device_state_t state = runtime->state;
         portEXIT_CRITICAL(&runtime_lock);
         app_control_access_service(state_known && !state.locked && !app_update_flash_busy());
-        if (trust_view.import_window || !wifi.lan_ready) {
+        if (wifi.control_switch) {
+            next_start = 0;
+            if (server.state == APP_CONTROL_STOPPED || server.state == APP_CONTROL_ERROR)
+                app_wifi_control_listener_closed(wifi.control_switch);
+        }
+        if (trust_view.import_window || !network_ready) {
             if (server.state == APP_CONTROL_READY || server.state == APP_CONTROL_STARTING) {
                 (void)app_control_server_stop();
             }
@@ -1177,11 +1189,11 @@ static void worker(void *unused)
                 runtime->approve_pending = true;
                 portEXIT_CRITICAL(&runtime_lock);
             }
-        } else if (wifi.lan_ready && trust_view.known && trust_view.present &&
+        } else if (network_ready && trust_view.known && trust_view.present &&
                    !trust_view.import_window &&
                    (server.state == APP_CONTROL_STOPPED || server.state == APP_CONTROL_ERROR) &&
                    now_ms() >= next_start) {
-            error = app_control_trust_start_server(&callbacks);
+            error = app_control_trust_start_server(&callbacks, wifi.control_ap);
             next_start = now_ms() + 5000;
         }
         if (state_known && server.state == APP_CONTROL_READY) {
@@ -1196,6 +1208,7 @@ static void worker(void *unused)
             runtime->package_length = 0;
             wipe(runtime->token, sizeof(runtime->token));
         }
+        app_control_server_snapshot(&server);
         app_control_runtime_snapshot_t view = {.initialized = true,
                                                .commissioning_open = trust_view.import_window,
                                                .usb_import_active = runtime->importing,

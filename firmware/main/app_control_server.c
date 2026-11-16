@@ -6,6 +6,7 @@
 #include "soc/soc_caps.h"
 #if SOC_WIFI_SUPPORTED && CONFIG_ESP_WIFI_ENABLED
 #include <net/if.h>
+#include <unistd.h>
 #include "esp_heap_caps.h"
 #include "esp_https_server.h"
 #include "esp_netif.h"
@@ -14,8 +15,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
+#include "app_control_dns.h"
 #include "app_network_task.h"
 #include "app_control_web.h"
+#include "app_wifi.h"
 
 #define CERT_BYTES 2048U
 #define KEY_BYTES 1024U
@@ -36,6 +40,10 @@ struct server {
     cp_principal_t principals[CP_MAX_PRINCIPALS];
     size_t principal_count;
     char ifkey[32], host[129], origin[193];
+    char hotspot_name[APP_CONTROL_HOTSPOT_NAME_CAPACITY];
+    char hotspot_ip_host[APP_WIFI_IP_CAPACITY + 6];
+    int dns_fd;
+    uint32_t dns_address;
     uint8_t certificate[CERT_BYTES + 1], private_key[KEY_BYTES + 1];
     size_t certificate_length, key_length;
     uint16_t port;
@@ -218,6 +226,18 @@ static esp_err_t error_response(httpd_req_t *request, const char *status, const 
     (void)httpd_resp_sendstr(request, error);
     return ESP_FAIL;
 }
+
+static const char *accepted_control_host(const server_t *s, const char *host,
+    const char *origin, const char *cookie, const char *csrf, bool native_request)
+{
+    if (!strcmp(host, s->host)) return host;
+    /* Browser assets, sessions and tickets live only at the unique DNS
+     * origin. The exact IP alias admits native login or Bearer traffic. */
+    if (s->hotspot_ip_host[0] && !strcmp(host, s->hotspot_ip_host) &&
+        native_request && !origin[0] && !cookie[0] && !csrf[0]) return s->host;
+    return NULL;
+}
+
 #include "app_control_server_media.inc"
 
 static esp_err_t handle_web(httpd_req_t *request)
@@ -278,6 +298,12 @@ static esp_err_t handle_request(httpd_req_t *request)
                                    .cookie = cookie[0] ? cookie : NULL,
                                    .csrf = csrf[0] ? csrf : NULL};
     const char *method = post ? "POST" : request->method == HTTP_DELETE ? "DELETE" : "GET";
+    security.host = accepted_control_host(s, host, origin, cookie, csrf,
+        authorization[0] || (post && !strcmp(request->uri, "/api/v1/sessions")));
+    if (!security.host) {
+        answer = error_response(request, "403 Forbidden", "{\"error\":\"forbidden\"}");
+        goto request_cleanup;
+    }
     if (request->method == HTTP_GET && recording_content_path(request->uri, NULL)) {
         answer = begin_recording_download(request, s, &security);
         goto request_cleanup;
@@ -285,6 +311,14 @@ static esp_err_t handle_request(httpd_req_t *request)
     if (xSemaphoreTake(s->mutex, pdMS_TO_TICKS(20)) != pdTRUE) {
         clear(s->body, sizeof(s->body));
         answer = error_response(request, "503 Service Unavailable", "{\"error\":\"busy\"}");
+        goto request_cleanup;
+    }
+    portENTER_CRITICAL(&s_lock);
+    bool stopping = s->stop_requested;
+    portEXIT_CRITICAL(&s_lock);
+    if (stopping) {
+        xSemaphoreGive(s->mutex);
+        answer = error_response(request, "503 Service Unavailable", "{\"error\":\"stopping\"}");
         goto request_cleanup;
     }
     drain_channel_closures(s);
@@ -328,14 +362,54 @@ request_cleanup:
     clear(&s->response, sizeof(s->response));
     return answer;
 }
+static esp_err_t hotspot_dns_start(server_t *s, uint32_t address)
+{
+    if (!s->hotspot_name[0]) return ESP_OK;
+    s->dns_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s->dns_fd < 0) return ESP_FAIL;
+    const struct sockaddr_in local = {.sin_family = AF_INET, .sin_port = htons(53),
+                                     .sin_addr.s_addr = address};
+    if (setsockopt(s->dns_fd, SOL_SOCKET, SO_BINDTODEVICE, &s->interface,
+                   sizeof(s->interface)) < 0 ||
+        bind(s->dns_fd, (const struct sockaddr *)&local, sizeof(local)) < 0) return ESP_FAIL;
+    s->dns_address = address;
+    return ESP_OK;
+}
+
+/* Keep the DNS packet buffer out of the authentication tick's stack frame. */
+static void __attribute__((noinline)) hotspot_dns_service(server_t *s)
+{
+    if (s->dns_fd < 0) return;
+    uint8_t packet[512 + 16];
+    for (unsigned i = 0; i < 4; ++i) {
+        struct sockaddr_in peer;
+        socklen_t peer_size = sizeof(peer);
+        ssize_t count = recvfrom(s->dns_fd, packet, 512, MSG_DONTWAIT,
+                                (struct sockaddr *)&peer, &peer_size);
+        if (count < 0) return;
+        size_t length = app_control_dns_reply(s->hotspot_name, s->dns_address, packet,
+                                              (size_t)count, sizeof(packet));
+        if (length)
+            (void)sendto(s->dns_fd, packet, length, MSG_DONTWAIT,
+                         (const struct sockaddr *)&peer, peer_size);
+    }
+}
+
+static void hotspot_dns_close(server_t *s)
+{
+    if (s->dns_fd < 0) return;
+    close(s->dns_fd);
+    s->dns_fd = -1;
+}
+
 static esp_err_t initialize(server_t *s)
 {
-    esp_netif_t *station = esp_netif_get_handle_from_ifkey(s->ifkey);
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey(s->ifkey);
     esp_netif_ip_info_t ip = {0};
-    if (!station || esp_netif_get_ip_info(station, &ip) != ESP_OK || !ip.ip.addr) {
+    if (!netif || esp_netif_get_ip_info(netif, &ip) != ESP_OK || !ip.ip.addr) {
         return ESP_ERR_INVALID_STATE;
     }
-    esp_err_t error = esp_netif_get_netif_impl_name(station, s->interface.ifr_name);
+    esp_err_t error = esp_netif_get_netif_impl_name(netif, s->interface.ifr_name);
     if (error != ESP_OK) {
         return error;
     }
@@ -372,6 +446,8 @@ static esp_err_t initialize(server_t *s)
             return ESP_ERR_INVALID_ARG;
         }
     }
+    error = hotspot_dns_start(s, ip.ip.addr);
+    if (error != ESP_OK) return error;
     httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
     config.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
     config.port_secure = s->port;
@@ -443,14 +519,17 @@ static void worker(void *argument)
     bool failed = error != ESP_OK;
     if (!failed) {
         portENTER_CRITICAL(&s_lock);
-        s_snapshot.state = APP_CONTROL_READY;
-        s_snapshot.tls = true;
+        s_snapshot.state = s->stop_requested ? APP_CONTROL_STOPPING : APP_CONTROL_READY;
+        s_snapshot.tls = !s->stop_requested;
         s_snapshot.error = ESP_OK;
         ++s_snapshot.revision;
-        snprintf(s_snapshot.address, sizeof(s_snapshot.address), "https://%s", s->host);
+        if (!s->stop_requested) snprintf(s_snapshot.address, sizeof(s_snapshot.address), "https://%s", s->host);
         portEXIT_CRITICAL(&s_lock);
     } else {
-        publish(APP_CONTROL_ERROR, error);
+        portENTER_CRITICAL(&s_lock);
+        s->stop_requested = true;
+        portEXIT_CRITICAL(&s_lock);
+        publish(APP_CONTROL_STOPPING, error);
     }
     for (;;) {
         portENTER_CRITICAL(&s_lock);
@@ -500,6 +579,7 @@ static void worker(void *argument)
             portEXIT_CRITICAL(&s_lock);
         }
         if (stop) {
+            hotspot_dns_close(s);
             portENTER_CRITICAL(&s_lock);
             bool transport_pending = s->download_active || s->media_pending_count != 0;
             portEXIT_CRITICAL(&s_lock);
@@ -541,21 +621,27 @@ static void worker(void *argument)
             app_network_task_delete_self();
             return;
         }
+        hotspot_dns_service(s);
         vTaskDelay(pdMS_TO_TICKS(has_completion ? 1 : 20));
     }
 }
 esp_err_t app_control_server_start(const app_control_server_config_t *config)
 {
-    if (!config || config->abi_version != APP_CONTROL_SERVER_ABI || !config->station_ifkey ||
+    if (!config || config->abi_version != APP_CONTROL_SERVER_ABI || !config->interface_key ||
         !config->allowed_host || !config->browser_origin || !config->certificate_pem ||
         !config->private_key_pem || !config->certificate_length ||
         config->certificate_length > CERT_BYTES || !config->private_key_length ||
         config->private_key_length > KEY_BYTES || config->principal_count > CP_MAX_PRINCIPALS ||
-        !config->principal_count || !config->principals || strlen(config->station_ifkey) >= 32 ||
-        strcmp(config->station_ifkey, "WIFI_STA_DEF") != 0 || strlen(config->allowed_host) >= 129 ||
+        !config->principal_count || !config->principals ||
+        (strcmp(config->interface_key, "WIFI_STA_DEF") != 0 &&
+         strcmp(config->interface_key, "WIFI_AP_DEF") != 0) || strlen(config->allowed_host) >= 129 ||
         strlen(config->browser_origin) >= 193) {
         return ESP_ERR_INVALID_ARG;
     }
+    bool ap = !strcmp(config->interface_key, "WIFI_AP_DEF");
+    if (ap ? (!config->hotspot_name || !config->hotspot_name[0] ||
+              strlen(config->hotspot_name) >= APP_CONTROL_HOTSPOT_NAME_CAPACITY) :
+             config->hotspot_name != NULL) return ESP_ERR_INVALID_ARG;
     portENTER_CRITICAL(&s_lock);
     bool busy = s_server || s_snapshot.state == APP_CONTROL_STARTING ||
                 s_snapshot.state == APP_CONTROL_STOPPING;
@@ -577,10 +663,17 @@ esp_err_t app_control_server_start(const app_control_server_config_t *config)
         publish(APP_CONTROL_ERROR, ESP_ERR_NO_MEM);
         return ESP_ERR_NO_MEM;
     }
-    strcpy(s->ifkey, config->station_ifkey);
+    strcpy(s->ifkey, config->interface_key);
     strcpy(s->host, config->allowed_host);
     strcpy(s->origin, config->browser_origin);
     s->port = config->port ? config->port : 443;
+    s->dns_fd = -1;
+    if (ap) {
+        strcpy(s->hotspot_name, config->hotspot_name);
+        if (s->port == 443) strcpy(s->hotspot_ip_host, APP_WIFI_CONTROL_AP_IP);
+        else snprintf(s->hotspot_ip_host, sizeof(s->hotspot_ip_host),
+                      APP_WIFI_CONTROL_AP_IP ":%u", s->port);
+    }
     s->callbacks = config->coordinator;
     memcpy(s->certificate, config->certificate_pem, config->certificate_length);
     s->certificate_length =
@@ -611,6 +704,8 @@ esp_err_t app_control_server_stop(void)
     if (s_server) {
         s_server->stop_requested = true;
         s_snapshot.state = APP_CONTROL_STOPPING;
+        s_snapshot.tls = false;
+        s_snapshot.address[0] = 0;
         ++s_snapshot.revision;
     } else if (s_snapshot.state == APP_CONTROL_STARTING) {
         error = ESP_ERR_INVALID_STATE;

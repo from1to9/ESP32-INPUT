@@ -78,7 +78,14 @@ typedef struct {unsigned type,subtype;uint32_t address,size;bool encrypted;} esp
 const esp_partition_t *esp_partition_find_first(unsigned,unsigned,const char *);
 esp_err_t esp_partition_read(const esp_partition_t *,size_t,void *,size_t);
 typedef struct {unsigned marker;} mbedtls_pk_context;
-typedef struct {mbedtls_pk_context pk;} mbedtls_x509_crt;
+#define MBEDTLS_ASN1_CONTEXT_SPECIFIC 0x80
+#define MBEDTLS_X509_SAN_IP_ADDRESS 7
+#define MBEDTLS_X509_SAN_DNS_NAME 2
+typedef struct test_x509_name {
+    struct { int tag; size_t len; unsigned char *p; } buf;
+    struct test_x509_name *next;
+} mbedtls_x509_sequence;
+typedef struct {mbedtls_pk_context pk; mbedtls_x509_sequence subject_alt_names;} mbedtls_x509_crt;
 void mbedtls_x509_crt_init(mbedtls_x509_crt *);
 void mbedtls_x509_crt_free(mbedtls_x509_crt *);
 int mbedtls_x509_crt_parse(mbedtls_x509_crt *,const unsigned char *,size_t);

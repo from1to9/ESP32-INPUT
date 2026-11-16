@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-/* Included by the station HTTPS owner. Audio/store calls below only copy into
+/* Included by the enrolled HTTPS owner. Audio/store calls below only copy into
  * the existing media worker's bounded mailbox; this task never reads flash. */
 #include "app_remote_media_runtime_port.h"
 #include "control_media.h"
@@ -424,6 +424,9 @@ static esp_err_t websocket_authenticate(httpd_req_t *request)
                  header(request, "Authorization", auth, sizeof(auth), false) &&
                  header(request, "Cookie", cookie, sizeof(cookie), false) &&
                  header(request, "Sec-WebSocket-Protocol", protocol, sizeof(protocol), false);
+    const char *request_host = valid ?
+        accepted_control_host(s, host, origin, cookie, "", auth[0]) : NULL;
+    valid = request_host != NULL;
     if (valid && origin[0]) {
         static const char browser_protocol[] = "esp32-control-v1, ticket.";
         const char *value = protocol + sizeof(browser_protocol) - 1;
@@ -444,7 +447,7 @@ static esp_err_t websocket_authenticate(httpd_req_t *request)
     if (valid && xSemaphoreTake(s->mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         drain_channel_closures(s);
         cp_http_security_t security = {.tls = true,
-                                       .host = host,
+                                       .host = request_host,
                                        .origin = origin[0] ? origin : NULL,
                                        .authorization = auth[0] ? auth : NULL,
                                        .cookie = cookie[0] ? cookie : NULL};

@@ -104,9 +104,12 @@ types, units and apply/save semantics.
   Mouse & Keyboard and Audio have separate records and readiness. New pairing
   requires a bounded window. Disconnect retains the bond. Forget acts on the
   exact selected record where supported. [Peer behavior](bluetooth-peer-snapshots.md)
-- Wi-Fi joins an existing station network. The setup hotspot is a bounded
-  recovery option. Keep Wi-Fi credentials inside the local editor and network
-  owner. Station connectivity alone grants no LAN access. [Wi-Fi setup](wifi-provisioning.md)
+- Wi-Fi joins an existing station network by default. The setup hotspot is a
+  bounded recovery option. The persistent control hotspot is a separate local
+  choice that survives reboot and uses the enrolled HTTPS/WSS service. A
+  manual mode switch closes the old sessions and releases remote input before
+  changing interfaces. A time-limited grant requires a usable clock. Network
+  connectivity alone grants no control access. [Wi-Fi setup](wifi-provisioning.md)
 - Local UI, HTTPS/WSS and MCP share typed semantics and owner validation. LAN
   clients require scoped authorization. Local lock, takeover and release keep
   priority over scans, reconnects and transfers. [LAN API](remote-control.md)

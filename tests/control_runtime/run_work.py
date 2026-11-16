@@ -20,6 +20,7 @@ def main():
     code += section('#define INBOX_CAPACITY', 'static uint64_t now_ms')
     code += fixture.split('/* BOUNDARIES */')[1].split('/* PRODUCTION */')[0]
     code += section('static void wipe(', 'static bool random_source(')
+    code += section('static bool available(', 'static cp_error_t submit(')
     code += section('static cp_error_t submit(', 'static void hex(')
     code += section('static cp_error_t queued_authority(', 'static void usb_reply(')
     code += section('esp_err_t app_control_runtime_init(', 'esp_err_t app_control_runtime_publish_state(')

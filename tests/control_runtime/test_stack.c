@@ -7,9 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <net/if.h>
+#include <arpa/inet.h>
 #include "server_test_sdk.h"
 #include "../../firmware/main/app_control_server.h"
 #include "../../firmware/main/app_network_task.h"
+#include "../../firmware/main/app_control_dns.h"
+#include "../../firmware/main/app_wifi.h"
 #include "weak_heap.h"
 typedef struct {
     unsigned marker;
@@ -51,6 +54,7 @@ typedef struct {
 #define HTTP_GET 0
 #define HTTP_POST 1
 #define HTTP_DELETE 2
+#define TEST_HOTSPOT_NAME "m-0123456789abcdef01234567.test"
 /* TYPES */
 /* PORTS */
 static portMUX_TYPE s_lock;
@@ -60,7 +64,8 @@ static cp_session_view_t s_sessions[CP_MAX_SESSIONS];
 static size_t s_session_count;
 static unsigned critical, creates, caps_creates, legacy_creates, caps_deletes, legacy_deletes;
 static unsigned live, cleared, http_starts, http_stops, mutex_deletes, delays;
-static bool fail_create, fail_listen, fail_stop_once;
+static bool fail_create, fail_listen, fail_stop_once, fail_dns, control_ap;
+static unsigned dns_starts, dns_closes;
 static TaskFunction_t task_entry;
 static void *task_argument;
 static jmp_buf exited;
@@ -167,13 +172,13 @@ void vTaskDelay(TickType_t delay)
 static esp_netif_t *esp_netif_get_handle_from_ifkey(const char *key)
 {
     static esp_netif_t station;
-    assert(!strcmp(key, "WIFI_STA_DEF"));
+    assert(!strcmp(key, control_ap ? "WIFI_AP_DEF" : "WIFI_STA_DEF"));
     return &station;
 }
 static esp_err_t esp_netif_get_netif_impl_name(esp_netif_t *station, char *name)
 {
     assert(station);
-    strcpy(name, "st0");
+    strcpy(name, control_ap ? "ap0" : "st0");
     return ESP_OK;
 }
 static esp_err_t esp_netif_get_ip_info(esp_netif_t *station, esp_netif_ip_info_t *ip)
@@ -193,6 +198,7 @@ static esp_err_t httpd_ssl_start(httpd_handle_t *listener, httpd_ssl_config_t *c
 {
     assert(config->httpd.stack_size == 12288 && config->httpd.task_caps == APP_NETWORK_STACK_CAPS);
     assert(config->httpd.max_req_hdr_len == 3072);
+    assert(!strcmp(config->httpd.if_name->ifr_name, control_ap ? "ap0" : "st0"));
     assert(config->httpd.max_open_sockets == 4 &&
            config->transport_mode == HTTPD_SSL_TRANSPORT_SECURE);
     assert(config->servercert_len && config->prvtkey_len);
@@ -245,6 +251,25 @@ static esp_err_t websocket_control(httpd_req_t *request, httpd_ws_frame_t *frame
     return ESP_FAIL;
 }
 static void drain_channel_closures(server_t *server) { assert(!server->channel_closure_count); }
+static esp_err_t hotspot_dns_start(server_t *server, uint32_t address)
+{
+    if (!control_ap) {
+        assert(!server->hotspot_name[0] && server->dns_fd == -1);
+        return ESP_OK;
+    }
+    assert(!strcmp(server->hotspot_name, TEST_HOTSPOT_NAME) && address == 1);
+    ++dns_starts;
+    server->dns_fd = 23;
+    return fail_dns ? ESP_FAIL : ESP_OK;
+}
+static void hotspot_dns_close(server_t *server)
+{
+    if (server->dns_fd < 0) return;
+    assert(server->dns_fd == 23);
+    server->dns_fd = -1;
+    ++dns_closes;
+}
+static void hotspot_dns_service(server_t *server) { (void)server; }
 static bool random_source(void *context, uint8_t *bytes, size_t count)
 {
     (void)context;
@@ -292,7 +317,8 @@ static void setup(void)
     memset(&s_snapshot, 0, sizeof(s_snapshot));
     creates = caps_creates = legacy_creates = caps_deletes = legacy_deletes = 0;
     cleared = http_starts = http_stops = mutex_deletes = delays = 0;
-    fail_create = fail_listen = fail_stop_once = false;
+    fail_create = fail_listen = fail_stop_once = fail_dns = control_ap = false;
+    dns_starts = dns_closes = 0;
     task_entry = NULL;
     task_argument = NULL;
 }
@@ -303,10 +329,11 @@ static esp_err_t start(void)
     memset(principal.id, 1, sizeof(principal.id));
     memset(principal.credential_sha256, 2, 32);
     app_control_server_config_t config = {.abi_version = APP_CONTROL_SERVER_ABI,
-                                          .station_ifkey = "WIFI_STA_DEF",
-                                          .allowed_host = "device.test",
-                                          .browser_origin = "https://device.test",
-                                          .port = 443,
+                                          .interface_key = control_ap ? "WIFI_AP_DEF" : "WIFI_STA_DEF",
+                                          .allowed_host = control_ap ? TEST_HOTSPOT_NAME ":8443" : "device.test",
+                                          .browser_origin = control_ap ? "https://" TEST_HOTSPOT_NAME ":8443" : "https://device.test",
+                                          .hotspot_name = control_ap ? TEST_HOTSPOT_NAME : NULL,
+                                          .port = control_ap ? 8443 : 443,
                                           .certificate_pem = cert,
                                           .certificate_length = sizeof(cert),
                                           .private_key_pem = key,
@@ -314,6 +341,40 @@ static esp_err_t start(void)
                                           .principals = &principal,
                                           .principal_count = 1};
     return app_control_server_start(&config);
+}
+
+static void test_dns_reply(void)
+{
+    static const uint8_t query[] = {
+        0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1,
+        26, 'M', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b',
+        'c', 'd', 'e', 'f', '0', '1', '2', '3', '4', '5', '6', '7',
+        4, 'T', 'e', 's', 't', 0, 0, 1, 0, 1,
+        0, 0, 41, 0x04, 0xd0, 0, 0, 0, 0, 0, 0 /* EDNS OPT. */
+    };
+    const size_t question_end = sizeof(query) - 11;
+    uint8_t packet[128];
+    uint32_t address = inet_addr("192.168.4.1");
+    memcpy(packet, query, sizeof(query));
+    size_t length = app_control_dns_reply(TEST_HOTSPOT_NAME, address, packet, sizeof(query), sizeof(packet));
+    assert(length == question_end + 16 && !memcmp(packet, query, 2) && packet[2] == 0x85 &&
+           !packet[3] && packet[7] == 1 && !packet[11] &&
+           !memcmp(packet + length - 4, (uint8_t[]){192, 168, 4, 1}, 4));
+    memcpy(packet, query, sizeof(query));
+    packet[question_end - 3] = 28; /* AAAA. */
+    assert(app_control_dns_reply(TEST_HOTSPOT_NAME, address, packet, sizeof(query), sizeof(packet)) == question_end);
+    assert(!packet[3] && !packet[7]);
+    memcpy(packet, query, sizeof(query));
+    packet[17] = 'x'; /* Other origin. */
+    assert(app_control_dns_reply(TEST_HOTSPOT_NAME, address, packet, sizeof(query), sizeof(packet)) == question_end);
+    assert(packet[3] == 5 && !packet[7]);
+    memcpy(packet, query, sizeof(query));
+    packet[12] = 0xc0;
+    assert(!app_control_dns_reply(TEST_HOTSPOT_NAME, address, packet, sizeof(query), sizeof(packet)));
+    for (size_t i = 0; i < question_end; ++i) {
+        memcpy(packet, query, sizeof(query));
+        assert(!app_control_dns_reply(TEST_HOTSPOT_NAME, address, packet, i, sizeof(packet)));
+    }
 }
 static void run_stopped_owner(unsigned expected_cleared)
 {
@@ -352,6 +413,23 @@ int main(void)
     run_stopped_owner(2);
     assert(http_starts == 1 && http_stops == 1);
     setup();
+    control_ap = true;
+    assert(start() == ESP_OK);
+    const char *alias = "192.168.4.1:8443";
+    assert(!strcmp(accepted_control_host(s_server, alias, "", "", "", true), TEST_HOTSPOT_NAME ":8443"));
+    assert(!accepted_control_host(s_server, "192.168.4.1", "", "", "", true));
+    assert(!accepted_control_host(s_server, alias, "https://192.168.4.1:8443", "", "", true));
+    assert(!accepted_control_host(s_server, alias, "", "browser-cookie", "", true));
+    assert(!accepted_control_host(s_server, alias, "", "", "csrf-token", true));
+    assert(!accepted_control_host(s_server, alias, "", "", "", false));
+    run_stopped_owner(2);
+    assert(http_starts == 1 && http_stops == 1 && dns_starts == 1 && dns_closes == 1);
+    setup();
+    control_ap = fail_dns = true;
+    assert(start() == ESP_OK);
+    run_stopped_owner(2);
+    assert(!http_starts && dns_starts == 1 && dns_closes == 1 && s_snapshot.state == APP_CONTROL_ERROR);
+    setup();
     fail_stop_once = true;
     assert(start() == ESP_OK);
     run_stopped_owner(2);
@@ -362,6 +440,7 @@ int main(void)
     run_stopped_owner(2);
     assert(http_starts == 1 && !http_stops && s_snapshot.state == APP_CONTROL_ERROR &&
            s_snapshot.error == ESP_ERR_NO_MEM);
+    test_dns_reply();
     puts("PASS: actual server owner/HTTPS stack caps, no allocation fallback, matched deletion, "
          "secret cleanup and retained stop retry");
     return 0;

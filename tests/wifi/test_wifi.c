@@ -16,6 +16,12 @@ static uint64_t clock_ms = 100;
 static esp_netif_t sta_netif = {1}, ap_netif = {2};
 static uint8_t durable[STORE_LENGTH];
 static bool exists;
+static uint8_t durable_control_ap[CONTROL_AP_SEED_BYTES];
+static bool control_ap_exists, radio_started, ap_netif_up;
+static esp_err_t control_mode_read_error, ap_attach_error, ap_handler_error, dhcp_error;
+static unsigned control_mode_writes, dhcp_starts;
+static bool dhcp_autostart;
+static esp_netif_dhcp_status_t dhcp_status;
 static uint8_t profile_banks[2][PROFILE_BANK_BYTES];
 static bool profile_exists[2];
 static int bank_index(const char *key) { return !strcmp(key,"profiles_a")?0:!strcmp(key,"profiles_b")?1:-1; }
@@ -131,8 +137,22 @@ esp_err_t esp_event_handler_unregister(esp_event_base_t base, int32_t id,
 }
 esp_err_t esp_netif_init(void) { return ESP_OK; }
 esp_netif_t *esp_netif_create_default_wifi_sta(void) { return &sta_netif; }
-esp_netif_t *esp_netif_create_default_wifi_ap(void) {
+esp_netif_t *esp_netif_new(const esp_netif_config_t *config) {
+    assert(config->ap);
     ++ap_creates; return fail_ap_netif ? NULL : &ap_netif;
+}
+esp_err_t esp_netif_attach_wifi_ap(esp_netif_t *netif) {
+    assert(netif == &ap_netif); return ap_attach_error;
+}
+esp_err_t esp_wifi_set_default_wifi_ap_handlers(void) { return ap_handler_error; }
+esp_err_t esp_netif_dhcps_get_status(esp_netif_t *netif, esp_netif_dhcp_status_t *out) {
+    assert(netif == &ap_netif); *out = dhcp_status; return ESP_OK;
+}
+esp_err_t esp_netif_dhcps_start(esp_netif_t *netif) {
+    assert(netif == &ap_netif && mode == WIFI_MODE_AP);
+    ++dhcp_starts;
+    if (dhcp_error == ESP_OK) dhcp_status = ESP_NETIF_DHCP_STARTED;
+    return dhcp_error;
 }
 esp_err_t esp_netif_get_ip_info(esp_netif_t *netif, esp_netif_ip_info_t *info) {
     if (netif == &sta_netif && ip_read_error != ESP_OK) return ip_read_error;
@@ -141,6 +161,10 @@ esp_err_t esp_netif_get_ip_info(esp_netif_t *netif, esp_netif_ip_info_t *info) {
         void (*hook)(void) = ip_read_hook; ip_read_hook = NULL; hook();
     }
     return ESP_OK;
+}
+bool esp_netif_is_netif_up(esp_netif_t *netif) {
+    assert(netif == &ap_netif);
+    return radio_started && mode == WIFI_MODE_AP && ap_netif_up;
 }
 esp_err_t esp_netif_get_netif_impl_name(esp_netif_t *netif, char *name) {
     assert(netif == &ap_netif); strcpy(name, "ap0"); return ESP_OK;
@@ -152,14 +176,26 @@ esp_err_t esp_wifi_init(const wifi_init_config_t *config) { (void)config; return
 esp_err_t esp_wifi_set_storage(int storage) { assert(storage == WIFI_STORAGE_RAM); return ESP_OK; }
 esp_err_t esp_wifi_set_config(int interface, wifi_config_t *config) {
     if (interface == WIFI_IF_STA) {if(station_config_error)return station_config_error;station_config = *config;}
-    else { assert(interface == WIFI_IF_AP); ap_config = *config; }
+    else {
+        assert(interface == WIFI_IF_AP);
+        if (mode == WIFI_MODE_AP) assert(!radio_started && config->ap.authmode == WIFI_AUTH_WPA2_PSK);
+        ap_config = *config;
+    }
     return ESP_OK;
 }
 esp_err_t esp_wifi_set_mode(int value) {
     ++mode_calls; if (mode_error) return mode_error; mode = value; return ESP_OK;
 }
-esp_err_t esp_wifi_start(void) { return ESP_OK; }
-esp_err_t esp_wifi_stop(void) { linked = false; return ESP_OK; }
+esp_err_t esp_wifi_start(void) {
+    radio_started = true;
+    if (mode == WIFI_MODE_AP && dhcp_autostart) dhcp_status = ESP_NETIF_DHCP_STARTED;
+    return ESP_OK;
+}
+esp_err_t esp_wifi_stop(void) {
+    linked = radio_started = false;
+    dhcp_status = ESP_NETIF_DHCP_INIT;
+    return ESP_OK;
+}
 esp_err_t esp_wifi_deinit(void) { ++driver_deinits; return ESP_OK; }
 esp_err_t esp_wifi_disconnect(void) { linked = false; return ESP_OK; }
 esp_err_t esp_wifi_connect(void) { ++connects; return connect_error; }
@@ -172,23 +208,42 @@ esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *info) {
 esp_err_t nvs_open(const char *name, int access, nvs_handle_t *handle) {
     assert(strcmp(name, "app_wifi") == 0);
     if (store_error) return store_error;
-    if (access == NVS_READONLY && !exists && !profile_exists[0] && !profile_exists[1]) return ESP_ERR_NVS_NOT_FOUND;
+    if (access == NVS_READONLY && !exists && !profile_exists[0] && !profile_exists[1] && !control_ap_exists)
+        return ESP_ERR_NVS_NOT_FOUND;
     *handle = 1; return ESP_OK;
 }
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *value, size_t *length) {
     assert(handle==1); int i=bank_index(key);
     const void *source=durable; size_t size=sizeof(durable); bool present=exists;
     if(i>=0) {source=profile_banks[i];size=PROFILE_BANK_BYTES;present=profile_exists[i];}
-    else assert(!strcmp(key,"network"));
+    else if (!strcmp(key, "control_ap")) {
+        if (control_mode_read_error != ESP_OK) return control_mode_read_error;
+        source = durable_control_ap; size = sizeof(durable_control_ap); present = control_ap_exists;
+    } else assert(!strcmp(key,"network"));
     if(!present) return ESP_ERR_NVS_NOT_FOUND;
     if(value) {assert(*length>=size);memcpy(value,source,size);} *length=size; return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t handle, const char *key, const void *value, size_t length) {
+    if (!strcmp(key, "control_ap")) {
+        ++control_mode_writes;
+        assert(handle == 1 && length == sizeof(durable_control_ap));
+        if (set_blob_error == ESP_OK || apply_failed_set) {
+            memcpy(durable_control_ap, value, length);
+            control_ap_exists = true;
+        }
+        return set_blob_error;
+    }
     assert(handle==1); int i=bank_index(key);assert(i>=0&&length==PROFILE_BANK_BYTES);
     if(set_blob_error==ESP_OK||apply_failed_set) {memcpy(profile_banks[i],value,length);profile_exists[i]=true;}
     return set_blob_error;
 }
 esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key) {
+    if (!strcmp(key, "control_ap")) {
+        ++control_mode_writes;
+        assert(handle == 1);
+        if (erase_error == ESP_OK || apply_failed_erase) control_ap_exists = false;
+        return erase_error;
+    }
     assert(handle == 1 && strcmp(key, "network") == 0);
     if (erase_error == ESP_OK || apply_failed_erase) {
         exists = false; memset(durable, 0, sizeof(durable));
@@ -246,6 +301,18 @@ static app_wifi_snapshot_t snapshot(void) {
     app_wifi_snapshot_t value; app_wifi_get_snapshot(&value); return value;
 }
 static void reset(bool preserve) {
+    memset(&s_station_credentials, 0, sizeof(s_station_credentials));
+    memset(&s_control_ap_info, 0, sizeof(s_control_ap_info));
+    memset(s_control_seed, 0, sizeof(s_control_seed));
+    s_control_switch_counter = 0;
+    s_control_switch_deadline = s_radio_retry_at = s_dhcp_retry_at = 0;
+    s_control_listener_closed = s_control_input_released = radio_started = false;
+    ap_netif_up = true;
+    control_mode_read_error = ap_attach_error = ap_handler_error = dhcp_error = ESP_OK;
+    control_mode_writes = dhcp_starts = 0;
+    dhcp_autostart = true;
+    dhcp_status = ESP_NETIF_DHCP_INIT;
+    if (!preserve) control_ap_exists = false;
     memset(&s_network, 0, sizeof(s_network));
     dns_clears = tcpip_calls = clock_ready_calls = 0;
     tcpip_owner = clock_ready = false; tcpip_error = ip_read_error = ESP_OK;
@@ -1070,6 +1137,180 @@ static void test_network_entry_dns_barrier(void)
     linked = ip_assigned = true; service_step();
     assert(snapshot().lan_ready && clock_ready && dns_clears == 11);
 }
+static void test_persistent_control_ap(void)
+{
+    seed_network();
+    linked = true;
+    service_step();
+    assert(snapshot().lan_ready && clock_ready);
+    uint32_t request;
+    assert(app_wifi_select_control_ap(true, &request) == ESP_OK);
+    assert(request == snapshot().control_switch);
+    bool release_requested;
+    assert(request && app_wifi_start_setup() == ESP_ERR_INVALID_STATE);
+    app_wifi_control_input_released(request);
+    app_wifi_control_listener_closed(request + 1);
+    service_step();
+    assert(mode == WIFI_MODE_STA && !control_ap_exists);
+    assert(app_wifi_control_switch_request(&release_requested) == request && !release_requested);
+    app_wifi_control_listener_closed(request);
+    service_step();
+    assert(mode == WIFI_MODE_STA && !control_ap_exists);
+    assert(app_wifi_control_switch_request(&release_requested) == request && release_requested);
+    app_wifi_control_input_released(request);
+    ap_netif_up = false;
+    service_step();
+    assert(mode == WIFI_MODE_AP && control_ap_exists && !snapshot().lan_ready && !clock_ready);
+    assert(snapshot().control_ap && !snapshot().control_ap_ready && !s_server && !s_accept_form);
+    ap_netif_up = true;
+    service_step();
+    app_wifi_setup_info_t first, restored;
+    assert(app_wifi_get_control_ap_info(&first) == ESP_OK);
+    assert(!strcmp(first.ip, APP_WIFI_CONTROL_AP_IP) && strlen(first.password) == 24 &&
+           !strncmp(first.ssid, "Mosaico-Control-", 16));
+    clock_ms += APP_WIFI_SETUP_TIMEOUT_MS + 1;
+    service_step();
+    assert(snapshot().control_ap_ready && app_wifi_scan_start() == ESP_ERR_INVALID_STATE);
+    assert(app_wifi_get_setup_info(&restored) == ESP_ERR_INVALID_STATE);
+    reset(true);
+    assert(snapshot().control_ap && !snapshot().control_ap_ready);
+    mode_error = ESP_FAIL;
+    service_step();
+    assert(snapshot().control_ap && !snapshot().control_ap_ready &&
+           snapshot().last_error == ESP_FAIL && control_ap_exists && !radio_started);
+    mode_error = ESP_OK;
+    clock_ms += CLEANUP_RETRY_MS;
+    service_step();
+    assert(app_wifi_get_control_ap_info(&restored) == ESP_OK && connects == 0);
+    assert(!strcmp(first.password, restored.password) && !strcmp(first.ssid, restored.ssid));
+    assert(app_wifi_select_control_ap(false, NULL) == ESP_OK);
+    request = snapshot().control_switch;
+    app_wifi_control_listener_closed(request);
+    clock_ms += CONTROL_SWITCH_TIMEOUT_MS;
+    service_step();
+    assert(!snapshot().control_switch && snapshot().control_ap_ready && mode == WIFI_MODE_AP);
+    assert(snapshot().last_error == ESP_ERR_TIMEOUT);
+    assert(app_wifi_select_control_ap(false, NULL) == ESP_OK);
+    app_wifi_control_input_released(request);
+    request = snapshot().control_switch;
+    app_wifi_control_listener_closed(request);
+    app_wifi_control_input_released(request);
+    erase_error = ESP_FAIL;
+    service_step();
+    assert(snapshot().control_storage_error == ESP_FAIL && !snapshot().control_storage_uncertain &&
+           snapshot().control_ap_ready && control_ap_exists);
+    erase_error = ESP_OK;
+    assert(app_wifi_select_control_ap(false, NULL) == ESP_OK);
+    request = snapshot().control_switch;
+    app_wifi_control_listener_closed(request);
+    app_wifi_control_input_released(request);
+    service_step();
+    assert(mode == WIFI_MODE_STA && !control_ap_exists && !snapshot().control_ap);
+    assert(snapshot().stored_data_present && app_wifi_get_control_ap_info(&restored) == ESP_ERR_INVALID_STATE);
+    clock_ms++;
+    service_step();
+    assert(connects == 1 && !s_server);
+    assert(app_wifi_start_setup() == ESP_OK);
+    service_step();
+    assert(mode == WIFI_MODE_APSTA && snapshot().setup_active && !snapshot().control_ap);
+    reset(true);
+    assert(!snapshot().control_ap && !snapshot().setup_active && mode == WIFI_MODE_STA);
+}
+
+static void complete_control_switch(bool ap)
+{
+    uint32_t request;
+    assert(app_wifi_select_control_ap(ap, &request) == ESP_OK && request);
+    app_wifi_control_listener_closed(request);
+    app_wifi_control_input_released(request);
+    service_step();
+}
+
+static void test_control_mode_storage_reconciliation(void)
+{
+    seed_network();
+    set_blob_error = ESP_FAIL;
+    apply_failed_set = true;
+    complete_control_switch(true);
+    assert(snapshot().control_ap && control_ap_exists && !snapshot().control_storage_uncertain &&
+           snapshot().control_storage_error == ESP_FAIL);
+    reset(true);
+    service_step();
+    assert(snapshot().control_ap_ready);
+    erase_error = ESP_FAIL;
+    apply_failed_erase = true;
+    complete_control_switch(false);
+    assert(!snapshot().control_ap && !control_ap_exists && !snapshot().control_storage_uncertain &&
+           snapshot().control_storage_error == ESP_FAIL);
+    reset(true);
+    assert(!snapshot().control_ap);
+
+    for (unsigned target = 0; target < 2; ++target) {
+        if (!target) complete_control_switch(true);
+        bool ap = target != 0;
+        control_mode_read_error = ESP_FAIL;
+        complete_control_switch(ap);
+        assert(snapshot().control_ap != ap && control_ap_exists == ap && snapshot().control_storage_uncertain);
+        unsigned writes = control_mode_writes;
+        complete_control_switch(ap);
+        assert(snapshot().control_storage_uncertain && control_mode_writes == writes);
+        control_mode_read_error = ESP_OK;
+        complete_control_switch(ap);
+        assert(snapshot().control_ap == ap && !snapshot().control_storage_uncertain &&
+               control_mode_writes == writes);
+        reset(true);
+        assert(snapshot().control_ap == ap);
+    }
+}
+
+static void test_control_mode_preserves_station_profile_uncertainty(void)
+{
+    seed_network();
+    app_wifi_join_request_t pending = join_request("Unconfirmed network", true);
+    char station[33];
+    memcpy(station, snapshot().ssid, sizeof(station));
+    set_blob_error = ESP_FAIL;
+    apply_failed_set = true;
+    assert(app_wifi_join(&pending) == ESP_OK);
+    service_step();
+    assert(snapshot().storage_uncertain && !strcmp(snapshot().ssid, station));
+    set_blob_error = ESP_OK;
+    complete_control_switch(true);
+    complete_control_switch(false);
+    assert(snapshot().storage_uncertain && !strcmp(snapshot().ssid, station) &&
+           !memcmp(station_config.sta.ssid, station, strlen(station)));
+    assert(app_wifi_verify_storage() == ESP_OK);
+    service_step();
+    assert(!snapshot().storage_uncertain);
+}
+
+static void test_control_ap_driver_and_dhcp_recovery(void)
+{
+    reset(false);
+    ap_attach_error = ESP_FAIL;
+    unsigned destroyed = destroyed_netifs;
+    assert(app_wifi_start_setup() == ESP_OK);
+    service_step();
+    assert(!s_ap && mode == WIFI_MODE_STA && destroyed_netifs == destroyed + 1);
+    ap_attach_error = ESP_OK;
+    ap_handler_error = ESP_FAIL;
+    complete_control_switch(true);
+    assert(!s_ap && !snapshot().control_ap_ready && snapshot().last_error == ESP_FAIL &&
+           destroyed_netifs == destroyed + 2);
+    dhcp_autostart = false;
+    dhcp_error = ESP_ERR_ESP_NETIF_DHCPS_START_FAILED;
+    ap_handler_error = ESP_OK;
+    clock_ms += CLEANUP_RETRY_MS;
+    service_step();
+    assert(s_ap && mode == WIFI_MODE_AP && esp_netif_is_netif_up(s_ap));
+    assert(!snapshot().control_ap_ready && snapshot().control_ap_error == dhcp_error && dhcp_starts == 1);
+    service_step();
+    assert(!snapshot().control_ap_ready && dhcp_starts == 1);
+    dhcp_error = ESP_OK;
+    clock_ms += CLEANUP_RETRY_MS;
+    service_step();
+    assert(snapshot().control_ap_ready && snapshot().control_ap_error == ESP_OK && dhcp_starts == 2);
+}
 int main(void) {
     test_setup_and_reconnect(); test_security_and_limits(); test_failures();
     test_cleanup_recovery(); test_storage_uncertainty(); test_unreadable_recovery();
@@ -1078,13 +1319,15 @@ int main(void) {
     test_device_station_provisioning(); test_scan_bounds_and_identity();
     test_scan_cancel_cleanup_and_pressure(); test_station_storage_and_scan_reconnect();
     test_scan_diagnostics_preserve_failed_generation();
-    test_network_entry_dns_barrier();
+    test_network_entry_dns_barrier(); test_persistent_control_ap();
+    test_control_mode_storage_reconciliation(); test_control_mode_preserves_station_profile_uncertainty();
+    test_control_ap_driver_and_dhcp_recovery();
     test_selected_editor_reservations();test_multiple_profiles();test_profile_radio_failure_preserves_durable_evidence();
     reset(false);start();app_wifi_set_maintenance(true);assert(!s_accept_form);service_step();assert(!snapshot().setup_active);
     assert(app_wifi_start_setup()==ESP_ERR_INVALID_STATE&&app_wifi_forget_network()==ESP_ERR_INVALID_STATE&&app_wifi_scan_start()==ESP_ERR_INVALID_STATE);
     app_wifi_join_request_t blocked=join_request("Blocked",false);assert(app_wifi_join(&blocked)==ESP_ERR_INVALID_STATE);
     app_wifi_profile_save_t save={.expected_revision=s_profiles.revision,.enabled=true};strcpy(save.ssid,"Blocked");strcpy(save.password,"test-passphrase");assert(app_wifi_profile_save(&save)==ESP_ERR_INVALID_STATE);
     assert(app_wifi_verify_storage()==ESP_OK);service_step();app_wifi_set_maintenance(false);assert(app_wifi_scan_start()==ESP_OK);
-    puts("PASS: production station scan/join, fallback setup, storage, reconnect and cancellation boundaries");
+    puts("PASS: station Wi-Fi, recovery setup, persistent control AP, storage and switch barriers");
     return 0;
 }

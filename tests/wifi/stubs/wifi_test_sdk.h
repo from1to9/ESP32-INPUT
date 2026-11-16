@@ -14,11 +14,14 @@ typedef int esp_err_t;
 #define ESP_ERR_NO_MEM 0x101
 #define ESP_ERR_INVALID_ARG 0x102
 #define ESP_ERR_INVALID_STATE 0x103
+#define ESP_ERR_INVALID_SIZE 0x104
 #define ESP_ERR_NOT_SUPPORTED 0x106
 #define ESP_ERR_TIMEOUT 0x107
 #define ESP_ERR_NVS_NOT_FOUND 0x1102
 #define ESP_ERR_WIFI_NOT_CONNECT 0x300f
 #define ESP_ERR_WIFI_STATE 0x3006
+#define ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED 0x5004
+#define ESP_ERR_ESP_NETIF_DHCPS_START_FAILED 0x5007
 #ifndef SOC_WIFI_SUPPORTED
 #define SOC_WIFI_SUPPORTED 1
 #endif
@@ -51,8 +54,12 @@ esp_err_t esp_event_handler_register(esp_event_base_t, int32_t,
 esp_err_t esp_event_handler_unregister(esp_event_base_t, int32_t,
     void (*handler)(void *, esp_event_base_t, int32_t, void *));
 typedef struct { int id; } esp_netif_t;
+typedef struct { int ap; } esp_netif_config_t;
+#define ESP_NETIF_DEFAULT_WIFI_AP() ((esp_netif_config_t){1})
 typedef struct { uint32_t addr; } ip4_addr_t;
 typedef struct { ip4_addr_t ip; } esp_netif_ip_info_t;
+typedef enum { ESP_NETIF_DHCP_INIT, ESP_NETIF_DHCP_STARTED, ESP_NETIF_DHCP_STOPPED } esp_netif_dhcp_status_t;
+#define ESP_IP4TOADDR(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
 #define IPSTR "%u.%u.%u.%u"
 #define IP2STR(p) (unsigned)((p)->addr & 255U), (unsigned)(((p)->addr >> 8) & 255U), \
     (unsigned)(((p)->addr >> 16) & 255U), (unsigned)(((p)->addr >> 24) & 255U)
@@ -61,8 +68,13 @@ typedef esp_err_t (*esp_netif_callback_fn)(void *);
 esp_err_t esp_netif_tcpip_exec(esp_netif_callback_fn, void *);
 void dns_clear_cache(void);
 esp_netif_t *esp_netif_create_default_wifi_sta(void);
-esp_netif_t *esp_netif_create_default_wifi_ap(void);
+esp_netif_t *esp_netif_new(const esp_netif_config_t *);
+esp_err_t esp_netif_attach_wifi_ap(esp_netif_t *);
+esp_err_t esp_wifi_set_default_wifi_ap_handlers(void);
+esp_err_t esp_netif_dhcps_get_status(esp_netif_t *, esp_netif_dhcp_status_t *);
+esp_err_t esp_netif_dhcps_start(esp_netif_t *);
 esp_err_t esp_netif_get_ip_info(esp_netif_t *, esp_netif_ip_info_t *);
+bool esp_netif_is_netif_up(esp_netif_t *);
 esp_err_t esp_netif_get_netif_impl_name(esp_netif_t *, char *);
 void esp_netif_destroy_default_wifi(void *);
 typedef struct { bool capable; } pmf_t;
@@ -81,6 +93,7 @@ enum {
 #define WIFI_IF_STA 0
 #define WIFI_IF_AP 1
 #define WIFI_MODE_STA 1
+#define WIFI_MODE_AP 2
 #define WIFI_MODE_APSTA 3
 #define WIFI_STORAGE_RAM 0
 typedef struct { uint8_t ssid[33], bssid[6], primary; int8_t rssi; int authmode; } wifi_ap_record_t;

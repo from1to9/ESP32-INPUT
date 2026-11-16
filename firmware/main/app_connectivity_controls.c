@@ -124,7 +124,8 @@ static int find_profile(const char id[33])
 }
 static bool wifi_idle(void)
 {
-    return idle() && controls.wifi.initialized && controls.profiles.known && !controls.profiles.uncertain &&
+    return idle() && controls.wifi.initialized && !controls.wifi.control_ap &&
+        controls.profiles.known && !controls.profiles.uncertain &&
         !controls.profiles.operation_pending && !controls.wifi.operation_pending && !controls.wifi.cleanup_pending &&
         !controls.wifi.setup_active && !controls.wifi.storage_uncertain;
 }
@@ -186,6 +187,11 @@ static bool build_review(void)
     write_line(&writer, "TLS certificate SHA-256: %s", review->certificate_pem_sha256);
     if (!review->port || review->clock_server_count > APP_CLOCK_SERVER_CAPACITY) return false;
     write_line(&writer, "HTTPS listener port: %u", review->port);
+    if (review->hotspot_name[0]) {
+        if (!text(review->hotspot_name, sizeof(review->hotspot_name))) return false;
+        write_line(&writer, "Control hotspot HTTPS name:");
+        write_line(&writer, "%s", review->hotspot_name);
+    }
     write_line(&writer, "Clock servers (unauthenticated SNTP):");
     if (!review->clock_server_count) write_line(&writer, "none");
     for (unsigned i = 0; i < review->clock_server_count; ++i) {
@@ -267,6 +273,7 @@ static void rebuild(void)
     }
     if (!controls.saved.known) snprintf(controls.saved.reason, sizeof(controls.saved.reason), "Saved network status unavailable.");
     else if (controls.saved.uncertain) snprintf(controls.saved.reason, sizeof(controls.saved.reason), "Saved network outcome uncertain. Verify storage before retrying.");
+    else if (controls.wifi.control_ap) snprintf(controls.saved.reason, sizeof(controls.saved.reason), "Return to Wi-Fi network to manage saved profiles.");
     else snprintf(controls.saved.reason, sizeof(controls.saved.reason), "%s", controls.message);
     controls.target = (app_bluetooth_target_view_t){.bond_revision = controls.bonds.revision, .preferences_revision = controls.preference.revision,
         .pending = controls.pending == P_BLE || controls.pending == P_BLE_MANAGEMENT || controls.preference.request_status == BLE_HID_TARGET_PENDING || controls.preference.request_status == BLE_HID_TARGET_APPLYING,
@@ -296,7 +303,8 @@ static void rebuild(void)
         .usb_import_active = controls.runtime.usb_import_active, .remaining_known = controls.runtime.trust.import_window && controls.runtime.trust.window_remaining_ms != 0,
         .remaining_seconds = controls.runtime.trust.window_remaining_ms / 1000U + (controls.runtime.trust.window_remaining_ms % 1000U != 0 ? 1U : 0U),
         .review_pending = controls.runtime.trust.review_pending};
-    controls.api.ready = controls.api.known && controls.runtime.server.state == APP_CONTROL_READY && controls.api.tls &&
+    controls.api.ready = controls.api.known && !controls.wifi.control_switch &&
+        controls.runtime.server.state == APP_CONTROL_READY && controls.api.tls &&
         text(controls.runtime.server.address, sizeof(controls.runtime.server.address)) && !strncmp(controls.runtime.server.address, "https://", 8);
     if (controls.api.ready) memcpy(controls.api.url, controls.runtime.server.address, sizeof(controls.api.url));
     controls.api.can_open = ready && controls.pending == P_NONE && controls.api.known && !controls.api.commissioning_open && !controls.api.usb_import_active;
@@ -328,7 +336,10 @@ static void rebuild(void)
     controls.api.can_approve = idle() && controls.context.overlay == APP_OVERLAY_API_REVIEW && controls.api.review_complete &&
         controls.api.commissioning_open && all_reviewed(controls.api.review_page_count);
     snprintf(controls.api.reason, sizeof(controls.api.reason), "%s", controls.api.review_pending && !controls.api.review_complete ?
-        "The complete identity and permissions cannot be displayed; approval is unavailable." : controls.message);
+        "The complete identity and permissions cannot be displayed; approval is unavailable." :
+        controls.wifi.control_ap_ready && !controls.api.ready && controls.runtime.trust.known &&
+            controls.runtime.trust.present && !controls.runtime.trust.control_ap_compatible ?
+        "Re-enroll over USB with a certificate for the control hotspot." : controls.message);
 }
 
 static void refresh_owners(void)
@@ -700,6 +711,10 @@ void app_connectivity_controls_fill(app_view_t *view)
         if (strlen(controls.api.url) < sizeof(view->wifi_lan_service_url))
             memcpy(view->wifi_lan_service_url, controls.api.url, strlen(controls.api.url) + 1U);
         else service_message = "HTTPS ready; Web/API panel shows the complete address.";
+    } else if (controls.wifi.control_ap_ready && !controls.wifi.control_switch &&
+               controls.runtime.trust.known && controls.runtime.trust.present &&
+               !controls.runtime.trust.control_ap_compatible) {
+        view->wifi_lan_service = APP_UI_LAN_SERVICE_ERROR; service_message = "Re-enroll TLS for the control hotspot.";
     } else if (controls.runtime.server.state == APP_CONTROL_ERROR || controls.runtime.server.state == APP_CONTROL_READY) {
         view->wifi_lan_service = APP_UI_LAN_SERVICE_ERROR; service_message = "A running TLS listener is not verified.";
     } else if (controls.runtime.server.state == APP_CONTROL_STARTING) {

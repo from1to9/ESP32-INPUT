@@ -250,6 +250,12 @@ static void store_view(const app_view_t *view)
     copy_text(s_slot.target, sizeof(s_slot.target), view->target_name);
     bind_text(&s_slot);
     app_view_t *owned = &s_slot.view;
+    if (owned->overlay == APP_OVERLAY_SETTINGS && owned->settings_page == APP_SETTINGS_WIFI &&
+        owned->wifi_control_ap_ready && !owned->locked && !owned->screen_off) {
+        clear_tail(owned->wifi_control_ap_password, sizeof(owned->wifi_control_ap_password));
+    } else {
+        wipe(owned->wifi_control_ap_password, sizeof(owned->wifi_control_ap_password));
+    }
     if (owned->overlay == APP_OVERLAY_WIFI_SETUP && owned->wifi_setup_active &&
         !owned->locked && !owned->screen_off) {
         clear_tail(owned->wifi_setup_ssid, sizeof(owned->wifi_setup_ssid));

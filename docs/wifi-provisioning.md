@@ -1,4 +1,4 @@
-# Device-side station provisioning
+# Device Wi-Fi setup and hotspots
 
 Open **Settings → Wi-Fi** and scan for an existing network. Select the network
 and enter its password on the device. Wait for station status to show an IP
@@ -7,7 +7,7 @@ hotspot requires explicit activation. LAN control requires separate enrollment.
 
 ## Integration contract
 
-The [app_wifi API](../firmware/main/app_wifi.h) is separate from device UI, the coordinator, board adapters and BLE. Startup calls `app_wifi_init()` once after shared NVS initialization. It owns Wi-Fi, the default STA netif and one low-priority worker; the fallback AP netif is created only on an explicit setup request. It never erases shared NVS or initializes Bluetooth. An `ESP_OK` action return means accepted, not connected, saved, scanned or stopped.
+The [app_wifi API](../firmware/main/app_wifi.h) is separate from device UI, the coordinator, board adapters and BLE. Startup calls `app_wifi_init()` once after shared NVS initialization. It owns Wi-Fi, the default STA netif and one low-priority worker. It creates the AP netif when recovery setup or the persistent control hotspot needs it. An `ESP_OK` action return acknowledges admission. Completion is observable through the Wi-Fi snapshot.
 
 | Local API | Integration rule |
 | --- | --- |
@@ -24,7 +24,7 @@ At a fresh explicit selection call `app_wifi_select_scan_record` and bind its ti
 
 Ordinary row joins with `selection_id=0` still validate generation/index/SSID and the 30-second list lifetime at admission and execution. A selection ticket is an explicit local editing policy, not a silent bypass or conversion to manual. Manual/hidden WPA2 entry is separately explicit (all three identity fields zero) and needs a corresponding editor before UI exposure. Secrets remain write-only. The same worker now supports save-only, named join/forget and complete priority reorder through `app_wifi_profiles.h`; the join/scan cancellation contract stays separate.
 
-`APP_WIFI_OBTAINING_IP` means association without valid IPv4. `lan_ready` requires actual association with the selected SSID and nonzero station IPv4; it proves neither Internet access nor server readiness. `backend_available/backend_error` are now copied from the actual station TLS owner by the control runtime. Before usable trust/listener readiness they remain unavailable, even with an IP. A running listener is separate from browser trust or successful client authentication. The [native UI extension](interaction.md#status-connectivity-and-display) owns private entry and rendering; the coordinator owns intent/epoch/editor handoff.
+`APP_WIFI_OBTAINING_IP` means association without valid IPv4. `lan_ready` requires actual association with the selected SSID and nonzero station IPv4. `control_ap_ready` describes the active control hotspot interface. `backend_available/backend_error` come from the control runtime's TLS listener observation. Browser trust and client authentication are checked separately. The [native UI extension](interaction.md#status-connectivity-and-display) owns private entry and rendering. The coordinator owns intent, epoch and editor handoff.
 
 The public snapshot contains no credential/token. It distinguishes initialized/configured state, current SSID, IP/RSSI, disconnect/retry/pending state and operation/connection/cleanup/storage errors. `configured` and `ssid` describe runtime selection. `stored_data_known` establishes whether presence is known; `stored_data_present` is meaningful only then. `stored_ssid` is empty for absent, unreadable or uncertain storage. A corrupt record may be known-present without a usable SSID. `storage_uncertain/storage_error` survive radio/setup success; only an explicit successful save/forget/read verification resolves them. Verification never switches the runtime network. Permit forget/recovery even with no configured network or known SSID; never fabricate a name.
 
@@ -41,13 +41,44 @@ The public snapshot contains no credential/token. It distinguishes initialized/c
 
 ## Optional fallback hotspot
 
-Only an explicit fallback request opens a ten-minute WPA2 SoftAP, with a fresh 24-hex-character password and independent 128-bit form token. Only that fallback asks a phone/computer to join the temporary AP and open its displayed URL. The normal native station workflow does not. No AP starts at boot, reconnect failure or scan failure; AP netif allocation failure does not prevent native station joining.
+Only an explicit fallback request opens a ten-minute WPA2 SoftAP, with a fresh 24-hex-character password and independent 128-bit form token. Join the temporary AP and open its displayed setup URL. The fallback never starts at boot, reconnect failure or scan failure. AP netif allocation failure leaves native station joining available.
 
 The fallback has one client, two HTTP sockets/routes, a 512-byte form bound, exact AP-IP Host/Origin validation, token/generation/deadline checks, UTF-8 validation and escaped HTML. Its HTTP listener binds the AP netif using `if_name`, serves GET `/` and POST `/configure`, and provides no input/settings/update/shell API. HTTP has no application TLS inside the WPA2 setup network. Anyone given that temporary AP password can submit; do not confuse it with LAN authentication or a captive portal. No captive DNS, arbitrary CORS or automatic portal detection is promised. HTTP 202 acknowledges admission only; the form never echoes the submitted station password.
 
 `app_wifi_get_setup_info()` is a trusted local-display API, separate from ordinary snapshots. Clear its password copy after close/expiry; never log or export it. Setup expires after ten minutes or closes five seconds after the submitted network actually connects. Stop/expiry/failure immediately revoke admission and clear setup secrets. Worker shutdown tracks HTTP stop and AP-to-STA mode independently; outstanding failures retain `cleanup_pending`, `setup_active`, `operation_pending` and cleanup errors, and retry no faster than once per second. Repeated stop cannot hot-loop. Do not show a usable password or offer another setup while cleanup remains pending. No token survives stop and setup never automatically reopens.
 
 HTTP tasks have two-second socket waits plus a four-second fragmented-body budget. Radio/HTTP shutdown is not performed in HID/UI callbacks; actual interruption and radio shutdown bounds still require device tests.
+
+## Persistent control hotspot
+
+In **Settings → Wi-Fi**, select **Use control hotspot**. After the hotspot is
+active, join the displayed `Mosaico-Control-…` network using the 24-character
+WPA2 password shown on that page. The selection and password survive reboot.
+**Return to Wi-Fi network** resumes the last confirmed station configuration
+from this boot. The next hotspot activation generates new Wi-Fi credentials.
+Station scans, joins, saved-profile writes and recovery setup are unavailable
+while the control hotspot is selected. The settings page still shows saved
+profiles and any existing storage uncertainty.
+
+The hotspot publishes readiness after the AP interface and DHCP server
+start. DHCP advertises the hotspot's local DNS server. Open the device-specific
+HTTPS name in **Web/API** after joining the hotspot. Native clients can use
+`192.168.4.1` at the enrolled TLS port, with 443 as the default. The
+[enrolled certificate](../bridge/README.md#control-hotspot-enrollment) covers
+both endpoints. Controller enrollment, operation permissions and the input
+lease govern access to HTTPS/WSS operations.
+
+The Wi-Fi worker waits for the old listener to shut down and the input
+coordinator to finish neutral reports on the old HID link. USB completion
+or BLE confirmation must drain on the original generation while that host
+remains connected. An observed disconnect lets the switch proceed. If the
+drain times out, the current Wi-Fi mode stays selected.
+When a mode save reports an error, the worker checks the persisted value
+and follows the confirmed result. An unreadable result leaves the current
+mode running. **Verify hotspot mode** reads the saved value again and
+applies a confirmed result after the same session and input drain.
+Reboot also reads the saved mode. The recovery HTTP listener is inactive in
+control mode.
 
 ## Saved catalog, maintenance and evidence
 

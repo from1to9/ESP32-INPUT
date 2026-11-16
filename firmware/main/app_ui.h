@@ -40,7 +40,7 @@ typedef enum {
     APP_BLUETOOTH_DEVICES, /* x=0 input devices, x=1 audio devices. */
     APP_NAV_HOME, APP_NAV_BACK, /* Mouse only: button 3 tap, Command+[ tap. */
     APP_CONTROLLER_SELECT, APP_CONTROLLER_EDIT,
-    APP_RESET_REQUEST,
+    APP_RESET_REQUEST, APP_WIFI_CONTROL_AP,
 } app_action_t;
 
 /* Local navigation can run during first-boot observation. HID, radio,
@@ -485,6 +485,9 @@ typedef struct {
     char wifi_ssid[33];
     char wifi_ipv4[16];
     char wifi_message[65];
+    bool wifi_control_ap, wifi_control_ap_ready, wifi_control_switch_available;
+    bool wifi_control_storage_uncertain;
+    char wifi_control_ap_password[25]; /* Local Wi-Fi page only. */
     bool wifi_setup_active;
     char wifi_setup_ssid[33];
     char wifi_setup_passcode[25]; /* Display only; clear when setup closes/ends. */

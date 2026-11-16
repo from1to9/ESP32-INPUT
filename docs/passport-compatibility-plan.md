@@ -113,14 +113,14 @@ identity, enrolled-client permissions, and input leases; it never inherits
 Passport's open policy. Its setup-only AP and previously saved settings must
 continue to work. Manual selection of persistent control AP survives reboot
 until the user switches back to STA; it does not replace the timed first-boot
-provisioning AP. Reuse a stable certificate hostname on STA and AP where
-the certificate permits it, resolve that name on the AP, and keep exact Host
-and Origin checks. An installation whose existing certificate cannot identify
-the AP endpoint needs an explicit re-commissioning path; do not disable TLS
-validation or silently expose HTTP. A cold boot with no trusted time does
-not make an existing time-limited grant valid: use an already valid
-permanent grant or show that authorization is unavailable until clock
-quality returns. A network switch closes sessions and releases input
+provisioning AP. Keep the station certificate hostname. On the AP, DHCP
+advertises a local DNS server for the device-specific browser origin, and
+native clients may use the separately certified `192.168.4.1` IP. Both
+interfaces keep exact Host and Origin checks. An older identity uses
+[local USB re-enrollment](../bridge/README.md#control-hotspot-enrollment).
+A cold boot without usable time requires an already valid permanent grant.
+Time-limited authorization stays unavailable until clock quality returns.
+A network switch closes sessions and releases input
 before rebinding the listener. The Mosaico UI needs only the new AP
 selection/status entry and the network integration required to expose
 the existing controller there.
