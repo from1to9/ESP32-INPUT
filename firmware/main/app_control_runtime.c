@@ -5,12 +5,16 @@
 #include "usb_hid.h"
 #include "app_sensor_api.h"
 #include "app_runtime_diagnostics.h"
+#include "app_display_names.h"
+#include "ble_hid.h"
+#include "bt_audio.h"
 #include "control_sensor_usb.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -98,10 +102,14 @@ static bool update_operation(cp_operation_id_t op)
     return (op >= CP_OP_FIRMWARE_CHECK && op <= CP_OP_FIRMWARE_DISCARD) ||
            op == CP_OP_FIRMWARE_CANCEL;
 }
+static bool display_name_operation(cp_operation_id_t op)
+{
+    return op == CP_OP_DISPLAY_NAME_SET || op == CP_OP_DISPLAY_NAME_CLEAR;
+}
 static bool owned(cp_operation_id_t op)
 {
     return (op >= CP_OP_WIFI_SCAN_START && op <= CP_OP_WIFI_JOIN) || profile_operation(op) ||
-           update_operation(op);
+           update_operation(op) || display_name_operation(op);
 }
 static bool supported_native(cp_operation_id_t op)
 {
@@ -113,9 +121,17 @@ static bool random_source(void *unused, uint8_t *out, size_t n)
     esp_fill_random(out, n);
     return true;
 }
+static bool argument_u64(const cp_command_t *, const char *, uint64_t *);
+#include "app_display_names_bindings.inc"
 static bool available(void *unused, cp_operation_id_t op, char reason[CP_REASON_CAPACITY])
 {
     (void)unused;
+    if (op == CP_OP_DISPLAY_NAME_LIST) return true;
+    if (display_name_operation(op)) {
+        bool known = app_display_names_status().known;
+        if (!known) strcpy(reason, "label_store_unavailable");
+        return known;
+    }
     if (update_operation(op)) {
         app_update_snapshot_t s;
         app_update_snapshot(&s);
@@ -158,6 +174,11 @@ static cp_error_t submit(void *unused, const cp_command_t *command, cp_result_t 
     }
     if (!supported_native(command->operation)) {
         return CP_NOT_IMPLEMENTED;
+    }
+    if (display_name_operation(command->operation)) {
+        app_display_name_entry_t entry = {0};
+        cp_error_t parsed = display_name_command(command, &entry);
+        if (parsed != CP_OK) return parsed;
     }
     cp_error_t e = CP_BUSY;
     portENTER_CRITICAL(&runtime_lock);
@@ -253,6 +274,9 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
 {
     (void)unused;
     int n = -1;
+    static const char display_names[] = "/api/v1/display-names";
+    if (!strncmp(resource, display_names, sizeof(display_names) - 1U))
+        return app_display_names_read(resource, json, capacity, length);
     if (!strcmp(resource, APP_RUNTIME_DIAGNOSTICS_RESOURCE)) {
         if (!(who->scopes & CP_SCOPE_DIAGNOSTICS_READ)) return CP_FORBIDDEN;
         return app_runtime_diagnostics_read(json, capacity, length);
@@ -295,13 +319,20 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
         size_t used = (size_t)k;
         for (unsigned i = 0; i < s.count; ++i) {
             char ssid[201];
+            char alias[APP_DISPLAY_NAME_CAPACITY], alias_json[APP_DISPLAY_NAME_BYTES * 6U + 3U] = "null";
+            uint8_t identity[APP_DISPLAY_NAME_ID_BYTES];
+            bool labelable = s.known && !s.uncertain &&
+                app_display_name_profile_identity(s.profiles[i].id, identity);
+            if (labelable && app_display_names_get(APP_DISPLAY_NAME_WIFI_PROFILE, identity, alias) &&
+                !cj_escape(alias, alias_json, sizeof(alias_json))) return CP_INTERNAL;
             if (!cj_escape(s.profiles[i].ssid, ssid, sizeof(ssid))) {
                 return CP_INTERNAL;
             }
             k = snprintf(
                 json + used, capacity - used,
-                "%s{\"id\":\"%s\",\"ssid\":%s,\"enabled\":%s,\"current\":%s,\"priority\":%u}",
-                i ? "," : "", s.profiles[i].id, ssid, s.profiles[i].enabled ? "true" : "false",
+                "%s{\"id\":\"%s\",\"ssid\":%s,\"label\":%s,\"labelable\":%s,\"enabled\":%s,\"current\":%s,\"priority\":%u}",
+                i ? "," : "", s.profiles[i].id, ssid, alias_json, labelable ? "true" : "false",
+                s.profiles[i].enabled ? "true" : "false",
                 s.profiles[i].current ? "true" : "false", s.profiles[i].priority);
             if (k < 0 || (size_t)k >= capacity - used) {
                 return CP_TOO_LARGE;
@@ -425,6 +456,8 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
     } else if (!strncmp(resource, "/api/v1/wifi/scans/", 19)) {
         app_wifi_scan_snapshot_t s;
         app_wifi_get_scan_snapshot(&s);
+        app_wifi_profiles_snapshot_t profiles;
+        app_wifi_profiles_snapshot(&profiles);
         n = snprintf(json, capacity,
                      "{\"state\":%u,\"generation\":%u,\"count\":%u,\"capacity_reached\":%s,"
                      "\"cleanup_pending\":%s,\"remaining_ms\":%u,\"error\":%d,\"records\":[",
@@ -445,7 +478,7 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
             }
             start = (unsigned)v;
         }
-        for (unsigned i = start; i < s.count && i < start + 8; ++i) {
+        for (unsigned i = start; s.state == APP_WIFI_SCAN_READY && i < s.count && i < start + 8; ++i) {
             app_wifi_scan_record_t r;
             if (app_wifi_get_scan_record(s.generation, (uint16_t)i, &r) != ESP_OK) {
                 return CP_STALE;
@@ -454,11 +487,29 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
             if (!cj_escape(r.label, label, sizeof(label))) {
                 return CP_INTERNAL;
             }
+            char alias[APP_DISPLAY_NAME_CAPACITY], alias_json[APP_DISPLAY_NAME_BYTES * 6U + 3U] = "null";
+            char identity_json[APP_DISPLAY_NAME_ID_CAPACITY + 2U] = "null", bssid[13];
+            app_display_name_entry_t ap = {.kind = APP_DISPLAY_NAME_WIFI_AP};
+            uint8_t profile_id[APP_DISPLAY_NAME_ID_BYTES] = {0};
+            unsigned saved_matches = app_display_name_scan_profiles(&profiles, &r, profile_id);
+            bool exact = app_display_name_ap_identity((const uint8_t *)r.ssid, r.ssid_length, r.bssid, r.sdk_authmode, ap.id);
+            bool labelable = exact && profiles.known && !profiles.uncertain && !profiles.operation_pending && !saved_matches;
+            bool aliased = exact && app_display_names_get(APP_DISPLAY_NAME_WIFI_AP, ap.id, alias);
+            if (!aliased && saved_matches == 1U) aliased = app_display_names_get(APP_DISPLAY_NAME_WIFI_PROFILE, profile_id, alias);
+            if (aliased && !cj_escape(alias, alias_json, sizeof(alias_json))) return CP_INTERNAL;
+            if (exact) {
+                char id[APP_DISPLAY_NAME_ID_CAPACITY];
+                app_display_name_format_id(&ap, id);
+                (void)snprintf(identity_json, sizeof(identity_json), "\"%s\"", id);
+            }
+            hex(r.bssid, sizeof(r.bssid), bssid);
             int k = snprintf(
                 json + used, capacity - used,
-                "%s{\"index\":%u,\"ssid\":%s,\"rssi_dbm\":%d,\"channel\":%u,\"security\":%u,\"join_"
+                "%s{\"index\":%u,\"ssid\":%s,\"label\":%s,\"display_id\":%s,\"labelable\":%s,\"bssid\":\"%s\","
+                "\"rssi_dbm\":%d,\"channel\":%u,\"security\":%u,\"join_"
                 "availability\":%u,\"current\":%s,\"remembered\":%s}",
-                i > start ? "," : "", i, label, r.rssi_dbm, r.channel, r.security, r.availability,
+                i > start ? "," : "", i, label, alias_json, identity_json, labelable ? "true" : "false", bssid,
+                r.rssi_dbm, r.channel, r.security, r.availability,
                 r.current ? "true" : "false", r.remembered ? "true" : "false");
             if (k < 0 || (size_t)k >= capacity - used) {
                 return CP_TOO_LARGE;
@@ -466,7 +517,7 @@ static cp_error_t read_resource(void *unused, const cp_identity_t *who, const ch
             used += (size_t)k;
         }
         int k = snprintf(json + used, capacity - used, "],\"next_index\":%u}",
-                         start + 8 < s.count ? start + 8 : 0);
+                         s.state == APP_WIFI_SCAN_READY && start + 8 < s.count ? start + 8 : 0);
         if (k < 0 || (size_t)k >= capacity - used) {
             return CP_TOO_LARGE;
         }
@@ -767,6 +818,10 @@ static void process_work(work_t *w)
         w->result = (cp_result_t){.command_key = w->command.command_key,
                                   .state = CP_RESULT_RUNNING,
                                   .uncertain_index = -1};
+        if (display_name_operation(w->command.operation)) {
+            display_name_apply(w);
+            return;
+        }
         w->initial_revision = s.revision;
         (void)cp_command_string(&w->command, "ssid", w->expected_ssid, sizeof(w->expected_ssid));
         esp_err_t e = start_native(w);
@@ -1092,6 +1147,7 @@ static void worker(void *unused)
 {
     (void)unused;
     esp_err_t error = app_control_trust_init();
+    app_display_names_load();
     cp_callbacks_t callbacks = {.random = random_source,
                                 .available = available,
                                 .dispatch = submit,
@@ -1202,6 +1258,7 @@ static void worker(void *unused)
         for (unsigned i = 0; i < INBOX_CAPACITY; ++i) {
             process_work(&runtime->work[i]);
         }
+        display_name_cleanup_service();
         poll_usb(trust_view.import_window);
         if (!trust_view.import_window && !approved) {
             wipe(runtime->package, sizeof(runtime->package));

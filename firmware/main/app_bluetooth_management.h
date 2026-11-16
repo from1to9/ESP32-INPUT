@@ -16,8 +16,9 @@ typedef struct {
     app_bluetooth_management_operation_t operation;
     app_bluetooth_management_phase_t phase;
     bool active, uncertain, irreversible;
+    bool preference_saved, wrong_peer;
     esp_err_t error;
-    uint64_t revision, deletion_request_id, policy_request_id;
+    uint64_t revision, deletion_request_id, policy_request_id, remote_attempt;
     char message[97];
 } app_bluetooth_management_snapshot_t;
 
@@ -29,6 +30,13 @@ void app_bluetooth_management_init(void);
 esp_err_t app_bluetooth_management_begin(app_bluetooth_management_operation_t,
     uint64_t host_generation, uint64_t bond_revision, uint64_t preference_revision,
     const ble_hid_target_t *exact_target, uint64_t now_ms);
+/* Remote Select waits for the exact secure link after committing the policy.
+ * The attempt ID changes when the manager accepts another operation. */
+esp_err_t app_bluetooth_management_begin_select(uint64_t host_generation, uint64_t bond_revision,
+    uint64_t preference_revision, const ble_hid_target_t *exact_target,
+    uint32_t wait_ms, uint64_t now_ms, uint64_t *attempt);
+esp_err_t app_bluetooth_management_begin_add(uint64_t host_generation, uint64_t bond_revision,
+    uint64_t preference_revision, uint32_t window_ms, uint64_t now_ms, uint64_t *attempt);
 void app_bluetooth_management_service(const app_bluetooth_management_context_t *, uint64_t now_ms);
 /* Cancels future steps, never an SDK/NVS write already submitted. Receipts and
  * uncertainty survive cancellation; no automatic pairing or rollback follows. */

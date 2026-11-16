@@ -180,6 +180,16 @@ has a wired backend. Show Classic audio peers separately on Mosaico,
 with only actions actually supported by its current audio service;
 Passport has no Classic audio list or scanner.
 
+On Mosaico, a user disconnect pauses reconnection for that host and keeps
+its bond. A target request waits 60 seconds by default after the selection
+is saved and accepts a wait of 1–300 seconds. A timeout keeps the saved
+selection and returns to ordinary saved-host advertising. BLE link
+readiness and the active input route are reported separately. The device
+review for Add explains that confirmation clears the selected-host
+preference and keeps all bonds. The result confirms advertising after
+the controller reports its start. Closing the window stops new admission,
+and cancelling a pending handshake keeps the window's original deadline.
+
 The three-button Wi-Fi page has a Scan networks action and a scrollable
 2.4 GHz result list. Each row shows a bounded SSID label, security type,
 signal strength, and saved/current marker; UP and DOWN clamp at the list
@@ -233,6 +243,14 @@ editing; users or agents edit them through Web/API. Passport must be able
 to scan during its AP setup window without dropping the controller; the
 Mosaico control AP may report live scans unavailable while still showing
 saved profiles and labels.
+
+Mosaico publishes the label catalog at `/api/v1/display-names` in
+eight-row pages. Use its revision as the command's `resource_revision`.
+Set takes an `owner_revision` for a saved profile or bond, or the current
+`scan_generation` and `scan_index` for an exact AP. Clear accepts the
+retained kind and ID with the catalog revision. Classic labeling requires
+a verified link-key fingerprint. Legacy synthetic Wi-Fi profile IDs and
+scan rows without a usable exact SSID are unavailable for labeling.
 
 The Passport has a 240 x 320 display and UP, DOWN, OK on one ADC ladder.
 No two-button chord is required. The BSP callback queues events; UI,

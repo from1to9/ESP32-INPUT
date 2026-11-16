@@ -5,6 +5,7 @@ const HEX32 = /^[0-9a-f]{32}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/;
 const IDENTITY_KEY = "mosaico.browser.identity.v1";
+const THEME_KEY = "mosaico.browser.theme.v1";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 const decimal = value => typeof value === "string" && DECIMAL.test(value) && BigInt(value) <= 18446744073709551615n;
@@ -53,6 +54,7 @@ export class Controller {
     this.state = null;
     this.controlled = false;
     this.busy = false;
+    this.managing = false;
     this.closing = false;
     this.uncertain = false;
     this.pin = null;
@@ -94,15 +96,15 @@ export class Controller {
     if (response.status !== 200 || !HEX32.test(s.session_id || "") || !HEX32.test(s.boot_id || "") ||
         !/^[0-9a-f]{16}$/.test(s.request_prefix || "") || !HEX32.test(s.csrf || "") ||
         !Number.isSafeInteger(Number(s.next_seq)) || Number(s.next_seq) < 1 ||
-        !Array.isArray(s.scopes) || !s.scopes.includes("input.control")) {
-      throw new Error("Browser login rejected or keyboard/mouse permission is unavailable. Check Mosaico's permissions.");
+        !Array.isArray(s.scopes) || !s.scopes.includes("view")) {
+      throw new Error("Browser login rejected. Check this browser’s approval on Mosaico.");
     }
     this.session = {...s, next_seq: Number(s.next_seq)};
     this.lastKey = null;
     ++this.generation;
     this.uncertain = false;
     await this.refresh();
-    this.message = "Browser connected. Take control explicitly to send input.";
+    this.message = s.scopes.includes("input.control") ? "Browser connected. Take control to send input." : "Browser connected with device access.";
     this.changed();
   }
   async refresh(allowEpochChange = false) {
@@ -219,6 +221,7 @@ export class Controller {
   async run(op, args = {}, total, sample) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     this.busy = true;
+    if (!sample && op !== "control.renew") this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
     this.changed();
     try { return await this.send(op, args, total, sample); }
     catch (error) { this.halt(this.uncertain ? this.message : error.message); throw error; }
@@ -226,6 +229,7 @@ export class Controller {
   }
   async acquire() {
     if (!this.session || this.uncertain) throw new Error("Connect a fresh browser session first.");
+    if (!this.session.scopes.includes("input.control")) throw new Error("Keyboard and mouse permission is unavailable.");
     await this.run("control.acquire", {producer: "script", lifetime_ms: 3000});
     const s = this.state;
     if (!s?.lease_active || !HEX32.test(s.lease_id || "")) throw new Error("Device has not established an active input lease.");
@@ -233,6 +237,63 @@ export class Controller {
     this.controlled = true;
     this.message = "Control acquired. Input is sent only from this page's explicit controls.";
     this.changed();
+  }
+  async manage(op, args, revision, { release = false, timeout = 45000, update = () => {} } = {}) {
+    if (this.busy || !this.session || this.uncertain) throw new Error("A current browser session and an idle command lane are required.");
+    if (!decimal(revision)) throw new Error("The device’s resource revision is unavailable. Refresh the lists.");
+    const session = this.session;
+    this.busy = this.managing = true;
+    this.changed();
+    try {
+      if (release && this.controlled) {
+        await this.send("control.release", {});
+        this.halt();
+      }
+      const state = await this.refresh();
+      if (this.session !== session || state.locked || !decimal(state.management_generation)) {
+        throw new Error("Device management is unavailable. Check Mosaico and refresh.");
+      }
+      const seq = session.next_seq;
+      if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
+      const envelope = {
+        v: 1, boot_id: session.boot_id, session_id: session.session_id,
+        request_id: session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
+        deadline_ms: (BigInt(state.now_ms) + 1500n).toString(),
+        management_generation: state.management_generation, resource_revision: revision, op, args,
+      };
+      let reply;
+      try {
+        ({json: reply} = await this.request("/api/v1/commands", "POST", envelope));
+        const next = Number(reply.next_seq);
+        if (this.session !== session || (next !== seq && next !== seq + 1)) throw new Error();
+        session.next_seq = next;
+      } catch {
+        if (this.session === session) {
+          this.uncertain = true;
+          this.halt();
+        }
+        throw new Error("Device reply unknown. Reconnect and refresh before taking another action.");
+      }
+      let result = reply;
+      const stopAt = performance.now() + timeout;
+      update(result);
+      while (ACTIVE.has(result.state)) {
+        if (this.session !== session) throw new Error("The browser session closed before the result arrived.");
+        if (!decimal(reply.command_key) || performance.now() >= stopAt) {
+          throw new Error("Result still unconfirmed. Refresh the device lists before retrying.");
+        }
+        await sleep(450);
+        const observation = await this.request(`/api/v1/requests/${reply.command_key}`);
+        if ([429, 503].includes(observation.status) && observation.json.error === "busy") continue;
+        if (this.session !== session || !observation.json.state) throw new Error("The result is unavailable. Refresh before retrying.");
+        result = observation.json;
+        update(result);
+      }
+      return result;
+    } finally {
+      this.busy = this.managing = false;
+      this.changed();
+    }
   }
   async text(value) { validateText(value); return this.run("keyboard.text.enqueue", {text: value}, value.length); }
   async checkResult() {
@@ -278,17 +339,381 @@ async function fingerprint(identity) {
   return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
 }
 
+const managementMessages = {
+  physical_approval_required: "Review the request on Mosaico and confirm it there.",
+  pairing_preparing: "Releasing the current host and preparing pairing.",
+  pairing_preference_cleared_starting: "The selected preference was cleared. Waiting for pairing advertising.",
+  pairing_advertising: "Pairing is visible. Select Mosaico from the new host’s Bluetooth settings.",
+  pairing_preference_cleared_advertising_failed: "The selected preference was cleared. Pairing advertising failed.",
+  pairing_policy_outcome_unknown: "Pairing did not open. The preference write may still finish. Refresh before retrying.",
+  target_preparing: "Releasing the current host and saving the selection.",
+  target_saved_waiting: "Selection saved. Connect from the selected host’s Bluetooth settings.",
+  target_wrong_host_rejected: "A different host was rejected. Still waiting for the selected host.",
+  target_ble_ready: "The selected host’s BLE link is ready.",
+  target_saved_link_timeout: "Selection saved. The selected host did not become ready in time.",
+  target_saved_link_failed: "Selection saved. The connection attempt failed.",
+  target_policy_outcome_unknown: "The attempt ended. The preference write may still finish. Refresh before retrying.",
+  label_saved: "Display label saved.",
+  label_cleared: "Display label cleared.",
+  label_storage_uncertain: "The label write is unconfirmed. Refresh the catalog before retrying.",
+  label_identity_or_revision_changed: "The item changed. Refresh before saving a label.",
+  label_capacity_reached: "The saved label limit was reached. Clear a label first.",
+};
+
+function themeControl(select) {
+  const choices = ["system", "light", "dark"];
+  let value = "system";
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (choices.includes(saved)) value = saved;
+  } catch { /* System theme remains available without storage. */ }
+  const apply = () => {
+    if (select.value === "system") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = select.value;
+  };
+  select.value = value;
+  apply();
+  select.onchange = () => {
+    apply();
+    try { localStorage.setItem(THEME_KEY, select.value); } catch { /* Keep this tab's choice. */ }
+  };
+}
+
+function mountManagement(client, $, clearInput) {
+  const model = {operations: new Map(), peers: null, profiles: null, labels: null, scan: null};
+  let loading = false;
+  let seenSession = null;
+  let disclosure = 8;
+  const has = scope => client.session?.scopes.includes(scope) === true;
+  const supports = op => model.operations.get(op) === true;
+  const node = (tag, title, css) => {
+    const result = document.createElement(tag);
+    if (title) result.textContent = title;
+    if (css) result.className = css;
+    return result;
+  };
+  const note = (message, section) => {
+    const status = $("management-result");
+    if (section) section.children[0].after(status);
+    status.textContent = message;
+    status.hidden = !message;
+  };
+  const blocked = () => !client.session || !client.state || client.state.locked || client.uncertain || client.busy || loading;
+  const controls = () => {
+    $("refresh-connections").disabled = !client.session || loading || client.busy;
+    $("scan").disabled = blocked() || !has("wifi.configure") || !supports("wifi.scan.start");
+    $("pair-duration").disabled = blocked() || !supports("bluetooth.pairing.open");
+    document.querySelectorAll("[data-manage]").forEach(button => {
+      button.disabled = blocked() || button.dataset.available !== "yes";
+    });
+  };
+  const button = (label, act, available, css) => {
+    const result = node("button", label, css);
+    result.type = "button";
+    result.dataset.manage = "";
+    result.dataset.available = available ? "yes" : "no";
+    result.onclick = act;
+    return result;
+  };
+  const empty = title => node("p", title, "hint");
+  const item = (title, detail, identity) => {
+    const row = node("article", "", "item");
+    row.append(node("strong", title));
+    if (detail) row.append(node("p", detail, "hint"));
+    if (identity) row.append(node("p", identity, "identity"));
+    return row;
+  };
+  const rowActions = (row, actions) => {
+    if (!actions.length) return;
+    const group = node("div", "", "actions");
+    group.append(...actions);
+    row.append(group);
+  };
+  async function get(path) {
+    for (const delay of [0, 60, 140]) {
+      if (delay) await sleep(delay);
+      const reply = await client.request(path);
+      if (reply.status === 200) return reply.json;
+      if (![429, 503].includes(reply.status) || reply.json.error !== "busy") break;
+    }
+    throw new Error("The device list is unavailable.");
+  }
+  async function pageList(path, key, cursorName, revisionKeys, bound) {
+    const first = await get(path(0));
+    const rows = Array.isArray(first[key]) ? [...first[key]] : [];
+    let cursor = first[cursorName];
+    while (Number.isInteger(cursor) && cursor > 0 && cursor <= bound && rows.length < bound) {
+      const next = await get(path(cursor));
+      if (revisionKeys.some(name => next[name] !== first[name]) || next[cursorName] === cursor || !Array.isArray(next[key])) {
+        throw new Error("The list changed while it was loading.");
+      }
+      rows.push(...next[key]);
+      cursor = next[cursorName];
+    }
+    return {...first, [key]: Array.isArray(first[key]) ? rows : first[key]};
+  }
+  const peers = () => pageList(i => `/api/v1/bluetooth/peers?cursor=${i}`, "peers", "next_cursor",
+    ["ble_revision", "classic_revision", "target_revision"], 64);
+  const labels = () => pageList(i => `/api/v1/display-names?cursor=${i}`, "labels", "next_cursor", ["revision"], 88);
+  const scans = () => pageList(i => `/api/v1/wifi/scans/${i}`, "records", "next_index", ["generation"], 32);
+  async function refresh({ scan = model.scan !== null, announce = false } = {}) {
+    if (!client.session || loading) return;
+    const session = client.session;
+    loading = true;
+    controls();
+    let unavailable = false;
+    try {
+      const ops = new Map();
+      // These are the catalog pages for the existing Bluetooth, Wi-Fi and
+      // display-label operations. Availability is still returned by the device.
+      for (const offset of [62, 71, 141, 151]) {
+        try {
+          const page = await get(`/api/v1/operations?cursor=${offset}&limit=8`);
+          for (const row of page.items || []) ops.set(row.name, row.available === true);
+        } catch { unavailable = true; }
+      }
+      model.operations = ops;
+      for (const [key, load] of [["peers", peers], ["profiles", () => get("/api/v1/wifi/profiles")], ["labels", labels],
+        ...(scan ? [["scan", scans]] : [])]) {
+        try { model[key] = await load(); }
+        catch { model[key] = null; unavailable = true; }
+      }
+    } finally {
+      loading = false;
+      if (client.session !== session) reset();
+      else {
+        render();
+        if (announce) note(unavailable ? "Some lists are unavailable. Refresh when Mosaico is ready." : "Connection lists refreshed.");
+      }
+    }
+  }
+  async function command(op, args, revision, {
+    release = false, timeout, success = "Device change confirmed.", scan = model.scan !== null
+  } = {}) {
+    if (release) clearInput();
+    const active = document.activeElement?.closest("#connections section");
+    const fallback = $(op.startsWith("bluetooth.") ? "bluetooth-title" : op.startsWith("wifi.") ? "wifi-title" : "labels-title");
+    note("Sending request…", active || fallback.closest("section"));
+    try {
+      const result = await client.manage(op, args, revision, {release, timeout, update: current => {
+        if (ACTIVE.has(current.state)) note(managementMessages[current.reason] || "Waiting for Mosaico.");
+      }});
+      const applied = result.error === "ok" && ["applied", "completed"].includes(result.state);
+      note(managementMessages[result.reason] || (applied ? success : `Change not confirmed (${result.error || result.state || "unknown"}).`));
+    } catch (error) { note(error.message); }
+    if (client.session && !client.uncertain) await refresh({scan});
+  }
+  function editor(title, detail, label, value, secret, save) {
+    const dialog = $("editor"), input = $("editor-value");
+    $("editor-title").textContent = title;
+    $("editor-detail").textContent = detail;
+    $("editor-label").textContent = label;
+    $("editor-error").textContent = "";
+    input.type = secret ? "password" : "text";
+    input.autocomplete = secret ? "new-password" : "off";
+    input.maxLength = secret ? 63 : 48;
+    input.value = value || "";
+    $("editor-form").onsubmit = event => {
+      event.preventDefault();
+      const value = input.value;
+      const allowed = secret ? /^[\x20-\x7e]{8,63}$/.test(value) :
+        value && [...value].length <= 16 && new TextEncoder().encode(value).length <= 48 &&
+        !/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value);
+      if (!allowed) {
+        $("editor-error").textContent = secret ? "Enter an 8–63 character Wi-Fi passphrase." : "Enter up to 16 characters and 48 UTF-8 bytes.";
+        return;
+      }
+      dialog.close();
+      save(value);
+    };
+    $("editor-cancel").onclick = () => dialog.close();
+    dialog.onclose = () => { input.value = ""; $("editor-form").onsubmit = null; };
+    dialog.showModal();
+    input.focus();
+  }
+  function labelActions(kind, id, title, label, owner, labelable = true) {
+    const catalog = model.labels;
+    const scope = ["hid_bond", "classic_bond"].includes(kind) ? "connections.manage" : "wifi.configure";
+    if (!id || !has(scope) || !catalog?.known) return [];
+    const actions = [];
+    if (labelable && owner) {
+      actions.push(button(label ? "Edit label" : "Add label", () => editor("Display label", title, "Label", label, false,
+        value => command("display_name.set", {kind, id, label: value, ...owner}, catalog.revision)), supports("display_name.set")));
+    }
+    if (label && catalog.labels.some(row => row.kind === kind && row.id === id)) {
+      actions.push(button("Clear label", () => command("display_name.clear", {kind, id}, catalog.revision), supports("display_name.clear")));
+    }
+    return actions;
+  }
+  function drawBluetooth() {
+    const data = model.peers;
+    const connection = $("ble-link"), actions = $("bluetooth-actions");
+    const inputs = $("ble-peers"), classic = $("classic-peers");
+    actions.replaceChildren();
+    inputs.replaceChildren();
+    classic.replaceChildren();
+    if (!data) {
+      connection.textContent = client.session ? "Bluetooth state unavailable." : "Connect this browser to read Bluetooth state.";
+      inputs.append(empty("Saved input hosts unavailable."));
+      classic.append(empty("Classic audio hosts unavailable."));
+      return;
+    }
+    const link = !data.ble_initialized || data.ble_failed ? "BLE unavailable" : data.ble_ready ? "BLE link ready" :
+      data.pairing_handshake ? "Pairing handshake in progress" : data.connected ? "BLE connected · preparing input" :
+      data.reconnect_paused ? "Host reconnect paused" : "No BLE link";
+    connection.textContent = `${link} · ${data.input_route === "usb" ? "USB" : "Bluetooth"} input route` +
+      (data.pairing_open ? ` · pairing open (${Math.ceil(data.pairing_remaining_ms / 1000)}s at last refresh)` : "");
+    const generation = data.ble_generation;
+    const permission = has("connections.manage");
+    if (permission && data.ble_initialized && !data.ble_failed) {
+      actions.append(
+        button("Pair new host", () => command("bluetooth.pairing.open", {generation, window_seconds: Number($("pair-duration").value)}, generation,
+          {release: data.input_route === "ble_hid", timeout: 70000}), supports("bluetooth.pairing.open")),
+        button("Close pairing window", () => command("bluetooth.pairing.close", {generation}, generation,
+          {success: "Pairing window closed."}), data.pairing_open && supports("bluetooth.pairing.close")),
+        button("Cancel handshake", () => command("bluetooth.pairing.cancel_handshake", {generation}, generation,
+          {success: "Pairing handshake cancelled."}), data.pairing_handshake && supports("bluetooth.pairing.cancel_handshake")),
+        button("Disconnect BLE host", () => command("bluetooth.disconnect", {generation}, generation,
+          {release: data.input_route === "ble_hid", success: "BLE host disconnected. Its automatic reconnect is paused."}),
+          data.admitted && supports("bluetooth.disconnect")),
+      );
+    }
+    for (const host of data.peers || []) {
+      const audio = host.transport === "classic_audio";
+      const original = host.name || "Original host name unavailable";
+      const state = audio ? [host.hfp_current && "Mic connected", host.a2dp_current && "Speaker connected"].filter(Boolean).join(" · ") :
+        [data.current_match_known && host.current && "Current", host.selected && "Selected"].filter(Boolean).join(" · ");
+      const title = host.label || host.name || (audio ? "Saved audio host" : "Saved input host");
+      const row = item(title, [original, state].filter(Boolean).join(" · "), host.peer_id || "Identity unavailable");
+      const choices = labelActions(audio ? "classic_bond" : "hid_bond", audio ? host.display_id : host.peer_id, title, host.label,
+        {owner_revision: audio ? data.classic_revision : data.ble_revision}, host.labelable);
+      if (audio && !host.labelable) row.append(empty("Display labels unavailable for this audio host."));
+      if (!audio && permission && host.selectable) choices.unshift(button(host.selected ? "Reconnect selected host" : "Select host",
+        () => command("bluetooth.target.request", {peer_id: host.peer_id, generation}, data.ble_revision,
+          {release: data.input_route === "ble_hid", timeout: 100000}), supports("bluetooth.target.request")));
+      rowActions(row, choices);
+      (audio ? classic : inputs).append(row);
+    }
+    if (!inputs.children.length) inputs.append(empty(data.ble_known ? "No saved input hosts." : "Saved input hosts unavailable."));
+    if (!classic.children.length) classic.append(empty(data.classic_known ? "No saved audio hosts." : "Classic audio hosts unavailable."));
+  }
+  function drawWifi() {
+    const profiles = model.profiles, scan = model.scan;
+    const saved = $("wifi-profiles"), nearby = $("wifi-scan");
+    saved.replaceChildren();
+    nearby.replaceChildren();
+    $("wifi-status").textContent = !client.session ? "Connect this browser to read saved networks." :
+      profiles?.uncertain ? "Saved network storage is uncertain." : !profiles?.known ? "Saved networks unavailable." :
+      `${profiles.profiles.length} of ${profiles.capacity} saved${supports("wifi.scan.start") ? "" : " · live scanning unavailable"}`;
+    const allow = has("wifi.configure") && profiles?.known && !profiles.uncertain && !profiles.operation_pending;
+    for (const [index, entry] of (profiles?.profiles || []).entries()) {
+      const row = item(entry.label || entry.ssid, `SSID: ${entry.ssid} · ${entry.current ? "Current" : entry.enabled ? "Saved" : "Disabled"} · priority ${entry.priority}`, entry.id);
+      const choices = labelActions("wifi_profile", entry.id, entry.ssid, entry.label, {owner_revision: profiles.revision}, entry.labelable);
+      if (allow) {
+        choices.unshift(button("Connect", () => command("wifi.profile.join", {profile_id: entry.id}, profiles.revision,
+          {release: true, success: "Saved network connected."}), entry.enabled && !entry.current && supports("wifi.profile.join")));
+        if (index > 0) choices.push(button("Move to first", () => command("wifi.profiles.reorder",
+          {profile_ids: [entry.id, ...profiles.profiles.filter(peer => peer.id !== entry.id).map(peer => peer.id)]},
+          profiles.revision, {success: "Network priority updated."}), supports("wifi.profiles.reorder")));
+        choices.push(button("Forget", () => {
+          if (globalThis.confirm(`Forget ${entry.ssid} on Mosaico?`))
+            command("wifi.profile.forget", {profile_id: entry.id}, profiles.revision, {success: "Saved network forgotten."});
+        }, supports("wifi.profile.forget")));
+      }
+      rowActions(row, choices);
+      saved.append(row);
+    }
+    if (!saved.children.length) saved.append(empty(profiles?.known && !profiles.uncertain ? "No saved networks." : "Saved network list unavailable."));
+    $("scan-panel").hidden = !scan;
+    if (!scan) return;
+    const security = ["Open", "WEP", "WPA", "WPA2", "WPA/WPA2", "WPA3", "WPA2/WPA3", "Enterprise", "OWE"];
+    for (const entry of scan.records || []) {
+      const row = item(entry.label || entry.ssid, `SSID: ${entry.ssid} · ${security[entry.security] || "Unknown security"} · ${entry.rssi_dbm} dBm`,
+        entry.bssid?.match(/.{1,2}/g)?.join(":"));
+      const choices = labelActions("wifi_ap", entry.display_id, entry.ssid, entry.label,
+        {scan_generation: scan.generation, scan_index: entry.index}, entry.labelable);
+      if (allow && entry.join_availability === 0 && !entry.remembered) choices.unshift(button("Save network",
+        () => editor("Save Wi-Fi network", entry.ssid, "Wi-Fi passphrase", "", true,
+          password => command("wifi.profile.save", {ssid: entry.ssid, password, keep_password: false, enabled: true, join: false},
+            profiles.revision, {success: "Network saved. Choose Connect when ready."})),
+        profiles.profiles.length < profiles.capacity && supports("wifi.profile.save")));
+      rowActions(row, choices);
+      nearby.append(row);
+    }
+    if (!nearby.children.length) nearby.append(empty(scan.state === 7 ? "Scan expired. Start a fresh scan." :
+      scan.state === 4 ? "No nearby networks were observed." : "No completed scan is available."));
+  }
+  function drawLabels() {
+    const catalog = model.labels, list = $("retained-labels");
+    list.replaceChildren();
+    $("label-capacity").textContent = !client.session ? "Saved labels appear after connecting." :
+      catalog?.known ? `${catalog.ap_count} of ${catalog.ap_capacity} exact AP labels used${catalog.cleanup_pending ? " · cleanup unconfirmed" : ""}` :
+      catalog?.cleanup_pending ? "Label cleanup and storage are unconfirmed." : "Display label storage unavailable.";
+    if (!catalog?.known) return;
+    const kinds = {hid_bond: "Bluetooth input", classic_bond: "Classic audio", wifi_profile: "Saved Wi-Fi", wifi_ap: "Scanned AP"};
+    for (const label of catalog.labels.slice(0, disclosure)) {
+      const row = item(label.label, [kinds[label.kind], label.original_ssid && `SSID: ${label.original_ssid}`].filter(Boolean).join(" · "), label.id);
+      rowActions(row, labelActions(label.kind, label.id, label.label, label.label, null));
+      list.append(row);
+    }
+    if (catalog.labels.length > disclosure) {
+      const more = node("button", "Show more labels", "quiet");
+      more.onclick = () => { disclosure += 8; drawLabels(); controls(); };
+      list.append(more);
+    }
+    if (!list.children.length) list.append(empty("No display labels saved."));
+  }
+  function render() { drawBluetooth(); drawWifi(); drawLabels(); controls(); }
+  function reset() {
+    model.operations.clear();
+    model.peers = model.profiles = model.labels = model.scan = null;
+    note("");
+    render();
+  }
+  $("refresh-connections").onclick = () => refresh({announce: true});
+  $("scan").onclick = () => command("wifi.scan.start", {}, String(model.scan?.generation || 0),
+    {scan: true, success: "Scan complete."});
+  setInterval(async () => {
+    if (blocked() || document.hidden || !(model.peers?.pairing_open || model.peers?.pairing_handshake)) return;
+    const session = client.session;
+    try {
+      const observed = await peers();
+      if (client.session === session && !loading && !client.busy) {
+        model.peers = observed;
+        drawBluetooth();
+        controls();
+      }
+    } catch { /* Keep the last confirmed list until an explicit refresh. */ }
+  }, 3500);
+  render();
+  return {
+    paint() {
+      if (seenSession !== client.session) {
+        seenSession = client.session;
+        reset();
+        if (seenSession && (has("connections.manage") || has("wifi.configure"))) void refresh();
+      }
+      controls();
+    },
+  };
+}
+
 function mount() {
   const $ = id => document.getElementById(id);
   const client = new Controller();
   let identity = null, pad = null, movement = null, pairingBusy = false;
+  themeControl($("theme"));
+  const management = mountManagement(client, $, () => { pad = movement = null; });
   const error = value => { client.message = value.message; client.changed(); };
   const act = async fn => { try { await fn(); } catch (value) { if (!client.uncertain) error(value); } };
   function paint() {
     const s = client.state;
+    const inputPermission = client.session?.scopes.includes("input.control");
     $("connection").textContent = client.controlled ? "Controlling" : client.session ? s ? "Connected / idle" : "State unavailable" : "Disconnected";
+    $("connection").dataset.state = client.controlled ? "controlling" : client.session && s ? "online" : "offline";
     $("target").textContent = s ? `${s.target_id.startsWith("usb:") ? "USB" : s.target_id.startsWith("bluetooth:") ? "Bluetooth" : "Input"} · ${s.target_id || "unavailable"}` : "Unavailable";
-    $("readiness").textContent = !s ? "Connect to read the actual input state." : s.locked ? "Device locked" :
+    $("readiness").textContent = !s ? "Connect to read the actual input state." : !inputPermission ?
+      "This browser does not have keyboard or mouse permission." : s.locked ? "Device locked" :
       !s.input_ready ? "Input not ready" : s.release_pending ? "Waiting for input releases" :
       !s.remote_allowed ? "Remote input is not allowed on Mosaico" : `${s.mode} · ready${client.controlled ? " · this browser owns control" : " · no control acquired here"}`;
     const active = client.controlled && !client.uncertain && s?.input_ready && !s.release_pending && !s.locked && s.remote_allowed;
@@ -297,13 +722,13 @@ function mount() {
     $("keyboard-controls").disabled = !active || s.mode !== "keyboard";
     $("mouse-controls").hidden = s?.mode === "keyboard";
     $("keyboard-controls").hidden = s?.mode !== "keyboard";
-    document.querySelectorAll("fieldset button").forEach(button => { button.disabled = !ready; });
+    document.querySelectorAll("#mouse-controls button, #keyboard-controls button").forEach(button => { button.disabled = !ready; });
     for (const mode of ["mouse", "keyboard"]) {
       $(`${mode}-mode`).disabled = !ready;
       $(`${mode}-mode`).setAttribute("aria-pressed", String(s?.mode === mode));
     }
-    $("acquire").disabled = !client.session || client.busy || client.uncertain || client.controlled || !s?.input_ready || s.locked || s.release_pending || !s.remote_allowed;
-    $("stop").disabled = !client.session;
+    $("acquire").disabled = !inputPermission || client.busy || client.uncertain || client.controlled || !s?.input_ready || s.locked || s.release_pending || !s.remote_allowed;
+    $("stop").disabled = !inputPermission || (client.managing && !client.controlled);
     $("disconnect").disabled = !client.session;
     $("refresh").disabled = !client.session || client.busy;
     $("connect").disabled = !identity || client.busy || client.closing || pairingBusy || Boolean(client.session);
@@ -312,6 +737,7 @@ function mount() {
     $("result-check").disabled = !client.lastKey || !client.session || client.busy;
     $("result").textContent = client.message;
     if (!active || s.mode !== "mouse") { pad = null; movement = null; }
+    management.paint();
   }
   client.onchange = paint;
   async function showIdentity() {
@@ -328,7 +754,6 @@ function mount() {
           data.client_id !== identity.client_id || data.fingerprint !== await fingerprint(identity)) throw new Error("Pairing status unavailable or identity mismatch.");
       $("approval").textContent = describeApproval(data);
       if (data.state === "approved" && connect) {
-        if (!data.scopes?.includes("input.control")) throw new Error("This browser has no keyboard/mouse permission. Change its permissions on Mosaico.");
         await client.login(identity);
         $("pair-title").textContent = "Browser access · approved";
         $("pairing").open = false;
@@ -344,7 +769,7 @@ function mount() {
       const hash = await fingerprint(identity);
       const response = await client.request("/api/v1/pairing/requests", "POST", {client_id: identity.client_id, credential_sha256: hash, label}, null);
       if (![200, 202].includes(response.status) || response.json.fingerprint !== hash) throw new Error("Pairing request was not acknowledged. Check approval; no input has been sent.");
-      $("approval").textContent = "Waiting for approval on Mosaico. Compare the SHA-256 fingerprint, choose keyboard/mouse permission and duration, then Check approval.";
+      $("approval").textContent = "Waiting for approval on Mosaico. Compare the fingerprint, choose permissions and duration, then check approval.";
     } finally { pairingBusy = false; paint(); }
   });
   $("check").onclick = () => act(() => status());
@@ -420,11 +845,17 @@ function mount() {
     });
   }, 900);
   const suspend = () => { pad = movement = null; if (client.session) act(() => client.disconnect(true)); };
-  document.addEventListener("visibilitychange", () => { if (document.hidden) suspend(); });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) return;
+    // A pairing or target request may send the user to the host's Bluetooth
+    // settings. Its session can remain live once browser input has released.
+    if (client.managing && !client.controlled) { pad = movement = null; return; }
+    suspend();
+  });
   globalThis.addEventListener("pagehide", suspend);
   globalThis.addEventListener("offline", suspend);
   act(async () => {
-    if (location.protocol !== "https:" || !globalThis.isSecureContext || !crypto.subtle) throw new Error("Open Mosaico's trusted station HTTPS address. Browser identity requires a secure context.");
+    if (location.protocol !== "https:" || !globalThis.isSecureContext || !crypto.subtle) throw new Error("Open Mosaico’s trusted HTTPS address over Wi-Fi or its control hotspot.");
     identity = await browserIdentity(); await showIdentity(); paint();
     if (identity) await status(false);
   });

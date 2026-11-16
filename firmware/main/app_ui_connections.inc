@@ -19,7 +19,7 @@ static size_t s_connection_count;
 static lv_obj_t *s_connection_state, *s_connection_detail, *s_connection_reason;
 static lv_obj_t *s_connection_allow_note;
 static lv_obj_t *s_connection_actions[4], *s_connection_pages[2], *s_connection_page;
-static lv_obj_t *s_saved_names[4], *s_saved_actions[4][3];
+static lv_obj_t *s_saved_names[4], *s_saved_status[4], *s_saved_actions[4][3];
 static lv_obj_t *s_device_tabs[2], *s_device_rows[4], *s_device_labels[4];
 static lv_obj_t *s_device_name, *s_device_status, *s_device_empty, *s_device_page;
 static lv_obj_t *s_device_pages[2], *s_device_add, *s_device_stop, *s_device_refresh, *s_audio_device_forget;
@@ -98,6 +98,7 @@ static void clear_connection_panel(void)
     memset(s_connection_actions, 0, sizeof(s_connection_actions));
     memset(s_connection_pages, 0, sizeof(s_connection_pages));
     memset(s_saved_names, 0, sizeof(s_saved_names));
+    memset(s_saved_status, 0, sizeof(s_saved_status));
     memset(s_saved_actions, 0, sizeof(s_saved_actions));
     s_connection_state = s_connection_detail = s_connection_reason = s_connection_page = NULL;
     s_connection_allow_note = NULL;
@@ -141,8 +142,13 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         label_text(title, "Saved Wi-Fi networks");
         s_connection_state = connection_label(body, 0, 32, MUTED);
         for (int i = 0; i < 4; ++i) {
-            s_saved_names[i] = label(body, "", 0, 40 + i * 64, 224, INK);
-            lv_obj_set_height(s_saved_names[i], 52); lv_label_set_long_mode(s_saved_names[i], LV_LABEL_LONG_DOT);
+            s_saved_names[i] = button(body, "", 0, 40 + i * 64, 224, 52, APP_WIFI_PROFILE_CONTROL, 0);
+            lv_obj_t *caption = lv_obj_get_child(s_saved_names[i], 0);
+            lv_obj_set_width(caption, 184);
+            lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_LEFT, 0);
+            lv_obj_align(caption, LV_ALIGN_TOP_LEFT, 8, 4);
+            s_saved_status[i] = metadata(s_saved_names[i], "", 8, 26, 184);
+            metadata(s_saved_names[i], LV_SYMBOL_RIGHT, 198, 17, 18);
             s_saved_actions[i][0] = button(body, "Join", 232, 40 + i * 64, 60, 52, APP_WIFI_PROFILE_CONTROL, 0);
             s_saved_actions[i][1] = button(body, "First", 300, 40 + i * 64, 68, 52, APP_WIFI_PROFILE_CONTROL, 0);
             s_saved_actions[i][2] = button(body, "Forget", 376, 40 + i * 64, 80, 52, APP_WIFI_PROFILE_CONTROL, 0);
@@ -151,6 +157,12 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
         s_connection_pages[0] = button(body, "Previous", 0, 360, 224, 48, APP_WIFI_PROFILE_CONTROL, 0);
         s_connection_pages[1] = button(body, "Next", 232, 360, 224, 48, APP_WIFI_PROFILE_CONTROL, 0);
+    } else if (kind == APP_OVERLAY_WIFI_PROFILE) {
+        label_text(title, "Saved network details");
+        s_connection_state = label(body, "", 0, 20, 456, INK);
+        s_connection_detail = label(body, "", 0, 92, 456, INK);
+        s_connection_reason = label(body, "", 0, 212, 456, MUTED);
+        button(body, "Back to saved networks", 0, 360, 456, 48, APP_MENU, APP_OVERLAY_WIFI_PROFILES);
     } else if (kind == APP_OVERLAY_BLUETOOTH_DEVICES) {
         label_text(title, "Bluetooth devices");
         s_device_tabs[0] = button(body, "Mouse & Keyboard", 0, 0, 224, 48, APP_BLUETOOTH_DEVICES, 0);
@@ -279,7 +291,7 @@ static void render_connection_panel(void)
         const app_saved_wifi_view_t *list = &s_view.saved_wifi;
         bool known = list->known && !list->uncertain && list->count <= APP_SAVED_WIFI_ROWS && list->page < 2;
         label_text(s_connection_state, list->pending ? "Updating saved networks..." : list->uncertain ? "Saved network state uncertain" :
-            !known ? "Saved networks unavailable" : !list->count ? "No saved networks" : "Join, prioritize or forget a saved network");
+            !known ? "Saved networks unavailable" : !list->count ? "No saved networks" : "Tap a network name for details");
         label_text(s_connection_reason, list->reason);
         for (size_t i = 0; i < 4; ++i) {
             size_t index = (size_t)list->page * 4 + i;
@@ -287,14 +299,19 @@ static void render_connection_panel(void)
             visible(s_saved_names[i], present);
             for (unsigned j = 0; j < 3; ++j) visible(s_saved_actions[i][j], present);
             if (!present) {
+                connection_bind(s_saved_names[i], APP_WIFI_PROFILE_CONTROL, (connection_request_t){0}, false);
                 for (unsigned j = 0; j < 3; ++j)
                     connection_bind(s_saved_actions[i][j], APP_WIFI_PROFILE_CONTROL, (connection_request_t){0}, false);
                 continue;
             }
             const app_saved_wifi_row_t *row = &list->rows[index];
-            label_format(s_saved_names[i], "%.128s\n%s / priority %u", row->label, row->current ? "Current" : row->enabled ? "Saved" : "Disabled", row->priority);
-            connection_request_t request = {.wifi = {.operation = APP_SAVED_WIFI_JOIN, .revision = list->revision, .page = list->page}};
+            text(s_saved_names[i], row->label);
+            label_format(s_saved_status[i], "%s / priority %u",
+                row->current ? "Current" : row->enabled ? "Saved" : "Disabled", row->priority);
+            connection_request_t request = {.wifi = {.operation = APP_SAVED_WIFI_DETAILS, .revision = list->revision, .page = list->page}};
             memcpy(request.wifi.id, row->id, sizeof(request.wifi.id));
+            connection_bind(s_saved_names[i], APP_WIFI_PROFILE_CONTROL, request, *row->id);
+            request.wifi.operation = APP_SAVED_WIFI_JOIN;
             connection_bind(s_saved_actions[i][0], APP_WIFI_PROFILE_CONTROL, request, !list->pending && *row->id && row->can_join);
             request.wifi.operation = APP_SAVED_WIFI_PREFER;
             connection_bind(s_saved_actions[i][1], APP_WIFI_PROFILE_CONTROL, request, !list->pending && *row->id && row->can_prefer);
@@ -306,6 +323,19 @@ static void render_connection_panel(void)
                 .page = i ? list->page + 1 : list->page ? list->page - 1 : 0}};
             connection_bind(s_connection_pages[i], APP_WIFI_PROFILE_CONTROL, request, known && !list->pending &&
                 (i ? (list->page + 1) * 4 < list->count : list->page > 0));
+        }
+    } else if (s_view.overlay == APP_OVERLAY_WIFI_PROFILE) {
+        const app_saved_wifi_view_t *list = &s_view.saved_wifi;
+        const app_saved_wifi_row_t *row = &list->detail;
+        if (!list->detail_known) {
+            label_text(s_connection_state, "Saved network unavailable");
+            label_text(s_connection_detail, "");
+            label_text(s_connection_reason, "");
+        } else {
+            label_format(s_connection_state, "Display label\n%s", row->has_label ? row->label : "None");
+            label_format(s_connection_detail, "Original SSID\n%s", row->original_ssid);
+            label_format(s_connection_reason, "Profile ID\n%s\n\n%s / priority %u", row->id,
+                row->current ? "Current" : row->enabled ? "Saved" : "Disabled", row->priority);
         }
     } else if (s_view.overlay == APP_OVERLAY_BLUETOOTH_DEVICES) {
         bool audio = s_view.bluetooth_audio_devices;
@@ -354,13 +384,13 @@ static void render_connection_panel(void)
                 const app_media_device_row_t *row = &devices->rows[i];
                 const char *status = devices->refreshing ? row->connected ? "Connected / checking" : "Checking saved state" :
                     !known ? row->connected ? "Connected / unverified" : "Saved state unknown" : row->connected ? "Connected" : "Saved";
-                label_format(s_device_labels[i], "%s   %s", row->identity, status);
+                label_format(s_device_labels[i], "%s   %s", *row->label ? row->label : row->identity, status);
                 app_media_request_t request = media_request(APP_MEDIA_DEVICE_DETAILS);
                 request.object_revision = devices->revision; request.value.peer_id = row->id;
                 media_bind(s_device_rows[i], request, !devices->pending);
             } else {
                 const app_bond_view_t *row = &s_view.bluetooth_hosts[index];
-                label_format(s_device_labels[i], "%.32s   %s", *row->name ? row->name : row->identity, row->connected ? "Connected" : "Saved");
+                label_format(s_device_labels[i], "%s   %s", *row->name ? row->name : row->identity, row->connected ? "Connected" : "Saved");
                 bind_bluetooth_row(s_device_rows[i], row);
             }
         }
@@ -388,8 +418,9 @@ static void render_connection_panel(void)
         enabled(s_connection_actions[2], true);
     } else if (s_view.overlay == APP_OVERLAY_AUDIO_DEVICE) {
         const app_media_devices_view_t *devices = &s_view.media.devices;
-        label_text(s_connection_state, *devices->identity ? devices->identity : "Selected device unavailable");
-        label_format(s_connection_detail, "Mic: %s / Speaker: %s", !devices->connection_known[0] ? "Unknown" :
+        label_text(s_connection_state, *devices->label ? devices->label : *devices->identity ? devices->identity : "Selected device unavailable");
+        label_format(s_connection_detail, "%s%sMic: %s / Speaker: %s", *devices->label ? devices->identity : "",
+            *devices->label ? "\n" : "", !devices->connection_known[0] ? "Unknown" :
             devices->connected[0] ? devices->voice_connected ? "Voice connected" : "Service connected" : "Disconnected", !devices->connection_known[1] ? "Unknown" :
             devices->connected[1] ? "Connected" : "Disconnected");
         const char *captions[] = {"Connect mic", "Disconnect mic", "Connect speaker", "Disconnect speaker"};
@@ -451,7 +482,9 @@ static void sanitize_connections(void)
         app_saved_wifi_row_t *row = &s_view.saved_wifi.rows[i];
         if (bounded_length(row->id, sizeof(row->id)) == sizeof(row->id)) row->can_join = row->can_prefer = row->can_forget = false;
         row->id[32] = row->label[128] = 0;
+        row->original_ssid[32] = 0;
     }
+    s_view.saved_wifi.detail.id[32] = s_view.saved_wifi.detail.label[128] = s_view.saved_wifi.detail.original_ssid[32] = 0;
     s_view.bluetooth_target.name[48] = s_view.bluetooth_target.identity[48] = s_view.bluetooth_target.reason[96] = 0;
     s_view.bluetooth_management.status[48] = s_view.bluetooth_management.reason[96] = s_view.bluetooth_management.forget_identity[48] = 0;
 }

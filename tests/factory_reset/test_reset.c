@@ -9,7 +9,7 @@ static struct { const char *partition, *name; unsigned keys; } stores[] = {
     {"nvs", "hid_cccd", 2}, {"nvs", "bt_config.conf", 4}, {"nvs", "nvs.net80211", 3},
     {"nvs", "phy", 3}, {"control", "ctrl_ota", 1}, {"control", RESET_NAMESPACE, 1},
     {"control", "ctrl_v1", 4}, {"control", "ctrl_access", 4}, {"control", "record_audio", 1},
-    {"nvs", "misc", 3},
+    {"nvs", "misc", 3}, {"control", "display_names", 2},
 };
 static esp_partition_t partitions[] = {
     {0x9000, 0x6000, 1, 2, "nvs"}, {0xf20000, 0x10000, 1, 2, "control"},

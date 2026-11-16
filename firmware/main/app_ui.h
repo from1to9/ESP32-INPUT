@@ -68,7 +68,7 @@ typedef enum {
     APP_OVERLAY_WIFI_PROFILES, APP_OVERLAY_BLUETOOTH_TARGET, APP_OVERLAY_BLUETOOTH_PAIRING,
     APP_OVERLAY_BLUETOOTH_DEVICES, APP_OVERLAY_AUDIO_DEVICE, APP_OVERLAY_BLUETOOTH_INPUT_OPTIONS,
     APP_OVERLAY_CONTROLLERS, APP_OVERLAY_CONTROLLER_ACCESS,
-    APP_OVERLAY_RESET,
+    APP_OVERLAY_RESET, APP_OVERLAY_WIFI_PROFILE,
 } app_overlay_t;
 typedef enum {
     APP_KEYBOARD_MOTION, APP_KEYBOARD_TOUCH, APP_KEYBOARD_SPOKEN, APP_KEYBOARD_SHORTCUTS
@@ -209,6 +209,7 @@ typedef struct {
 typedef struct {
     uint16_t record_index; /* Immutable manager index, not the visible row. */
     char label[APP_UI_WIFI_LABEL_CAPACITY];
+    char display_name[49], bssid[18];
     app_ui_wifi_security_t security;
     app_ui_join_availability_t availability;
     bool rssi_valid;
@@ -303,7 +304,7 @@ typedef enum {
  * Identity is a stable SDK identity, including address type if needed. */
 typedef struct {
     char identity[24];
-    char name[33];
+    char name[49];
     bool connected;
     bool target_known, selected;
     uint64_t bond_revision, preferences_revision;

@@ -179,6 +179,9 @@
 #define CP_OP_SENSORS_CATALOG 149U
 #define CP_OP_SENSORS_LATEST 150U
 #define CP_OP_SENSORS_SAMPLES 151U
+#define CP_OP_DISPLAY_NAME_LIST 152U
+#define CP_OP_DISPLAY_NAME_SET 153U
+#define CP_OP_DISPLAY_NAME_CLEAR 154U
 cp_scope_mask_t cp_scope_from_name(const char *);
 const char *cp_scope_name(size_t);
 bool cp_operation_flag(cp_operation_id_t, const char *);

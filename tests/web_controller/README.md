@@ -56,3 +56,11 @@ touch Pointer Events, onscreen keys, full-text rejection, partial/unknown
 outcomes, local takeover, target replacement, saved approval without an active
 lease and independent same-name browser identities. HTTP evidence records
 method/path/operation/header size, never credentials or session cookies.
+
+Run the same command with `--case management` and a new output directory
+for Bluetooth and Wi-Fi management. This uses a management-only browser
+approval, the production command envelope and the coordinator's physical
+pairing review. Wi-Fi, labels and BLE worker completions use host fixtures.
+The suite checks theme persistence, exact AP label set and clear, and
+writes six Chromium screenshots for desktop and iPhone/iPad-sized touch
+viewports.

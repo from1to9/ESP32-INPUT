@@ -1654,6 +1654,7 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
                                  "/api/v1/wifi/scans/",
                                  "/api/v1/wifi/profiles",
                                  "/api/v1/bluetooth/peers",
+                                 "/api/v1/display-names",
                                  "/api/v1/firmware/releases",
                                  "/api/v1/firmware/policy",
                                  "/api/v1/firmware/state",

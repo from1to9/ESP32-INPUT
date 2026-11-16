@@ -364,7 +364,8 @@ static void set_outcome(device_job_t *job, const app_remote_device_outcome_t *ou
             result.state = CP_RESULT_RUNNING; reason(&result, "applied_saving");
         } else {
             result.state = outcome->phase == APP_REMOTE_DEVICE_EFFECTIVE || configuration(job->request.operation) ||
-                job->request.operation == CP_OP_PREFERENCES_RESET ? CP_RESULT_APPLIED : CP_RESULT_COMPLETED;
+                job->request.operation == CP_OP_PREFERENCES_RESET ||
+                job->request.operation == CP_OP_BLUETOOTH_PAIRING_OPEN ? CP_RESULT_APPLIED : CP_RESULT_COMPLETED;
             reason(&result, job->request.settings_fields && job->request.durable ? "saved" : "boundary_confirmed"); job->finished = true;
         }
         break;
@@ -381,6 +382,7 @@ static void set_outcome(device_job_t *job, const app_remote_device_outcome_t *ou
         result.state = CP_RESULT_RUNNING; reason(&result, "restart_pending"); break;
     default: result.state = CP_RESULT_RUNNING; reason(&result, "owner_pending"); break;
     }
+    if (outcome->reason) reason(&result, outcome->reason);
     if (!same_result(&result, &job->result)) { job->result = result; job->publication_pending = true; }
 }
 static void submit_job(app_remote_device_t *d, device_job_t *job)
@@ -567,7 +569,8 @@ static cp_error_t execute(app_remote_device_t *d, const cp_command_t *command, u
         if (command->operation == CP_OP_SYSTEM_RESTART) optional_string(&d->document, "approval_id", request->approval_id, sizeof(request->approval_id));
         optional_string(&d->document, "retained_manifest_digest", request->retained_manifest_digest, sizeof(request->retained_manifest_digest));
         int64_t integer;
-        request->window_seconds = cj_integer(&d->document, cj_get(&d->document, 0, "window_seconds"), &integer) ? (uint32_t)integer : 120;
+        request->window_seconds = cj_integer(&d->document, cj_get(&d->document, 0, "window_seconds"), &integer) ?
+            (uint32_t)integer : command->operation == CP_OP_BLUETOOTH_TARGET_REQUEST ? 60U : 120U;
         request->timeout_ms = cj_integer(&d->document, cj_get(&d->document, 0, "timeout_ms"), &integer) ? (uint32_t)integer : 10000;
         request->duration_ms = cj_integer(&d->document, cj_get(&d->document, 0, "duration_ms"), &integer) ? (uint32_t)integer : 60;
         request->strength_percent = cj_integer(&d->document, cj_get(&d->document, 0, "strength_percent"), &integer) ? (uint8_t)integer : 100;
@@ -577,6 +580,13 @@ static cp_error_t execute(app_remote_device_t *d, const cp_command_t *command, u
         uint16_t node = cj_get(&d->document, 0, "generation");
         if (node != CJ_NONE && (!cj_u64(&d->document, node, &generation) || generation != state->bluetooth_generation)) return rejected(result, CP_STALE);
         if (command->operation == CP_OP_IMU_CALIBRATE) request->deadline_ms = now + request->timeout_ms;
+        if (command->operation == CP_OP_BLUETOOTH_TARGET_REQUEST) {
+            /* Owner may spend up to 30 seconds releasing and saving before the
+             * selected-host wait starts. Give its terminal receipt time to publish. */
+            uint64_t timeout = APP_REMOTE_DEVICE_STAGE_MS + APP_REMOTE_DEVICE_JOB_MS + 1000ULL * request->window_seconds;
+            if (now > UINT64_MAX - timeout) return rejected(result, CP_INTERNAL);
+            request->deadline_ms = now + timeout;
+        }
         request->approval_required = destructive(command->operation);
         if (command->operation == CP_OP_PREFERENCES_RESET || command->operation == CP_OP_DEVICE_FACTORY_RESET_REQUEST) {
             cp_error_t error = reset_candidate(request, &state->settings);
@@ -661,7 +671,8 @@ void app_remote_device_service(app_remote_device_t *d, uint64_t now)
                         !d->port.approval_claim || d->port.approval_claim(d->port.user, &approval) != CP_OK) cancel_job(d, job);
                     else {
                         job->request.deadline_ms = now + (job->request.operation == CP_OP_DEVICE_FACTORY_RESET_REQUEST ?
-                            APP_REMOTE_DEVICE_STAGE_MS : APP_REMOTE_DEVICE_JOB_MS);
+                            APP_REMOTE_DEVICE_STAGE_MS : job->request.operation == CP_OP_BLUETOOTH_PAIRING_OPEN ?
+                            APP_REMOTE_DEVICE_STAGE_MS + APP_REMOTE_DEVICE_JOB_MS : APP_REMOTE_DEVICE_JOB_MS);
                         submit_job(d, job);
                     }
                 }

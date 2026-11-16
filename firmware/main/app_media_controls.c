@@ -12,6 +12,7 @@
 #include "board_recording_flash.h"
 #include "audio_media.h"
 #include "bt_audio.h"
+#include "app_display_names.h"
 #include "esp_timer.h"
 #include <limits.h>
 #include <math.h>
@@ -679,16 +680,28 @@ static void rebuild_devices(void)
         const bt_audio_bond_t *bond = &controls.bonds.bonds[index];
         app_media_device_row_t *row = &view->rows[i]; row->id = peer_id(bond->address);
         snprintf(row->identity, sizeof(row->identity), "%02X:%02X:%02X:%02X:%02X:%02X", bond->address[0], bond->address[1], bond->address[2], bond->address[3], bond->address[4], bond->address[5]);
+        row->label[0] = 0;
+        if (view->known && bond->bond_id_known) {
+            uint8_t id[APP_DISPLAY_NAME_ID_BYTES];
+            app_display_name_classic_identity(bond->address, bond->bond_id.bytes, id);
+            (void)app_display_names_get(APP_DISPLAY_NAME_CLASSIC_BOND, id, row->label);
+        }
         row->connected = bt->initialized && !bt->failed &&
             ((bt->hfp_connected && bt->hfp_peer_known && !memcmp(bt->hfp_peer, bond->address, 6)) ||
              (bt->a2dp_connected && bt->a2dp_peer_known && !memcmp(bt->a2dp_peer, bond->address, 6)));
         row->selected = controls.selected_peer_known && !memcmp(controls.selected_peer, bond->address, 6);
     }
     view->selected_saved = selected >= 0;
+    view->label[0] = 0;
     if (controls.selected_peer_known) {
         const uint8_t *peer = controls.selected_peer; view->selected = peer_id(peer);
         memcpy(view->address, peer, sizeof(view->address));
         snprintf(view->identity, sizeof(view->identity), "%02X:%02X:%02X:%02X:%02X:%02X", peer[0], peer[1], peer[2], peer[3], peer[4], peer[5]);
+        if (view->known && selected >= 0 && controls.bonds.bonds[selected].bond_id_known) {
+            uint8_t id[APP_DISPLAY_NAME_ID_BYTES];
+            app_display_name_classic_identity(peer, controls.bonds.bonds[selected].bond_id.bytes, id);
+            (void)app_display_names_get(APP_DISPLAY_NAME_CLASSIC_BOND, id, view->label);
+        }
         for (unsigned i = 0; i < 2; ++i) {
             bool connected = i ? bt->a2dp_connected : bt->hfp_connected;
             bool known = i ? bt->a2dp_peer_known : bt->hfp_peer_known;

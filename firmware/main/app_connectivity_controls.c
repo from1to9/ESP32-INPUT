@@ -4,6 +4,7 @@
 #include "app_control_runtime.h"
 #include "ble_hid.h"
 #include "app_bluetooth_management.h"
+#include "app_display_names.h"
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -46,7 +47,8 @@ typedef struct {
     bool confirm_bluetooth;
     uint64_t confirm_bond_revision, confirm_preference_revision, confirm_generation, management_revision;
     ble_hid_target_t confirm_target;
-    char confirm_profile[33];
+    char detail_profile[33];
+    app_saved_wifi_row_t confirm_profile;
     char expected_digest[65], message[97];
 } connectivity_controls_t;
 /* Only the serialized coordinator accesses this cache. It contains no lock,
@@ -266,10 +268,31 @@ static void rebuild(void)
     for (size_t i = 0; i < controls.saved.count; ++i) {
         const app_wifi_profile_view_t *row = &controls.profiles.profiles[i]; app_saved_wifi_row_t *out = &controls.saved.rows[i];
         bool valid = hex_text(row->id, 32) && text(row->ssid, sizeof(row->ssid)) && row->ssid[0];
-        if (valid) { memcpy(out->id, row->id, sizeof(out->id)); snprintf(out->label, sizeof(out->label), "%s", row->ssid); }
+        if (valid) {
+            memcpy(out->id, row->id, sizeof(out->id));
+            memcpy(out->original_ssid, row->ssid, sizeof(out->original_ssid));
+            uint8_t id[APP_DISPLAY_NAME_ID_BYTES];
+            out->has_label = !controls.saved.uncertain && app_display_name_profile_identity(row->id, id) &&
+                app_display_names_get(APP_DISPLAY_NAME_WIFI_PROFILE, id, out->label);
+            if (!out->has_label)
+                snprintf(out->label, sizeof(out->label), "%s", row->ssid);
+        }
         out->enabled = row->enabled; out->current = row->current; out->priority = row->priority;
         out->can_join = valid && row->enabled && wifi_idle() && controls.wifi.state != APP_WIFI_CONNECTING && controls.wifi.state != APP_WIFI_OBTAINING_IP;
         out->can_prefer = valid && wifi_idle() && i > 0; out->can_forget = valid && wifi_idle();
+    }
+    if (controls.context.overlay == APP_OVERLAY_WIFI_PROFILE && controls.saved.known && !controls.saved.uncertain) {
+        int detail = find_profile(controls.detail_profile);
+        if (detail >= 0 && controls.saved.rows[detail].id[0]) {
+            controls.saved.detail = controls.saved.rows[detail];
+            controls.saved.detail_known = true;
+        }
+    } else if (controls.context.overlay == APP_OVERLAY_CONFIRM && controls.confirm_owned && !controls.confirm_bluetooth) {
+        controls.saved.detail = controls.confirm_profile;
+        controls.saved.detail_known = controls.confirm_profile.id[0] != 0;
+        controls.saved.reviewing = true;
+        controls.saved.review_current = controls.confirm_valid && !controls.confirm_entering &&
+            controls.confirm_profile_revision == controls.profiles.revision && controls.saved.known && !controls.saved.uncertain;
     }
     if (!controls.saved.known) snprintf(controls.saved.reason, sizeof(controls.saved.reason), "Saved network status unavailable.");
     else if (controls.saved.uncertain) snprintf(controls.saved.reason, sizeof(controls.saved.reason), "Saved network outcome uncertain. Verify storage before retrying.");
@@ -283,7 +306,8 @@ static void rebuild(void)
         const ble_hid_bond_t *row = &controls.bonds.bonds[found]; controls.target.known = true; controls.target.target = ui_key(row);
         controls.target.selected = row->is_selected;
         controls.target.connected = controls.bluetooth.connection_admitted && controls.bonds.current_match_known && row->is_current;
-        snprintf(controls.target.name, sizeof(controls.target.name), "Saved input host");
+        if (!row->bond_id_known || !app_display_names_get(APP_DISPLAY_NAME_HID_BOND, row->bond_id, controls.target.name))
+            snprintf(controls.target.name, sizeof(controls.target.name), "Saved input host");
         snprintf(controls.target.identity, sizeof(controls.target.identity), "%02X:%02X:%02X:%02X:%02X:%02X (type %u)", row->address[0], row->address[1], row->address[2], row->address[3], row->address[4], row->address[5], row->address_type);
         controls.target.selection_supported = row->selection_supported;
         controls.target.can_select = ble_manageable() && row->address_type_known && row->bond_id_known; controls.target.can_prefer = ble_idle() && found > 0;
@@ -411,13 +435,21 @@ static void handle_wifi(const app_saved_wifi_request_t *request, app_connectivit
         if (request->page < 2 && request->page * 4U < controls.saved.count) { controls.wifi_page = request->page; effect->invalidate_ui = true; } return;
     }
     int found = find_profile(request->id);
+    if (request->operation == APP_SAVED_WIFI_DETAILS) {
+        if (found < 0 || controls.saved.uncertain || !controls.saved.rows[found].id[0]) {
+            say(effect, error_text(ESP_ERR_INVALID_STATE)); return;
+        }
+        memcpy(controls.detail_profile, request->id, sizeof(controls.detail_profile));
+        effect->open_overlay = true; effect->overlay = APP_OVERLAY_WIFI_PROFILE;
+        return;
+    }
     if (found < 0 || !wifi_idle()) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return; }
     if (request->operation == APP_SAVED_WIFI_FORGET_REQUEST) {
         if (!controls.saved.rows[found].can_forget) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return; }
         controls.confirm_owned = controls.confirm_valid = controls.confirm_entering = true;
         controls.confirm_bluetooth = false;
         controls.confirm_epoch = controls.context.epoch; controls.confirm_ui_revision = controls.context.ui_revision;
-        controls.confirm_profile_revision = controls.profiles.revision; memcpy(controls.confirm_profile, request->id, 33);
+        controls.confirm_profile_revision = controls.profiles.revision; controls.confirm_profile = controls.saved.rows[found];
         effect->open_overlay = true; effect->overlay = APP_OVERLAY_CONFIRM; effect->confirmation = APP_CONFIRM_WIFI_FORGET; return;
     }
     if (request->operation == APP_SAVED_WIFI_JOIN && controls.saved.rows[found].can_join) (void)submit_wifi(P_WIFI_JOIN, request->id, effect);
@@ -587,7 +619,7 @@ bool app_connectivity_controls_handle(const app_intent_t *intent, app_connectivi
             controls.context.confirmation == APP_CONFIRM_WIFI_FORGET && intent->ui_revision == controls.confirm_ui_revision &&
             controls.confirm_profile_revision == controls.profiles.revision;
         controls.confirm_owned = controls.confirm_valid = false;
-        if (intent->x == 1 && valid) (void)submit_wifi(P_WIFI_FORGET, controls.confirm_profile, effect);
+        if (intent->x == 1 && valid) (void)submit_wifi(P_WIFI_FORGET, controls.confirm_profile.id, effect);
         else say(effect, intent->x == 0 ? "Forget cancelled." : error_text(ESP_ERR_INVALID_STATE));
         effect->open_overlay = true; effect->overlay = APP_OVERLAY_WIFI_PROFILES;
     } else if (intent->action == APP_WIFI_PROFILE_CONTROL) handle_wifi(&intent->wifi_profile, effect);
@@ -605,7 +637,7 @@ void app_connectivity_controls_poll(uint64_t now_ms, app_connectivity_controls_e
         .screen_off = controls.context.screen_off, .release_pending = controls.context.release_pending,
         .transport_switch_pending = controls.context.transport_switch_pending};
     app_bluetooth_management_snapshot_t management_state; app_bluetooth_management_snapshot(&management_state);
-    if (management_state.active && management_state.operation == APP_BT_MANAGE_ADD &&
+    if (management_state.active && !management_state.remote_attempt && management_state.operation == APP_BT_MANAGE_ADD &&
         controls.context.overlay != APP_OVERLAY_BLUETOOTH_PAIRING && controls.context.overlay != APP_OVERLAY_BLUETOOTH_DEVICES) app_bluetooth_management_cancel();
     app_bluetooth_management_service(&bluetooth_context, now_ms);
     app_bluetooth_management_snapshot(&management_state);

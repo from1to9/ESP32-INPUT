@@ -22,7 +22,7 @@ def main():
         binary = path.with_suffix("")
         command = [os.environ.get("CC") or shutil.which("clang") or "cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wconversion", "-Wshadow",
                    "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
-        for include in ("tests/coordinator/stubs", "firmware/main", "components/control_protocol/include", "components/control_protocol",
+        for include in ("tests/coordinator/stubs", "tests/display_names", "firmware/main", "components/control_protocol/include", "components/control_protocol",
                         "components/audio_engine/include", "components/input_core/include", "components/device_settings/include", "components/spoken_letters/include"):
             command += ["-I", str(ROOT / include)]
         command += [str(path), str(ROOT / "firmware/main/app_runtime_diagnostics.c")]

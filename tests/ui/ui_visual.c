@@ -1545,7 +1545,7 @@ static void setup_cache_lifetime_checks(void)
 
 int main(int argc, char **argv)
 {
-    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion") || !strcmp(argv[2], "about") || !strcmp(argv[2], "audio") || !strcmp(argv[2], "bluetooth") || !strcmp(argv[2], "navigation") || !strcmp(argv[2], "controllers"))));
+    assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "keys") || !strcmp(argv[2], "motion") || !strcmp(argv[2], "about") || !strcmp(argv[2], "audio") || !strcmp(argv[2], "bluetooth") || !strcmp(argv[2], "navigation") || !strcmp(argv[2], "controllers") || !strcmp(argv[2], "wifi-labels"))));
     bool keys_only = argc == 3 && !strcmp(argv[2], "keys");
     bool motion_only = argc == 3 && !strcmp(argv[2], "motion");
     bool about_only = argc == 3 && !strcmp(argv[2], "about");
@@ -1591,6 +1591,10 @@ int main(int argc, char **argv)
         }
         strcpy(s_state.bluetooth_hosts[1].name, "Named test host");
         grid_groups();
+        if (argc == 3 && !strcmp(argv[2], "wifi-labels")) {
+            saved_wifi_label_checks();
+            continue;
+        }
         if (navigation_only) {
             navigation_checks();
             motion_grip_checks();
@@ -1729,6 +1733,7 @@ int main(int argc, char **argv)
         recording_storage_checks();
         media_checks();
         connection_checks();
+        saved_wifi_label_checks();
         controller_permission_checks();
         bluetooth_management_checks();
         remote_review_checks();

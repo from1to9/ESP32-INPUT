@@ -174,6 +174,7 @@ typedef struct {
 typedef struct {
     app_media_id_t id;
     char identity[24];
+    char label[49];
     bool connected, selected;
 } app_media_device_row_t;
 typedef struct {
@@ -182,7 +183,7 @@ typedef struct {
     uint64_t revision;
     app_media_device_row_t rows[APP_MEDIA_ROWS];
     app_media_id_t selected;
-    char identity[24], reason[97];
+    char identity[24], label[49], reason[97];
     uint8_t address[6]; /* Display-only transport address, never a merged identity. */
     bool can_connect[2], can_disconnect[2], connected[2], connection_known[2];
 } app_media_devices_view_t;

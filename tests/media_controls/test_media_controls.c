@@ -1274,3 +1274,5 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(argv[1], names[i])) { cases[i](); printf("PASS: media controls %s\n", names[i]); return 0; }
     return 2;
 }
+
+#include "../display_names/read_boundary.inc"

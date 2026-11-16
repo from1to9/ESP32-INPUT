@@ -104,3 +104,74 @@ static void connection_checks(void)
     s_state = original; render(); clear_intents();
     puts("PASS: native local API enrollment and exact complete review, actual HTTPS, saved Wi-Fi IDs/priorities and full Bluetooth target fingerprints");
 }
+
+static void saved_wifi_label_checks(void)
+{
+    app_view_t original = s_state;
+    s_state.overlay = APP_OVERLAY_WIFI_PROFILES;
+    s_state.saved_wifi = (app_saved_wifi_view_t){.known = true, .count = 2, .revision = 17};
+    ++s_state.ui_revision;
+    for (unsigned i = 0; i < 2; ++i) {
+        app_saved_wifi_row_t *row = &s_state.saved_wifi.rows[i];
+        row->current = i == 0;
+        row->enabled = i == 0;
+        row->has_label = true;
+        row->priority = i + 1U;
+        row->can_forget = true;
+        snprintf(row->label, sizeof(row->label), "Work WiFi");
+        snprintf(row->original_ssid, sizeof(row->original_ssid), "Warehouse-Access-Point-East-0%u", i);
+        snprintf(row->id, sizeof(row->id), "123456789abcdef0123456789abcdef%u", i);
+    }
+    screenshot("wifi-saved-duplicate-labels");
+    assert(has_visible_label(lv_screen_active(), "Current / priority 1"));
+    assert(has_visible_label(lv_screen_active(), "Disabled / priority 2"));
+    for (unsigned i = 0; i < 2; ++i) strcpy(s_state.saved_wifi.rows[i].label, "WWWWWWWWWWWWWWWW");
+    screenshot("wifi-saved-wide-labels");
+    const char *details[] = {"wifi-saved-detail-first", "wifi-saved-detail-second"};
+    for (unsigned i = 0; i < 2; ++i) {
+        clear_intents(); tap(104, 130 + (int)i * 64);
+        const app_intent_t *open = last_action(APP_WIFI_PROFILE_CONTROL);
+        const app_saved_wifi_row_t *row = &s_state.saved_wifi.rows[i];
+        assert(open && open->wifi_profile.operation == APP_SAVED_WIFI_DETAILS &&
+            open->wifi_profile.revision == 17 && !strcmp(open->wifi_profile.id, row->id));
+        s_state.overlay = APP_OVERLAY_WIFI_PROFILE;
+        s_state.saved_wifi.detail_known = true;
+        s_state.saved_wifi.detail = *row;
+        ++s_state.ui_revision;
+        screenshot(details[i]);
+        assert(has_visible_label(lv_screen_active(), "Display label\nWWWWWWWWWWWWWWWW"));
+        assert(has_visible_label(lv_screen_active(), i ?
+            "Original SSID\nWarehouse-Access-Point-East-01" : "Original SSID\nWarehouse-Access-Point-East-00"));
+        char identity[96];
+        snprintf(identity, sizeof(identity), "Profile ID\n%s\n\n%s / priority %u", row->id,
+            row->current ? "Current" : "Disabled", row->priority);
+        assert(has_visible_label(lv_screen_active(), identity));
+        clear_intents(); tap_control("Back to saved networks");
+        assert(last_action(APP_MENU)->x == APP_OVERLAY_WIFI_PROFILES);
+        s_state.overlay = APP_OVERLAY_WIFI_PROFILES;
+        ++s_state.ui_revision;
+        render();
+    }
+    clear_intents(); tap(428, 194);
+    const app_intent_t *forget = last_action(APP_WIFI_PROFILE_CONTROL);
+    assert(forget && forget->wifi_profile.operation == APP_SAVED_WIFI_FORGET_REQUEST &&
+        !strcmp(forget->wifi_profile.id, s_state.saved_wifi.rows[1].id));
+    s_state.overlay = APP_OVERLAY_CONFIRM;
+    s_state.confirmation = APP_CONFIRM_WIFI_FORGET;
+    s_state.saved_wifi.detail = s_state.saved_wifi.rows[1];
+    s_state.saved_wifi.reviewing = s_state.saved_wifi.review_current = true;
+    ++s_state.ui_revision;
+    screenshot("wifi-forget-exact-identity");
+    char review[256];
+    snprintf(review, sizeof(review), "Display label: WWWWWWWWWWWWWWWW\nOriginal SSID: %s\nProfile ID: %s\n\n"
+        "This removes the saved network and disconnects it if in use.",
+        s_state.saved_wifi.detail.original_ssid, s_state.saved_wifi.detail.id);
+    assert(has_visible_label(lv_screen_active(), review));
+    s_state.saved_wifi.review_current = false;
+    screenshot("wifi-forget-changed-identity");
+    clear_intents(); tap_control("Forget network"); assert(action_count(APP_CONFIRM) == 0);
+    s_state = original;
+    render();
+    clear_intents();
+    puts("PASS: saved Wi-Fi rows retain state and exact detail/forget identity for long duplicate labels");
+}

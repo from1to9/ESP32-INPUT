@@ -62,26 +62,55 @@ static cp_error_t remote_device_peers_read(const char *resource, char *json, siz
     (void)remote_device_json(json, capacity, &used,
         "{\"ble_revision\":\"%" PRIu64 "\",\"classic_revision\":\"%" PRIu64 "\",\"target_revision\":\"%" PRIu64 "\","
         "\"ble_known\":%s,\"ble_updating\":%s,\"classic_known\":%s,\"classic_refreshing\":%s,\"connected\":%s,"
-        "\"current_match_known\":%s,\"target_durable\":%s,\"total\":%u,\"peers\":[",
+        "\"current_match_known\":%s,\"target_durable\":%s,\"total\":%u,"
+        "\"ble_generation\":\"%" PRIu64 "\",\"management_generation\":\"%" PRIu64 "\","
+        "\"ble_initialized\":%s,\"ble_failed\":%s,\"admitted\":%s,\"encrypted\":%s,"
+        "\"keyboard_subscribed\":%s,\"mouse_subscribed\":%s,\"ble_ready\":%s,\"advertising\":%s,"
+        "\"reconnect_paused\":%s,\"pairing_open\":%s,\"pairing_handshake\":%s,\"pairing_remaining_ms\":%" PRIu32 ","
+        "\"input_route\":\"%s\",\"peers\":[",
         ble.revision, classic.revision, target.revision, ble.known ? "true":"false", ble.updating ? "true":"false",
         classic.known ? "true":"false", classic.refreshing ? "true":"false", link.connected ? "true":"false",
-        link.connected && ble.known && ble.current_match_known ? "true":"false", target.durable ? "true":"false", total);
+        link.connected && ble.known && ble.current_match_known ? "true":"false", target.durable ? "true":"false", total,
+        link.generation, s_management_generation, link.initialized ? "true":"false", link.failed ? "true":"false",
+        link.connection_admitted ? "true":"false", link.encrypted ? "true":"false",
+        link.keyboard_subscribed ? "true":"false", link.mouse_subscribed ? "true":"false", link.ready ? "true":"false",
+        link.advertising ? "true":"false", link.reconnect_paused ? "true":"false", link.pairing_open ? "true":"false",
+        link.pairing_handshake ? "true":"false", link.pairing_remaining_ms,
+        s_input_transport == APP_INPUT_USB ? "usb" : "ble_hid");
     unsigned end = cursor + limit < total ? cursor + limit : total;
     for (unsigned i = cursor; i < end; ++i) {
+        char alias[APP_DISPLAY_NAME_CAPACITY], alias_json[APP_DISPLAY_NAME_BYTES * 6U + 3U] = "null";
         if (i < ble.count) {
             const ble_hid_bond_t *bond = &ble.bonds[i]; char id[65], encoded[68];
             if (bond->bond_id_known) { remote_device_hex(bond->bond_id, sizeof(bond->bond_id), id); (void)snprintf(encoded, sizeof(encoded), "\"%s\"", id); }
             else (void)snprintf(encoded, sizeof(encoded), "%s", "null");
+            bool labelable = ble.known && !ble.updating && bond->bond_id_known;
+            if (labelable && app_display_names_get(APP_DISPLAY_NAME_HID_BOND, bond->bond_id, alias) &&
+                !cj_escape(alias, alias_json, sizeof(alias_json))) return CP_INTERNAL;
             (void)remote_device_json(json, capacity, &used,
-                "%s{\"transport\":\"ble_hid\",\"peer_id\":%s,\"name\":null,\"order\":%u,\"selected\":%s,\"current\":%s,\"selectable\":%s}",
-                i == cursor ? "":",", encoded, i, ble.known && target.available && bond->is_selected ? "true":"false",
+                "%s{\"transport\":\"ble_hid\",\"peer_id\":%s,\"name\":null,\"label\":%s,\"labelable\":%s,"
+                "\"order\":%u,\"selected\":%s,\"current\":%s,\"selectable\":%s}",
+                i == cursor ? "":",", encoded, alias_json, labelable ? "true" : "false",
+                i, ble.known && target.available && bond->is_selected ? "true":"false",
                 ble.known && link.connected && ble.current_match_known && bond->is_current ? "true":"false",
                 ble.known && !ble.updating && bond->selection_supported && bond->bond_id_known && bond->address_type_known ? "true":"false");
         } else {
             const bt_audio_bond_t *bond = &classic.bonds[i - ble.count]; char id[13]; remote_device_hex(bond->address, sizeof(bond->address), id);
+            char label_id[APP_DISPLAY_NAME_ID_CAPACITY + 2U] = "null";
+            bool labelable = classic.known && !classic.refreshing && bond->bond_id_known;
+            if (labelable) {
+                app_display_name_entry_t entry = {.kind = APP_DISPLAY_NAME_CLASSIC_BOND};
+                app_display_name_classic_identity(bond->address, bond->bond_id.bytes, entry.id);
+                char fingerprint[APP_DISPLAY_NAME_ID_CAPACITY];
+                app_display_name_format_id(&entry, fingerprint);
+                (void)snprintf(label_id, sizeof(label_id), "\"%s\"", fingerprint);
+                if (app_display_names_get(APP_DISPLAY_NAME_CLASSIC_BOND, entry.id, alias) &&
+                    !cj_escape(alias, alias_json, sizeof(alias_json))) return CP_INTERNAL;
+            }
             (void)remote_device_json(json, capacity, &used,
-                "%s{\"transport\":\"classic_audio\",\"peer_id\":\"%s\",\"name\":null,\"order\":null,\"selected\":false,"
-                "\"hfp_current\":%s,\"a2dp_current\":%s}", i == cursor ? "":",", id,
+                "%s{\"transport\":\"classic_audio\",\"peer_id\":\"%s\",\"name\":null,\"label\":%s,\"display_id\":%s,"
+                "\"labelable\":%s,\"order\":null,\"selected\":false,\"hfp_current\":%s,\"a2dp_current\":%s}",
+                i == cursor ? "":",", id, alias_json, label_id, labelable ? "true" : "false",
                 classic.known && bond->hfp_current ? "true":"false", classic.known && bond->a2dp_current ? "true":"false");
         }
     }

@@ -14484,6 +14484,301 @@
       ],
       "x-initial-v1-supported": true,
       "x-device-resource": "/api/v1/sensors/samples"
+    },
+    {
+      "name": "display_name_list",
+      "description": "display_name.list; authenticated device scopes and availability apply. Acceptance is not completion.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "type": "object",
+            "properties": {
+              "management_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "resource_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "epoch": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "transport_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "target_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "ui_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "args": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "context",
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "idempotentHint": false
+      },
+      "x-device-operation": "display_name.list",
+      "x-required-scopes": [
+        "view"
+      ],
+      "x-initial-v1-supported": true,
+      "x-device-resource": "/api/v1/display-names"
+    },
+    {
+      "name": "display_name_set",
+      "description": "display_name.set; authenticated device scopes and availability apply. Acceptance is not completion.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "type": "object",
+            "properties": {
+              "management_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "resource_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "epoch": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "transport_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "target_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "ui_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "args": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "hid_bond",
+                  "classic_bond",
+                  "wifi_profile",
+                  "wifi_ap"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 48,
+                "minLength": 1
+              },
+              "owner_revision": {
+                "type": "string",
+                "maxLength": 20,
+                "format": "uint64",
+                "minLength": 1
+              },
+              "scan_generation": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "scan_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 31
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "context",
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "idempotentHint": false
+      },
+      "x-device-operation": "display_name.set",
+      "x-required-scopes": [
+        "view"
+      ],
+      "x-initial-v1-supported": true,
+      "x-device-resource": null
+    },
+    {
+      "name": "display_name_clear",
+      "description": "display_name.clear; authenticated device scopes and availability apply. Acceptance is not completion.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "type": "object",
+            "properties": {
+              "management_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "resource_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "epoch": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "transport_generation": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              },
+              "target_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "maxLength": 64
+              },
+              "ui_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uint64"
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          },
+          "args": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "hid_bond",
+                  "classic_bond",
+                  "wifi_profile",
+                  "wifi_ap"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "maxLength": 64,
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "context",
+          "args"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "idempotentHint": false
+      },
+      "x-device-operation": "display_name.clear",
+      "x-required-scopes": [
+        "view"
+      ],
+      "x-initial-v1-supported": true,
+      "x-device-resource": null
     }
   ]
 }

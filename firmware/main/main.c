@@ -14,6 +14,7 @@
 #endif
 #include "app_media_controls.h"
 #include "app_connectivity_controls.h"
+#include "app_display_names.h"
 #include "app_recording_store.h"
 #include "app_control_runtime.h"
 #include "app_control_access.h"
@@ -1276,7 +1277,7 @@ static bool allowed_in_overlay(app_action_t action)
         return s_overlay == APP_OVERLAY_MODES || s_overlay == APP_OVERLAY_TARGET ||
             s_overlay == APP_OVERLAY_SETTINGS || s_overlay == APP_OVERLAY_WIFI_SETUP ||
             s_overlay == APP_OVERLAY_KEYBOARD || s_overlay == APP_OVERLAY_AUDIO ||
-            s_overlay == APP_OVERLAY_WIFI_NETWORK || s_overlay == APP_OVERLAY_MEDIA_OPTIONS ||
+            s_overlay == APP_OVERLAY_WIFI_NETWORK || s_overlay == APP_OVERLAY_WIFI_PROFILE || s_overlay == APP_OVERLAY_MEDIA_OPTIONS ||
             s_overlay == APP_OVERLAY_RECORDINGS || s_overlay == APP_OVERLAY_RECORDING_DETAIL ||
             s_overlay == APP_OVERLAY_RECORDING_START || s_overlay == APP_OVERLAY_RECORDING_STORAGE ||
             s_overlay == APP_OVERLAY_API_CONNECTION || s_overlay == APP_OVERLAY_CONTROLLERS ||
@@ -1750,6 +1751,7 @@ static void __attribute__((noinline)) handle_intent(const app_intent_t *intent, 
              (s_overlay == APP_OVERLAY_NONE || s_overlay == APP_OVERLAY_KEYBOARD) &&
              s_engine.state.mode == INPUT_KEYBOARD) ||
             (intent->x == APP_OVERLAY_WIFI_NETWORKS && s_overlay == APP_OVERLAY_WIFI_NETWORK) ||
+            (intent->x == APP_OVERLAY_WIFI_PROFILES && s_overlay == APP_OVERLAY_WIFI_PROFILE) ||
             ((intent->x == APP_OVERLAY_API_REVIEW || intent->x == APP_OVERLAY_CONTROLLERS) &&
              s_overlay == APP_OVERLAY_API_CONNECTION) ||
             (intent->x == APP_OVERLAY_API_CONNECTION && s_overlay == APP_OVERLAY_CONTROLLERS) ||
@@ -2808,11 +2810,15 @@ static void __attribute__((noinline)) report_motion_diagnostics(const input_link
     s_motion_trace.range_known = false;
 }
 
-static app_wifi_row_view_t wifi_row(const app_wifi_scan_record_t *record, uint16_t index)
+static app_wifi_row_view_t wifi_row(const app_wifi_scan_record_t *record, uint16_t index,
+    const app_wifi_profiles_snapshot_t *profiles)
 {
     app_wifi_row_view_t row = {.record_index = index, .rssi_valid = true,
         .rssi_dbm = record->rssi_dbm, .current = record->current, .remembered = record->remembered};
     (void)snprintf(row.label, sizeof(row.label), "%s", record->label);
+    app_display_names_scan(record, profiles, row.display_name);
+    (void)snprintf(row.bssid, sizeof(row.bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
+        record->bssid[0], record->bssid[1], record->bssid[2], record->bssid[3], record->bssid[4], record->bssid[5]);
     switch (record->security) {
     case APP_WIFI_SECURITY_OPEN: row.security = APP_UI_SECURITY_OPEN; break;
     case APP_WIFI_SECURITY_WEP: row.security = APP_UI_SECURITY_WEP; break;
@@ -2840,6 +2846,9 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
 {
     app_wifi_scan_snapshot_t scan;
     app_wifi_get_scan_snapshot(&scan);
+    static EXT_RAM_BSS_ATTR app_wifi_profiles_snapshot_t profiles;
+    if (scan.state == APP_WIFI_SCAN_READY || s_overlay == APP_OVERLAY_WIFI_NETWORK)
+        app_wifi_profiles_snapshot(&profiles);
     switch (scan.state) {
     case APP_WIFI_SCAN_IDLE: view->wifi_scan.state = APP_UI_SCAN_IDLE; break;
     case APP_WIFI_SCAN_QUEUED: view->wifi_scan.state = APP_UI_SCAN_QUEUED; break;
@@ -2887,7 +2896,7 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
                 view->wifi_scan.state = APP_UI_SCAN_EXPIRED;
                 break;
             }
-            view->wifi_scan.rows[view->wifi_scan.row_count++] = wifi_row(&record, index);
+            view->wifi_scan.rows[view->wifi_scan.row_count++] = wifi_row(&record, index, &profiles);
         }
     }
     app_wifi_scan_record_t selected;
@@ -2901,7 +2910,7 @@ static void fill_local_management_view(app_view_t *view, const app_wifi_snapshot
     if (selected_valid) {
         view->wifi_selection.valid = true;
         view->wifi_selection.generation = s_wifi_selection_generation;
-        view->wifi_selection.network = wifi_row(&selected, s_wifi_selection_index);
+        view->wifi_selection.network = wifi_row(&selected, s_wifi_selection_index, &profiles);
         view->wifi_selection.can_join_once = radio_idle && selected.availability == APP_WIFI_JOIN_AVAILABLE;
         view->wifi_selection.can_remember = view->wifi_selection.can_join_once;
     }
@@ -3072,6 +3081,8 @@ static void __attribute__((noinline)) render_view(const ble_hid_snapshot_t *link
             peer->address[3], peer->address[4], peer->address[5],
             peer->address_type_known ? "" : "?", (unsigned)peer->address_type);
         view.bluetooth_hosts[i].connected = link->connected && bonds.current_match_known && peer->is_current;
+        if (!bonds.updating && peer->bond_id_known)
+            (void)app_display_names_get(APP_DISPLAY_NAME_HID_BOND, peer->bond_id, view.bluetooth_hosts[i].name);
     }
     switch (wifi.state) {
     case APP_WIFI_IDLE: view.wifi_state = APP_UI_WIFI_DISCONNECTED; break;

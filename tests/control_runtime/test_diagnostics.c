@@ -9,6 +9,7 @@
 #include <string.h>
 #include "app_runtime_diagnostics.h"
 #include "app_control_runtime.h"
+#include "app_display_names.h"
 #include "app_audio.h"
 #include "board_audio_mosaico.h"
 #include "usb_audio.h"
@@ -17,6 +18,15 @@
 #include "app_sensor_api.h"
 #include "control_json.h"
 #include "control_sensor_usb.h"
+#include "read_boundary.inc"
+cp_error_t app_display_names_read(const char *resource, char *json, size_t capacity, size_t *length)
+{ (void)resource; (void)json; (void)capacity; (void)length; assert(false); return CP_UNAVAILABLE; }
+unsigned app_display_name_scan_profiles(const app_wifi_profiles_snapshot_t *profiles, const app_wifi_scan_record_t *row,
+    uint8_t id[APP_DISPLAY_NAME_ID_BYTES])
+{ (void)profiles; (void)row; (void)id; assert(false); return 0; }
+bool app_display_name_ap_identity(const uint8_t *ssid, uint8_t length, const uint8_t bssid[6], uint16_t auth,
+    uint8_t id[APP_DISPLAY_NAME_ID_BYTES])
+{ (void)ssid; (void)length; (void)bssid; (void)auth; (void)id; assert(false); return false; }
 static struct {
     app_wifi_snapshot_t wifi;
     app_wifi_scan_snapshot_t scan;

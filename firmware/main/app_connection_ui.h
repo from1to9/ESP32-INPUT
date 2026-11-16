@@ -30,7 +30,7 @@ typedef struct {
     char review_pages[APP_API_REVIEW_PAGES][257]; /* Complete owner-formatted permissions. */
 } app_api_view_t;
 typedef enum { APP_SAVED_WIFI_PAGE, APP_SAVED_WIFI_JOIN, APP_SAVED_WIFI_PREFER,
-    APP_SAVED_WIFI_FORGET_REQUEST } app_saved_wifi_operation_t;
+    APP_SAVED_WIFI_FORGET_REQUEST, APP_SAVED_WIFI_DETAILS } app_saved_wifi_operation_t;
 typedef struct {
     app_saved_wifi_operation_t operation;
     uint64_t revision;
@@ -38,16 +38,18 @@ typedef struct {
     char id[33];
 } app_saved_wifi_request_t;
 typedef struct {
-    char id[33], label[129];
-    bool enabled, current, can_join, can_prefer, can_forget;
+    char id[33], label[129], original_ssid[33];
+    bool enabled, current, has_label, can_join, can_prefer, can_forget;
     unsigned priority;
 } app_saved_wifi_row_t;
 typedef struct {
     bool known, uncertain, pending;
+    bool detail_known, reviewing, review_current;
     uint64_t revision;
     unsigned page;
     size_t count;
     app_saved_wifi_row_t rows[APP_SAVED_WIFI_ROWS];
+    app_saved_wifi_row_t detail;
     char reason[97];
 } app_saved_wifi_view_t;
 typedef struct {
