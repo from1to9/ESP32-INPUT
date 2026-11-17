@@ -7,10 +7,10 @@ host-side or physical check.
 
 ## Passport ESP32-C3 checkpoint
 
-The Passport source candidate combines local three-button BLE HID,
+The Passport firmware combines local three-button BLE HID,
 Wi-Fi station and fallback AP, board-hosted Web and HTTP/WebSocket input,
 connection management, display labels, and optional speaker cues. The pinned
-ESP32-C3 build passes at the Web controller checkpoint. Host regressions
+ESP32-C3 build passes at the current integration checkpoint. Host regressions
 exercise the shared input engine and HID report path, BLE and Wi-Fi owners,
 HTTP ingress, management transitions, lock and release behavior. Actual
 Chromium renders and interaction checks cover desktop, phone and tablet
@@ -18,13 +18,21 @@ viewports in Dark and Light themes; host LVGL renders cover the 240 × 320
 device interface in both themes. The browser tests do not establish Safari
 or physical iPhone/iPad behavior.
 
-The Web checkpoint's application image is 1,958,320 bytes. Static DRAM is
-206,884 of 321,296 bytes. Twenty-two declared stack paths pass with a
-2,048-byte engineering reserve and at least 1,120 bytes remaining margin.
-These figures do not measure runtime free heap, task high-water marks, radio
-coexistence or display timing. No Passport physical button, screen, BLE host,
-speaker, Wi-Fi or HTTP behavior has yet been observed on hardware. The
-community release gate and hardware cases are listed in the
+On one physical Passport, prior candidate builds paired with an iPad and
+delivered local mouse movement and Enter; the saved Bluetooth host later
+reconnected automatically. The current integrated USB-control build was flashed
+as an application with NVS preserved and hash verification. In one USB session,
+switching from station to Passport AP returned a terminal applied result;
+same-boot status showed AP, DHCP and BLE synchronized. A later build with the
+same Wi-Fi resource profile reported complete USB status through connection
+phases and served LAN `/health` with HTTP 200 on an unattended boot while
+marking all three physical button observations pending. Its bounded LAN checks
+included eight sequential requests, two concurrent requests and one follow-up,
+all complete. Earlier builds sometimes stalled on multiple HTTP requests, and
+the cause is still unknown. These observations do not establish sustained Web
+reliability, physical display rendering, every BLE/USB input path, Safari
+behavior, speaker output or long-run radio coexistence. The
+community release gate and remaining hardware cases are listed in the
 [Passport guide](../passport/README.md) and
 [community release requirements](passport-community-release.md).
 
@@ -76,6 +84,11 @@ and [storage boundary](interaction.md#status-connectivity-and-display) for what 
 
 ## Open issues
 
+- **Mosaico iPhone Web pad expiry.** A physical iPhone session received
+  `rejected: expired` for movement despite an authorized control session.
+  Source and host checks cover the subsequent timing and rejection-reason
+  changes, but the latest diagnostic image has not been installed on that
+  Mosaico board. The on-device reason and a corrective fix remain open.
 - **Bluetooth memory pressure.** The controller policy removes the internal
   DMA dependency for allocations explicitly eligible for PSRAM. Real PSRAM
   exhaustion or a full MSYS pool can still trigger the SDK assertion. Dynamic

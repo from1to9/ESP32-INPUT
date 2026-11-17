@@ -349,8 +349,13 @@ device's saved Appearance setting. No password or setup token is stored in
 browser storage. Scan names are literal text with a raw hexadecimal identity
 view; hidden and unsupported networks cannot be submitted.
 
-Real AP association/DHCP, phone QR scanning, station reconnect, radio
-coexistence, flash power-loss behavior and physical rendering remain untested.
+On one Passport, an app-only flashed integration build completed a USB-controlled
+switch to the AP with DHCP ready in the same boot, and a later boot rejoined a
+saved station profile. The unattended LAN health endpoint returned HTTP 200;
+bounded sequential and two-client requests completed. Earlier builds sometimes
+stalled on repeated requests, so sustained HTTP reliability, phone QR scanning,
+extended Wi-Fi/BLE coexistence, flash power-loss behavior and physical rendering
+remain unqualified. See [validation and known issues](../docs/validation.md).
 
 Health reports startup results, NimBLE synchronization, internal free heap
 and largest block, and cumulative observed UP/DOWN/OK presses. HTTP 503
