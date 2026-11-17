@@ -34,6 +34,12 @@ static passport_ble_state_t published, state;
 static atomic_bool emergency_lock;
 static hid_engine_t engine;
 static uint16_t connection = BLE_HS_CONN_HANDLE_NONE, keyboard_handle, mouse_handle;
+// The pinned host can restore CCCDs before its delayed CONNECT callback.
+// Keep those observations separate from admitted connection state.
+static struct {
+    uint16_t connection;
+    bool keyboard, mouse;
+} early_subscriptions = { .connection = BLE_HS_CONN_HANDLE_NONE };
 static uint8_t keyboard[8], mouse[4], leds;
 static bool suspended, new_connection, selected_valid, transition, disconnect_requested, closing;
 static bool startup_restore;
@@ -343,6 +349,7 @@ static int store_full(struct ble_store_status_event *event, void *arg)
 
 static bool stop_advertising(void)
 {
+    early_subscriptions.connection = BLE_HS_CONN_HANDLE_NONE;
     int rc = ble_gap_adv_stop();
     if (rc && rc != BLE_HS_EALREADY) result("Advertising stop failed");
     else state.advertising = false;
@@ -424,6 +431,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         bool window_open = state.advertising && window_end > now_ms() && state.storage_known;
         state.advertising = false;
         if (event->connect.status) {
+            early_subscriptions.connection = BLE_HS_CONN_HANDLE_NONE;
             reconnect_next = now_ms() + 1000;
             state.pairing = false;
             window_end = 0;
@@ -446,12 +454,19 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             return 0;
         }
         if (!new_connection) format_peer(state.current, sizeof(state.current), &desc.peer_id_addr);
+        state.keyboard_subscribed = early_subscriptions.connection == connection && early_subscriptions.keyboard;
+        state.mouse_subscribed = early_subscriptions.connection == connection && early_subscriptions.mouse;
+        early_subscriptions.connection = BLE_HS_CONN_HANDLE_NONE;
         result(new_connection ? "Pairing" : "Connected; securing link");
-        int rc = ble_gap_security_initiate(connection);
-        diagnostic("security_request", rc);
-        if (rc) {
-            result("Security request failed");
-            disconnect_link();
+        // Encryption can also precede CONNECT. A redundant peripheral security
+        // request starts another 30-second procedure even on an encrypted link.
+        if (!desc.sec_state.encrypted) {
+            int rc = ble_gap_security_initiate(connection);
+            diagnostic("security_request", rc);
+            if (rc && rc != BLE_HS_EALREADY) {
+                result("Security request failed");
+                disconnect_link();
+            }
         }
         return 0;
         }
@@ -494,6 +509,16 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 link_ready = false;
                 ++state.generation;
             }
+        } else if (connection == BLE_HS_CONN_HANDLE_NONE && state.advertising &&
+                   state.storage_known && window_end > now_ms() &&
+                   event->subscribe.conn_handle != BLE_HS_CONN_HANDLE_NONE &&
+                   (event->subscribe.attr_handle == keyboard_handle || event->subscribe.attr_handle == mouse_handle)) {
+            if (early_subscriptions.connection != event->subscribe.conn_handle) {
+                early_subscriptions.connection = event->subscribe.conn_handle;
+                early_subscriptions.keyboard = early_subscriptions.mouse = false;
+            }
+            if (event->subscribe.attr_handle == keyboard_handle) early_subscriptions.keyboard = event->subscribe.cur_notify;
+            if (event->subscribe.attr_handle == mouse_handle) early_subscriptions.mouse = event->subscribe.cur_notify;
         }
         diagnostic("subscribe", 0);
         return 0;
@@ -790,6 +815,7 @@ static void reset(int reason)
     memset(keyboard, 0, sizeof(keyboard));
     memset(mouse, 0, sizeof(mouse));
     connection = BLE_HS_CONN_HANDLE_NONE;
+    early_subscriptions.connection = BLE_HS_CONN_HANDLE_NONE;
     ++state.generation;
     hid_engine_set_link(&engine, false, false);
     hid_engine_set_locked(&engine, true);

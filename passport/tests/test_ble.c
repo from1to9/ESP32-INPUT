@@ -8,8 +8,8 @@
 struct ble_config ble_hs_cfg;
 static uint64_t clock_ms;
 static bool store_ok, send_fail;
-static int stop_error, start_error, whitelist_error, terminate_error;
-static unsigned adv_calls, terminate_calls, forget_calls, report_count;
+static int stop_error, start_error, whitelist_error, terminate_error, security_error;
+static unsigned adv_calls, terminate_calls, forget_calls, report_count, security_calls;
 static bool controller_advertising;
 static int filter_policy;
 static ble_addr_t saved[3], allowed;
@@ -91,7 +91,7 @@ int ble_gap_adv_start(int type,const ble_addr_t *peer,int duration,const struct 
     (void)peer;(void)arg;assert(type==BLE_OWN_ADDR_PUBLIC&&duration>0&&duration<=300000&&cb==gap_event);++adv_calls;filter_policy=p->filter_policy;if(!start_error)controller_advertising=true;return start_error;
 }
 int ble_gap_conn_find(uint16_t conn,struct ble_gap_conn_desc *desc) { assert(conn==connection);*desc=peer_desc;return 0; }
-int ble_gap_security_initiate(uint16_t conn) { assert(conn==connection);return 0; }
+int ble_gap_security_initiate(uint16_t conn) { assert(conn==connection);++security_calls;return security_error; }
 int ble_gap_terminate(uint16_t conn,int reason) { assert(conn==connection&&reason==BLE_ERR_REM_USER_CONN_TERM);++terminate_calls;return terminate_error; }
 int ble_gatts_count_cfg(const struct ble_gatt_svc_def *s) { assert(s==services);return 0; }
 int ble_gatts_add_svcs(const struct ble_gatt_svc_def *s) { assert(s==services);keyboard_handle=10;mouse_handle=20;return 0; }
@@ -114,13 +114,14 @@ static void setup(void) {
     memset(&remote_management,0,sizeof(remote_management));
     state=(passport_ble_state_t){.synced=true,.generation=1,.locked=true};
     connection=BLE_HS_CONN_HANDLE_NONE;hid_engine_init(&engine);hid_engine_set_locked(&engine,true);
+    early_subscriptions.connection=BLE_HS_CONN_HANDLE_NONE;
     suspended=new_connection=selected_valid=transition=disconnect_requested=closing=link_ready=false;
     pairing_failed=false;
     startup_restore=selection_present=selection_failure=selection_cleared=false;
     reconnect_end=reconnect_next=0;reconnect_attempts=0;
     window_end=release_end=lease_end=0;clock_ms=1000;queue_count=0;store_ok=true;send_fail=false;
-    stop_error=start_error=whitelist_error=terminate_error=0;
-    adv_calls=terminate_calls=forget_calls=report_count=0;saved_count=0;atomic_store(&emergency_lock,false);
+    stop_error=start_error=whitelist_error=terminate_error=security_error=0;
+    adv_calls=terminate_calls=forget_calls=report_count=security_calls=0;saved_count=0;atomic_store(&emergency_lock,false);
     name_queued = names_reconciled = false;
     name_applied = name_removals = fixture_ltk = fixture_security_revision = 0;
     name_remove_result = PN_OK;
@@ -134,9 +135,10 @@ static passport_command_t action(passport_command_kind_t kind) {
 static void issue(passport_command_kind_t kind) { passport_command_t r=action(kind);command(&r,clock_ms); }
 static void tick_once(void) { clock_ms+=20;service(NULL); }
 static void gap(int type) { struct ble_gap_event ev={.type=type,.connect={.conn_handle=1}};gap_event(&ev,NULL); }
-static void subscribe(uint16_t handle,bool enabled) {
-    struct ble_gap_event ev={.type=BLE_GAP_EVENT_SUBSCRIBE,.subscribe={connection,handle,enabled}};gap_event(&ev,NULL);
+static void subscribe_on(uint16_t conn,uint16_t handle,bool enabled) {
+    struct ble_gap_event ev={.type=BLE_GAP_EVENT_SUBSCRIBE,.subscribe={conn,handle,enabled}};gap_event(&ev,NULL);
 }
+static void subscribe(uint16_t handle,bool enabled) { subscribe_on(connection,handle,enabled); }
 static void connect_saved(void) {
     saved[0]=(ble_addr_t){.val={1,2,3,4,5,6}};saved_count=1;selected=saved[0];selected_valid=true;
     refresh_peers();advertise(false,0);peer_desc=(struct ble_gap_conn_desc){.peer_id_addr=saved[0],.sec_state={true,true}};
@@ -321,6 +323,61 @@ static void test_remote_management(void)
     assert(passport_ble_remote_poll(clock_ms,&r)&&r.error==CP_OK&&!state.advertising&&!state.pairing);
 }
 
+static void early_saved_host(void)
+{
+    setup();hid_engine_set_locked(&engine,false);
+    saved[0]=(ble_addr_t){.val={1}};saved_count=1;
+    startup_restore=true;synced();tick_once();
+    peer_desc=(struct ble_gap_conn_desc){.peer_id_addr=saved[0],.sec_state={true,true}};
+}
+
+static void test_early_security_and_subscriptions(void)
+{
+    // The pinned peripheral host waits for remote version/features before
+    // CONNECT. Encryption and restored CCCDs can already have completed.
+    early_saved_host();
+    struct ble_gap_event encrypted={.type=BLE_GAP_EVENT_ENC_CHANGE};
+    gap_event(&encrypted,NULL);
+    subscribe_on(1,keyboard_handle,true);subscribe_on(1,mouse_handle,true);
+    assert(!state.connected && !state.ready && !report_count);
+    gap(BLE_GAP_EVENT_CONNECT);
+    assert(state.keyboard_subscribed && state.mouse_subscribed && security_calls==0);
+    tick_once();assert(!state.ready && report_count==1);
+    tick_once();assert(state.ready && report_count==2 && !terminate_calls);
+    for(unsigned i=0;i<2;++i)for(unsigned j=0;j<reports[i].length;++j)assert(reports[i].bytes[j]==0);
+
+    // Preserve the latest actual subscription value, without guessing from a bond.
+    early_saved_host();subscribe_on(1,keyboard_handle,true);subscribe_on(1,mouse_handle,true);
+    subscribe_on(1,mouse_handle,false);gap(BLE_GAP_EVENT_CONNECT);tick_once();
+    assert(!state.ready && state.keyboard_subscribed && !state.mouse_subscribed && !report_count);
+    subscribe(mouse_handle,true);tick_once();tick_once();assert(state.ready);
+
+    early_saved_host();subscribe_on(2,keyboard_handle,true);subscribe_on(2,mouse_handle,true);
+    gap(BLE_GAP_EVENT_CONNECT);tick_once();assert(!state.ready && !report_count);
+    subscribe(keyboard_handle,true);subscribe(mouse_handle,true);tick_once();tick_once();assert(state.ready);
+    subscribe_on(2,keyboard_handle,false);tick_once();assert(state.ready);
+
+    // A stopped admission window cannot donate subscriptions to another attempt,
+    // even when the controller reuses the connection handle.
+    early_saved_host();subscribe_on(1,keyboard_handle,true);subscribe_on(1,mouse_handle,true);
+    stop_advertising();subscribe_on(1,keyboard_handle,true);advertise(false,0);
+    gap(BLE_GAP_EVENT_CONNECT);tick_once();assert(!state.ready && !report_count);
+    early_saved_host();subscribe_on(1,keyboard_handle,true);subscribe_on(1,mouse_handle,true);
+    clock_ms=window_end;gap(BLE_GAP_EVENT_CONNECT);tick_once();assert(terminate_calls==1 && !state.ready && !report_count);
+    early_saved_host();subscribe_on(1,keyboard_handle,true);subscribe_on(1,mouse_handle,true);
+    peer_desc.peer_id_addr.val[0]=2;gap(BLE_GAP_EVENT_CONNECT);tick_once();
+    assert(terminate_calls==1 && !state.ready && !report_count);
+
+    // An ongoing host security procedure is not a failure; real errors remain so.
+    early_saved_host();peer_desc.sec_state.encrypted=false;security_error=BLE_HS_EALREADY;
+    gap(BLE_GAP_EVENT_CONNECT);tick_once();assert(security_calls==1 && !terminate_calls && !state.ready);
+    peer_desc.sec_state.encrypted=true;subscribe(keyboard_handle,true);subscribe(mouse_handle,true);
+    tick_once();tick_once();assert(state.ready);
+    early_saved_host();peer_desc.sec_state.encrypted=false;security_error=BLE_HS_EREJECT;
+    gap(BLE_GAP_EVENT_CONNECT);assert(security_calls==1 && terminate_calls==1 && !state.ready);
+    puts("PASS: encryption/CCCD restoration before CONNECT, admission isolation and existing security procedure");
+}
+
 static void test_startup_reconnect(void)
 {
     setup();hid_engine_set_locked(&engine,false);
@@ -401,7 +458,7 @@ int main(void) {
         assert(!state.ready && !report_count); // Navigable Home does not send HID.
         assert(ble_hs_cfg.sm_io_cap==BLE_HS_IO_NO_INPUT_OUTPUT&&ble_hs_cfg.sm_bonding);
     }
-    test_security();test_input_release();test_disconnect_diagnostics();test_bond_names();test_remote_management();test_startup_reconnect();
+    test_security();test_input_release();test_disconnect_diagnostics();test_bond_names();test_remote_management();test_startup_reconnect();test_early_security_and_subscriptions();
     setup();connect_saved();tick_once();tick_once();
     passport_command_t old=action(PASSPORT_MOVE);old.x=12;
     unsigned revision=state.input_revision;issue(PASSPORT_TAKEOVER);

@@ -115,6 +115,9 @@ Keys, Connections, or Status. Connections contains Bluetooth, Wi-Fi, Sound,
 and Appearance. Hold DOWN from any page to lock and request release.
 Mouse and Keys remain visible but disabled until the BLE owner reports output
 ready, including its bond, encryption, subscription and release conditions.
+The host may restore encryption and subscriptions before delivering its CONNECT
+callback. Passport retains those subscription observations for the same admitted
+connection, without sending input early or restarting completed encryption.
 UP/DOWN skips these cards while unavailable; Connections and Status remain
 accessible. Losing readiness moves focus off Mouse or Keys to Connections and
 cancels an unfinished OK selection. Readiness restores both cards automatically. The C3
