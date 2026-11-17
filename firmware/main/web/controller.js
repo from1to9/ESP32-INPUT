@@ -231,18 +231,24 @@ export class Controller {
     this.message = s.scopes.includes("input.control") ? "Browser connected. Take control to send input." : "Browser connected with device access.";
     this.changed();
   }
-  async refresh(allowEpochChange = false) {
+  async refresh(allowEpochChange = false, idleOnly = false) {
     if (!this.session) throw new Error("Connect this browser first.");
     const session = this.session;
+    const before = this.state;
+    // An idle read can finish after an input command has established a
+    // newer state or lease. Only the command's own checks may stop it then.
+    const superseded = () => idleOnly && (this.busy || this.controlled || this.state !== before);
     let response;
     try {
       for (const delay of [0, 20, 40, 80]) {
         if (delay) await sleep(delay);
         if (this.session !== session) throw new Error("Browser session changed while reading state.");
+        if (superseded()) return null;
         response = await this.request("/api/v1/state?view=protocol");
         if (![429, 503].includes(response.status) || response.json.error !== "busy") break;
       }
     } catch (error) {
+      if (superseded()) return null;
       if (this.session === session) {
         this.state = null;
         this.halt("Connection unavailable. Control stopped locally; reconnect explicitly after checking the target.");
@@ -250,6 +256,7 @@ export class Controller {
       throw error;
     }
     if (this.session !== session) throw new Error("Browser session changed while reading state.");
+    if (superseded()) return null;
     const s = response.json.protocol;
     if (response.status !== 200 || !s || s.boot_id !== this.session.boot_id ||
         !["now_ms", "epoch", "transport_generation", "state_sequence", "ui_revision"].every(k => decimal(s[k])) ||
@@ -1033,7 +1040,7 @@ function mount() {
   $("check").onclick = () => authorize(status);
   $("connect").onclick = () => authorize(status);
   $("acquire").onclick = () => act(() => client.acquire());
-  $("refresh").onclick = () => { if (!client.busy) return act(() => client.refresh()); };
+  $("refresh").onclick = () => { if (!client.busy) return act(() => client.refresh(false, !client.controlled)); };
   $("disconnect").onclick = () => act(() => client.disconnect());
   $("stop").onclick = () => act(async () => {
     pad = movement = null;
@@ -1131,7 +1138,7 @@ function mount() {
     if (!client.session || client.busy || document.hidden) return;
     act(async () => {
       if (client.controlled) await client.run("control.renew");
-      else await client.refresh();
+      else await client.refresh(false, true);
     });
   }, 900);
   const suspend = () => { pad = movement = null; if (client.session) act(() => client.disconnect(true)); };
