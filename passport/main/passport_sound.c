@@ -15,6 +15,8 @@ static bool enabled_saved, preference_known;
 static TaskHandle_t worker;
 static bool wanted, active, cleanup_unconfirmed;
 static passport_cue_t pending;
+static uint32_t pending_id;
+static passport_receipt_t cue_receipt;
 
 static bool output_wanted(void)
 {
@@ -24,7 +26,7 @@ static bool output_wanted(void)
     return enabled;
 }
 
-static esp_err_t play(passport_cue_t cue)
+static esp_err_t play(passport_cue_t cue, bool *completed)
 {
     // Peak amplitude is 1/8 scale before codec gain; each tone ramps in and out.
     static const int16_t sine[] = {
@@ -43,7 +45,8 @@ static esp_err_t play(passport_cue_t cue)
     const uint32_t phase_step = tones[cue].hz * 65536U / PASSPORT_SPEAKER_RATE;
     uint16_t phase = 0;
     int16_t block[PASSPORT_SPEAKER_BLOCK][2];
-    for (unsigned offset = 0; offset < frames && output_wanted(); offset += PASSPORT_SPEAKER_BLOCK) {
+    unsigned offset = 0;
+    for (; offset < frames && output_wanted(); offset += PASSPORT_SPEAKER_BLOCK) {
         unsigned count = frames - offset;
         if (count > PASSPORT_SPEAKER_BLOCK) count = PASSPORT_SPEAKER_BLOCK;
         for (unsigned i = 0; i < count; ++i) {
@@ -56,6 +59,7 @@ static esp_err_t play(passport_cue_t cue)
         esp_err_t result = passport_speaker_write(&block[0][0], count);
         if (result != ESP_OK) return result;
     }
+    *completed = offset >= frames;
     return ESP_OK;
 }
 
@@ -76,10 +80,19 @@ static void service(void *unused)
         portENTER_CRITICAL(&lock);
         const bool run = wanted;
         passport_cue_t cue = pending;
+        uint32_t id = pending_id;
         pending = 0;
+        pending_id = 0;
         portEXIT_CRITICAL(&lock);
         if (!run) break;
-        if (cue) result = play(cue);
+        if (cue) {
+            bool completed = false;
+            result = play(cue, &completed);
+            portENTER_CRITICAL(&lock);
+            if (id && cue_receipt.id == id && cue_receipt.result == PR_PENDING)
+                cue_receipt = (passport_receipt_t){id, result != ESP_OK ? PR_UNAVAILABLE : completed ? PR_APPLIED : PR_CANCELLED, result};
+            portEXIT_CRITICAL(&lock);
+        }
         else ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
     if (result != ESP_OK) {
@@ -96,6 +109,8 @@ static void service(void *unused)
     portENTER_CRITICAL(&lock);
     worker = NULL;
     pending = 0;
+    pending_id = 0;
+    if (cue_receipt.result == PR_PENDING) cue_receipt.result = result != ESP_OK ? PR_UNAVAILABLE : PR_CANCELLED;
     active = false;
     if (start) cleanup_unconfirmed = closed != ESP_OK;
     output = wanted || cleanup_unconfirmed ? PASSPORT_SOUND_UNAVAILABLE : PASSPORT_SOUND_OFF;
@@ -126,6 +141,8 @@ static void stop_output(void)
     portENTER_CRITICAL(&lock);
     wanted = false;
     pending = 0;
+    pending_id = 0;
+    if (cue_receipt.result == PR_PENDING) cue_receipt.result = PR_CANCELLED;
     if (active) {
         output = PASSPORT_SOUND_STOPPING;
         if (worker) xTaskNotifyGive(worker);
@@ -172,19 +189,25 @@ esp_err_t passport_sound_set(bool enabled)
 passport_sound_state_t passport_sound_state(void)
 {
     portENTER_CRITICAL(&lock);
-    passport_sound_state_t snapshot = {output, enabled_saved, preference_known};
+    passport_sound_state_t snapshot = {.output = output, .enabled = enabled_saved,
+        .preference_known = preference_known, .cue = cue_receipt};
     portEXIT_CRITICAL(&lock);
     return snapshot;
 }
 
-bool passport_sound_cue(passport_cue_t cue)
+static bool queue_cue(passport_cue_t cue, uint32_t id)
 {
+    if (cue < PASSPORT_CUE_CONFIRM || cue > PASSPORT_CUE_ERROR) return false;
     portENTER_CRITICAL(&lock);
-    bool queued = output == PASSPORT_SOUND_READY && !pending;
+    bool queued = output == PASSPORT_SOUND_READY && !pending && (!id || cue_receipt.result != PR_PENDING);
     if (queued) {
         pending = cue;
+        pending_id = id;
+        if (id) cue_receipt = (passport_receipt_t){id, PR_PENDING, 0};
         xTaskNotifyGive(worker);
     }
     portEXIT_CRITICAL(&lock);
     return queued;
 }
+bool passport_sound_cue(passport_cue_t cue) { return queue_cue(cue, 0); }
+bool passport_sound_cue_usb(passport_cue_t cue, uint32_t id) { return id && queue_cue(cue, id); }

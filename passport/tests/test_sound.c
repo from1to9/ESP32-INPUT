@@ -11,6 +11,7 @@ static uint8_t registers[256] = {[0xFD] = 0x83, [0xFE] = 0x11};
 static unsigned bus_token, tx_token, worker_token;
 static bool added, tx_created, tx_enabled, create_fails, commit_fails, close_fails, short_write, stop_mid_cue;
 static bool has_key;
+static bool usb_cue;
 static int fail_register = -1;
 static unsigned codec_refs[CODEC_REF_STAGE_NUM], writes, played_frames, waits, commits, tasks;
 static uint8_t stored, staged;
@@ -160,7 +161,7 @@ unsigned ulTaskNotifyTake(bool clear, unsigned delay)
     if (++waits == 1) {
         assert((registers[0x01] & 0x05) == 0x05 && !(registers[0x12] & 0x02));
         assert(registers[0x32] && !(registers[0x31] & 0x60));
-        assert(passport_sound_cue(PASSPORT_CUE_SUCCESS));
+        assert(usb_cue ? passport_sound_cue_usb(PASSPORT_CUE_SUCCESS,77) : passport_sound_cue(PASSPORT_CUE_SUCCESS));
         assert(!passport_sound_cue(PASSPORT_CUE_ERROR));
     } else {
         assert(waits == 2);
@@ -253,5 +254,9 @@ int main(void)
     assert(passport_sound_set(true) == ESP_OK);
     run_worker();
     assert(passport_sound_state().output == PASSPORT_SOUND_OFF);
+    usb_cue=true;assert(passport_sound_set(true)==ESP_OK);run_worker();
+    assert(cue_receipt.id==77&&cue_receipt.result==PR_APPLIED);
+    stop_mid_cue=true;assert(passport_sound_set(true)==ESP_OK);run_worker();assert(cue_receipt.result==PR_CANCELLED);
+    stop_mid_cue=false;short_write=true;assert(passport_sound_set(true)==ESP_OK);run_worker();assert(cue_receipt.result==PR_UNAVAILABLE);
     puts("PASS: default Off, NVS uncertainty, TX only, ADC power guards with pinned ES8311, cleanup, and bounded cues");
 }

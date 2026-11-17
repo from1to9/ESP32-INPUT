@@ -3,6 +3,7 @@
 #include "passport_ble.h"
 #include "passport_sound.h"
 #include "passport_wifi.h"
+#include "passport_usb.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -105,7 +106,7 @@ static void observe_owner(void)
     passport_ble_snapshot(&ble);
     if (ble.locked && (!owner_was_locked || owner_generation != ble.generation || page != LOCK_SCREEN)) {
         enter_lock_screen();
-    } else if (page == LOCK_SCREEN && unlock_requested && !ble.locked) {
+    } else if (page == LOCK_SCREEN && !ble.locked && (unlock_requested || owner_was_locked)) {
         page = HOME;
         focus = 0;
         unlock_requested = false;
@@ -755,27 +756,39 @@ static void build_view(const char *http)
 
 }
 
-static void apply_theme(void)
+esp_err_t passport_ui_set_theme(passport_theme_t selected)
 {
-    if (!theme_pending || !atomic_load(&text_applied)) return;
-    theme_pending = false;
-    if (passport_theme_save(pending_theme) == ESP_OK) {
+    esp_err_t rc = passport_theme_save(selected);
+    if (rc == ESP_OK) {
         theme_failed = false;
-        theme = pending_theme;
+        theme = selected;
         snprintf(theme_note, sizeof(theme_note), "Theme saved");
     } else {
         theme_failed = true;
         passport_sound_cue(PASSPORT_CUE_ERROR);
         snprintf(theme_note, sizeof(theme_note), "Theme save unconfirmed");
     }
+    return rc;
+}
+static void apply_theme(void)
+{
+    if (!theme_pending || !atomic_load(&text_applied)) return;
+    theme_pending = false;
+    (void)passport_ui_set_theme(pending_theme);
 }
 
+esp_err_t passport_ui_set_sound(bool enabled)
+{
+    esp_err_t rc = passport_sound_set(enabled);
+    sound_save_failed = rc != ESP_OK;
+    if (sound_save_failed && enabled) passport_sound_cue(PASSPORT_CUE_ERROR);
+    return rc;
+}
 static void apply_sound(void)
 {
     if (!sound_pending || !atomic_load(&text_applied)) return;
     sound_pending = false;
-    sound_save_failed = passport_sound_set(pending_sound) != ESP_OK;
-    if (sound_save_failed && pending_sound) passport_sound_cue(PASSPORT_CUE_ERROR);
+    (void)passport_ui_set_sound(pending_sound);
 }
 
 static void service_repeat(uint64_t now)
@@ -853,6 +866,7 @@ void passport_ui_run(const char *http, bool buttons_available)
         snprintf(theme_note, sizeof(theme_note), "Theme load failed; using dark");
     }
     passport_sound_load();
+    passport_usb_init();
     bool pairing_sent = false;
     for (;;) {
         observe_owner();
@@ -866,6 +880,7 @@ void passport_ui_run(const char *http, bool buttons_available)
         render_ui(http);
         apply_theme();
         apply_sound();
+        passport_usb_service(&ble, &wifi, theme, !theme_failed, theme_pending || sound_pending);
         // The pairing explanation must be applied to the screen before opening the window.
         if (page == PAIR_WINDOW && !pairing_sent && atomic_load(&text_applied)) {
             request(PASSPORT_PAIR, 0, 0, 0);

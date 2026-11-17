@@ -391,10 +391,39 @@ static void test_remote_scan_receipts(void)
     c.action=PW_SCAN_CANCEL;handle_command(&c,clock_ms);assert(state.scan_request_result==PW_SCAN_ACCEPTED&&!state.scanning&&scan_draining);
 }
 
+static void test_usb_receipts(void)
+{
+    reset_runtime();mock_ble.synced=true;
+    passport_wifi_command_t c={.action=PW_USE_AP,.command_id=91};
+    handle_command(&c,clock_ms);assert(state.command.result==PR_PENDING&&!state.ap_started);
+    step(clock_ms);assert(state.command.result==PR_PENDING);
+    event(false,WIFI_EVENT_AP_START);step(clock_ms);assert(state.command.result==PR_APPLIED&&state.dhcp_running);
+    c=(passport_wifi_command_t){.action=PW_SCAN,.command_id=92,.revision=state.scan_revision};
+    handle_command(&c,clock_ms);assert(state.command.result==PR_PENDING);
+    fixture_count=0;event(false,WIFI_EVENT_SCAN_DONE);step(clock_ms);assert(state.command.result==PR_APPLIED&&state.scan_known);
+
+    test_scan_and_ap();mock_ble.synced=true;publish();
+    passport_wifi_submission_t s={.request_id=1001,.scan_revision=state.scan_revision,.row=0,.password="fixture123"};
+    assert(!state.setup_open&&passport_wifi_submit_usb(&s)&&!passport_wifi_submit_usb(&s));
+    queue_t *q=commands;
+    for(size_t i=0;i+10<=sizeof(q->data);++i) assert(memcmp((char *)q->data+i,"fixture123",10));
+    step(clock_ms);assert(state.command.result==PR_PENDING&&state.request_state==PW_REQUEST_JOINING&&!state.pending);
+    assert(!usb_submission_queued);for(size_t i=0;i<sizeof(usb_submission);++i)assert(!((unsigned char *)&usb_submission)[i]);
+    event(false,WIFI_EVENT_STA_STOP);event(false,WIFI_EVENT_AP_STOP);step(clock_ms);event(false,WIFI_EVENT_STA_START);
+    assert(!commits&&state.command.result==PR_PENDING);got_connection(true);step(clock_ms);
+    assert(state.command.result==PR_APPLIED&&commits==1&&state.request_state==PW_REQUEST_SAVED);
+
+    test_scan_and_ap();mock_ble.synced=true;publish();s.scan_revision=state.scan_revision;
+    assert(passport_wifi_submit_usb(&s));atomic_store(&event_loss,true);step(clock_ms);
+    assert(!published.initialized&&!usb_submission_queued&&!passport_wifi_submit_usb(&s));
+    for(size_t i=0;i<sizeof(usb_submission);++i)assert(!((unsigned char *)&usb_submission)[i]);
+}
+
 int main(void)
 {
     test_init(); test_scan_and_ap(); test_join_and_persistence(); test_save_failure(); test_release_and_lock(); test_rejection_and_recovery(); test_profile_store(); test_rejected_switch_preserves_live_network(); test_web_scan_window(); test_full_profile_update();
     test_scan_names();
+    test_usb_receipts();
     vQueueDelete(commands); vQueueDelete(events);
     test_remote_scan_receipts();
     puts("PASS: Wi-Fi initialization rollback, AP/DHCP observations, scan cancellation, exact setup confirmation, IP-before-save, reconnect deadline, NVS uncertainty and BLE release boundary");

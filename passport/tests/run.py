@@ -16,7 +16,8 @@ headers = (
     'esp_log.h esp_timer.h lvgl.h'
 ).split()
 def sdk_function(source, name):
-    match = re.search(r'(?m)^(?:static )?(?:int|void|esp_err_t|uint32_t)\s+' + re.escape(name) + r'\(', source)
+    match = re.search(r'(?m)^(?:static )?(?:int|void|esp_err_t|uint32_t|bool|size_t|ssize_t)\s+' +
+                      re.escape(name) + r'\([^;{]*\)\s*\{', source)
     if not match:
         raise RuntimeError(f'Missing pinned SDK function: {name}')
     start = source.index('{', match.start())
@@ -28,11 +29,12 @@ def sdk_function(source, name):
     return source[match.start():end] + '\n'
 
 
-tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'sound', 'names', 'control_http', 'management')
+tests = ('startup', 'ble', 'store', 'cccd', 'theme', 'wifi', 'setup', 'sound', 'names', 'control_http', 'management', 'usb')
 fixtures = {
     'startup': 'stubs.h', 'theme': 'theme_stubs.h', 'wifi': 'wifi_stubs.h',
     'setup': 'setup_stubs.h', 'sound': 'sound_stubs.h', 'names': 'names_stubs.h',
     'control_http': 'control_http_stubs.h', 'management': 'stubs.h',
+    'usb': 'usb_stubs.h',
 }
 for test in sys.argv[1:] or tests:
     if test not in tests:
@@ -42,6 +44,17 @@ for test in sys.argv[1:] or tests:
         extra = 'host/ble_sm.h services/gap/ble_svc_gap.h services/gatt/ble_svc_gatt.h nvs.h store/config/ble_store_config.h freertos/semphr.h'.split()
         if test == 'sound':
             extra += ['bsp_i2c.h', 'driver/i2s_std.h']
+        if test == 'usb':
+            extra += ['driver/usb_serial_jtag.h', 'esp_app_desc.h']
+            sdk = root / '.tools/passport-esp-idf/components/esp_driver_usb_serial_jtag/src'
+            driver = (sdk / 'usb_serial_jtag.c').read_text()
+            vfs = (sdk / 'usb_serial_jtag_vfs.c').read_text()
+            (work / 'sdk_usb_rx.inc').write_text(
+                ''.join(sdk_function(driver, name) for name in
+                        ('usb_serial_jtag_is_driver_installed', 'usb_serial_jtag_get_read_bytes_available')) +
+                ''.join(sdk_function(vfs, name) for name in
+                        ('usb_serial_jtag_rx_char_no_driver', 'usb_serial_jtag_read_char',
+                         'usb_serial_jtag_return_char', 'usb_serial_jtag_read', 'usb_serial_jtag_fcntl')))
         if test == 'names':
             extra.append('mbedtls/md.h')
         for header in headers + extra:

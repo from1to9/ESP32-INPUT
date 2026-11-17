@@ -36,7 +36,10 @@ or NimBLE callback. Unsupported operations return unavailable.
 | STA and persistent control AP | Add AP without changing enrolled policy | STA preferred, AP fallback |
 | On-device control | Existing Mosaico UI | New three-button mouse and limited keys UI |
 
-The ESP32-C3 USB Serial/JTAG port stays available for flash and diagnostics;
+The ESP32-C3 USB Serial/JTAG port stays available for flash, diagnostics and the
+[physical USB control API](passport-usb-control.md), which can perform device
+operations without three-button confirmation. This does not change network
+authorization or bypass input fault locks. The port
 it cannot be reconfigured as native USB HID. Passport's ES8311 speaker is
 used only for local cues. Do not include microphone, recording, media API,
 Bluetooth audio, Mosaico motion/touch UI, or incompatible USB/OTA components

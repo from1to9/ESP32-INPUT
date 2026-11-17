@@ -62,6 +62,18 @@ static struct {
     char target[PASSPORT_PEER_TEXT];
 } remote_management;
 static void remote_management_cancel(cp_error_t error);
+static bool physical_inputs_available;
+static struct {
+    passport_command_t request;
+    uint64_t deadline, epoch;
+    bool active, uncertain;
+} usb_command;
+static void usb_command_finish(passport_result_t result, int32_t detail)
+{
+    if (!usb_command.active) return;
+    state.command = (passport_receipt_t){usb_command.request.command_id, result, detail};
+    usb_command.active = false;
+}
 
 
 static uint64_t now_ms(void) { return esp_timer_get_time() / 1000; }
@@ -484,7 +496,9 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         memset(keyboard, 0, sizeof(keyboard));
         memset(mouse, 0, sizeof(mouse));
         disconnect_requested = false;
-        if (!transition || engine.state.release_pending || engine.count) { state.release_unknown = true; remote_management.uncertain=true; }
+        if (!transition || engine.state.release_pending || engine.count) {
+            state.release_unknown = true; remote_management.uncertain=true; usb_command.uncertain=true;
+        }
         hid_engine_set_link(&engine, false, false);
         link_ready = false;
         stop_advertising();
@@ -546,6 +560,7 @@ static void execute_management(void)
         (pending.bond_revision != state.bond_revision || !state.storage_known || !is_saved(&peer))) {
         result("Host list changed; select again");
         if (remote_management.key) { remote_management.error=CP_STALE; remote_management.done=true; }
+        usb_command_finish(PR_STALE, 0);
         transition = false;
         return;
     }
@@ -556,6 +571,7 @@ static void execute_management(void)
         if (passport_store_select(&peer)) {
             result("Host selection not saved");
             if (remote_management.key) { remote_management.error=CP_UNAVAILABLE; remote_management.done=true; }
+            usb_command_finish(PR_STORAGE_UNCERTAIN, 0);
             break;
         }
         selected = peer;
@@ -563,12 +579,16 @@ static void execute_management(void)
         advertise(false,pending.window_ms);
         break;
     case PASSPORT_FORGET:
-        if (passport_store_forget(&peer)) result("Forget uncertain; restart required");
+        if (passport_store_forget(&peer)) {
+            result("Forget uncertain; restart required");
+            usb_command_finish(PR_STORAGE_UNCERTAIN, 0);
+        }
         else {
             passport_name_result_t removed = remove_bond_name(&peer);
             result(removed == PN_OK ? "Bond forgotten" : "Bond forgotten; label cleanup failed");
             if (selected_valid && same(&selected, &peer)) selected_valid = false;
             refresh_peers();
+            if (removed != PN_OK) usb_command_finish(PR_STORAGE_UNCERTAIN, removed);
         }
         break;
     default: result("Disconnected; bond retained"); break;
@@ -577,7 +597,7 @@ static void execute_management(void)
     disconnect_requested = false;
 }
 
-static void command(const passport_command_t *request, uint64_t now)
+static passport_result_t command_impl(const passport_command_t *request, uint64_t now)
 {
     remote_management_cancel(CP_STALE);
     if (request->kind == PASSPORT_LOCK) {
@@ -586,59 +606,70 @@ static void command(const passport_command_t *request, uint64_t now)
         hid_engine_set_locked(&engine, true);
         close_pairing();
         result("Input locked");
-        return;
+        return PR_PENDING;
     }
     // Closing a visible pairing window remains valid across its connect event.
     if (request->kind == PASSPORT_STOP_PAIR) {
         if (reconnect_end) { reconnect_end = 0; stop_advertising(); }
-        close_pairing(); result("Pairing closed"); return;
+        close_pairing();
+        if (request->command_id && state.advertising && !stop_advertising()) return PR_UNAVAILABLE;
+        result("Pairing closed"); return PR_PENDING;
     }
-    if (request->generation != state.generation) { result("Stale action rejected"); return; }
-    if (request->kind == PASSPORT_UNLOCK) { hid_engine_set_locked(&engine, false); result("Unlocked"); return; }
+    if (request->generation != state.generation) { result("Stale action rejected"); return PR_STALE; }
+    if (request->kind == PASSPORT_UNLOCK) {
+        if (request->command_id && (!physical_inputs_available || atomic_load(&emergency_lock))) return PR_LOCKED;
+        hid_engine_set_locked(&engine, false); result("Unlocked"); return PR_APPLIED;
+    }
     if (request->kind == PASSPORT_CANCEL) {
         if (request->network_change) passport_control_network_reset(now);
         else passport_control_local(now);
-        hid_engine_cancel(&engine); lease_end = 0; ++state.cancel_revision; return;
+        hid_engine_cancel(&engine); lease_end = 0; ++state.cancel_revision; return PR_PENDING;
     }
-    bool local_input=request->kind==PASSPORT_MOVE || request->kind==PASSPORT_CLICK || request->kind==PASSPORT_KEY;
-    if (local_input && request->input_revision!=state.input_revision) { result("Fresh press required"); return; }
+    if (request->command_id && engine.state.locked) return PR_LOCKED;
+    if (request->command_id && request->kind <= PASSPORT_FORGET && (!state.synced || !state.storage_known)) return PR_UNAVAILABLE;
+    bool local_input=request->kind==PASSPORT_MOVE || request->kind==PASSPORT_CLICK || request->kind==PASSPORT_KEY || request->kind==PASSPORT_SCROLL;
+    if (local_input && request->input_revision!=state.input_revision) { result("Fresh press required"); return PR_STALE; }
+    if (request->command_id && local_input && engine.count) return PR_BUSY;
     if (request->kind==PASSPORT_TAKEOVER || (local_input && engine.state.owner==INPUT_REMOTE)) {
         passport_control_local(now);
         (void)hid_engine_set_mode(&engine,INPUT_MOUSE);
         ++state.input_revision; lease_end=now+LEASE_MS;
-        result("Local control; press again"); return;
+        result("Local control; press again"); return request->kind == PASSPORT_TAKEOVER ? PR_PENDING : PR_RELEASE_REQUIRED;
     }
     if (request->kind <= PASSPORT_FORGET) {
         if ((request->kind == PASSPORT_ADVERTISE || request->kind == PASSPORT_FORGET || request->kind == PASSPORT_DISCONNECT) &&
-            request->bond_revision != state.bond_revision) { result("Host list changed; select again"); return; }
+            request->bond_revision != state.bond_revision) { result("Host list changed; select again"); return PR_STALE; }
         if (request->kind == PASSPORT_DISCONNECT) {
             ble_addr_t peer = { .type = request->peer_type };
             memcpy(peer.val, request->peer, 6);
-            if (!selected_valid || !same(&selected, &peer)) { result("Selected host is not active"); return; }
+            if (!selected_valid || !same(&selected, &peer)) { result("Selected host is not active"); return PR_STALE; }
         }
-        if (transition) { result("Host change in progress"); return; }
+        if (transition) { result("Host change in progress"); return PR_BUSY; }
         pending = *request;
-        if (!stop_advertising()) return;
+        if (!stop_advertising()) return PR_UNAVAILABLE;
         passport_control_local(now);
         hid_engine_cancel(&engine);
         transition = true;
         release_end = now + RELEASE_MS;
         result("Releasing input");
-        return;
+        return PR_PENDING;
     }
-    if (transition || !state.ready) { result("Input unavailable"); return; }
+    if (transition || !state.ready) { result("Input unavailable"); return PR_UNAVAILABLE; }
     if (local_input && engine.state.mode!=INPUT_MOUSE) {
         (void)hid_engine_set_mode(&engine,INPUT_MOUSE);
-        ++state.input_revision; result("Mouse mode; press again"); return;
+        ++state.input_revision; result("Mouse mode; press again"); return PR_RELEASE_REQUIRED;
     }
     hid_engine_enqueue_result_t rc = HID_ENGINE_ENQUEUE_INVALID;
     if (request->kind == PASSPORT_MOVE) rc = hid_engine_enqueue_mouse_move(&engine, engine.state.epoch, INPUT_LOCAL, request->x, request->y);
-    if (request->kind == PASSPORT_CLICK) rc = hid_engine_enqueue_mouse_click(&engine, engine.state.epoch, INPUT_LOCAL, 1);
-    if (request->kind == PASSPORT_KEY) rc = hid_engine_enqueue_mouse_key(&engine, engine.state.epoch, INPUT_LOCAL, 0, request->usage);
-    if (rc == HID_ENGINE_ENQUEUE_OK) { lease_end = now + LEASE_MS; result("Input queued"); }
+    if (request->kind == PASSPORT_CLICK) rc = hid_engine_enqueue_mouse_click(&engine, engine.state.epoch, INPUT_LOCAL, request->buttons ? request->buttons : 1);
+    if (request->kind == PASSPORT_KEY) rc = hid_engine_enqueue_mouse_key(&engine, engine.state.epoch, INPUT_LOCAL, request->modifier, request->usage);
+    if (request->kind == PASSPORT_SCROLL) rc = hid_engine_enqueue_mouse_scroll(&engine, engine.state.epoch, INPUT_LOCAL, request->y);
+    if (rc == HID_ENGINE_ENQUEUE_OK) { lease_end = now + LEASE_MS; result("Input queued"); return PR_PENDING; }
     else { hid_engine_cancel(&engine); result("Input rejected; releasing"); }
+    return rc == HID_ENGINE_ENQUEUE_INVALID ? PR_INVALID : PR_UNAVAILABLE;
 }
 
+#include "passport_ble_usb.inc"
 #include "passport_ble_control.inc"
 
 static void reconnect_startup(uint64_t now)
@@ -659,6 +690,7 @@ static void service(struct ble_npl_event *event)
     const uint64_t now = now_ms();
     refresh_peers();
     if (atomic_exchange(&emergency_lock, false)) {
+        usb_command_finish(PR_LOCKED, 0);
         if (reconnect_end) { reconnect_end = 0; stop_advertising(); }
         remote_management_cancel(CP_LOCKED);
         passport_control_local(now);
@@ -725,6 +757,7 @@ static void service(struct ble_npl_event *event)
     hid_engine_step_result_t step = hid_engine_step(&engine, send_report, NULL);
     passport_control_service(now);
     if (step == HID_ENGINE_STEP_RETRY_EXHAUSTED) {
+        usb_command_finish(PR_UNKNOWN, 0);
         state.release_unknown = true;
         result("Release unknown; disconnecting");
         disconnect_link();
@@ -732,9 +765,10 @@ static void service(struct ble_npl_event *event)
     if (transition) {
         if (connection == BLE_HS_CONN_HANDLE_NONE) execute_management();
         else if (!disconnect_requested && (!engine.state.release_pending || now >= release_end)) {
-            if (engine.state.release_pending) { state.release_unknown = true; remote_management.uncertain=true; }
+            if (engine.state.release_pending) { state.release_unknown = true; remote_management.uncertain=true; usb_command.uncertain=true; }
             int rc = disconnect_link();
             if (rc) { result("Disconnect failed"); transition = false;
+                usb_command_finish(PR_UNAVAILABLE, rc);
                 if (remote_management.key) { remote_management.error=CP_UNAVAILABLE; remote_management.done=true; }
             }
             else disconnect_requested = true;
@@ -766,6 +800,7 @@ static void service(struct ble_npl_event *event)
     passport_control_view_t view; passport_control_view(&view);
     state.network_available=view.available; state.network_active=view.active;
     memcpy(state.controller,view.controller,sizeof(state.controller));
+    usb_command_poll(now, step);
     portENTER_CRITICAL(&state_lock);
     published = state;
     portEXIT_CRITICAL(&state_lock);
@@ -800,6 +835,7 @@ static void synced(void)
 
 static void reset(int reason)
 {
+    usb_command_finish(PR_UNKNOWN, reason);
     if (remote_management.key) { remote_management.done=true; remote_management.error=CP_UNAVAILABLE; }
     (void)reason;
     passport_control_network_reset(now_ms());
@@ -837,6 +873,7 @@ static bool random_bytes(void *user, uint8_t *out, size_t length)
 
 esp_err_t passport_ble_start(bool buttons_available)
 {
+    physical_inputs_available = buttons_available;
     startup_restore = true;
     selected_valid = false;
     reconnect_end = reconnect_next = 0;

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "passport_names.h"
+#include "passport_receipt.h"
 
 #define PASSPORT_WIFI_PROFILES 4
 #define PASSPORT_WIFI_SCAN_ROWS 16
@@ -29,6 +30,7 @@ typedef enum { PW_OFFLINE, PW_SWITCHING, PW_CONNECTING, PW_ASSOCIATED, PW_ONLINE
 typedef enum { PW_REQUEST_NONE, PW_REQUEST_WAITING, PW_REQUEST_JOINING, PW_REQUEST_SAVED, PW_REQUEST_FAILED, PW_REQUEST_CANCELLED } passport_wifi_request_state_t;
 typedef enum { PW_SCAN_ACCEPTED, PW_SCAN_REJECTED, PW_SCAN_STALE, PW_SCAN_LOCKED, PW_SCAN_BUSY } passport_scan_result_t;
 typedef struct {
+    passport_receipt_t command;
     uint64_t scan_request_id;
     passport_scan_result_t scan_request_result;
     bool initialized, storage_known, scanning, scan_known, scan_truncated, provisioning_available;
@@ -53,6 +55,7 @@ typedef enum {
 } passport_wifi_action_t;
 typedef struct {
     passport_wifi_action_t action;
+    uint32_t command_id; // Physical USB receipt; zero for existing native/Web callers.
     uint32_t id, revision;
     uint64_t remote_scan_id; // Zero for native/setup requests.
 } passport_wifi_command_t;
@@ -66,12 +69,15 @@ void passport_wifi_prepare(void);
 esp_err_t passport_wifi_start(void);
 void passport_wifi_snapshot(passport_wifi_state_t *out);
 bool passport_wifi_request(const passport_wifi_command_t *command);
-// Only the native screen may receive AP credentials. Never pass these to HTTP.
+// Native screen and explicit physical USB reads only. Never pass these to HTTP.
 void passport_wifi_ap_credentials(char ssid[32], char password[17]);
 // Local setup windows are unavailable until the provisioning routes are installed.
 void passport_wifi_set_provisioning_available(bool available);
 bool passport_wifi_setup_token(char token[33]);
 bool passport_wifi_submit(const passport_wifi_submission_t *submission, const char token[33]);
+// Physical USB only: confirms this exact scan row/credentials on the Wi-Fi owner.
+// This entry is never exposed by the HTTP/open-network management adapters.
+bool passport_wifi_submit_usb(const passport_wifi_submission_t *submission);
 bool passport_wifi_scan(uint32_t setup_id, const char token[33]);
 const char *passport_wifi_security_name(passport_wifi_security_t security);
 const char *passport_wifi_phase_name(passport_wifi_phase_t phase);

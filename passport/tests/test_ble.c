@@ -110,6 +110,7 @@ int xTaskCreate(void (*run)(void *),const char *name,unsigned stack,void *arg,un
 }
 
 static void setup(void) {
+    memset(&usb_command,0,sizeof(usb_command)); physical_inputs_available=true;
     passport_control_deinit();
     memset(&remote_management,0,sizeof(remote_management));
     state=(passport_ble_state_t){.synced=true,.generation=1,.locked=true};
@@ -451,6 +452,45 @@ static void test_startup_reconnect(void)
     }
 }
 
+static void test_usb_receipts(void)
+{
+    setup();connect_saved();
+    passport_command_t c=action(PASSPORT_TAKEOVER);c.command_id=100;
+    command(&c,clock_ms);assert(state.command.result==PR_PENDING);
+    tick_once();tick_once();
+    c=action(PASSPORT_KEY);c.command_id=101;c.usage=0x28;
+    command(&c,clock_ms);assert(state.command.result==PR_PENDING);
+    unsigned before=report_count;tick_once();
+    assert(report_count==before+1&&reports[before].bytes[2]==0x28&&state.command.result==PR_PENDING);
+    tick_once();assert(state.command.result==PR_APPLIED&&report_count==before+2);
+    for(unsigned j=0;j<reports[before+1].length;++j)assert(!reports[before+1].bytes[j]);
+    c=action(PASSPORT_KEY);c.command_id=102;c.usage=0x28;command(&c,clock_ms);send_fail=true;tick_once();
+    assert(state.command.result==PR_UNKNOWN);send_fail=false;
+    setup();connect_saved();c=action(PASSPORT_LOCK);c.command_id=103;command(&c,clock_ms);
+    assert(state.command.result==PR_PENDING);tick_once();assert(state.command.result==PR_PENDING);tick_once();
+    assert(state.command.result==PR_APPLIED&&state.locked);
+    c=action(PASSPORT_UNLOCK);c.command_id=104;physical_inputs_available=false;command(&c,clock_ms);
+    assert(state.command.result==PR_LOCKED&&engine.state.locked);
+    physical_inputs_available=true;c.generation--;command(&c,clock_ms);assert(state.command.result==PR_STALE);
+    setup();issue(PASSPORT_UNLOCK);c=action(PASSPORT_PAIR);c.command_id=105;c.window_ms=1000;command(&c,clock_ms);
+    tick_once();assert(state.command.result==PR_APPLIED&&state.pairing&&state.advertising);
+    stop_error=9;c=action(PASSPORT_STOP_PAIR);c.command_id=106;command(&c,clock_ms);assert(state.command.result==PR_UNAVAILABLE);
+    for(unsigned neutral=0;neutral<2;++neutral) {
+        setup();connect_saved();c=action(PASSPORT_FORGET);c.command_id=701+neutral;
+        unsigned before=report_count;command(&c,clock_ms);assert(transition&&engine.state.release_pending);
+        if(neutral){tick_once();tick_once();assert(!engine.state.release_pending&&disconnect_requested);}
+        gap(BLE_GAP_EVENT_DISCONNECT);tick_once();
+        assert(forget_calls==1&&!saved_count); // The bond deletion really happened in either case.
+        assert(report_count==before+(neutral?2:0));
+        assert(state.command.result==(neutral?PR_APPLIED:PR_UNKNOWN));
+        if(!neutral)assert(state.release_unknown);
+    }
+    setup();connect_saved();c=action(PASSPORT_DISCONNECT);c.command_id=703;
+    command(&c,clock_ms);assert(transition&&state.command.result==PR_PENDING);
+    reset(77);tick_once();
+    assert(!state.synced&&state.release_unknown&&state.command.id==703&&state.command.result==PR_UNKNOWN&&state.command.detail==77);
+}
+
 int main(void) {
     for (unsigned available=0;available<2;++available) {
         setup();passport_control_deinit();assert(passport_ble_start(available)==ESP_OK);
@@ -458,7 +498,7 @@ int main(void) {
         assert(!state.ready && !report_count); // Navigable Home does not send HID.
         assert(ble_hs_cfg.sm_io_cap==BLE_HS_IO_NO_INPUT_OUTPUT&&ble_hs_cfg.sm_bonding);
     }
-    test_security();test_input_release();test_disconnect_diagnostics();test_bond_names();test_remote_management();test_startup_reconnect();test_early_security_and_subscriptions();
+    test_security();test_input_release();test_disconnect_diagnostics();test_bond_names();test_remote_management();test_startup_reconnect();test_early_security_and_subscriptions();test_usb_receipts();
     setup();connect_saved();tick_once();tick_once();
     passport_command_t old=action(PASSPORT_MOVE);old.x=12;
     unsigned revision=state.input_revision;issue(PASSPORT_TAKEOVER);

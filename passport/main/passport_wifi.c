@@ -24,7 +24,7 @@
 _Static_assert(WIFI_AUTH_MAX <= UINT8_MAX, "Scan auth identifier must fit in one byte");
 
 typedef struct {
-    bool submission, web_scan;
+    bool submission, web_scan, local_usb;
     passport_wifi_command_t command;
     passport_wifi_submission_t credentials;
     char token[33];
@@ -59,6 +59,19 @@ static unsigned stop_mask, attempts;
 static uint32_t cancel_revision, cancel_generation;
 static uint64_t release_deadline, stop_deadline, join_deadline, retry_at, fallback_at, scan_deadline, setup_deadline;
 static queued_command_t incoming; // Owner-only; erased after consumption, including credentials.
+// USB passwords never enter the FreeRTOS queue's retained backing storage.
+// snapshot_lock protects this one-slot handoff; the owner erases it on receipt.
+static passport_wifi_submission_t usb_submission;
+static bool usb_submission_queued;
+static passport_wifi_action_t usb_action;
+static uint32_t usb_profile;
+static uint64_t usb_deadline;
+
+static void usb_command_finish(passport_result_t outcome, int32_t detail)
+{
+    if (!state.command.id || state.command.result != PR_PENDING) return;
+    state.command.result = outcome; state.command.detail = detail;
+}
 
 static uint64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 static void result(const char *message) { snprintf(state.result, sizeof(state.result), "%s", message); }
@@ -117,6 +130,9 @@ static void publish(void)
     state.setup_seconds = state.setup_open && setup_deadline > now_ms() ? (setup_deadline - now_ms() + 999) / 1000 : 0;
     portENTER_CRITICAL(&snapshot_lock);
     published = state;
+    if (!state.initialized) {
+        explicit_bzero(&usb_submission, sizeof(usb_submission)); usb_submission_queued = false;
+    }
     memcpy(published_token, setup_token, sizeof(published_token));
     portEXIT_CRITICAL(&snapshot_lock);
 }
@@ -151,6 +167,23 @@ bool passport_wifi_submit(const passport_wifi_submission_t *submission, const ch
     memcpy(message.token, token, sizeof(message.token));
     bool accepted = xQueueSend(commands, &message, 0) == pdTRUE;
     explicit_bzero(&message, sizeof(message));
+    return accepted;
+}
+bool passport_wifi_submit_usb(const passport_wifi_submission_t *submission)
+{
+    if (!commands || !submission->request_id) return false;
+    portENTER_CRITICAL(&snapshot_lock);
+    bool available = published.initialized && !usb_submission_queued;
+    if (available) { usb_submission = *submission; usb_submission_queued = true; }
+    portEXIT_CRITICAL(&snapshot_lock);
+    if (!available) return false;
+    queued_command_t message = {.submission = true, .local_usb = true};
+    bool accepted = xQueueSend(commands, &message, 0) == pdTRUE;
+    if (!accepted) {
+        portENTER_CRITICAL(&snapshot_lock);
+        explicit_bzero(&usb_submission, sizeof(usb_submission)); usb_submission_queued = false;
+        portEXIT_CRITICAL(&snapshot_lock);
+    }
     return accepted;
 }
 bool passport_wifi_scan(uint32_t setup_id, const char token[33])
@@ -227,6 +260,7 @@ static void start_radio(uint64_t now)
     if (rc == ESP_OK) rc = esp_wifi_start();
     switching = waiting_stop = false;
     if (rc != ESP_OK) {
+        usb_command_finish(PR_UNAVAILABLE, rc);
         error("Start Wi-Fi", rc); state.phase = PW_OFFLINE;
         if (new_profile) request_result(PW_REQUEST_FAILED, "Wi-Fi start failed; no profile saved");
         return;
@@ -240,6 +274,7 @@ static void start_radio(uint64_t now)
 }
 static void abort_switch(void)
 {
+    usb_command_finish(PR_UNKNOWN, 0);
     if (target_new) request_result(PW_REQUEST_FAILED, "Network switch rejected; no profile saved");
     switching = waiting_release = waiting_stop = setup_requested = false;
     explicit_bzero(&target_record, sizeof(target_record));
@@ -265,6 +300,7 @@ static void begin_switch(bool station, bool ap, uint64_t now)
 }
 static void fallback(const char *message, uint64_t now)
 {
+    if (usb_action == PW_CONNECT || usb_action == PW_CONFIRM) usb_command_finish(PR_UNAVAILABLE, 0);
     if (new_profile) request_result(PW_REQUEST_FAILED, message);
     result(message);
     target_new = target_pin = false;
@@ -331,6 +367,7 @@ static void save_working_profile(uint64_t now)
     esp_err_t rc = memcmp(&store, &staged_store, sizeof(store)) ? passport_wifi_store_save(&staged_store) : ESP_OK;
     if (rc != ESP_OK) {
         state.storage_known = false;
+        usb_command_finish(PR_STORAGE_UNCERTAIN, rc);
         explicit_bzero(&staged_store, sizeof(staged_store));
         fallback("Profile save uncertain; restart required", now);
         return;
@@ -344,7 +381,7 @@ static void save_working_profile(uint64_t now)
     // Remove only the AP interface; preserve the working station association.
     if (desired_ap) {
         esp_err_t mode = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (mode != ESP_OK) { error("LAN ready; AP stop", mode); return; }
+        if (mode != ESP_OK) { usb_command_finish(PR_UNAVAILABLE, mode); error("LAN ready; AP stop", mode); return; }
         desired_ap = false;
         radio_ap = false;
     }
@@ -424,20 +461,26 @@ static void handle_event(const queued_event_t *event, uint64_t now)
         }
     }
 }
-static void handle_submission(const queued_command_t *message)
+static passport_result_t submit_credentials(const queued_command_t *message)
 {
     const passport_wifi_submission_t *s = &message->credentials;
+    if (message->local_usb) {
+        passport_ble_state_t ble; passport_ble_snapshot(&ble);
+        if (ble.locked || !ble.synced) return PR_LOCKED;
+        if (switching) return PR_BUSY;
+    }
     state.last_submission_id = s->request_id; state.submission_accepted = false;
-    if (!s->request_id || !state.setup_open || state.pending || s->setup_id != state.setup_id || memcmp(message->token, setup_token, sizeof(setup_token)) ||
+    if (!s->request_id || state.pending || (!message->local_usb &&
+        (!state.setup_open || s->setup_id != state.setup_id || memcmp(message->token, setup_token, sizeof(setup_token)))) ||
         !state.storage_known || !state.scan_known || state.scanning || s->scan_revision != state.scan_revision || s->row >= state.scan_count) {
-        result("Setup request rejected; refresh the page"); return;
+        result("Setup request rejected; refresh the page"); return !state.storage_known ? PR_UNAVAILABLE : state.pending ? PR_BUSY : PR_STALE;
     }
     const passport_wifi_row_t *row = &state.rows[s->row];
     size_t length = strnlen(s->password, sizeof(s->password));
     if (!row->ssid.length || row->security == PW_UNSUPPORTED || length > 63 ||
-        (row->security == PW_OPEN ? length != 0 : length < 8)) { result("Unsupported security or invalid password"); return; }
-    for (unsigned i = 0; i < length; ++i) if ((unsigned char)s->password[i] < 32 || (unsigned char)s->password[i] > 126) { result("Password must be printable ASCII"); return; }
-    if (!row->profile_id && store.count == PASSPORT_WIFI_PROFILES) { result("Profiles full; forget one locally first"); return; }
+        (row->security == PW_OPEN ? length != 0 : length < 8)) { result("Unsupported security or invalid password"); return PR_INVALID; }
+    for (unsigned i = 0; i < length; ++i) if ((unsigned char)s->password[i] < 32 || (unsigned char)s->password[i] > 126) { result("Password must be printable ASCII"); return PR_INVALID; }
+    if (!row->profile_id && store.count == PASSPORT_WIFI_PROFILES) { result("Profiles full; forget one locally first"); return PR_BUSY; }
     proposed = (passport_wifi_record_t){.id = row->profile_id, .ssid_length = row->ssid.length, .security = row->security, .password_length = length};
     memcpy(proposed.ssid, row->ssid.bytes, row->ssid.length);
     memcpy(proposed.password, s->password, length);
@@ -447,63 +490,75 @@ static void handle_submission(const queued_command_t *message)
     state.pending_ssid = row->ssid; state.pending_security = row->security;
     state.pending = true;
     result("Confirm this exact request on Passport");
+    return PR_APPLIED;
 }
-static void handle_command(const passport_wifi_command_t *command, uint64_t now)
+static bool confirm_submission(uint64_t now)
+{
+    target_record = proposed; target_new = target_pin = true;
+    state.pending = false;
+    request_result(PW_REQUEST_JOINING, "Joining; save is not confirmed yet");
+    begin_switch(true, true, now);
+    if (switching) result("Joining confirmed network");
+    return switching;
+}
+static passport_result_t command_impl(const passport_wifi_command_t *command, uint64_t now)
 {
     if (command->remote_scan_id) {
         state.scan_request_id=command->remote_scan_id; state.scan_request_result=PW_SCAN_REJECTED;
-        if (command->action!=PW_SCAN && command->action!=PW_SCAN_CANCEL) return;
-        if (command->revision!=state.scan_revision) { state.scan_request_result=PW_SCAN_STALE; return; }
+        if (command->action!=PW_SCAN && command->action!=PW_SCAN_CANCEL) return PR_INVALID;
+        if (command->revision!=state.scan_revision) { state.scan_request_result=PW_SCAN_STALE; return PR_STALE; }
     }
     if (command->action == PW_SETUP_CLOSE || command->action == PW_REJECT) {
-        if (command->action == PW_SETUP_CLOSE || (state.pending && command->id == state.pending_id)) { close_setup(); result("Setup request cancelled"); }
-        return;
+        if (command->command_id && command->action == PW_REJECT && command->revision != state.setup_id) return PR_STALE;
+        if (command->action == PW_SETUP_CLOSE || (state.pending && command->id == state.pending_id)) { close_setup(); result("Setup request cancelled"); return PR_APPLIED; }
+        return PR_STALE;
     }
     passport_ble_state_t ble;
     passport_ble_snapshot(&ble);
-    if (ble.locked) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_LOCKED; result("Unlock locally to change Wi-Fi"); return; }
-    if (switching) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_BUSY; result("Network switch in progress"); return; }
-    if (command->action == PW_SCAN_CANCEL) { if (cancel_scan()) { result("Scan cancelled"); if (command->remote_scan_id) state.scan_request_result=PW_SCAN_ACCEPTED; } return; }
+    if (ble.locked) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_LOCKED; result("Unlock locally to change Wi-Fi"); return PR_LOCKED; }
+    if (switching) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_BUSY; result("Network switch in progress"); return PR_BUSY; }
+    if (command->command_id && (command->action == PW_SCAN || command->action == PW_SCAN_CANCEL) && command->revision != state.scan_revision) return PR_STALE;
+    if (command->action == PW_SCAN_CANCEL) {
+        if (!cancel_scan()) return PR_UNAVAILABLE;
+        result("Scan cancelled"); if (command->remote_scan_id) state.scan_request_result=PW_SCAN_ACCEPTED;
+        return scan_draining ? PR_PENDING : PR_APPLIED;
+    }
     if (command->action == PW_SCAN) {
-        if (state.scanning || scan_draining || (associating && state.phase != PW_ONLINE && state.phase != PW_OFFLINE)) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_BUSY; result("Wait for connection before scanning"); return; }
+        if (state.scanning || scan_draining || (associating && state.phase != PW_ONLINE && state.phase != PW_OFFLINE)) { if (command->remote_scan_id) state.scan_request_result=PW_SCAN_BUSY; result("Wait for connection before scanning"); return PR_BUSY; }
         wifi_scan_config_t scan = {.show_hidden = true, .scan_type = WIFI_SCAN_TYPE_ACTIVE,
             .scan_time.active = {.min = 30, .max = 120}, .home_chan_dwell_time = 30};
         esp_err_t rc = esp_wifi_scan_start(&scan, false);
-        if (rc != ESP_OK) { error("Scan", rc); return; }
+        if (rc != ESP_OK) { error("Scan", rc); return PR_UNAVAILABLE; }
         state.scanning = true; state.scan_known = false; state.scan_count = 0;
         ++state.scan_revision; scan_deadline = now + SCAN_MS;
         if (command->remote_scan_id) state.scan_request_result=PW_SCAN_ACCEPTED;
-        result("Scanning 2.4 GHz networks"); return;
+        result("Scanning 2.4 GHz networks"); return PR_PENDING;
     }
-    if (command->action == PW_DISCONNECT && (!command->id || command->id != state.active_profile || command->revision != state.revision)) { result("Selected profile is not active"); return; }
+    if (command->action == PW_DISCONNECT && (!command->id || command->id != state.active_profile || command->revision != state.revision)) { result("Selected profile is not active"); return PR_STALE; }
     if (command->action == PW_USE_AP || command->action == PW_DISCONNECT || command->action == PW_SETUP_OPEN) {
-        if (command->action == PW_SETUP_OPEN && (!atomic_load(&provisioning) || !state.storage_known)) { result("Provisioning unavailable"); return; }
+        if (command->action == PW_SETUP_OPEN && (!atomic_load(&provisioning) || !state.storage_known)) { result("Provisioning unavailable"); return PR_UNAVAILABLE; }
         bool setup = command->action == PW_SETUP_OPEN;
         if (state.ap_started && !desired_station) {
             if (setup && state.dhcp_running) open_setup(now);
             else if (setup) result("AP DHCP unavailable; setup closed");
-            return;
+            return state.dhcp_running && (!setup || state.setup_open) ? PR_APPLIED : PR_UNAVAILABLE;
         }
         fallback(setup ? "Opening setup AP" : "Local AP selected", now);
         setup_requested = setup && switching;
-        return;
+        return switching ? PR_PENDING : PR_UNAVAILABLE;
     }
     if (command->action == PW_CONFIRM) {
-        if (!state.pending || command->id != state.pending_id || command->revision != state.setup_id) { result("Setup request changed; select again"); return; }
-        target_record = proposed; target_new = target_pin = true;
-        state.pending = false;
-        request_result(PW_REQUEST_JOINING, "Joining; save is not confirmed yet");
-        begin_switch(true, true, now);
-        if (switching) result("Joining confirmed network");
-        return;
+        if (!state.pending || command->id != state.pending_id || command->revision != state.setup_id) { result("Setup request changed; select again"); return PR_STALE; }
+        return confirm_submission(now) ? PR_PENDING : PR_UNAVAILABLE;
     }
-    if (!state.storage_known || command->revision != state.revision) { result("Profile list changed or unavailable"); return; }
+    if (!state.storage_known || command->revision != state.revision) { result("Profile list changed or unavailable"); return state.storage_known ? PR_STALE : PR_UNAVAILABLE; }
     int index = profile_index(command->id);
-    if (index < 0) { result("Selected profile no longer exists"); return; }
+    if (index < 0) { result("Selected profile no longer exists"); return PR_STALE; }
     if (command->action == PW_CONNECT) {
         target_record = store.records[index]; target_pin = target_new = false;
         begin_switch(true, state.ap_started, now);
         if (switching) result("Connecting saved profile");
+        return switching ? PR_PENDING : PR_UNAVAILABLE;
     } else if (command->action == PW_FORGET) {
         staged_store = store;
         memmove(&staged_store.records[index], &staged_store.records[index + 1], (store.count - index - 1) * sizeof(store.records[0]));
@@ -515,11 +570,19 @@ static void handle_command(const passport_wifi_command_t *command, uint64_t now)
             store = staged_store; ++state.revision; result("Profile forgotten");
             if (joining.id == command->id) fallback("Profile forgotten; local AP selected", now);
             const passport_name_key_t key = {.kind = PN_WIFI_PROFILE, .profile = command->id};
-            if (passport_names_remove(&key) != PN_OK) result("Profile forgotten; label cleanup failed");
+            if (passport_names_remove(&key) != PN_OK) {
+                result("Profile forgotten; label cleanup failed");
+                explicit_bzero(&staged_store, sizeof(staged_store));
+                return PR_STORAGE_UNCERTAIN;
+            }
         }
         explicit_bzero(&staged_store, sizeof(staged_store));
+        return rc == ESP_OK ? PR_APPLIED : PR_STORAGE_UNCERTAIN;
     }
+    return PR_INVALID;
 }
+
+#include "passport_wifi_usb.inc"
 
 static bool wifi_name_retained(const passport_name_key_t *key)
 {
@@ -566,6 +629,7 @@ static void step(uint64_t now)
     passport_ble_snapshot(&ble);
     if (state.setup_open && (ble.locked || now >= setup_deadline || !atomic_load(&provisioning))) { close_setup(); result("Setup closed; reopen locally"); }
     if (atomic_exchange(&event_loss, false)) {
+        usb_command_finish(PR_UNKNOWN, 0);
         if (state.request_state == PW_REQUEST_JOINING) request_result(PW_REQUEST_FAILED, "Wi-Fi event loss; restart required");
         esp_wifi_stop(); close_setup(); state.initialized = false;
         state.ap_started = state.dhcp_running = state.ap_client = state.ap_lease = false;
@@ -575,6 +639,12 @@ static void step(uint64_t now)
     queued_event_t event;
     for (unsigned i = 0; i < 16 && xQueueReceive(events, &event, 0) == pdTRUE; ++i) handle_event(&event, now);
     if (xQueueReceive(commands, &incoming, 0) == pdTRUE) {
+        if (incoming.local_usb) {
+            portENTER_CRITICAL(&snapshot_lock);
+            incoming.credentials = usb_submission;
+            explicit_bzero(&usb_submission, sizeof(usb_submission)); usb_submission_queued = false;
+            portEXIT_CRITICAL(&snapshot_lock);
+        }
         if (incoming.submission) handle_submission(&incoming);
         else if (incoming.web_scan) {
             if (state.setup_open && !state.pending && incoming.credentials.setup_id == state.setup_id &&
@@ -605,11 +675,12 @@ static void step(uint64_t now)
         }
         if (waiting_stop && !stop_mask) { radio_started = false; start_radio(now); }
         else if (waiting_stop && now >= stop_deadline) {
+            usb_command_finish(PR_UNKNOWN, 0);
             if (target_new) request_result(PW_REQUEST_FAILED, "Wi-Fi stop unconfirmed; restart required");
             state.initialized = false; close_setup(); result("Wi-Fi stop unconfirmed; restart required");
         }
     }
-    if (state.scanning && now >= scan_deadline) { cancel_scan(); state.scan_known = false; result("Scan timed out"); }
+    if (state.scanning && now >= scan_deadline) { cancel_scan(); state.scan_known = false; result("Scan timed out"); if (usb_action == PW_SCAN) usb_command_finish(PR_TIMEOUT, 0); }
     if (!switching && desired_station) {
         if (fallback_at && now >= fallback_at) fallback("LAN unavailable for 30 seconds; AP fallback", now);
         else if (join_deadline && now >= join_deadline && state.phase != PW_ONLINE) {
@@ -624,6 +695,7 @@ static void step(uint64_t now)
     }
     if (ble.locked && state.setup_open) { close_setup(); result("Setup closed by Lock"); }
     service_wifi_names(&ble);
+    usb_command_poll(now);
     publish();
 }
 static void owner_task(void *arg)

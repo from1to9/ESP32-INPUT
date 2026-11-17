@@ -9,6 +9,10 @@
 #include "../main/passport_ui.c"
 
 static bool locked;
+void passport_usb_init(void) {}
+void passport_usb_service(const passport_ble_state_t *b, const passport_wifi_state_t *w,
+                          passport_theme_t t, bool known, bool busy)
+{ (void)b; (void)w; (void)t; (void)known; (void)busy; }
 static unsigned lock_calls, fail_lock_call;
 static lv_obj_t label;
 static passport_view_t applied_view;
@@ -599,6 +603,8 @@ static void test_appearance(void)
 
 static void test_visible_state(void)
 {
+    page=LOCK_SCREEN;unlock_requested=false;owner_was_locked=true;mock_ble.locked=false;mock_wifi.pending=false;
+    observe_owner();assert(page==HOME); // A physical USB unlock follows actual owner state.
     page = HOME; focus = 2; ble.synced = false;
     ble.release_unknown = true;
     snprintf(ble.result, sizeof(ble.result), "Command queue full");
