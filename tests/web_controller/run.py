@@ -80,14 +80,12 @@ def main():
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--http", action="store_true", help="Exercise authenticated plaintext browser transport")
     parser.add_argument("--channel-direct", action="store_true",
-                        help="Run the motion-channel case on the device HTTPS origin and its CSP")
+                        help="Run the motion-channel case directly on the device origin and its CSP")
     parser.add_argument("--case", choices=("all", "pad-freshness", "management", "authorization-feedback", "lease-renewal",
                                            "control-timing", "motion-channel"),
                         default="all")
     args = parser.parse_args()
     channel_test = args.case == "motion-channel"
-    if channel_test and args.http and not args.channel_direct:
-        parser.error("Use --channel-direct for the enrolled HTTP input channel")
     if args.channel_direct and not channel_test:
         parser.error("--channel-direct requires --case motion-channel")
     args.protocol_root = args.protocol_root.resolve()
@@ -220,7 +218,8 @@ def main():
                 if not args.channel_direct:
                     sys.path.insert(0, str(ROOT / "tools"))
                     from serve_web_controller import ControllerServer
-                    proxy = ControllerServer(0, origin, legacy_state=True, device_ca=temporary / "cert.pem")
+                    proxy = ControllerServer(0, origin, legacy_state=True,
+                                             device_ca=None if args.http else temporary / "cert.pem")
                     threading.Thread(target=proxy.serve_forever, daemon=True).start()
                     environment["WEB_ORIGIN"] = proxy.local_origin
             if args.browser_executable:

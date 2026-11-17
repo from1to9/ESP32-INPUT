@@ -91,9 +91,8 @@ class ControllerHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
-        websocket = f" ws://{self.server.local_host}" if self.server.tls else ""
         self.send_header("Content-Security-Policy",
-                         f"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'{websocket}; "
+                         f"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' ws://{self.server.local_host}; "
                          "base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'")
         for cookie in cookies:
             self.send_header("Set-Cookie", cookie)
@@ -104,7 +103,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         protocol = self.headers.get("Sec-WebSocket-Protocol", "")
         key = self.headers.get("Sec-WebSocket-Key", "")
-        if (not self.server.tls or self.command != "GET" or origins != [self.server.local_origin]
+        if (self.command != "GET" or origins != [self.server.local_origin]
                 or self.headers.get("Transfer-Encoding") is not None or self.headers.get("Content-Length", "0") != "0"
                 or self.headers.get("Upgrade", "").lower() != "websocket"
                 or not re.fullmatch(r"[A-Za-z0-9+/]{22}==", key)
@@ -139,7 +138,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
                     self.send_header(name, value)
                 self.end_headers()
                 while True:
-                    ready = [peer] if peer.pending() else select([self.connection, peer], [], [])[0]
+                    ready = [peer] if self.server.tls and peer.pending() else select([self.connection, peer], [], [])[0]
                     for source in ready:
                         data = source.recv(16384)
                         if not data:

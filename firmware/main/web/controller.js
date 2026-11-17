@@ -308,7 +308,8 @@ export class Controller {
         const resource = `/api/v1/requests/${key}`;
         const result = channel ? {json: await channel.exchange({v: 1, resource})} : await this.request(resource);
         if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
-        if ((channel ? result.json.command_key !== key : ![200, 202, 400].includes(result.status)) || !result.json.state) {
+        if (result.json.command_key !== key || !result.json.state ||
+            (!channel && ![200, 202, 400].includes(result.status))) {
           throw new Error("Result is unavailable.");
         }
         answer = result.json;

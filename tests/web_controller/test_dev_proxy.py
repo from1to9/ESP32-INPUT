@@ -52,6 +52,9 @@ class Upstream(BaseHTTPRequestHandler):
         elif self.path == "/api/v1/commands":
             self.send_response(400)
             payload = b'{"state":"rejected","error":"expired"}'
+        elif self.path == "/api/v1/channel":
+            self.send_response(403)
+            payload = b'{"error":"invalid_ticket"}'
         else:
             self.send_response(200)
             payload = b'{"protocol":{}}'
@@ -142,7 +145,7 @@ class DevProxyTest(unittest.TestCase):
                     status, body, headers = request("GET", "/controller.js")
                     self.assertEqual((status, body), (200, b"first"))
                     self.assertEqual(headers["Cache-Control"], "no-store")
-                    self.assertIn("connect-src 'self'", headers["Content-Security-Policy"])
+                    self.assertIn(f"connect-src 'self' ws://{local.local_host};", headers["Content-Security-Policy"])
                     asset.write_text("second")
                     self.assertEqual(request("GET", "/controller.js")[:2], (200, b"second"))
 
@@ -175,6 +178,25 @@ class DevProxyTest(unittest.TestCase):
                 self.assertEqual(headers["Origin"], f"http://{upstream_host}")
                 self.assertEqual(headers["Cookie"], "control-http=fixture")
                 self.assertEqual(headers["X-CSRF-Token"], "fixture-csrf")
+
+                channel_headers = {"Connection": "Upgrade", "Upgrade": "websocket",
+                                   "Sec-WebSocket-Key": "a" * 22 + "==", "Sec-WebSocket-Version": "13",
+                                   "Sec-WebSocket-Protocol": "esp32-control-v1, ticket." + "b" * 64,
+                                   "Cookie": "control-http=fixture"}
+                calls = len(upstream.calls)
+                for origin in ({}, {"Origin": "http://foreign.invalid"},
+                               {"Origin": local.local_origin, "Host": "foreign.invalid"}):
+                    self.assertEqual(request("GET", "/api/v1/channel", {**channel_headers, **origin})[0], 403)
+                self.assertEqual(len(upstream.calls), calls)
+                channel_headers["Origin"] = local.local_origin
+                self.assertEqual(request("GET", "/api/v1/channel", channel_headers)[:2],
+                                 (403, b'{"error":"invalid_ticket"}'))
+                method, route, headers, data = upstream.calls[-1]
+                self.assertEqual((method, route, data), ("GET", "/api/v1/channel", b""))
+                self.assertEqual(headers["Host"], upstream_host)
+                self.assertEqual(headers["Origin"], f"http://{upstream_host}")
+                self.assertEqual(headers["Cookie"], channel_headers["Cookie"])
+                self.assertEqual(headers["Sec-WebSocket-Protocol"], channel_headers["Sec-WebSocket-Protocol"])
 
 
 if __name__ == "__main__":

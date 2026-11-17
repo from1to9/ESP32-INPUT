@@ -121,6 +121,33 @@ for (const outcome of ["sent", "stale", "reply lost"]) {
   assert.equal(client.controlled, outcome === "sent");
   assert.equal(client.uncertain, outcome === "reply lost");
 }
+for (const terminal of [
+  {command_key: "12", state: "rejected", error: "expired"},
+  {command_key: "13", state: "rejected", error: "expired"},
+  {state: "rejected", error: "expired"},
+  {command_key: "12", state: "cancelled", error: "expired"},
+]) {
+  const f = fixture();
+  f.result({state: "accepted", error: "ok"}, 202);
+  const fetch = f.client.fetcher;
+  f.client.fetcher = (url, options) => {
+    if (url !== "/api/v1/requests/12") return fetch(url, options);
+    f.calls.push({path: url, options});
+    return {status: 400, json: async () => terminal};
+  };
+  const known = terminal.command_key === "12";
+  const recoverable = known && terminal.state === "rejected";
+  const move = f.client.run("mouse.move_relative", {dx: 8, dy: 3});
+  if (recoverable) assert.equal(await move, terminal);
+  else await assert.rejects(move, known ? /cancelled/ : /Result is unavailable/);
+  assert.equal(f.client.controlled, recoverable);
+  assert.equal(f.client.uncertain, !known);
+  if (!known) assert.match(f.client.message, /Reply unknown/);
+  assert.equal(f.client.session.next_seq, 2);
+  assert.deepEqual(f.calls.map(call => call.path), [
+    statePath, "/api/v1/commands", "/api/v1/requests/12", ...(recoverable ? [statePath] : []),
+  ]);
+}
 {
   const f = fixture(); f.state.now_ms = "2500";
   await f.client.run("keyboard.key_tap", {usage: 4});

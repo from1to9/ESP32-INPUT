@@ -151,6 +151,9 @@ Refresh to load edits to the local HTML, CSS and JavaScript. The local proxy
 validates the loopback Host and Origin before forwarding API traffic to the
 single configured device. Mosaico validates authorization, session cookies and
 CSRF, and executes each action through its normal input path.
+When the enrolled HTTP listener advertises WebSocket support, the proxy
+relays the input channel to the same configured HTTP device with its browser
+cookie and single-use ticket.
 
 For an existing approved test browser, pass `--identity-file /path/to/identity.json`
 with a private file containing its `client_id` and `credential`. The loopback
@@ -168,5 +171,6 @@ python3 tools/serve_web_controller.py --device-origin https://mosaico.local \
 ```
 
 Open `http://127.0.0.1:8766/` in the local test browser. The proxy relays
-WebSocket frames only to the fixed HTTPS device. Add the same identity and
-legacy-state options when using a saved test identity and older firmware.
+WebSocket frames to the configured HTTPS device over the verified TLS
+connection. Add the same identity and legacy-state options when using a saved
+test identity and older firmware.
