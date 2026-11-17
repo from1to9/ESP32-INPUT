@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_remote_input.h"
+#include "app_command_bridge.h"
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
@@ -667,8 +668,15 @@ static void current_authority_stops_held_and_queued_input(void)
     finish(&f);
 }
 
+#ifdef TEST_DUAL_TRANSPORT
+#include "test_dual_transport.inc"
+#endif
+
 int main(void)
 {
+#ifdef TEST_DUAL_TRANSPORT
+    dual_listener_order_and_restart();
+#endif
     current_authority_stops_held_and_queued_input();
     recenter_applies_once_without_realigning_duplicates();
     recenter_rejects_authority_mode_and_held_work();

@@ -530,6 +530,12 @@ static void persistent_code_lifecycle(void)
 {
     reset();
     trusted.present = false; trusted.active_digest[0] = 0; native_count = 0; boot();
+    static const char identity_tag[] = "Mosaico local browser identity v1";
+    uint8_t identity_hash[32];
+    char stored_identity[65];
+    cp_sha256(identity_tag, sizeof(identity_tag) - 1, identity_hash);
+    hex(identity_hash, sizeof(identity_hash), stored_identity);
+    assert(!strcmp(access_state->trust_digest, stored_identity));
     app_control_access_code_t code; app_control_access_code_snapshot(&code);
     assert(code.known && !code.present);
     assert(app_control_access_code_generate(code.revision) == CP_OK);

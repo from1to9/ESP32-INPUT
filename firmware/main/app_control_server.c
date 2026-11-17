@@ -70,6 +70,9 @@ struct server {
     } channels[CP_MAX_SESSIONS];
 };
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+/* Completions can outlive a listener. Never restart the shared key sequence
+ * while the firmware still owns work from either listener. */
+static uint64_t s_command_key;
 static server_t *s_servers[2]; /* TLS, enrolled local HTTP. */
 #define s_server s_servers[0] /* Existing streaming-media owner remains TLS. */
 static app_control_server_snapshot_t s_snapshots[2];
@@ -148,6 +151,14 @@ static void publish(unsigned slot, app_control_server_state_t state, esp_err_t e
         s_snapshots[slot].address[0] = 0;
     }
     portEXIT_CRITICAL(&s_lock);
+}
+static uint64_t next_command_key(void *unused)
+{
+    (void)unused;
+    portENTER_CRITICAL(&s_lock);
+    uint64_t key = s_command_key == UINT64_MAX ? 0 : ++s_command_key;
+    portEXIT_CRITICAL(&s_lock);
+    return key;
 }
 static bool random_source(void *user, uint8_t *output, size_t length)
 {
@@ -447,7 +458,8 @@ static esp_err_t initialize(server_t *s)
                                 .principal = s->callbacks.principal ? principal_source : NULL,
                                 .input_authorized = s->callbacks.input_authorized ? input_authorized : NULL,
                                 .pairing = s->callbacks.pairing ? pairing : NULL,
-                                .pairing_code = s->callbacks.pairing_code ? pairing_code : NULL};
+                                .pairing_code = s->callbacks.pairing_code ? pairing_code : NULL,
+                                .next_command_key = next_command_key};
     cp_error_t result =
         cp_initialize_policy(s->protocol_memory, cp_context_size(), &callbacks,
                              s->slot ? CP_POLICY_ENROLLED_HTTP : CP_POLICY_ENROLLED_TLS, &s->protocol);

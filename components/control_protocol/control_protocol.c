@@ -1202,19 +1202,19 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
     if ((uint64_t)seq != (uint64_t)s->sequence + 1) {
         return failure(out, CP_SEQUENCE_GAP);
     }
-    if (c->next_key == UINT64_MAX) {
-        return failure(out, CP_BUSY);
-    }
     record_t *r = allocate_record(c);
     if (!r) {
         return failure(out, CP_BUSY);
     }
+    uint64_t key = c->callbacks.next_command_key ? c->callbacks.next_command_key(c->callbacks.user) :
+        c->next_key == UINT64_MAX ? 0 : ++c->next_key;
+    if (!key) return failure(out, CP_BUSY);
     memset(r, 0, sizeof(*r));
     r->used = true;
     r->session = (uint8_t)session;
     r->session_generation = s->generation;
     r->sequence = (uint32_t)seq;
-    r->key = ++c->next_key;
+    r->key = key;
     memcpy(r->digest, digest, 32);
     r->result = (cp_result_t){.state = CP_RESULT_REJECTED,
                               .error = CP_INVALID,

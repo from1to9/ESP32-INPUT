@@ -128,9 +128,10 @@ static bool usable(const access_record_t *r, bool known, uint64_t wall)
 static void local_identity(app_control_trust_snapshot_t *trust)
 {
     if (trust->known && !trust->uncertain && !trust->present) {
-        static const char name[] = "Mosaico local browser identity v1";
-        uint8_t digest[32]; cp_sha256(name, sizeof(name) - 1, digest);
-        hex(digest, sizeof(digest), trust->active_digest);
+        // SHA-256 of "Mosaico local browser identity v1". Keep the persisted
+        // identity across upgrades without hashing a constant on hot reads.
+        static const char digest[] = "411b03ba9227cf4dceaef5a7c36196e76419c23b2baa60e3721d55ebd9a4cf63";
+        memcpy(trust->active_digest, digest, sizeof(digest));
     }
 }
 static size_t trusted_principals(cp_principal_t out[CP_MAX_PRINCIPALS], char digest[65])

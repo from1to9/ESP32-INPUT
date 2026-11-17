@@ -88,6 +88,7 @@ typedef struct {
     uint32_t version;
     cp_operation_id_t operation;
     uint64_t command_key;
+    uint64_t admission_order; /* Optional local coordinator order, never a wire field. */
     cp_identity_t identity;
     uint64_t deadline_ms;
     uint64_t management_generation;
@@ -177,6 +178,9 @@ typedef struct {
     cp_error_t (*pairing_code)(void *, const char *client, const char *credential,
                               const char *label, const char *code, const char *duration,
                               char *json, size_t capacity, size_t *length);
+    /* Shared result identity for contexts completing through the same owner.
+     * Return the next strictly increasing nonzero key, or zero on exhaustion. */
+    uint64_t (*next_command_key)(void *);
 } cp_callbacks_t;
 
 const cp_operation_info_t *cp_operation_find(const char *name);
