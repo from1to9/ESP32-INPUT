@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_connectivity_controls.h"
+#include "app_control_access.h"
 #include "app_wifi_profiles.h"
 #include "app_control_runtime.h"
 #include "ble_hid.h"
@@ -33,6 +34,7 @@ typedef struct {
     ble_hid_target_snapshot_t preference;
     app_control_runtime_snapshot_t runtime;
     app_control_trust_review_t review;
+    app_control_access_code_t code;
     app_api_view_t api;
     app_api_view_t api_identity;
     app_saved_wifi_view_t saved;
@@ -322,15 +324,23 @@ static void rebuild(void)
             "Allow reconnect for 30s; exact selection is unavailable. Input waits for verified identity." : controls.message);
     } else snprintf(controls.target.reason, sizeof(controls.target.reason), "%s", controls.message[0] ?
         controls.message : "The saved target is unavailable or changed. Select a fresh row.");
-    controls.api = (app_api_view_t){.known = controls.runtime.initialized && controls.runtime.trust.initialized,
-        .tls = controls.runtime.server.tls, .commissioning_open = controls.runtime.commissioning_open,
+    controls.api = (app_api_view_t){.known = controls.runtime.initialized,
+        .tls = controls.runtime.server.tls,
+        .code_known = controls.code.known, .code_present = controls.code.present,
+        .code_pending = controls.code.pending, .code_revision = controls.code.revision, .commissioning_open = controls.runtime.commissioning_open,
         .usb_import_active = controls.runtime.usb_import_active, .remaining_known = controls.runtime.trust.import_window && controls.runtime.trust.window_remaining_ms != 0,
         .remaining_seconds = controls.runtime.trust.window_remaining_ms / 1000U + (controls.runtime.trust.window_remaining_ms % 1000U != 0 ? 1U : 0U),
         .review_pending = controls.runtime.trust.review_pending};
     controls.api.ready = controls.api.known && !controls.wifi.control_switch &&
-        controls.runtime.server.state == APP_CONTROL_READY && controls.api.tls &&
-        text(controls.runtime.server.address, sizeof(controls.runtime.server.address)) && !strncmp(controls.runtime.server.address, "https://", 8);
-    if (controls.api.ready) memcpy(controls.api.url, controls.runtime.server.address, sizeof(controls.api.url));
+        controls.runtime.web.state == APP_CONTROL_READY &&
+        text(controls.runtime.web.address, sizeof(controls.runtime.web.address)) && !strncmp(controls.runtime.web.address, "http://", 7);
+    if (controls.api.ready) memcpy(controls.api.url, controls.runtime.web.address, sizeof(controls.api.url));
+    if (controls.api.known && !controls.wifi.control_switch && controls.api.tls &&
+        controls.runtime.server.state == APP_CONTROL_READY &&
+        text(controls.runtime.server.address, sizeof(controls.runtime.server.address)) &&
+        !strncmp(controls.runtime.server.address, "https://", 8)) {
+        memcpy(controls.api.tls_url, controls.runtime.server.address, sizeof(controls.api.tls_url));
+    }
     controls.api.can_open = ready && controls.pending == P_NONE && controls.api.known && !controls.api.commissioning_open && !controls.api.usb_import_active;
     controls.api.can_close = ready && controls.api.known && controls.api.commissioning_open;
     bool review_valid = controls.api.review_pending && controls.runtime.commissioning_open &&
@@ -342,12 +352,14 @@ static void rebuild(void)
         controls.api.review_complete = build_review();
     }
     const app_api_view_t *old = &controls.api_identity;
-    bool changed = controls.api_trust_revision != controls.runtime.trust.revision || old->known != controls.api.known ||
+    bool changed = old->code_revision != controls.api.code_revision || old->code_pending != controls.api.code_pending ||
+        controls.api_trust_revision != controls.runtime.trust.revision || old->known != controls.api.known ||
         old->commissioning_open != controls.api.commissioning_open || old->review_complete != controls.api.review_complete ||
         old->ready != controls.api.ready || old->tls != controls.api.tls || old->usb_import_active != controls.api.usb_import_active ||
         memcmp(old->review_digest, controls.api.review_digest, sizeof(old->review_digest)) ||
         memcmp(old->review_host, controls.api.review_host, sizeof(old->review_host)) ||
-        memcmp(old->review_pages, controls.api.review_pages, sizeof(old->review_pages)) || memcmp(old->url, controls.api.url, sizeof(old->url));
+        memcmp(old->review_pages, controls.api.review_pages, sizeof(old->review_pages)) ||
+        memcmp(old->url, controls.api.url, sizeof(old->url)) || memcmp(old->tls_url, controls.api.tls_url, sizeof(old->tls_url));
     if (changed) {
         controls.api_identity = controls.api; controls.api_trust_revision = controls.runtime.trust.revision;
         controls.reviewed_pages = 0; controls.review_page = 0;
@@ -361,7 +373,7 @@ static void rebuild(void)
         controls.api.commissioning_open && all_reviewed(controls.api.review_page_count);
     snprintf(controls.api.reason, sizeof(controls.api.reason), "%s", controls.api.review_pending && !controls.api.review_complete ?
         "The complete identity and permissions cannot be displayed; approval is unavailable." :
-        controls.wifi.control_ap_ready && !controls.api.ready && controls.runtime.trust.known &&
+        controls.wifi.control_ap_ready && !controls.api.tls_url[0] && controls.runtime.trust.known &&
             controls.runtime.trust.present && !controls.runtime.trust.control_ap_compatible ?
         "Re-enroll over USB with a certificate for the control hotspot." : controls.message);
 }
@@ -371,6 +383,7 @@ static void refresh_owners(void)
     app_wifi_get_snapshot(&controls.wifi); app_wifi_profiles_snapshot(&controls.profiles);
     controls.bluetooth = ble_hid_snapshot(); ble_hid_copy_bond_list(&controls.bonds); controls.preference = ble_hid_target_snapshot();
     app_control_runtime_snapshot(&controls.runtime);
+    app_control_access_code_snapshot(&controls.code);
     /* The runtime's published management snapshot may lag its immediate local
      * window gate. Use the trust owner's current cached gate before admission. */
     app_control_trust_snapshot(&controls.runtime.trust);
@@ -524,6 +537,12 @@ static void handle_api(const app_api_request_t *request, app_connectivity_contro
     bool page = controls.context.overlay == APP_OVERLAY_API_CONNECTION || controls.context.overlay == APP_OVERLAY_API_REVIEW;
     if (!page || request->revision != controls.api.revision) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return; }
     esp_err_t error = ESP_ERR_INVALID_STATE;
+    if (request->operation == APP_API_CODE_GENERATE) {
+        cp_error_t result = controls.context.overlay == APP_OVERLAY_API_CONNECTION && idle() ?
+            app_control_access_code_generate(controls.code.revision) : CP_BUSY;
+        say(effect, result == CP_OK ? "Saving a new access code." : "Code generation unavailable. Try again.");
+        return;
+    }
     if (request->operation == APP_API_REVIEW_PAGE) {
         unsigned current = controls.review_page;
         if (controls.context.overlay == APP_OVERLAY_API_REVIEW && controls.api.review_complete && request->page < controls.api.review_page_count &&
@@ -595,7 +614,7 @@ bool app_connectivity_controls_handle(const app_intent_t *intent, app_connectivi
     if (!intent || (!confirm && intent->action != APP_API_COMMISSIONING && intent->action != APP_WIFI_PROFILE_CONTROL && intent->action != APP_BLUETOOTH_TARGET_CONTROL)) return false;
     if (intent->action == APP_API_COMMISSIONING && intent->api.operation != APP_API_WINDOW_OPEN &&
         intent->api.operation != APP_API_WINDOW_CLOSE && intent->api.operation != APP_API_REVIEW_PAGE &&
-        intent->api.operation != APP_API_REVIEW_APPROVE) return false;
+        intent->api.operation != APP_API_REVIEW_APPROVE && intent->api.operation != APP_API_CODE_GENERATE) return false;
     effect->handled = true; refresh_owners(); rebuild();
     if (!local_ready() || intent->epoch != controls.context.epoch || intent->ui_revision != controls.context.ui_revision) { say(effect, error_text(ESP_ERR_INVALID_STATE)); return true; }
     if (confirm) {
@@ -691,7 +710,10 @@ void app_connectivity_controls_fill(app_view_t *view)
 {
     if (!view || !controls.initialized) return;
     rebuild();
-    view->api = controls.api; view->saved_wifi = controls.saved; view->bluetooth_target = controls.target;
+    view->api = controls.api;
+    if (local_ready() && controls.context.overlay == APP_OVERLAY_API_CONNECTION && controls.code.known && controls.code.present)
+        memcpy(view->api.access_code, controls.code.digits, sizeof(view->api.access_code));
+    view->saved_wifi = controls.saved; view->bluetooth_target = controls.target;
     app_bluetooth_management_snapshot_t management_state; app_bluetooth_management_snapshot(&management_state);
     app_bluetooth_management_view_t *management_view = &view->bluetooth_management;
     memset(management_view, 0, sizeof(*management_view));
@@ -737,23 +759,19 @@ void app_connectivity_controls_fill(app_view_t *view)
     view->wifi_lan_service_url[0] = 0;
     const char *service_message;
     if (!controls.api.known) {
-        view->wifi_lan_service = APP_UI_LAN_SERVICE_UNAVAILABLE; service_message = "HTTPS service status unavailable.";
+        view->wifi_lan_service = APP_UI_LAN_SERVICE_UNAVAILABLE; service_message = "Web service status unavailable.";
     } else if (controls.api.ready) {
-        view->wifi_lan_service = APP_UI_LAN_SERVICE_READY; service_message = "HTTPS listener is ready.";
+        view->wifi_lan_service = APP_UI_LAN_SERVICE_READY; service_message = "Web listener is ready.";
         if (strlen(controls.api.url) < sizeof(view->wifi_lan_service_url))
             memcpy(view->wifi_lan_service_url, controls.api.url, strlen(controls.api.url) + 1U);
-        else service_message = "HTTPS ready; Web/API panel shows the complete address.";
-    } else if (controls.wifi.control_ap_ready && !controls.wifi.control_switch &&
-               controls.runtime.trust.known && controls.runtime.trust.present &&
-               !controls.runtime.trust.control_ap_compatible) {
-        view->wifi_lan_service = APP_UI_LAN_SERVICE_ERROR; service_message = "Re-enroll TLS for the control hotspot.";
-    } else if (controls.runtime.server.state == APP_CONTROL_ERROR || controls.runtime.server.state == APP_CONTROL_READY) {
-        view->wifi_lan_service = APP_UI_LAN_SERVICE_ERROR; service_message = "A running TLS listener is not verified.";
-    } else if (controls.runtime.server.state == APP_CONTROL_STARTING) {
-        view->wifi_lan_service = APP_UI_LAN_SERVICE_STARTING; service_message = "HTTPS listener is starting.";
+        else service_message = "Web/API panel shows the complete address.";
+    } else if (controls.runtime.web.state == APP_CONTROL_ERROR) {
+        view->wifi_lan_service = APP_UI_LAN_SERVICE_ERROR; service_message = "Web listener unavailable.";
+    } else if (controls.runtime.web.state == APP_CONTROL_STARTING) {
+        view->wifi_lan_service = APP_UI_LAN_SERVICE_STARTING; service_message = "Web listener is starting.";
     } else {
         view->wifi_lan_service = APP_UI_LAN_SERVICE_DISABLED;
-        service_message = controls.runtime.server.state == APP_CONTROL_STOPPING ? "HTTPS listener is stopping." : "HTTPS listener is stopped.";
+        service_message = controls.runtime.web.state == APP_CONTROL_STOPPING ? "Web listener is stopping." : "Web listener is stopped.";
     }
     snprintf(view->wifi_lan_service_message, sizeof(view->wifi_lan_service_message), "%s", service_message);
     view->bluetooth_hosts_available = controls.bonds.known && !controls.bonds.updating && controls.bonds.count <= APP_UI_BOND_CAPACITY;

@@ -6,11 +6,10 @@
 #include "control_test_sdk.h"
 #include "control_registry.h"
 #include "../../firmware/main/app_control_server.h"
-typedef struct { cp_callbacks_t callbacks; bool stop_requested; } server_t;
-static server_t server, *s_server = &server;
+typedef struct { cp_callbacks_t callbacks; bool stop_requested; cp_session_view_t sessions[CP_MAX_SESSIONS]; size_t session_count; } server_t;
+static server_t server, *s_servers[2] = {&server, NULL};
 static portMUX_TYPE s_lock;
-static cp_session_view_t s_sessions[CP_MAX_SESSIONS];
-static size_t s_session_count;
+
 static cp_principal_t principal;
 static bool present = true;
 static unsigned critical;
@@ -26,8 +25,8 @@ int main(void)
     server.callbacks.principal = current;
     principal = (cp_principal_t){.enabled = true, .scopes = CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL};
     memset(principal.id, 0x11, 16); memset(principal.credential_sha256, 0x22, 32);
-    s_session_count = 1;
-    cp_session_view_t *v = &s_sessions[0]; v->authenticated = true; v->last_authenticated_ms = clock_ms;
+    server.session_count = 1;
+    cp_session_view_t *v = &server.sessions[0]; v->authenticated = true; v->last_authenticated_ms = clock_ms;
     v->identity.scopes = principal.scopes; v->identity.browser = true;
     memcpy(v->identity.principal_id, principal.id, 16); memset(v->identity.session_id, 0x33, 16);
     memcpy(v->credential_sha256, principal.credential_sha256, 32);
@@ -45,7 +44,7 @@ int main(void)
     ++clock_ms; assert(!app_control_server_client_connected(principal.id));
     clock_ms = 100; server.stop_requested = true;
     assert(!app_control_server_identity_alive(&v->identity)); server.stop_requested = false;
-    s_server = NULL; assert(!app_control_server_client_connected(principal.id));
+    s_servers[0] = NULL; assert(!app_control_server_client_connected(principal.id));
     assert(!critical);
     puts("PASS: actual cached session authority rejects changed credentials/scopes/revoke/expiry before the next protocol tick");
     return 0;

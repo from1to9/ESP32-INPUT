@@ -110,13 +110,19 @@ types, units and apply/save semantics.
   exact selected record where supported. [Peer behavior](bluetooth-peer-snapshots.md)
 - Wi-Fi joins an existing station network by default. The setup hotspot is a
   bounded recovery option. The persistent control hotspot is a separate local
-  choice that survives reboot and uses the enrolled HTTPS/WSS service. A
-  manual mode switch closes the old sessions and releases remote input before
-  changing interfaces. A time-limited grant requires a usable clock. Network
-  connectivity alone grants no control access. [Wi-Fi setup](wifi-provisioning.md)
-- Local UI, HTTPS/WSS and MCP share typed semantics and owner validation. LAN
-  clients require scoped authorization. Local lock, takeover and release keep
-  priority over scans, reconnects and transfers. [LAN API](remote-control.md)
+  choice that survives reboot. Both control networks serve the Mosaico browser
+  page over local HTTP and support the enrolled HTTPS/WSS service. A manual
+  mode switch closes the old sessions and releases remote input before
+  changing interfaces. [Wi-Fi setup](wifi-provisioning.md)
+- The Mosaico browser page is reachable before authorization. An eight-digit
+  code generated in local settings survives reboot and admits a separate,
+  revocable credential for each browser. Replacing the code preserves existing
+  credentials. Long-term access works without a usable clock. Timed access
+  requires one. Native API and MCP clients retain enrolled HTTPS.
+- Local UI, browser control, HTTPS/WSS and MCP share typed semantics and owner
+  validation. LAN operations require scoped authorization and input requires a
+  short lease. Local lock, takeover and release keep priority over scans,
+  reconnects and transfers. [LAN API](remote-control.md)
 - Firmware updates verify the signed artifact and matching layout, stage an
   inactive application slot and activate only after the release and maintenance
   gates. Preserve the confirmed image across interrupted staging and require

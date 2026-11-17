@@ -172,6 +172,11 @@ typedef struct {
     bool (*input_authorized)(void *, const cp_identity_t *);
     cp_error_t (*pairing)(void *, bool status, const char *client, const char *proof,
                          const char *label, char *json, size_t capacity, size_t *length);
+    /* The owning access service verifies its device code and persists a separate
+     * browser principal. The HTTP engine never treats a code as a session. */
+    cp_error_t (*pairing_code)(void *, const char *client, const char *credential,
+                              const char *label, const char *code, const char *duration,
+                              char *json, size_t capacity, size_t *length);
 } cp_callbacks_t;
 
 const cp_operation_info_t *cp_operation_find(const char *name);
@@ -186,7 +191,11 @@ bool cp_command_boolean(const cp_command_t *, const char *key, bool *out);
 bool cp_command_json(const cp_command_t *, const char *key, char *out, size_t capacity);
 
 typedef struct cp_context cp_context_t;
-typedef enum { CP_POLICY_ENROLLED_TLS, CP_POLICY_PASSPORT_OPEN_HTTP } cp_access_policy_t;
+typedef enum {
+    CP_POLICY_ENROLLED_TLS,
+    CP_POLICY_PASSPORT_OPEN_HTTP,
+    CP_POLICY_ENROLLED_HTTP
+} cp_access_policy_t;
 bool cp_policy_allows(cp_access_policy_t, cp_operation_id_t);
 size_t cp_context_size(void);
 /* Caller-owned storage must satisfy both the size and alignment queries. */
@@ -250,8 +259,9 @@ cp_error_t cp_transport_upgrade(cp_context_t *, const cp_http_security_t *, cons
  * retain their own liveness/grants. Ordinary HTTP close never calls this. */
 cp_error_t cp_transport_close(cp_context_t *, const cp_identity_t *, uint64_t now_ms);
 /* Server/bridge consume this same bounded HTTP engine. The default policy
- * requires a real verified TLS listener. Only an explicitly initialized
- * Passport open policy accepts plaintext HTTP; requests cannot select policy.
+ * requires a real verified TLS listener. Explicit enrolled HTTP keeps the same
+ * credential, permission and session checks over a local plaintext transport.
+ * Passport open HTTP remains a separate policy; requests cannot select policy.
  * The response never contains private drafts or an unredacted argument echo. */
 typedef struct {
     unsigned status;

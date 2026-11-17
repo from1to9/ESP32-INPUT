@@ -12,6 +12,11 @@ static ble_hid_snapshot_t bluetooth;
 static ble_hid_bond_list_t bonds;
 static ble_hid_target_snapshot_t preference;
 static app_control_runtime_snapshot_t api;
+static app_control_access_code_t code = {.known = true, .revision = 1};
+static unsigned code_generations;
+void app_control_access_code_snapshot(app_control_access_code_t *out) { *out = code; }
+cp_error_t app_control_access_code_generate(uint64_t revision)
+{ assert(revision == code.revision); ++code_generations; return CP_OK; }
 static app_control_trust_review_t review;
 static app_connectivity_controls_context_t context;
 static app_view_t view;
@@ -376,13 +381,25 @@ static void api_window(void)
     assert(controls.pending == P_NONE && view.api.commissioning_open && view.api.remaining_seconds == 90);
     handle(api_intent(APP_API_WINDOW_CLOSE)); assert(closes == 1);
     api.trust.import_window = false; poll_at(1040); assert(controls.pending == P_NONE);
-    api.server.state = APP_CONTROL_READY; api.server.tls = true; strcpy(api.server.address, "https://device.local:8443"); poll_at(1050);
-    assert(view.api.ready && !strcmp(view.api.url, api.server.address));
-    assert(view.wifi_lan_service == APP_UI_LAN_SERVICE_READY && !strcmp(view.wifi_lan_service_url, api.server.address));
-    api.server.tls = false; poll_at(1060); assert(!view.api.ready && !view.api.url[0]);
+    api.web.state = APP_CONTROL_READY; strcpy(api.web.address, "http://192.168.4.1");
+    api.server.state = APP_CONTROL_READY; api.server.tls = true;
+    strcpy(api.server.address, "https://m-0123456789abcdef01234567.test:8443"); poll_at(1050);
+    assert(view.api.ready && !strcmp(view.api.url, api.web.address));
+    assert(!strcmp(view.api.tls_url, api.server.address));
+    assert(view.wifi_lan_service == APP_UI_LAN_SERVICE_READY && !strcmp(view.wifi_lan_service_url, api.web.address));
+    api.web.state = APP_CONTROL_ERROR; poll_at(1060); assert(!view.api.ready && !view.api.url[0]);
+    assert(!strcmp(view.api.tls_url, api.server.address));
     assert(view.wifi_lan_service == APP_UI_LAN_SERVICE_ERROR && !view.wifi_lan_service_url[0]);
-    api.server.state = APP_CONTROL_STARTING; poll_at(1070); assert(view.wifi_lan_service == APP_UI_LAN_SERVICE_STARTING);
-    api.server.state = APP_CONTROL_STOPPED; poll_at(1080); assert(view.wifi_lan_service == APP_UI_LAN_SERVICE_DISABLED);
+    api.web.state = APP_CONTROL_STARTING; poll_at(1070); assert(view.wifi_lan_service == APP_UI_LAN_SERVICE_STARTING);
+    api.web.state = APP_CONTROL_STOPPED; poll_at(1080); assert(view.wifi_lan_service == APP_UI_LAN_SERVICE_DISABLED);
+    code.present = true; strcpy(code.digits, "12345678"); ++code.revision; poll_at(1081);
+    assert(!strcmp(view.api.access_code, code.digits));
+    app_intent_t held = api_intent(APP_API_CODE_GENERATE);
+    ++code.revision; poll_at(1082); handle(held); assert(!code_generations);
+    handle(api_intent(APP_API_CODE_GENERATE)); assert(code_generations == 1);
+    context.locked = true; poll_at(1083); assert(!view.api.access_code[0]);
+    handle(api_intent(APP_API_CODE_GENERATE)); assert(code_generations == 1);
+    context.locked = false; context.overlay = APP_OVERLAY_SETTINGS; poll_at(1084); assert(!view.api.access_code[0]);
     api.initialized = false; poll_at(1090); assert(view.wifi_lan_service == APP_UI_LAN_SERVICE_UNAVAILABLE);
 }
 static void api_review(void)

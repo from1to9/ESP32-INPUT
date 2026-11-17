@@ -32,8 +32,7 @@ async function pauseState() {
 }
 try {
   await page.goto(origin);
-  await page.locator("#pair").click(); await waitText("approval", "Waiting for approval");
-  await fixture("approve"); await page.locator("#check").click(); await waitText("connection", "Connected / idle");
+  await page.locator("#access-code").fill("12345678"); await page.locator("#pair").click(); await waitText("connection", "Connected / idle");
   await page.locator("#acquire").click(); await waitText("connection", "Controlling");
   await page.locator("#pad").scrollIntoViewIfNeeded();
   const box = await page.locator("#pad").boundingBox();

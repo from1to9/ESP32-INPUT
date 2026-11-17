@@ -289,9 +289,8 @@ local confirmation. Failed setup never enables remote-control/MCP authority.
 
 **Use control hotspot** selects a persistent WPA2 control network. On the
 Wi-Fi page, show its actual readiness, network name and local password.
-**Web/API** shows the device-specific HTTPS name after DHCP, DNS and the
-enrolled listener are ready. A certificate that lacks the hotspot SANs
-prompts for USB re-enrollment. While a switch is pending, show that remote
+**Web/API** shows the live HTTP address and separately reports the enrolled
+HTTPS listener. While a switch is pending, show that remote
 input and sessions are closing. **Return to Wi-Fi network** resumes the last
 confirmed station configuration. A stored mode that could not be read back
 shows **Verify hotspot mode** for explicit read-only reconciliation.
@@ -307,14 +306,16 @@ See [Wi-Fi provisioning](wifi-provisioning.md) for service limits and states.
 
 ### Browser controller permissions
 
-In Settings → Wi-Fi → Web/API, open the displayed HTTPS address on
-the controller and request pairing. On the device, open **Wi-Fi controllers**,
-choose the request and compare its full credential fingerprint with the browser.
-A new approval starts with Keyboard & mouse for six hours. Management and
-Updates are independent choices. The term can also be 24 hours or until revoked.
-Review the device and the selected permissions before approving or saving.
-Changing an imported USB identity replaces its previous scopes, including any
-capture grants. Revoke removes that controller's access.
+In Settings → Wi-Fi → Web/API, **Generate code** creates an eight-digit
+code for browser authorization. The code stays on the device across reboot.
+**Replace code** changes it for future authorization. A browser uses the
+shown URL and code to save an individual credential with keyboard, mouse and
+management access. Long-term access is the browser default. The six-hour and
+24-hour choices require trusted time. The **Browsers** list reviews, edits or
+revokes each authorization, including the separate Updates permission.
+HTTPS proposals submitted for physical review retain their local fingerprint
+and permission review. Changing an imported USB identity replaces its scopes,
+including any capture grants.
 
 The list identifies the controller separately from the HID target and shows
 requests, saved permissions, current input control, expiry and revocation.

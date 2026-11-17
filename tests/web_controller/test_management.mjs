@@ -27,11 +27,12 @@ async function connect(page, first) {
   await page.goto(origin);
   if (first) {
     await page.locator("#client-name").fill("Management test");
+    await page.locator("#access-code").fill("12345678");
     await page.locator("#pair").click();
-    await waitText(page, "approval", "Waiting for approval");
+    await waitText(page, "connection", "Connected / idle");
     assert.equal((await fixture(page, "approve-management")).status(), 200);
-    await page.locator("#check").click();
-  } else await page.locator("#connect").click();
+    await page.reload();
+  }
   await waitText(page, "connection", "Connected / idle");
   await waitText(page, "ble-link", "BLE link ready");
   await waitText(page, "wifi-profiles", "Workshop network");

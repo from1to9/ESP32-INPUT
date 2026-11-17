@@ -1,50 +1,54 @@
 # Mosaico browser input
 
-The enrolled HTTPS listener serves a same-origin controller at `/`, with
-`/controller.css` and `/controller.js` as static dependencies. It works with a
-desktop mouse and a phone touchscreen over station Wi-Fi or the locally
-selected [control hotspot](wifi-provisioning.md#persistent-control-hotspot).
+Mosaico serves the same browser controller at `/` over local HTTP on its
+station Wi-Fi network or [control hotspot](wifi-provisioning.md#persistent-control-hotspot).
+The enrolled HTTPS listener can also serve the controller.
 
 ## Connect and take control
 
-1. Open the HTTPS address shown in Mosaico **Settings → Wi-Fi → Web/API**.
-   For the control hotspot, join the displayed Wi-Fi network and use its
-   DHCP-provided DNS. Open the full device-specific name and port from
-   Web/API, such as `https://m-0123456789abcdef01234567.test`. Trust the enrolled
-   certificate. An old certificate needs [USB re-enrollment](../bridge/README.md#control-hotspot-enrollment)
-   if it lacks the hotspot name.
-2. Name the browser and choose **Pair this browser**. Web Crypto creates an
-   independent random client ID and credential, saved only in that origin's
-   browser storage. Compare the complete SHA-256 fingerprint with the proposal
-   on Mosaico, then approve keyboard/mouse access and the desired duration there.
-   The default is six hours; the device also offers 24 hours or permanent access.
-3. Choose **Check approval**. An approved browser signs in using its own
-   credential. It receives a Secure, HttpOnly, SameSite=Strict session cookie
-   and an in-memory CSRF value. No native bridge credential is required.
-4. Check the actual input target and readiness, then choose **Take control**.
-   Select Mouse or Keyboard with the explicit mode buttons. Login, reload and
-   saved approval never restore an input lease or start a pending action.
+1. On an unlocked Mosaico, open **Settings → Wi-Fi → Web/API** and select
+   **Generate code**. The panel shows an eight-digit access code and the
+   current HTTP address. The code survives reboot. **Replace code** changes
+   the code for future authorization requests.
+2. Join the same LAN or the displayed control hotspot and open the HTTP
+   address in a browser. The page opens before sign-in. Name the browser,
+   enter the code and choose **Authorize this browser**. Long-term access is
+   selected by default and lasts until revoked. The six-hour and 24-hour
+   choices require trusted device time.
+3. After Mosaico saves the grant, the browser signs in with its own random
+   credential. It stores the credential for this origin and can reconnect
+   without another code or device interaction. The code is used for
+   authorization and is cleared from the browser form after submission.
+4. Check the input target and readiness, then select **Take control**.
+   Login, reload and saved authorization leave input idle.
 
-Saved identity is specific to the browser storage and HTTPS origin, not its
-name, IP address or the HID destination. Another same-name browser must pair
-independently. A new login for the same browser identity replaces its own older
-browser session; use one controlling tab at a time. **Forget identity in this
-browser** removes that local credential and closes the current session. Revoke
-its saved permission separately on Mosaico when desired.
+The device code authorizes keyboard and mouse access and management. Review,
+edit or revoke each saved authorization under **Web/API → Browsers**.
+Replacing the code leaves existing browser grants in place. Forgetting the
+identity in a browser removes its local credential and requests session
+closure. Device-side revocation separately removes access.
+An explicit USB replacement of the device's TLS identity retains the existing
+trust reset behavior and can require browser authorization again.
 
-The station and hotspot URLs are separate origins and need separate browser
-pairing. Each independently enrolled unit has its own hotspot browser origin.
-After a mode change, sign in on the selected network and
-take control again. When the device has no usable time, an offline browser
-needs a valid permanent grant. Local approval must explicitly select that
-duration for a new offline pairing.
+The LAN address, hotspot address and HTTPS address are separate browser
+origins. Each browser profile or origin gets its own credential even when
+two entries use the same name. A new login replaces that browser's older
+session on the listener. A network switch closes the old sessions and input
+lease. Reconnect on the selected network, then explicitly acquire control.
+
+The displayed HTTP address has plaintext transport. A participant able to
+observe or alter network traffic can see the code and browser credentials.
+Use enrolled HTTPS when transport confidentiality or server authentication is
+needed. On the control hotspot the HTTPS browser uses the enrolled DNS name
+and port. See [TLS enrollment](../bridge/README.md#control-hotspot-enrollment)
+for certificate setup and renewal.
 
 ## Control an iPad or iPhone
 
 First pair the Mosaico input device ending in `-IN` with the iPad or iPhone
 and enable AssistiveTouch. In Mosaico **Settings → Wi-Fi → Web/API**, open
-the HTTPS address on the controlling phone or computer and complete browser
-pairing above. Check the selected Apple device and choose **Take control**
+the HTTP address on the controlling phone or computer and authorize the
+browser as described above. Check the selected Apple device and choose **Take control**
 to use the browser touchpad and keyboard.
 
 Bluetooth input keeps the Apple device's USB port available for a Mac running
@@ -106,18 +110,16 @@ short lease expires independently. Reconnection requires explicit acquisition.
 
 ## HTTP boundary and validation
 
-Static assets have an exact Host/Origin boundary, no CORS and a CSP permitting
-only same-origin external scripts/styles and connections. Dynamic requests use
-the existing production HTTPS adapter and protocol: same-origin JSON POSTs,
-Secure session cookie, exact Origin and mutation CSRF. Normal GETs may omit
-Origin; they still authenticate with the browser cookie. The listener permits
-up to 3,072 header bytes to accommodate browser UA, Fetch Metadata and cookies;
-normal body/frame and socket limits remain in their existing owners.
+Static and dynamic requests use the active listener's exact Host and Origin
+boundaries. The page has no CORS access and its CSP permits only same-origin
+scripts, styles and connections. Browser mutations require the session CSRF
+value. Ordinary authenticated GETs may omit Origin. HTTP uses the
+`control-http` HttpOnly, SameSite=Strict cookie. HTTPS uses the
+`__Host-control` Secure, HttpOnly, SameSite=Strict cookie. The preauthentication
+cookies are separate for the two transports. The listener permits up to 3,072
+header bytes. Existing body, frame and socket limits still apply.
 
-Run `node tests/web_controller/test_client.mjs` for client state/validation
-regressions. [The browser test instructions](../tests/web_controller/README.md)
-exercise real Chromium over loopback HTTPS with the production HTTP adapter,
-protocol, access manager, coordinator and HID engine. Those tests substitute
-SDK listener I/O, NVS, trusted time, physical approval and the HID send boundary;
-they do not establish actual LAN, certificate-installation or BLE/USB host
-compatibility on a physical Mosaico.
+See the [browser regression instructions](../tests/web_controller/README.md)
+for Chromium and native-client tests. The tests use production firmware paths
+with substitutes for the listener, NVS, trusted time and HID send boundary.
+LAN and hotspot reachability on a physical unit require device observation.

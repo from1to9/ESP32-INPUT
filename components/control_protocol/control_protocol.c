@@ -166,7 +166,7 @@ static const cp_operation_info_t *operation(cp_operation_id_t id)
 }
 bool cp_policy_allows(cp_access_policy_t policy, cp_operation_id_t id)
 {
-    if (policy == CP_POLICY_ENROLLED_TLS) return operation(id) != NULL;
+    if (policy == CP_POLICY_ENROLLED_TLS || policy == CP_POLICY_ENROLLED_HTTP) return operation(id) != NULL;
     if (policy != CP_POLICY_PASSPORT_OPEN_HTTP) return false;
     switch (id) {
     case CP_OP_STATE_GET: case CP_OP_CAPABILITIES_GET: case CP_OP_OPERATIONS_LIST:
@@ -278,7 +278,7 @@ cp_error_t cp_initialize_policy(void *memory, size_t size, const cp_callbacks_t 
     }
     if (!memory || (uintptr_t)memory % cp_context_alignment() || size < sizeof(cp_context_t) ||
         !callbacks || !out || !callbacks->random ||
-        (policy != CP_POLICY_ENROLLED_TLS && policy != CP_POLICY_PASSPORT_OPEN_HTTP)) {
+        (policy != CP_POLICY_ENROLLED_TLS && policy != CP_POLICY_ENROLLED_HTTP && policy != CP_POLICY_PASSPORT_OPEN_HTTP)) {
         return CP_INVALID;
     }
     cp_context_t *c = memory;
@@ -308,7 +308,7 @@ cp_error_t cp_initialize_policy(void *memory, size_t size, const cp_callbacks_t 
 }
 cp_error_t cp_load_principal(cp_context_t *c, const cp_principal_t *p)
 {
-    if (c && c->policy != CP_POLICY_ENROLLED_TLS) return CP_FORBIDDEN;
+    if (c && c->policy == CP_POLICY_PASSPORT_OPEN_HTTP) return CP_FORBIDDEN;
     if (!c || !p || !nonzero(p->id, 16) || !nonzero(p->credential_sha256, 32) || !p->scopes ||
         (p->scopes & ~CP_SCOPE_ALL)) {
         return CP_INVALID;
@@ -356,7 +356,7 @@ static cp_error_t revoke_loaded_principal(cp_context_t *c, const uint8_t id[16])
 cp_error_t cp_revoke_principal(cp_context_t *c, const uint8_t id[16], uint64_t now)
 {
     if (!c || !id) return CP_INVALID;
-    if (c->policy != CP_POLICY_ENROLLED_TLS) return CP_FORBIDDEN;
+    if (c->policy == CP_POLICY_PASSPORT_OPEN_HTTP) return CP_FORBIDDEN;
     cp_tick(c, now);
     return revoke_loaded_principal(c, id);
 }
@@ -584,7 +584,7 @@ static cp_error_t failure(cp_http_response_t *out, cp_error_t error)
 }
 cp_error_t cp_http_configure(cp_context_t *c, const char *host, const char *origin)
 {
-    const char *scheme = c && c->policy == CP_POLICY_PASSPORT_OPEN_HTTP ? "http://" : "https://";
+    const char *scheme = c && c->policy != CP_POLICY_ENROLLED_TLS ? "http://" : "https://";
     size_t prefix = strlen(scheme);
     if (!c || !host || !origin || !strlen(host) || strlen(host) >= sizeof(c->host) ||
         strlen(origin) >= sizeof(c->origin) || strncmp(origin, scheme, prefix) != 0 ||
@@ -629,12 +629,24 @@ static bool cookie_value(const char *cookies, const char *name, char *out, size_
     }
     return found;
 }
+static const char *session_cookie(const cp_context_t *c)
+{
+    return c->policy == CP_POLICY_ENROLLED_TLS ? "__Host-control" : "control-http";
+}
+static const char *challenge_cookie(const cp_context_t *c)
+{
+    return c->policy == CP_POLICY_ENROLLED_TLS ? "__Host-control-preauth" : "control-http-preauth";
+}
+static const char *cookie_security(const cp_context_t *c)
+{
+    return c->policy == CP_POLICY_ENROLLED_TLS ? "Secure; " : "";
+}
 static cp_error_t create_session(cp_context_t *c, unsigned principal, bool browser,
                                   cp_http_response_t *out)
 {
     /* A browser reload proves the same credential, replaces only its own
      * browser session and releases its old lease. No lease/job is restored. */
-    if (browser && c->policy == CP_POLICY_ENROLLED_TLS) for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i)
+    if (browser && c->policy != CP_POLICY_PASSPORT_OPEN_HTTP) for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i)
         if (c->sessions[i].used && c->sessions[i].browser && c->sessions[i].principal == principal)
             close_session(c, i, CP_SAFETY_SESSION_LOST);
     unsigned slot = CP_MAX_SESSIONS;
@@ -676,9 +688,9 @@ static cp_error_t create_session(cp_context_t *c, unsigned principal, bool brows
            "{\"session_id\":\"%s\",\"request_prefix\":\"%s\",\"boot_id\":\"%s\",\"csrf\":\"%s\","
            "\"next_seq\":1",
            session_hex, prefix, boot, csrf);
-    if (browser && c->policy == CP_POLICY_ENROLLED_TLS) {
+    if (browser && c->policy != CP_POLICY_PASSPORT_OPEN_HTTP) {
         snprintf(out->set_cookie, sizeof(out->set_cookie),
-                 "__Host-control=%s; Secure; HttpOnly; SameSite=Strict; Path=/", token_hex);
+                 "%s=%s; %sHttpOnly; SameSite=Strict; Path=/", session_cookie(c), token_hex, cookie_security(c));
     } else {
         append(out->body, sizeof(out->body), &used, ",\"session_token\":\"%s\"", token_hex);
     }
@@ -699,6 +711,8 @@ static cp_error_t create_session(cp_context_t *c, unsigned principal, bool brows
 static cp_error_t login(cp_context_t *c, const cp_http_security_t *security, const char *body,
                         size_t length, cp_http_response_t *out)
 {
+    if (c->policy == CP_POLICY_ENROLLED_HTTP && !security->origin)
+        return failure(out, CP_FORBIDDEN);
     if (c->now - c->login_window >= 60000U) {
         c->login_window = c->now;
         c->failed_logins = 0;
@@ -741,7 +755,7 @@ static cp_error_t login(cp_context_t *c, const cp_http_security_t *security, con
         char nonce[33];
         uint8_t value[16];
         if (c->now >= c->challenge_until ||
-            !cookie_value(security->cookie, "__Host-control-preauth", nonce, sizeof(nonce)) ||
+            !cookie_value(security->cookie, challenge_cookie(c), nonce, sizeof(nonce)) ||
             !decode(nonce, value, 16) || !equal(value, c->challenge, 16) || !security->csrf ||
             strcmp(nonce, security->csrf) != 0) {
             return failure(out, CP_FORBIDDEN);
@@ -763,7 +777,7 @@ static int authenticate(cp_context_t *c, const cp_http_security_t *security, boo
         }
         memcpy(token, security->authorization + 7, 65);
     } else if (c->policy == CP_POLICY_PASSPORT_OPEN_HTTP ||
-               !cookie_value(security->cookie, "__Host-control", token, sizeof(token))) {
+               !cookie_value(security->cookie, session_cookie(c), token, sizeof(token))) {
         return -1;
     }
     uint8_t secret[32], hash[32];
@@ -780,7 +794,7 @@ static int authenticate(cp_context_t *c, const cp_http_security_t *security, boo
         if (!s->used || !equal(hash, s->token_hash, 32)) {
             continue;
         }
-        if (c->policy == CP_POLICY_ENROLLED_TLS && s->browser == bearer) {
+        if (c->policy != CP_POLICY_PASSPORT_OPEN_HTTP && s->browser == bearer) {
             continue;
         }
         if (s->browser && mutation) {
@@ -1796,9 +1810,41 @@ static cp_error_t http_inner(cp_context_t *c, const char *method, const char *re
         if (!strcmp(resource, "/api/v1/login-challenge") || !strcmp(resource, "/api/v1/sessions") ||
             !strncmp(resource, "/api/v1/pairing/", 16)) return failure(out, CP_FORBIDDEN);
     }
+    if (!strcmp(resource, "/api/v1/pairing/code")) {
+        if (strcmp(method, "POST") || !security->origin || !c->callbacks.pairing_code)
+            return failure(out, CP_FORBIDDEN);
+        cj_document_t *d = &c->document;
+        if (!cj_parse(d, body, length) || d->nodes[0].type != CJ_OBJECT) return failure(out, CP_INVALID);
+        const char *client = cj_string(d, cj_get(d, 0, "client_id"));
+        const char *credential = cj_string(d, cj_get(d, 0, "credential"));
+        const char *label = cj_string(d, cj_get(d, 0, "label"));
+        const char *code = cj_string(d, cj_get(d, 0, "code"));
+        const char *duration = cj_string(d, cj_get(d, 0, "duration"));
+        unsigned members = 0;
+        for (uint16_t t = d->nodes[0].child; t != CJ_NONE; t = d->nodes[t].next) ++members;
+        uint8_t id[16], secret[32];
+        bool valid = members == 5 && decode(client, id, sizeof(id)) &&
+            decode(credential, secret, sizeof(secret)) && label && strlen(label) >= 1 && strlen(label) <= 32 &&
+            code && strlen(code) == 8 && duration &&
+            (!strcmp(duration, "permanent") || !strcmp(duration, "6h") || !strcmp(duration, "24h"));
+        if (valid) for (unsigned i = 0; i < 8; ++i) valid &= code[i] >= '0' && code[i] <= '9';
+        wipe(secret, sizeof(secret));
+        if (!valid) return failure(out, CP_INVALID);
+        cp_error_t error = c->callbacks.pairing_code(c->callbacks.user, client, credential, label,
+            code, duration, out->body, sizeof(out->body), &out->length);
+        if (error == CP_STORAGE_UNCERTAIN) {
+            failure(out, error);
+            out->status = 503;
+            return error;
+        }
+        if (error != CP_OK) return failure(out, error);
+        out->status = 202;
+        return CP_OK;
+    }
     if (!strcmp(resource, "/api/v1/pairing/requests") || !strcmp(resource, "/api/v1/pairing/status")) {
         if (strcmp(method, "POST") || !security->origin || !c->callbacks.pairing) return failure(out, CP_FORBIDDEN);
         bool status = !strcmp(resource, "/api/v1/pairing/status");
+        if (!status && c->policy != CP_POLICY_ENROLLED_TLS) return failure(out, CP_FORBIDDEN);
         cj_document_t *d = &c->document;
         if (!cj_parse(d, body, length) || d->nodes[0].type != CJ_OBJECT) return failure(out, CP_INVALID);
         const char *client = cj_string(d, cj_get(d, 0, "client_id"));
@@ -1824,8 +1870,8 @@ static cp_error_t http_inner(cp_context_t *c, const char *method, const char *re
         char nonce[33];
         encode(c->challenge, 16, nonce);
         snprintf(out->set_cookie, sizeof(out->set_cookie),
-                 "__Host-control-preauth=%s; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=60",
-                 nonce);
+                 "%s=%s; %sHttpOnly; SameSite=Strict; Path=/; Max-Age=60",
+                 challenge_cookie(c), nonce, cookie_security(c));
         out->status = 200;
         out->length = (size_t)snprintf(out->body, sizeof(out->body), "{\"csrf\":\"%s\"}", nonce);
         return CP_OK;
@@ -1872,8 +1918,8 @@ static cp_error_t http_inner(cp_context_t *c, const char *method, const char *re
     }
     if (strcmp(resource, "/api/v1/sessions/current") == 0 && strcmp(method, "DELETE") == 0) {
         close_session(c, (unsigned)session, CP_SAFETY_SESSION_LOST);
-        if (c->policy == CP_POLICY_ENROLLED_TLS) snprintf(out->set_cookie, sizeof(out->set_cookie),
-                 "__Host-control=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+        if (c->policy != CP_POLICY_PASSPORT_OPEN_HTTP) snprintf(out->set_cookie, sizeof(out->set_cookie),
+                 "%s=; %sHttpOnly; SameSite=Strict; Path=/; Max-Age=0", session_cookie(c), cookie_security(c));
         out->status = 200;
         memcpy(out->body, "{\"state\":\"completed\"}", 22);
         out->length = strlen(out->body);

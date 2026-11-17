@@ -76,6 +76,7 @@ def main():
     parser.add_argument("--playwright-module", required=True, type=Path)
     parser.add_argument("--browser-executable", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--http", action="store_true", help="Exercise authenticated plaintext browser transport")
     parser.add_argument("--case", choices=("all", "pad-freshness", "management"), default="all")
     args = parser.parse_args()
     args.protocol_root = args.protocol_root.resolve()
@@ -131,10 +132,10 @@ def main():
             do_GET = do_POST = do_DELETE = request
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        origin = f"https://localhost:{server.server_port}"
+        origin = f"{'http' if args.http else 'https'}://localhost:{server.server_port}"
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls.load_cert_chain(temporary / "cert.pem", temporary / "key.pem")
-        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        if not args.http: server.socket = tls.wrap_socket(server.socket, server_side=True)
         with (output / "backend.log").open("w") as error:
             backend = subprocess.Popen([temporary / "native_bridge", f"localhost:{server.server_port}", origin],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error, text=True, bufsize=1)
@@ -152,7 +153,7 @@ def main():
                 server.shutdown(); backend.stdin.close(); backend.wait(timeout=10)
             (output / "http-metadata.json").write_text(json.dumps(records, indent=2) + "\n")
             manifest = {"browser_exit": result.returncode, "backend_exit": backend.returncode,
-                        "boundaries": "Real loopback HTTPS/Chromium and production C HTTP/protocol/access/coordinator/HID engine; simulated station sockets, NVS, trusted clock, local approval and HID send API; no physical device",
+                        "boundaries": "Real loopback HTTP(S)/Chromium and production C HTTP/protocol/access/coordinator/HID engine; simulated station sockets, NVS, trusted clock, local approval and HID send API; no physical device",
                         "source_sha256_at_compile": hashes,
                         "native_binary_sha256": hashlib.sha256((temporary / "native_bridge").read_bytes()).hexdigest(),
                         "protocol_root": str(args.protocol_root)}

@@ -35,7 +35,7 @@ export function describeResult(result, total = null) {
 }
 
 function describeApproval(data) {
-  const states = {pending: "Waiting for approval", approved: "Access approved", rejected: "Approval rejected",
+  const states = {pending: "Authorization pending", approved: "Access approved", rejected: "Approval rejected",
     expired: "Access expired", clock_unknown: "Device time unknown; access unavailable", unknown: "Not approved"};
   const permissions = [[1, "Mouse & keyboard"], [2, "Device management"], [4, "Firmware updates"]]
     .filter(([bit]) => (data.permissions & bit) !== 0).map(([, label]) => label).join(", ") || "No permissions";
@@ -334,7 +334,8 @@ async function browserIdentity(create = false) {
   localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
   return identity;
 }
-async function fingerprint(identity) {
+async function verifiedFingerprint(identity) {
+  if (location.protocol !== "https:" || !crypto.subtle) return null;
   const bytes = Uint8Array.from(identity.credential.match(/../g), value => parseInt(value, 16));
   return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
 }
@@ -741,36 +742,49 @@ function mount() {
   }
   client.onchange = paint;
   async function showIdentity() {
-    $("fingerprint").textContent = identity ? `SHA-256 ${await fingerprint(identity)}` : "No browser identity yet";
+    const fingerprint = identity && await verifiedFingerprint(identity);
+    $("fingerprint").textContent = fingerprint ? `SHA-256 ${fingerprint}` :
+      identity ? `Browser ID ${identity.client_id}` : "No browser identity yet";
   }
-  async function status(connect = true) {
+  async function status() {
     if (!identity) throw new Error("Pair this browser first.");
     if (pairingBusy) throw new Error("Wait for the current browser pairing request.");
     pairingBusy = true; paint();
     try {
       const response = await client.request("/api/v1/pairing/status", "POST", identity, null);
       const data = response.json;
+      const fingerprint = await verifiedFingerprint(identity);
       if (![200, 202].includes(response.status) || !HEX64.test(data.fingerprint || "") ||
-          data.client_id !== identity.client_id || data.fingerprint !== await fingerprint(identity)) throw new Error("Pairing status unavailable or identity mismatch.");
+          data.client_id !== identity.client_id || (fingerprint && data.fingerprint !== fingerprint)) {
+        throw new Error("Pairing status unavailable or identity mismatch.");
+      }
       $("approval").textContent = describeApproval(data);
-      if (data.state === "approved" && connect) {
+      if (data.state === "approved") {
         await client.login(identity);
         $("pair-title").textContent = "Browser access · approved";
         $("pairing").open = false;
       }
+      return data.state;
     } finally { pairingBusy = false; paint(); }
   }
   $("pair").onclick = () => act(async () => {
     const label = $("client-name").value.trim();
     if (!/^[\x20-\x7e]{1,32}$/.test(label)) throw new Error("Use 1–32 printable ASCII characters for this browser's name.");
+    const code = $("access-code").value;
+    if (!/^[0-9]{8}$/.test(code)) throw new Error("Enter the 8-digit access code from Mosaico settings.");
+    const duration = $("access-duration").value;
     pairingBusy = true; paint();
     try {
       identity = await browserIdentity(true); await showIdentity();
-      const hash = await fingerprint(identity);
-      const response = await client.request("/api/v1/pairing/requests", "POST", {client_id: identity.client_id, credential_sha256: hash, label}, null);
-      if (![200, 202].includes(response.status) || response.json.fingerprint !== hash) throw new Error("Pairing request was not acknowledged. Check approval; no input has been sent.");
-      $("approval").textContent = "Waiting for approval on Mosaico. Compare the fingerprint, choose permissions and duration, then check approval.";
-    } finally { pairingBusy = false; paint(); }
+      const response = await client.request("/api/v1/pairing/code", "POST", {...identity, label, code, duration}, null);
+      if (response.status !== 202) throw new Error(response.status === 401 ? "Access code rejected." :
+        response.status === 429 ? "Pairing is busy. Wait a minute before trying again." : "Authorization unavailable. Check the code and available browser slots on Mosaico.");
+      $("approval").textContent = "Saving browser authorization…";
+    } finally { $("access-code").value = ""; pairingBusy = false; paint(); }
+    for (let attempt = 0; attempt < 12; ++attempt) {
+      await sleep(250);
+      if (await status() !== "pending") break;
+    }
   });
   $("check").onclick = () => act(() => status());
   $("connect").onclick = () => act(() => status());
@@ -855,9 +869,9 @@ function mount() {
   globalThis.addEventListener("pagehide", suspend);
   globalThis.addEventListener("offline", suspend);
   act(async () => {
-    if (location.protocol !== "https:" || !globalThis.isSecureContext || !crypto.subtle) throw new Error("Open Mosaico’s trusted HTTPS address over Wi-Fi or its control hotspot.");
+    if (!["http:", "https:"].includes(location.protocol) || !crypto.getRandomValues) throw new Error("Open Mosaico’s address over Wi-Fi or its control hotspot.");
     identity = await browserIdentity(); await showIdentity(); paint();
-    if (identity) await status(false);
+    if (identity) await status();
   });
   paint();
 }

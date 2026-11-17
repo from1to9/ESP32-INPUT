@@ -3,7 +3,7 @@
 Wi-Fi station operation is independent of USB or Bluetooth input. Join a LAN
 with the [device setup workflow](wifi-provisioning.md). The device remembers up
 to eight ordered profiles. A station IP address shows network connectivity.
-The HTTPS listener also needs an installed TLS identity, local enrollment
+The enrolled HTTPS listener needs an installed TLS identity, local enrollment
 and authorization for the caller. The recovery hotspot handles setup only.
 Use the [persistent control hotspot](wifi-provisioning.md#persistent-control-hotspot)
 for direct local HTTPS/WSS control without a station connection. Network

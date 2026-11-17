@@ -28,6 +28,10 @@ def main():
         for name in ("trust", "access", "access_cache", "update", "clock", "server"):
             if selected and selected!=name:
                 continue
+            if name == "server":
+                source = (ROOT / "firmware/main/app_control_server.c").read_text()
+                begin = source.index("static const char *accepted_control_host(")
+                (temporary / "server_host_fixture.inc").write_text(source[begin:source.index('#include "app_control_server_media.inc"', begin)])
             if name == "access_cache":
                 source = (ROOT / "firmware/main/app_control_server.c").read_text()
                 begin = source.index("static bool cached_authority(")
@@ -39,7 +43,7 @@ def main():
                     return source[begin:source.index(after, begin)]
                 fixture = section("static bool update_policy(", "static cp_error_t pairing(")
                 fixture += section("static cp_error_t pairing(", "static cp_error_t read_resource(")
-                fixture += section("static bool argument_u64(", "static esp_err_t start_native(")
+                fixture += section("static bool argument_u64(const cp_command_t *c,", "static esp_err_t start_native(")
                 fixture += section("static bool matches(", "esp_err_t app_control_runtime_access_request(")
                 fixture += source[source.index("cp_error_t app_control_runtime_update_authority("):]
                 (temporary / "access_authority_fixture.inc").write_text(fixture)

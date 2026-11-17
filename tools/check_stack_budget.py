@@ -1255,7 +1255,7 @@ PATHS["update_coordinator_authority"] = CORE + [("main", "remote_update_service"
     ("control_trust", "app_control_trust_update_policy")]
 PATH_OWNERS["update_coordinator_authority"] = "main"
 
-# Per-controller authority shares the existing coordinator, HTTPS and management
+# Per-controller authority shares the existing coordinator, HTTP(S) and management
 # owners. UI-owned snapshot/intent composition is listed with its caller.
 ACCESS_RECORDS = [("controller_access", "records"), ("controller_access", "records_version"),
     ("control_trust", "app_control_trust_principals")]
@@ -1286,6 +1286,11 @@ ACCESS_PATHS = {
     "access_pair_request": ("https", ACCESS_HTTP + [("server", "pairing"), ("control_runtime", "pairing"),
         ("controller_access", "app_control_access_pair"), ("controller_access", "records_version"),
         ("control_trust", "app_control_trust_principals")]),
+    "access_pair_code_records": ("https", ACCESS_HTTP + [("server", "pairing_code"),
+        ("control_runtime", "pairing_code"), ("controller_access", "app_control_access_pair_code"),
+        ("controller_access", "records_version"), ("control_trust", "app_control_trust_principals")]),
+    "access_pair_code_hash": ("https", ACCESS_HTTP + [("server", "pairing_code"),
+        ("control_runtime", "pairing_code"), ("controller_access", "app_control_access_pair_code")] + ACCESS_HASH),
     "access_pair_status": ("https", ACCESS_HTTP + [("server", "pairing"), ("control_runtime", "pairing"),
         ("controller_access", "app_control_access_pair_status")] + ACCESS_RECORDS),
     "access_login": ("https", ACCESS_HTTP + [("protocol", "login"), ("protocol", "refresh_principal"),

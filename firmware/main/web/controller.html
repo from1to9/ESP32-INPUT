@@ -19,12 +19,16 @@
     </header>
     <details id="pairing" open>
       <summary id="pair-title">Connect this browser</summary>
-      <p>Approve this browser on Mosaico. Compare the fingerprint on both screens. Access is separate from taking control of the mouse and keyboard.</p>
+      <p>Enter the 8-digit access code from Settings → Wi-Fi → Web/API on Mosaico. The code stays valid until you replace it. Access is separate from taking control of the mouse and keyboard.</p>
       <label for="client-name">Browser name</label>
       <input id="client-name" maxlength="32" value="My browser" autocomplete="off">
+      <label for="access-code">Access code</label>
+      <input id="access-code" type="password" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" autocomplete="off">
+      <label for="access-duration">Browser authorization</label>
+      <select id="access-duration"><option value="permanent">Long term · until revoked</option><option value="24h">24 hours</option><option value="6h">6 hours</option></select>
       <p class="fingerprint" id="fingerprint">No browser identity yet</p>
-      <div class="actions"><button id="pair">Pair this browser</button><button id="check">Check approval</button><button id="connect">Connect saved browser</button></div>
-      <p id="approval" role="status">Default approval is 6 hours. Choose permissions and duration on Mosaico.</p>
+      <div class="actions"><button id="pair">Authorize this browser</button><button id="check">Check approval</button><button id="connect">Connect saved browser</button></div>
+      <p id="approval" role="status">Long-term authorization reconnects this browser without touching Mosaico. Revoke browsers in its controller list.</p>
     </details>
     <nav class="jump-links" aria-label="Console sections">
       <a href="#target-title">Input</a><a href="#bluetooth-title">Bluetooth</a><a href="#wifi-title">Wi-Fi</a><a href="#labels-title">Labels</a>

@@ -75,3 +75,18 @@ cp_error_t app_control_access_pair(const char *client, const char *digest, const
                                    uint64_t *request);
 cp_error_t app_control_access_pair_status(const char *client, const char *credential,
                                           char *out, size_t capacity, size_t *length);
+
+#define APP_CONTROL_CODE_DIGITS 8U
+typedef struct {
+    bool known, present, pending;
+    uint64_t revision;
+    esp_err_t error;
+    char digits[APP_CONTROL_CODE_DIGITS + 1U]; /* Trusted local display only. */
+} app_control_access_code_t;
+/* Only the physical coordinator calls generate; service rechecks unlocked state.
+ * Never serialize the local display snapshot to a network response or log. */
+void app_control_access_code_snapshot(app_control_access_code_t *);
+cp_error_t app_control_access_code_generate(uint64_t expected_revision);
+cp_error_t app_control_access_pair_code(const char *client, const char *credential,
+                                        const char *label, const char *code,
+                                        const char *duration, uint64_t *request);

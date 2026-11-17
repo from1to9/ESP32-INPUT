@@ -38,10 +38,10 @@ static void channel_closed(server_t *s, const cp_identity_t *who)
         }
     }
     bool current = false;
-    for (size_t i = 0; i < s_session_count; ++i) {
-        if (s_sessions[i].authenticated &&
-            !memcmp(s_sessions[i].identity.session_id, who->session_id, 16) &&
-            !memcmp(s_sessions[i].identity.principal_id, who->principal_id, 16)) {
+    for (size_t i = 0; i < s->session_count; ++i) {
+        if (s->sessions[i].authenticated &&
+            !memcmp(s->sessions[i].identity.session_id, who->session_id, 16) &&
+            !memcmp(s->sessions[i].identity.principal_id, who->principal_id, 16)) {
             current = true;
         }
     }

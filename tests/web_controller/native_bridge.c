@@ -13,6 +13,7 @@
 
 typedef void *SemaphoreHandle_t;
 typedef struct {
+    unsigned slot;
     cp_context_t *protocol;
     SemaphoreHandle_t mutex;
     char host[129], hotspot_ip_host[APP_WIFI_IP_CAPACITY + 6];
@@ -85,7 +86,9 @@ esp_err_t nvs_open_from_partition(const char *partition, const char *ns, int mod
 static unsigned web_bank(const char *key) { assert(!strcmp(key, "access_a") || !strcmp(key, "access_b")); return !strcmp(key, "access_b") ? 1U : 0U; }
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *size)
 {
-    assert(handle == 1); unsigned i = web_bank(key);
+    assert(handle == 1);
+    if (!strcmp(key, "web_code")) { assert(*size >= 9); memcpy(out, "12345678", 9); *size = 9; return ESP_OK; }
+    unsigned i = web_bank(key);
     if (!web_bank_sizes[i]) return ESP_ERR_NVS_NOT_FOUND;
     assert(*size >= web_bank_sizes[i]); *size = web_bank_sizes[i]; memcpy(out, web_banks[i], *size); return ESP_OK;
 }
@@ -205,9 +208,18 @@ static cp_error_t web_pairing(void *user, bool status, const char *client, const
     int written = snprintf(json, capacity, "{\"state\":\"pending\",\"request_id\":\"%llu\",\"fingerprint\":\"%s\"}", (unsigned long long)request, proof);
     assert(written > 0 && (size_t)written < capacity); *length = (size_t)written; return CP_OK;
 }
+static cp_error_t web_pairing_code(void *user, const char *client, const char *credential,
+    const char *label, const char *code, const char *duration, char *json, size_t capacity, size_t *length)
+{
+    (void)user; uint64_t receipt;
+    cp_error_t error = app_control_access_pair_code(client, credential, label, code, duration, &receipt);
+    if (error != CP_OK) return error;
+    int n = snprintf(json, capacity, "{\"state\":\"pending\",\"request_id\":\"%llu\"}", (unsigned long long)receipt);
+    assert(n > 0 && (size_t)n < capacity); *length = (size_t)n; return CP_OK;
+}
 static void web_service(void)
 {
-    s_now_ms += 10;
+    s_now_ms += 10; app_control_access_service(true);
     if (web_cancel_after && trace_count >= web_cancel_after) {
         web_cancel_after = 0; remote_local_override(false); cp_physical_override(web_server.protocol, false, s_now_ms);
     }
@@ -236,12 +248,12 @@ static void web_fixture(httpd_req_t *r)
             test_update_target = (ble_hid_target_snapshot_t){.available = true, .loaded = true, .durable = true, .revision = 51};
             test_link.keyboard_subscribed = test_link.mouse_subscribed = true;
         }
-        app_control_access_snapshot_t view; app_control_access_snapshot(&view); assert(view.pending);
-        app_control_access_request_t request = {.action = APP_CONTROL_ACCESS_APPROVE,
+        app_control_access_snapshot_t view; app_control_access_snapshot(&view); assert(view.pending || view.count);
+        app_control_access_request_t request = {.action = view.pending ? APP_CONTROL_ACCESS_APPROVE : APP_CONTROL_ACCESS_EDIT,
             .expected_revision = view.revision, .pairing_request = view.pairing_request,
             .permissions = web_management ? APP_CONTROL_ACCESS_MANAGE : APP_CONTROL_ACCESS_INPUT,
             .duration = APP_CONTROL_ACCESS_SIX_HOURS};
-        memcpy(request.client_id, view.proposal.id, 16); uint64_t receipt;
+        memcpy(request.client_id, view.pending ? view.proposal.id : view.clients[view.count - 1].id, 16); uint64_t receipt;
         assert(app_control_access_submit(&request, &receipt) == CP_OK);
         app_control_access_service(true); app_control_access_snapshot(&view);
         assert(view.receipt_request == receipt && view.receipt_state == CP_RESULT_APPLIED);
@@ -305,8 +317,9 @@ int main(int argc, char **argv)
     cp_callbacks_t callbacks = {.user = s_command_bridge, .random = web_random_source,
         .available = web_available, .dispatch = web_dispatch,
         .safety = app_command_bridge_safety, .read = web_read,
-        .principal = web_principal, .input_authorized = web_input_authorized, .pairing = web_pairing};
-    assert(cp_initialize(storage, cp_context_size(), &callbacks, &web_server.protocol) == CP_OK);
+        .principal = web_principal, .input_authorized = web_input_authorized, .pairing = web_pairing, .pairing_code = web_pairing_code};
+    web_server.slot = !strncmp(web_origin, "http://", 7);
+    assert(cp_initialize_policy(storage, cp_context_size(), &callbacks, web_server.slot ? CP_POLICY_ENROLLED_HTTP : CP_POLICY_ENROLLED_TLS, &web_server.protocol) == CP_OK);
     assert(cp_http_configure(web_server.protocol, web_host, web_origin) == CP_OK);
     web_service();
     static char input[8192]; static cj_document_t document; static httpd_req_t request;

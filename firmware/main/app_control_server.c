@@ -31,6 +31,9 @@ typedef struct {
 } completion_t;
 typedef struct server server_t;
 struct server {
+    unsigned slot;
+    cp_session_view_t sessions[CP_MAX_SESSIONS];
+    size_t session_count;
     cp_context_t *protocol;
     void *protocol_memory;
     SemaphoreHandle_t mutex;
@@ -67,18 +70,17 @@ struct server {
     } channels[CP_MAX_SESSIONS];
 };
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
-static server_t *s_server;
-static app_control_server_snapshot_t s_snapshot;
+static server_t *s_servers[2]; /* TLS, enrolled local HTTP. */
+#define s_server s_servers[0] /* Existing streaming-media owner remains TLS. */
+static app_control_server_snapshot_t s_snapshots[2];
 static app_control_media_port_t s_media_port;
-static cp_session_view_t s_sessions[CP_MAX_SESSIONS];
-static size_t s_session_count;
 static void cache_sessions(server_t *s)
 {
     cp_session_view_t views[CP_MAX_SESSIONS] = {0};
     size_t count = cp_sessions_snapshot(s->protocol, views);
     portENTER_CRITICAL(&s_lock);
-    memcpy(s_sessions, views, sizeof(views));
-    s_session_count = count;
+    memcpy(s->sessions, views, sizeof(views));
+    s->session_count = count;
     portEXIT_CRITICAL(&s_lock);
 }
 static bool cached_authority(const cp_session_view_t *v, const cp_callbacks_t *callbacks)
@@ -97,10 +99,12 @@ static bool cached_session(const uint8_t *session, const uint8_t *principal,
     uint64_t now = (uint64_t)esp_timer_get_time() / 1000U;
     bool alive = false;
     portENTER_CRITICAL(&s_lock);
-    if (s_server && !s_server->stop_requested) {
-        callbacks = s_server->callbacks;
-        for (size_t i = 0; i < s_session_count; ++i) {
-            const cp_session_view_t *v = &s_sessions[i];
+    for (unsigned k = 0; k < 2 && !alive; ++k) {
+        server_t *s = s_servers[k];
+        if (!s || s->stop_requested) continue;
+        callbacks = s->callbacks;
+        for (size_t i = 0; i < s->session_count; ++i) {
+            const cp_session_view_t *v = &s->sessions[i];
             if (v->authenticated && now >= v->last_authenticated_ms &&
                 now - v->last_authenticated_ms < 5000U &&
                 (!session || !memcmp(session, v->identity.session_id, CP_ID_BYTES)) &&
@@ -133,15 +137,15 @@ static void clear(void *memory, size_t length)
         *p++ = 0;
     }
 }
-static void publish(app_control_server_state_t state, esp_err_t error)
+static void publish(unsigned slot, app_control_server_state_t state, esp_err_t error)
 {
     portENTER_CRITICAL(&s_lock);
-    s_snapshot.state = state;
-    s_snapshot.error = error;
-    ++s_snapshot.revision;
+    s_snapshots[slot].state = state;
+    s_snapshots[slot].error = error;
+    ++s_snapshots[slot].revision;
     if (state != APP_CONTROL_READY) {
-        s_snapshot.tls = false;
-        s_snapshot.address[0] = 0;
+        s_snapshots[slot].tls = false;
+        s_snapshots[slot].address[0] = 0;
     }
     portEXIT_CRITICAL(&s_lock);
 }
@@ -170,6 +174,13 @@ static cp_error_t pairing(void *user, bool status, const char *client, const cha
     server_t *s = user;
     return s->callbacks.pairing(s->callbacks.user, status, client, proof, label, json, capacity, length);
 }
+static cp_error_t pairing_code(void *user, const char *client, const char *credential,
+    const char *label, const char *code, const char *duration, char *json, size_t capacity, size_t *length)
+{
+    server_t *s = user;
+    return s->callbacks.pairing_code(s->callbacks.user, client, credential, label, code, duration,
+                                     json, capacity, length);
+}
 static bool available(void *user, cp_operation_id_t op, char reason[CP_REASON_CAPACITY])
 {
     server_t *s = user;
@@ -186,10 +197,10 @@ static void safety(void *user, cp_safety_reason_t reason, const cp_identity_t *i
     server_t *s = user;
     if (reason == CP_SAFETY_SESSION_LOST || reason == CP_SAFETY_REVOKED) {
         portENTER_CRITICAL(&s_lock);
-        for (size_t i = 0; i < s_session_count; ++i) {
+        for (size_t i = 0; i < s->session_count; ++i) {
             if (!identity ||
-                memcmp(identity->session_id, s_sessions[i].identity.session_id, CP_ID_BYTES) == 0) {
-                s_sessions[i].authenticated = false;
+                memcmp(identity->session_id, s->sessions[i].identity.session_id, CP_ID_BYTES) == 0) {
+                s->sessions[i].authenticated = false;
             }
         }
         portEXIT_CRITICAL(&s_lock);
@@ -291,7 +302,7 @@ static esp_err_t handle_request(httpd_req_t *request)
         goto request_cleanup;
     }
     s->body[received] = 0;
-    cp_http_security_t security = {.tls = true,
+    cp_http_security_t security = {.tls = s->slot == 0,
                                    .host = host,
                                    .origin = origin[0] ? origin : NULL,
                                    .authorization = authorization[0] ? authorization : NULL,
@@ -435,9 +446,11 @@ static esp_err_t initialize(server_t *s)
                                 .read = read_state,
                                 .principal = s->callbacks.principal ? principal_source : NULL,
                                 .input_authorized = s->callbacks.input_authorized ? input_authorized : NULL,
-                                .pairing = s->callbacks.pairing ? pairing : NULL};
+                                .pairing = s->callbacks.pairing ? pairing : NULL,
+                                .pairing_code = s->callbacks.pairing_code ? pairing_code : NULL};
     cp_error_t result =
-        cp_initialize(s->protocol_memory, cp_context_size(), &callbacks, &s->protocol);
+        cp_initialize_policy(s->protocol_memory, cp_context_size(), &callbacks,
+                             s->slot ? CP_POLICY_ENROLLED_HTTP : CP_POLICY_ENROLLED_TLS, &s->protocol);
     if (result != CP_OK || cp_http_configure(s->protocol, s->host, s->origin) != CP_OK) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -449,14 +462,15 @@ static esp_err_t initialize(server_t *s)
     error = hotspot_dns_start(s, ip.ip.addr);
     if (error != ESP_OK) return error;
     httpd_ssl_config_t config = HTTPD_SSL_CONFIG_DEFAULT();
-    config.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
+    config.transport_mode = s->slot ? HTTPD_SSL_TRANSPORT_INSECURE : HTTPD_SSL_TRANSPORT_SECURE;
+    config.port_insecure = s->port;
     config.port_secure = s->port;
     config.servercert = s->certificate;
     config.servercert_len = s->certificate_length;
     config.prvtkey_pem = s->private_key;
     config.prvtkey_len = s->key_length;
     config.httpd.if_name = &s->interface;
-    config.httpd.ctrl_port = 32770;
+    config.httpd.ctrl_port = 32770 + s->slot;
     config.httpd.max_open_sockets = 4;
     config.httpd.max_uri_handlers = 7;
     /* Reserve room for browser UA, Accept, Fetch Metadata and cookie headers.
@@ -474,7 +488,7 @@ static esp_err_t initialize(server_t *s)
     config.httpd.uri_match_fn = httpd_uri_match_wildcard;
     error = httpd_ssl_start(&s->listener, &config);
 #if CONFIG_HTTPD_WS_SUPPORT && CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT
-    if (error == ESP_OK) {
+    if (error == ESP_OK && !s->slot) {
         httpd_uri_t channel = {.uri = "/api/v1/channel",
                                .method = HTTP_GET,
                                .handler = websocket_data,
@@ -504,11 +518,11 @@ static esp_err_t initialize(server_t *s)
     }
     bool websocket = false;
 #if CONFIG_HTTPD_WS_SUPPORT && CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT
-    websocket = error == ESP_OK;
+    websocket = error == ESP_OK && !s->slot;
 #endif
     cp_set_transport_capabilities(s->protocol, websocket, error == ESP_OK);
     portENTER_CRITICAL(&s_lock);
-    s_snapshot.websocket_available = websocket;
+    s_snapshots[s->slot].websocket_available = websocket;
     portEXIT_CRITICAL(&s_lock);
     return error;
 }
@@ -519,17 +533,17 @@ static void worker(void *argument)
     bool failed = error != ESP_OK;
     if (!failed) {
         portENTER_CRITICAL(&s_lock);
-        s_snapshot.state = s->stop_requested ? APP_CONTROL_STOPPING : APP_CONTROL_READY;
-        s_snapshot.tls = !s->stop_requested;
-        s_snapshot.error = ESP_OK;
-        ++s_snapshot.revision;
-        if (!s->stop_requested) snprintf(s_snapshot.address, sizeof(s_snapshot.address), "https://%s", s->host);
+        s_snapshots[s->slot].state = s->stop_requested ? APP_CONTROL_STOPPING : APP_CONTROL_READY;
+        s_snapshots[s->slot].tls = !s->slot && !s->stop_requested;
+        s_snapshots[s->slot].error = ESP_OK;
+        ++s_snapshots[s->slot].revision;
+        if (!s->stop_requested) snprintf(s_snapshots[s->slot].address, sizeof(s_snapshots[s->slot].address), "%s://%s", s->slot ? "http" : "https", s->host);
         portEXIT_CRITICAL(&s_lock);
     } else {
         portENTER_CRITICAL(&s_lock);
         s->stop_requested = true;
         portEXIT_CRITICAL(&s_lock);
-        publish(APP_CONTROL_STOPPING, error);
+        publish(s->slot, APP_CONTROL_STOPPING, error);
     }
     for (;;) {
         portENTER_CRITICAL(&s_lock);
@@ -599,14 +613,14 @@ static void worker(void *argument)
             if (s->listener) {
                 esp_err_t stopped = httpd_ssl_stop(s->listener);
                 if (stopped != ESP_OK) {
-                    publish(APP_CONTROL_STOPPING, stopped);
+                    publish(s->slot, APP_CONTROL_STOPPING, stopped);
                     vTaskDelay(pdMS_TO_TICKS(1000));
                     continue;
                 }
                 s->listener = NULL;
             }
             portENTER_CRITICAL(&s_lock);
-            s_server = NULL;
+            s_servers[s->slot] = NULL;
             portEXIT_CRITICAL(&s_lock);
             if (s->mutex) {
                 vSemaphoreDelete(s->mutex);
@@ -615,9 +629,10 @@ static void worker(void *argument)
                 clear(s->protocol_memory, cp_context_size());
                 heap_caps_free(s->protocol_memory);
             }
+            unsigned slot = s->slot;
             clear(s, sizeof(*s));
             heap_caps_free(s);
-            publish(failed ? APP_CONTROL_ERROR : APP_CONTROL_STOPPED, failed ? error : ESP_OK);
+            publish(slot, failed ? APP_CONTROL_ERROR : APP_CONTROL_STOPPED, failed ? error : ESP_OK);
             app_network_task_delete_self();
             return;
         }
@@ -625,30 +640,31 @@ static void worker(void *argument)
         vTaskDelay(pdMS_TO_TICKS(has_completion ? 1 : 20));
     }
 }
-esp_err_t app_control_server_start(const app_control_server_config_t *config)
+static esp_err_t start(const app_control_server_config_t *config, unsigned slot)
 {
     if (!config || config->abi_version != APP_CONTROL_SERVER_ABI || !config->interface_key ||
-        !config->allowed_host || !config->browser_origin || !config->certificate_pem ||
-        !config->private_key_pem || !config->certificate_length ||
-        config->certificate_length > CERT_BYTES || !config->private_key_length ||
-        config->private_key_length > KEY_BYTES || config->principal_count > CP_MAX_PRINCIPALS ||
-        !config->principal_count || !config->principals ||
+        !config->allowed_host || !config->browser_origin ||
+        (!slot && (!config->certificate_pem || !config->private_key_pem || !config->certificate_length ||
+         config->certificate_length > CERT_BYTES || !config->private_key_length ||
+         config->private_key_length > KEY_BYTES || !config->principal_count || !config->principals)) ||
+        config->principal_count > CP_MAX_PRINCIPALS ||
+        (config->principal_count && !config->principals) ||
         (strcmp(config->interface_key, "WIFI_STA_DEF") != 0 &&
          strcmp(config->interface_key, "WIFI_AP_DEF") != 0) || strlen(config->allowed_host) >= 129 ||
         strlen(config->browser_origin) >= 193) {
         return ESP_ERR_INVALID_ARG;
     }
     bool ap = !strcmp(config->interface_key, "WIFI_AP_DEF");
-    if (ap ? (!config->hotspot_name || !config->hotspot_name[0] ||
+    if (!slot && (ap ? (!config->hotspot_name || !config->hotspot_name[0] ||
               strlen(config->hotspot_name) >= APP_CONTROL_HOTSPOT_NAME_CAPACITY) :
-             config->hotspot_name != NULL) return ESP_ERR_INVALID_ARG;
+             config->hotspot_name != NULL)) return ESP_ERR_INVALID_ARG;
     portENTER_CRITICAL(&s_lock);
-    bool busy = s_server || s_snapshot.state == APP_CONTROL_STARTING ||
-                s_snapshot.state == APP_CONTROL_STOPPING;
+    bool busy = s_servers[slot] || s_snapshots[slot].state == APP_CONTROL_STARTING ||
+                s_snapshots[slot].state == APP_CONTROL_STOPPING;
     if (!busy) {
-        s_snapshot.state = APP_CONTROL_STARTING;
-        s_snapshot.error = ESP_OK;
-        ++s_snapshot.revision;
+        s_snapshots[slot].state = APP_CONTROL_STARTING;
+        s_snapshots[slot].error = ESP_OK;
+        ++s_snapshots[slot].revision;
     }
     portEXIT_CRITICAL(&s_lock);
     if (busy) {
@@ -660,101 +676,111 @@ esp_err_t app_control_server_start(const app_control_server_config_t *config)
         s = heap_caps_aligned_calloc(_Alignof(server_t), 1, sizeof(*s), MALLOC_CAP_8BIT);
     }
     if (!s) {
-        publish(APP_CONTROL_ERROR, ESP_ERR_NO_MEM);
+        publish(slot, APP_CONTROL_ERROR, ESP_ERR_NO_MEM);
         return ESP_ERR_NO_MEM;
     }
+    s->slot = slot;
     strcpy(s->ifkey, config->interface_key);
     strcpy(s->host, config->allowed_host);
     strcpy(s->origin, config->browser_origin);
-    s->port = config->port ? config->port : 443;
+    s->port = config->port ? config->port : slot ? 80 : 443;
     s->dns_fd = -1;
-    if (ap) {
+    if (ap && !slot) {
         strcpy(s->hotspot_name, config->hotspot_name);
         if (s->port == 443) strcpy(s->hotspot_ip_host, APP_WIFI_CONTROL_AP_IP);
         else snprintf(s->hotspot_ip_host, sizeof(s->hotspot_ip_host),
                       APP_WIFI_CONTROL_AP_IP ":%u", s->port);
     }
     s->callbacks = config->coordinator;
+    if (!slot) {
     memcpy(s->certificate, config->certificate_pem, config->certificate_length);
     s->certificate_length =
         config->certificate_length + (config->certificate_pem[config->certificate_length - 1] != 0);
     memcpy(s->private_key, config->private_key_pem, config->private_key_length);
     s->key_length =
         config->private_key_length + (config->private_key_pem[config->private_key_length - 1] != 0);
-    memcpy(s->principals, config->principals, config->principal_count * sizeof(cp_principal_t));
+    }
+    if (config->principal_count) memcpy(s->principals, config->principals, config->principal_count * sizeof(cp_principal_t));
     s->principal_count = config->principal_count;
     portENTER_CRITICAL(&s_lock);
-    s_server = s;
+    s_servers[slot] = s;
     portEXIT_CRITICAL(&s_lock);
     if (app_network_task_create(worker, "control_server", 4096, s, 1, NULL) != pdPASS) {
         portENTER_CRITICAL(&s_lock);
-        s_server = NULL;
+        s_servers[slot] = NULL;
         portEXIT_CRITICAL(&s_lock);
         clear(s, sizeof(*s));
         heap_caps_free(s);
-        publish(APP_CONTROL_ERROR, ESP_ERR_NO_MEM);
+        publish(slot, APP_CONTROL_ERROR, ESP_ERR_NO_MEM);
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 }
-esp_err_t app_control_server_stop(void)
+static esp_err_t stop(unsigned slot)
 {
     portENTER_CRITICAL(&s_lock);
     esp_err_t error = ESP_OK;
-    if (s_server) {
-        s_server->stop_requested = true;
-        s_snapshot.state = APP_CONTROL_STOPPING;
-        s_snapshot.tls = false;
-        s_snapshot.address[0] = 0;
-        ++s_snapshot.revision;
-    } else if (s_snapshot.state == APP_CONTROL_STARTING) {
+    if (s_servers[slot]) {
+        s_servers[slot]->stop_requested = true;
+        s_snapshots[slot].state = APP_CONTROL_STOPPING;
+        s_snapshots[slot].tls = false;
+        s_snapshots[slot].address[0] = 0;
+        ++s_snapshots[slot].revision;
+    } else if (s_snapshots[slot].state == APP_CONTROL_STARTING) {
         error = ESP_ERR_INVALID_STATE;
     }
     portEXIT_CRITICAL(&s_lock);
     return error;
 }
-void app_control_server_snapshot(app_control_server_snapshot_t *out)
+static void snapshot(unsigned slot, app_control_server_snapshot_t *out)
 {
     if (!out) {
         return;
     }
     portENTER_CRITICAL(&s_lock);
-    *out = s_snapshot;
+    *out = s_snapshots[slot];
     portEXIT_CRITICAL(&s_lock);
 }
+esp_err_t app_control_server_start(const app_control_server_config_t *c) { return start(c, 0); }
+esp_err_t app_control_server_start_http(const app_control_server_config_t *c) { return start(c, 1); }
+esp_err_t app_control_server_stop(void) { return stop(0); }
+esp_err_t app_control_server_stop_http(void) { return stop(1); }
+void app_control_server_snapshot(app_control_server_snapshot_t *out) { snapshot(0, out); }
+void app_control_server_http_snapshot(app_control_server_snapshot_t *out) { snapshot(1, out); }
 esp_err_t app_control_server_publish_state(const cp_device_state_t *state)
 {
     if (!state || strnlen(state->target_id, sizeof(state->target_id)) == sizeof(state->target_id) ||
-        strnlen(state->mode, sizeof(state->mode)) == sizeof(state->mode)) {
-        return ESP_ERR_INVALID_ARG;
-    }
+        strnlen(state->mode, sizeof(state->mode)) == sizeof(state->mode)) return ESP_ERR_INVALID_ARG;
     portENTER_CRITICAL(&s_lock);
     esp_err_t error = ESP_ERR_INVALID_STATE;
-    if (s_server && !s_server->stop_requested) {
-        s_server->state = *state;
-        s_server->state_pending = true;
-        s_server->state_known = true;
-        error = ESP_OK;
+    for (unsigned k = 0; k < 2; ++k) {
+        server_t *s = s_servers[k];
+        if (s && !s->stop_requested) {
+            s->state = *state; s->state_pending = s->state_known = true; error = ESP_OK;
+        }
     }
     portEXIT_CRITICAL(&s_lock);
     return error;
 }
 esp_err_t app_control_server_complete(uint64_t key, const cp_result_t *result)
 {
-    if (!key || !result) {
-        return ESP_ERR_INVALID_ARG;
-    }
+    if (!key || !result) return ESP_ERR_INVALID_ARG;
     portENTER_CRITICAL(&s_lock);
     esp_err_t error = ESP_ERR_INVALID_STATE;
-    server_t *s = s_server;
-    if (s && !s->stop_requested) {
-        if (s->completion_count == COMPLETION_CAPACITY) {
-            error = ESP_ERR_NO_MEM;
-        } else {
+    /* Preflight all bounded mailboxes before enqueueing, so a retry cannot
+     * duplicate delivery. Each protocol ignores keys owned by the other. */
+    for (unsigned k = 0; k < 2; ++k) {
+        server_t *s = s_servers[k];
+        if (s && !s->stop_requested) {
+            error = s->completion_count == COMPLETION_CAPACITY ? ESP_ERR_NO_MEM : ESP_OK;
+            if (error != ESP_OK) break;
+        }
+    }
+    if (error == ESP_OK) for (unsigned k = 0; k < 2; ++k) {
+        server_t *s = s_servers[k];
+        if (s && !s->stop_requested) {
             unsigned tail = (s->completion_head + s->completion_count) % COMPLETION_CAPACITY;
-            s->completions[tail] = (completion_t){.key = key, .result = *result};
-            ++s->completion_count;
-            error = ESP_OK;
+            s->completions[tail] = (completion_t){.key = key, .result = *result}; ++s->completion_count;
         }
     }
     portEXIT_CRITICAL(&s_lock);
@@ -763,12 +789,12 @@ esp_err_t app_control_server_complete(uint64_t key, const cp_result_t *result)
 void app_control_server_physical_override(bool locked)
 {
     portENTER_CRITICAL(&s_lock);
-    if (s_server) {
-        s_server->override_pending = true;
-        s_server->override_locked |= locked;
+    for (unsigned k = 0; k < 2; ++k) if (s_servers[k]) {
+        s_servers[k]->override_pending = true; s_servers[k]->override_locked |= locked;
     }
     portEXIT_CRITICAL(&s_lock);
 }
+
 #else
 bool app_control_server_client_connected(const uint8_t id[CP_ID_BYTES]) { (void)id; return false; }
 bool app_control_server_identity_alive(const cp_identity_t *who)
@@ -834,4 +860,8 @@ esp_err_t app_control_server_complete(uint64_t key, const cp_result_t *r)
     return ESP_ERR_NOT_SUPPORTED;
 }
 void app_control_server_physical_override(bool locked) { (void)locked; }
+esp_err_t app_control_server_start_http(const app_control_server_config_t *c)
+{ (void)c; return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t app_control_server_stop_http(void) { return ESP_ERR_NOT_SUPPORTED; }
+void app_control_server_http_snapshot(app_control_server_snapshot_t *s) { app_control_server_snapshot(s); }
 #endif

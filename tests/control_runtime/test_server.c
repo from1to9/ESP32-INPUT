@@ -11,6 +11,9 @@
 #include "../../firmware/main/app_network_task.h"
 #include "weak_heap.h"
 typedef struct server {
+    cp_session_view_t sessions[CP_MAX_SESSIONS];
+    size_t session_count;
+    char host[129], hotspot_ip_host[32];
     cp_context_t *protocol;
     SemaphoreHandle_t mutex;
     httpd_handle_t listener;
@@ -55,6 +58,7 @@ static void safety(void *u, cp_safety_reason_t reason, const cp_identity_t *who)
         for (size_t i = 0; i < s_session_count; ++i) {
             if (!who || !memcmp(who->session_id, s_sessions[i].identity.session_id, 16)) {
                 s_sessions[i].authenticated = false;
+                s_server->sessions[i].authenticated = false;
             }
         }
     }
@@ -63,6 +67,7 @@ static void cache_sessions(server_t *s)
 {
     memset(s_sessions, 0, sizeof(s_sessions));
     s_session_count = cp_sessions_snapshot(s->protocol, s_sessions);
+    s->session_count = s_session_count; memcpy(s->sessions, s_sessions, sizeof(s_sessions));
 }
 bool app_control_server_session_alive(const uint8_t session[16], const uint8_t principal[16])
 {
@@ -97,6 +102,7 @@ static esp_err_t error_response(httpd_req_t *r, const char *status, const char *
     snprintf(r->response, sizeof(r->response), "%s", body);
     return ESP_FAIL;
 }
+#include "server_host_fixture.inc"
 #include "../../firmware/main/app_control_server_media.inc"
 
 static server_t server;
@@ -419,7 +425,7 @@ static void setup_server(bool browser)
     memset(&identity, 0, sizeof(identity));
     server.listener = (void *)1;
     server.mutex = (void *)1;
-    s_server = &server;
+    s_server = &server; strcpy(server.host, "device.test");
     clock_ms = 100;
     random_seed = 0;
     reads = cancellations = low_level_sends = blocking_helper_calls = capture_failures =

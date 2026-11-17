@@ -9,7 +9,7 @@
 /* Copied safe display metadata only. No password, client secret, import token,
  * certificate private key or original USB package enters the UI snapshot. */
 typedef enum { APP_API_WINDOW_OPEN, APP_API_WINDOW_CLOSE, APP_API_REVIEW_PAGE,
-    APP_API_REVIEW_APPROVE } app_api_operation_t;
+    APP_API_REVIEW_APPROVE, APP_API_CODE_GENERATE } app_api_operation_t;
 typedef struct {
     app_api_operation_t operation;
     uint64_t revision;
@@ -18,12 +18,15 @@ typedef struct {
 } app_api_request_t;
 typedef struct {
     bool known, ready, tls, commissioning_open, usb_import_active;
+    bool code_known, code_present, code_pending;
+    uint64_t code_revision;
+    char access_code[9]; /* Physical unlocked Web/API panel only; never remote state. */
     bool can_open, can_close, remaining_known;
     bool remote_input_allowed; /* Parent-owned physical local admission, independent of TLS. */
     uint64_t remote_input_generation; /* Zero is unknown; rejects a stale held toggle. */
     uint32_t remaining_seconds;
     uint64_t revision;
-    char url[256], reason[97];
+    char url[256], tls_url[256], reason[97];
     bool review_pending, review_complete, can_approve;
     char review_digest[65], review_host[129];
     unsigned review_page, review_page_count;

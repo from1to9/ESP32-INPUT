@@ -24,7 +24,7 @@ At a fresh explicit selection call `app_wifi_select_scan_record` and bind its ti
 
 Ordinary row joins with `selection_id=0` still validate generation/index/SSID and the 30-second list lifetime at admission and execution. A selection ticket is an explicit local editing policy, not a silent bypass or conversion to manual. Manual/hidden WPA2 entry is separately explicit (all three identity fields zero) and needs a corresponding editor before UI exposure. Secrets remain write-only. The same worker now supports save-only, named join/forget and complete priority reorder through `app_wifi_profiles.h`; the join/scan cancellation contract stays separate.
 
-`APP_WIFI_OBTAINING_IP` means association without valid IPv4. `lan_ready` requires actual association with the selected SSID and nonzero station IPv4. `control_ap_ready` describes the active control hotspot interface. `backend_available/backend_error` come from the control runtime's TLS listener observation. Browser trust and client authentication are checked separately. The [native UI extension](interaction.md#status-connectivity-and-display) owns private entry and rendering. The coordinator owns intent, epoch and editor handoff.
+`APP_WIFI_OBTAINING_IP` means association without valid IPv4. `lan_ready` requires actual association with the selected SSID and nonzero station IPv4. `control_ap_ready` describes the active control hotspot interface. `backend_available/backend_error` report the runtime's local HTTP listener observation. The enrolled HTTPS listener and browser authorization have their own state. The [native UI extension](interaction.md#status-connectivity-and-display) owns private entry and rendering. The coordinator owns intent, epoch and editor handoff.
 
 The public snapshot contains no credential/token. It distinguishes initialized/configured state, current SSID, IP/RSSI, disconnect/retry/pending state and operation/connection/cleanup/storage errors. `configured` and `ssid` describe runtime selection. `stored_data_known` establishes whether presence is known; `stored_data_present` is meaningful only then. `stored_ssid` is empty for absent, unreadable or uncertain storage. A corrupt record may be known-present without a usable SSID. `storage_uncertain/storage_error` survive radio/setup success; only an explicit successful save/forget/read verification resolves them. Verification never switches the runtime network. Permit forget/recovery even with no configured network or known SSID; never fabricate a name.
 
@@ -61,14 +61,16 @@ while the control hotspot is selected. The settings page still shows saved
 profiles and any existing storage uncertainty.
 
 The hotspot publishes readiness after the AP interface and DHCP server
-start. DHCP advertises the hotspot's local DNS server. Open the device-specific
-HTTPS name in **Web/API** after joining the hotspot. Native clients can use
-`192.168.4.1` at the enrolled TLS port, with 443 as the default. The
+start. Open `http://192.168.4.1` as shown in **Web/API** after joining the
+hotspot and authorize your browser with the device code. On station Wi-Fi,
+use the displayed station HTTP address. DHCP advertises the hotspot's local
+DNS server for the enrolled HTTPS name. Native clients can use `192.168.4.1`
+at the enrolled TLS port, with 443 as the default. The
 [enrolled certificate](../bridge/README.md#control-hotspot-enrollment) covers
 both endpoints. Controller enrollment, operation permissions and the input
 lease govern access to HTTPS/WSS operations.
 
-The Wi-Fi worker waits for the old listener to shut down and the input
+The Wi-Fi worker waits for both old listeners to shut down and the input
 coordinator to finish neutral reports on the old HID link. USB completion
 or BLE confirmation must drain on the original generation while that host
 remains connected. An observed disconnect lets the switch proceed. If the
