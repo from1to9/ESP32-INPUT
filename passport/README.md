@@ -66,6 +66,34 @@ to 6144 for an existing configuration. Panic register and frame-pointer
 backtrace diagnostics remain enabled. The frame-pointer option adds code and
 execution overhead, which is included in this revision's size report.
 
+The no-PSRAM target uses four static RX buffers, four dynamic RX buffers,
+four dynamic TX buffers, and an RX BA window of four. Both `ESP_WIFI_IRAM_OPT`
+and `ESP_WIFI_RX_IRAM_OPT` are disabled: this trades Wi-Fi throughput for
+internal RAM needed by BLE, LVGL, HTTP and optional sound. Apply these values
+from `sdkconfig.defaults` to an existing generated configuration as well;
+`reconfigure` does not override existing choices. Set
+`LWIP_TCP_SND_BUF_DEFAULT` to 2880 as well: each socket can queue two MSS worth
+of outgoing payload instead of four, trading peak throughput for RAM when
+responses are in flight. Moving initialization earlier
+does not reduce total memory demand. Build size savings do not establish the
+heap margin under radio traffic, scanning, rendering or sound output.
+The [control-owner limits](#direct-network-input) reserve RAM alongside LVGL
+and radios. A failed owner is not a usable baseline for measuring that combined
+load. Mosaico retains its default capacities.
+Bluetooth reserves two controller activities for its single peripheral link
+and advertising, and twelve MSYS-2 packet blocks instead of the generic 24.
+`BT_NIMBLE_LOW_SPEED_MODE` moves host GAP/GATT/NPL routines to flash. The
+controller's interrupt code remains in RAM; `BT_CTRL_RUN_IN_FLASH_ONLY` is
+not enabled. Connection, pairing, HID neutral release, concurrent traffic
+and NVS writes still require physical qualification with these RAM budgets.
+The pinned BSP hardcodes a 40-line LVGL DMA buffer. The build compiles a local
+copy with that constant set to 16 lines (7,680 bytes), saving 11,520 bytes of
+internal heap. The original managed dependency is unchanged; configuration
+fails if its expected definition or source registration changes. Display
+initialization, single buffering, RGB565 conversion and the final rounded
+flush mask are retained. Smaller chunks increase display transaction count;
+actual refresh timing still requires a device observation.
+
 ## Dependency sources and licenses
 
 - [FoloToy AI Passport BSP](https://github.com/FoloToy/ai-passport/tree/c27304afe8c4a704b86699f1f6382bde91db86a6/components/bsp)
@@ -80,24 +108,64 @@ execution overhead, which is included in this revision's size report.
 
 ## Local interaction
 
-The device starts on Lock. Release the buttons, then hold OK to unlock.
+The device starts on Home with navigation enabled when its buttons initialize.
+After a manual or safety lock, release the buttons, then hold OK to unlock.
 UP/DOWN clicks change focus and an OK click selects it. Home opens Mouse,
 Keys, Connections, or Status. Connections contains Bluetooth, Wi-Fi, Sound,
 and Appearance. Hold DOWN from any page to lock and request release.
+Mouse and Keys remain visible but disabled until the BLE owner reports output
+ready, including its bond, encryption, subscription and release conditions.
+UP/DOWN skips these cards while unavailable; Connections and Status remain
+accessible. Losing readiness moves focus off Mouse or Keys to Connections and
+cancels an unfinished OK selection. Readiness restores both cards automatically. The C3
+USB Serial/JTAG interface is not a USB HID host connection.
 An unlocked OK hold returns to the parent page, except on Mouse where
 a direction hold repeats movement.
-Double clicks are consumed. Outside a bounded local Wi-Fi setup window, the screen dims after 60 seconds of inactivity
-and locks input; the first complete waking gesture only wakes the screen.
-The BSP provides the 500 ms long-press threshold.
+Short actions run on the BSP's confirmed release, without waiting for its
+delayed single-click callback. Each short UP/DOWN release changes focus,
+including quick repeated taps. The first short OK release selects once;
+subsequent OK presses in the BSP click window (180 ms plus one 5 ms poll)
+are consumed through release to prevent activation through a newly opened
+page. Delayed single/double-click callbacks never add an action. The ADC's
+40 ms press confirmation and 120 ms release retention remain unchanged.
+Outside a bounded local Wi-Fi setup window, the screen turns off after 60
+seconds without local button activity. This does not lock input or interrupt
+BLE or Web control. The first complete waking gesture only wakes the screen,
+without taking over an active Web controller. Manual Lock and fault locks
+still stop input and require a fresh OK hold to unlock.
+The BSP provides the 500 ms long-press threshold. A build-local repair to the
+pinned button 4.2.0 driver sends repeated holds through its original long-press
+transition at that same threshold; otherwise its repeat state omits LONG.
+It also bounds subsequent held polls after the last LONG callback is consumed.
+The dependency source, debounce, click window and release filtering stay intact.
 
 Bluetooth lists up to three saved identity addresses, plus Pair new and Back.
 Pair new displays its explanation before requesting a 60-second Just Works
-pairing window. Leaving that page or locking closes new-pair admission. Advertise on a saved host opens a 60-second window restricted
+pairing window. The page distinguishes an open window, a connected link
+being secured, a saved host, and an ended attempt with the device's result.
+A saved bond does not establish report subscriptions or input readiness.
+Saved hosts initially use their identity address, not the remote OS's device
+name; a display label can be assigned separately.
+Leaving that page or locking closes new-pair admission. Advertise on a saved host opens a 60-second window restricted
 to that exact bond. It does not scan for computers or phones. Disconnect
 retains the bond; Forget has a Cancel-first confirmation and removes only
 the selected identity. Re-pairing requires explicit forget. Full capacity,
 unsupported passkey/numeric-comparison methods, and storage errors are
 reported without silently evicting a bond or approving a number.
+
+Passport remembers the host selected by Advertise or a completed new pairing.
+On cold startup it restores that exact saved identity and opens a reconnect
+window for at most 60 seconds, with at most three advertising starts and a
+one-second pause after a failed connection. The host still initiates BLE;
+encryption, saved keys, both subscriptions and neutral release remain required
+before input is ready. No input action resumes automatically. Readiness closes
+the reconnect window; it does not reset the local inactivity timer described
+above. Explicit host management or Lock cancels the startup attempt;
+Disconnect stays disconnected until another explicit action or the next cold
+boot. Forget also removes the
+selection when it names that host. An older installation without a stored
+selection adopts its sole saved bond; with multiple saved bonds, select one
+manually once. An unavailable selection or locked startup does not advertise.
 
 Mouse is a focusable Up/Left/Click/Right/Down grid and Back. Each OK click
 requests one 12-unit relative step or left-button tap. A direction hold
@@ -124,12 +192,24 @@ is marked unknown. Successful notification submission means NimBLE accepted
 the report, not that the host OS processed it.
 
 Bonds are saved in one NVS snapshot under `passport_bonds`, using the pinned
+SDK's RAM store for lookups. Passport initializes and restores that store
+before host startup. A Passport-only linker wrapper makes subsequent SDK
+`ble_store_config_init` calls idempotent: the pinned dynamic privacy startup
+otherwise clears the restored records and replaces the NVS/admission callbacks
+before selecting its local IRK. Explicit Passport initialization still resets
+the RAM store on a full host restart. Existing snapshot format and failure
+handling are retained. The snapshot uses the pinned
 SDK's record ABI. Unknown schema, restore failures, and uncertain commits
 make the store unavailable; the application never erases NVS to recover.
 The old snapshot may remain after a failed deletion, so an uncertain forget
 requires restart and inspection. Saved rows show the bond's resolved public
 or static-random identity, never a transient RPA. Names/labels are not row
 identifiers. See [API.md](API.md) for the stable identity and label interface.
+The separate `passport_bonds/selected` preference leaves the existing bond
+snapshot format intact. A selection write or commit failure is reported and
+does not start the requested connection; an explicit selection can retry it.
+Forget records an explicit cleared selection, so a remaining sole bond is not
+mistaken for a legacy installation and chosen on the next startup.
 
 ## Native interface and appearance
 
@@ -177,7 +257,7 @@ Three scan metadata labels keep security, signal, and saved status visible
 alongside the label and original SSID.
 Only a changed view reaches LVGL; labels are updated only when text changes,
 and palette updates preserve the object tree. Fonts are Montserrat 12, 14
-and 18. The BSP retains its single 19,200-byte DMA draw buffer. Host object
+and 18. The BSP uses the build-configured single 7,680-byte DMA draw buffer. Host object
 counts and target static-memory figures do not establish C3 runtime free heap.
 
 ## Health and validation
@@ -227,6 +307,10 @@ Setup assets and API are AP-only, including when the listener also serves
 health over LAN. An associated station, wrong local socket address, unexpected
 Host or foreign Origin is rejected. A token from the physically opened window
 is required for scans and submissions and is checked again by the Wi-Fi owner.
+The SDK's dual-stack listener represents IPv4 clients as IPv4-mapped IPv6
+sockets. Setup and control normalize that representation before comparing
+the actual local interface address; native IPv6 remains unsupported. Host,
+Origin and AP-only admission checks still use the verified IPv4 address.
 HTTP queue admission is displayed separately from owner acceptance, local
 confirmation, association/IP and a successful profile save. Passwords are
 cleared from the form after submission and are not retried automatically.
@@ -251,6 +335,60 @@ HTTP 200 describes those bootstrap observations, not HID readiness or
 continuing device health. Applying a view to LVGL is distinct from physical
 screen verification. A failed update is retried after the next bounded
 20 ms button wait. The LVGL lock attempt is bounded at 50 ms.
+
+For device diagnosis, enable the default-off `PASSPORT_DIAGNOSTICS` option.
+It logs internal free heap and largest block after each startup stage. For
+USB enumeration gaps, a one-shot timer replays the four completed stage snapshots
+and current published BLE/control state 30 seconds after boot, even if the UI
+task is stuck. A missing stage is not a successful initialization. The timer
+and retained snapshots exist only in diagnostic builds.
+For 180 seconds after the UI starts it also logs one independent calibrated BSP
+ADC voltage summary every 250 ms, the cumulative BSP glitch counter and
+observed press mask, plus consumed button events with production timestamps,
+freshness, Lock and unlock state. Buttons are numbered UP=0, DOWN=1, OK=2;
+events are PRESS=0, CLICK=1, DOUBLE=2, LONG=3, RELEASE=4. The ADC reading is
+not the decoder's cached sample. Normal UI iterations sample at most once
+per 10 ms (usually after the 20 ms button wait); each summary includes the
+last reading, valid minimum/maximum, valid count and failed-read count.
+`adc_mv=-1` means a failed read or conversion. Backlight transitions have
+their own timestamps. `observed` is cumulative, not the currently held keys.
+Button records include focus; `render_start`, `render_end` and `applied`
+record the view's LVGL update call, not DMA completion or physical pixels.
+Compare RELEASE to the immediate page/focus change, then the following
+render record. A synchronized view of the finger and display is needed for
+an absolute physical input-to-pixel measurement.
+Logging and extra reads affect timing; this
+is diagnostic evidence, not latency qualification. Thresholds and event
+admission remain unchanged. Capture ten seconds with all buttons released,
+then hold UP, DOWN and OK individually for two seconds with three-second
+released gaps, followed by twenty seconds idle. Retain the serial capture
+locally, including its surrounding startup errors, and disable diagnostics
+for final qualification. Never infer physical button correctness from BSP
+initialization success or substituted host callbacks alone.
+
+The same option logs BLE transitions for 180 seconds after BLE startup and
+reopens logging for each requested advertising window plus ten seconds.
+Records contain connection/encryption/disconnect status, subscription flags,
+store type/result and identity classification, saved-host count, storage
+availability, readiness, SDK advertising-active state, control-owner availability,
+free heap and largest block. Advertising-active means the SDK reports an active
+advertiser; a host scan or connection is still needed to prove radio reception.
+Control initialization logs allocation success, sizes and required alignments;
+at most sixteen early failures identify allocation, owner initialization or
+HTTP configuration. These diagnostics preserve the normal error responses.
+The protocol and remote-input objects use their published alignment requirements
+because the target's ordinary heap only guarantees four-byte alignment.
+They omit addresses,
+keys and credentials. For random identities, `random_class` is only the two
+address-class bits: 0 non-resolvable, 1 resolvable private, 2 reserved, 3 static;
+it is -1 for other record/address types. NVS write/commit failures also log the SDK error code;
+the store then remains unavailable, so repeated operations do not retry it.
+Outcome changes retain the initial failure in the log, and locally initiated
+failure disconnects preserve their reason on screen. Host OS pairing status
+alone never proves the device saved a bond or completed HID readiness.
+Setup additionally logs at most sixteen AP-admission rejections per boot,
+using only the failed boundary name, status code and AP state flags. It does
+not log socket addresses, Host/Origin contents, tokens or credentials.
 
 AP credentials stay in Wi-Fi owner storage and native view/LVGL labels. Temporary entropy and configuration copies are explicitly cleared.
 AP credentials are excluded from HTTP. Router passwords are accepted only by
@@ -284,7 +422,10 @@ with the target build. It uses CMake/Ninja (PATH or the dedicated tools above),
 the real production view and widgets, RGB565 software rendering, and SDK/BSP
 fixtures. PNG captures and contact sheets go to `.agent/local/passport-wifi/render`.
 ASan/UBSan, visible-object bounds, fixed object count and unchanged-frame
-checks cover both palettes. These are actual LVGL renders, not photographs;
+checks cover both palettes. Add `--compare-partial` to compare all selected
+frames pixel-for-pixel with the 16-line partial rendering buffer. The host
+fixture does not measure panel DMA or apply the BSP's final corner mask.
+These are actual LVGL renders, not photographs;
 the light palette especially still needs on-device display qualification.
 
 Run `node passport/tests/web/check.mjs` with Playwright and Chromium installed
@@ -315,8 +456,11 @@ shows `Network control: open`, the active controller, IP and Lock. Lock
 rejects remote mutations while status and local recovery remain available.
 No HTTP downgrade is enabled on Mosaico.
 
-Passport uses two sessions, sixteen retained results, four active requests,
-four remote jobs, a 2048-byte input frame and a single transport mailbox.
+Passport uses two sessions, four retained protocol results, two active requests,
+two remote jobs, four recent owner results, a 2048-byte input frame and a single
+transport mailbox. `/api/v1/capabilities` reports the result capacity. Old results
+can become unknown sooner; concurrent commands retain the existing busy response
+when capacity is exhausted. Argument, response and JSON limits are unchanged.
 The compact parser and owner settings apply only to the Passport target.
 Network callbacks never call the engine: the NimBLE task processes one
 bounded mailbox item per 20 ms service and remains the sole report sender.
@@ -350,6 +494,12 @@ Mac/iPad/iPhone hosts. Text is never silently shortened, and a reported HID
 send does not prove the host application acted. **Stop** is always visible
 while connected. Loss of focus, page visibility, network, session or target
 ends held input; reconnect does not replay or resume it.
+Background lease renewal keeps input buttons visually steady while retaining
+command serialization; a simultaneous action asks the user to wait and is not
+queued. Failed Connect feedback also appears beside the connection controls.
+Requests use relative URLs with CORS fetch mode so Safari can send a concrete
+Origin under the page's no-referrer policy; strict server Host/Origin admission
+and same-origin credentials remain in effect.
 
 Connections lists BLE hosts and Wi-Fi saved/scanned rows with original
 identities and optional labels. Add device advertises for a new host;

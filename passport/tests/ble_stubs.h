@@ -85,6 +85,7 @@ struct ble_gap_event {
     int type;
     struct { int status; uint16_t conn_handle; } connect;
     struct { int status; } enc_change;
+    struct { int reason; } disconnect;
     struct { uint16_t conn_handle, attr_handle; bool cur_notify; } subscribe;
 };
 #define BLE_GAP_EVENT_CONNECT 1
@@ -99,6 +100,7 @@ struct ble_gap_event {
 #define BLE_SM_PAIR_KEY_DIST_ENC 1
 #define BLE_SM_PAIR_KEY_DIST_ID 2
 int ble_gap_adv_stop(void);
+int ble_gap_adv_active(void);
 int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *);
 int ble_gap_wl_set(const ble_addr_t *, int);
 int ble_gap_adv_start(int,const ble_addr_t *,int,const struct ble_gap_adv_params *,int (*)(struct ble_gap_event *,void *),void *);

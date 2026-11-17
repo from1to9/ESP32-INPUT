@@ -336,13 +336,18 @@ void passport_widgets_update(const passport_view_t *view)
             visible(items[slot].scan_summary, scan_summary);
             if (scan_summary) text(items[slot].scan_summary, view->scan_summary[slot]);
         }
-        bool selected = index == view->focus;
-        if (geometry_changed || theme_changed || view->focus != previous.focus) {
+        const passport_item_t *item = &view->items[index];
+        bool selected = index == view->focus && !item->disabled;
+        if (geometry_changed || theme_changed || view->focus != previous.focus ||
+            item->disabled != previous.items[index].disabled) {
             lv_obj_remove_style(items[slot].box, &focused, 0);
             if (selected) lv_obj_add_style(items[slot].box, &focused, 0);
+            if (item->disabled) lv_obj_add_state(items[slot].box, LV_STATE_DISABLED);
+            else lv_obj_remove_state(items[slot].box, LV_STATE_DISABLED);
+            lv_obj_set_style_bg_color(items[slot].box, lv_color_hex(selected ? focus_fill : item->disabled ? field : surface), 0);
+            lv_obj_set_style_text_color(items[slot].title, lv_color_hex(item->disabled ? muted : ink), 0);
             lv_obj_set_style_text_color(items[slot].icon, lv_color_hex(selected ? accent : muted), 0);
         }
-        const passport_item_t *item = &view->items[index];
         text(items[slot].title, item->title);
         text(items[slot].subtitle, item->subtitle);
         text(items[slot].icon, icon_text(item->checked ? ICON_CHECK : item->icon));

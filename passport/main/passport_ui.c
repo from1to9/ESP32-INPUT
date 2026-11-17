@@ -8,9 +8,10 @@
 #include <stdio.h>
 #include <string.h>
 #include "esp_timer.h"
+#include "esp_log.h"
 
 typedef enum { HOME, BLUETOOTH, HOST, CONFIRM_FORGET, PAIR_WINDOW, MOUSE, KEYS, STATUS, LOCK_SCREEN, CONNECTIONS, WIFI, APPEARANCE, WIFI_LIST, WIFI_SAVED, WIFI_ACTION, WIFI_CONFIRM, WIFI_AP, WIFI_DETAILS, WIFI_JOIN_QR, WIFI_URL_QR, WIFI_PENDING, SOUND, HOST_IDENTITY, WIFI_IDENTITY } page_t;
-static page_t page = LOCK_SCREEN;
+static page_t page = HOME;
 static unsigned focus;
 static passport_peer_t target;
 static uint32_t target_revision;
@@ -25,6 +26,8 @@ static uint64_t confirmation_visible_after = UINT64_MAX;
 static char ap_ssid[32], ap_password[17], wifi_note[64];
 static uint64_t wifi_note_until;
 static bool suppress_click[3], awake = true, wake_gesture, takeover_gesture, down_held, unlock_armed;
+static bool short_held[3], long_seen[3];
+static uint64_t ok_click_blocked_until;
 static bool unlock_requested;
 static uint64_t last_activity;
 static uint64_t lock_visible_after = UINT64_MAX;
@@ -47,6 +50,16 @@ static const char *const home[] = {"Mouse", "Keys", "Connections", "Status"};
 static const char *const key_names[] = {"Esc", "Enter", "Tab", "Backspace", "Up", "Left", "Right", "Down", "Back"};
 static const uint8_t key_usages[] = {41, 40, 43, 42, 82, 80, 79, 81};
 
+static void home_focus(void)
+{
+    // This C3 has BLE HID only; USB Serial/JTAG is not an output transport.
+    if (page == HOME && !ble.ready && focus < 2) {
+        focus = 2;
+        short_held[PASSPORT_OK] = false;
+        suppress_click[PASSPORT_OK] = true;
+    }
+}
+
 static void request(passport_command_kind_t kind, int x, int y, unsigned usage)
 {
     passport_command_t command = {
@@ -68,6 +81,7 @@ static void navigate(page_t next)
     request(PASSPORT_CANCEL, 0, 0, 0);
     page = next;
     focus = 0;
+    home_focus();
     confirmation_armed = false;
     confirmation_visible_after = UINT64_MAX;
 }
@@ -79,6 +93,7 @@ static void enter_lock_screen(void)
     unlock_armed = unlock_requested = down_held = wake_gesture = takeover_gesture = false;
     repeat_active = ok_held = false;
     memset(suppress_click, true, sizeof(suppress_click));
+    memset(short_held, false, sizeof(short_held));
     lock_visible_after = UINT64_MAX;
     atomic_store(&text_applied, false);
 }
@@ -97,6 +112,7 @@ static void observe_owner(void)
     }
     owner_was_locked = ble.locked;
     owner_generation = ble.generation;
+    home_focus();
     passport_wifi_snapshot(&wifi);
     if (awake && page != LOCK_SCREEN && !ble.locked) {
         if ((!was_ready && ble.ready) || (previous_phase != PW_ONLINE && wifi.phase == PW_ONLINE)) {
@@ -162,6 +178,7 @@ static void activate(void)
 {
     switch (page) {
     case HOME:
+        if (focus < 2 && !ble.ready) return;
         status_return = HOME;
         navigate((page_t[]){MOUSE, KEYS, CONNECTIONS, STATUS}[focus]);
         break;
@@ -271,6 +288,10 @@ static void activate(void)
 
 static void input(const passport_button_event_t *event)
 {
+    // SINGLE_CLICK is delayed until the BSP's double-click window closes.
+    // A short action is already committed at release; these are notifications only.
+    if (event->kind == PASSPORT_CLICKED || event->kind == PASSPORT_DOUBLE) return;
+    bool short_action = false;
     last_activity = event->time_ms;
     if (!awake) {
         awake = true;
@@ -278,7 +299,7 @@ static void input(const passport_button_event_t *event)
         passport_backlight(true);
     }
     if (event->kind == PASSPORT_PRESS) {
-        if (ble.network_active) {
+        if (ble.network_active && !wake_gesture) {
             request(PASSPORT_TAKEOVER,0,0,0);
             repeat_active=false; takeover_gesture=true;
         }
@@ -289,15 +310,29 @@ static void input(const passport_button_event_t *event)
             repeat_active = false;
             request(PASSPORT_CANCEL, 0, 0, 0);
         }
-        if (!wake_gesture && !takeover_gesture) suppress_click[event->button] = false;
+        short_held[event->button] = true;
+        long_seen[event->button] = false;
+        suppress_click[event->button] = wake_gesture || takeover_gesture ||
+            (event->button == PASSPORT_OK && ok_click_blocked_until &&
+             event->time_ms <= ok_click_blocked_until);
         if (event->button != PASSPORT_OK) confirmation_armed = false;
         if (event->button == PASSPORT_OK && (page == WIFI_CONFIRM || page == WIFI_PENDING)) {
-            confirmation_armed = !wake_gesture && !takeover_gesture && atomic_load(&text_applied) && event->time_ms > confirmation_visible_after;
+            confirmation_armed = !suppress_click[event->button] && atomic_load(&text_applied) && event->time_ms > confirmation_visible_after;
         }
         if (event->button == PASSPORT_DOWN) down_held = true;
         if (event->button == PASSPORT_OK && page == LOCK_SCREEN && ble.locked &&
-            !down_held && !wake_gesture && !takeover_gesture && atomic_load(&text_applied) &&
+            !down_held && !suppress_click[event->button] && atomic_load(&text_applied) &&
             event->time_ms > lock_visible_after) unlock_armed = true;
+    }
+    if (event->kind == PASSPORT_RELEASE) {
+        short_action = short_held[event->button] && !long_seen[event->button] && !suppress_click[event->button];
+        // Keep quick UP/DOWN releases responsive. Only OK needs to prevent a
+        // second click in the same burst from activating a newly opened page.
+        if (event->button == PASSPORT_OK && short_held[event->button] && !long_seen[event->button]) {
+            ok_click_blocked_until = event->time_ms + passport_button_click_guard_ms();
+        }
+        short_held[event->button] = false;
+        suppress_click[event->button] = true;
     }
     if (event->kind == PASSPORT_RELEASE && event->button == PASSPORT_DOWN) down_held = false;
     if (event->kind == PASSPORT_RELEASE && event->button == PASSPORT_OK) {
@@ -307,19 +342,20 @@ static void input(const passport_button_event_t *event)
             request(PASSPORT_CANCEL, 0, 0, 0);
         }
     }
+    if (event->kind == PASSPORT_LONG) long_seen[event->button] = true;
     // Takeover consumes ordinary input, but the awake DOWN safety hold still locks.
     if (wake_gesture || (takeover_gesture && !(event->kind == PASSPORT_LONG && event->button == PASSPORT_DOWN))) {
-        if (event->kind == PASSPORT_CLICKED || event->kind == PASSPORT_DOUBLE) wake_gesture = takeover_gesture = false;
         // Waking and ordinary takeover holds require a new press after release.
         if (event->kind == PASSPORT_RELEASE) { wake_gesture = takeover_gesture = false; suppress_click[event->button] = true; }
         return;
     }
     if (event->kind == PASSPORT_LONG) {
+        const bool consumed = suppress_click[event->button];
         suppress_click[event->button] = true;
         if (event->button == PASSPORT_DOWN) {
             request(PASSPORT_LOCK, 0, 0, 0);
             enter_lock_screen();
-        } else if (event->button == PASSPORT_OK) {
+        } else if (event->button == PASSPORT_OK && !consumed) {
             if (ble.locked && unlock_armed) {
                 request(PASSPORT_UNLOCK, 0, 0, 0);
                 unlock_requested = true;
@@ -352,13 +388,13 @@ static void input(const passport_button_event_t *event)
         }
         return;
     }
-    if (event->kind == PASSPORT_DOUBLE) { suppress_click[event->button] = true; return; }
-    if (event->kind != PASSPORT_CLICKED || suppress_click[event->button]) return;
+    if (!short_action) return;
     if (!atomic_load(&text_applied)) return;
     if (page == LOCK_SCREEN) return;
     bool bounded_list = page == WIFI_LIST || page == WIFI_SAVED;
-    if (event->button == PASSPORT_UP) focus = bounded_list ? (focus ? focus - 1 : 0) : (focus + entries() - 1) % entries();
-    else if (event->button == PASSPORT_DOWN) focus = bounded_list ? (focus + 1 < entries() ? focus + 1 : focus) : (focus + 1) % entries();
+    unsigned first = page == HOME && !ble.ready ? 2 : 0;
+    if (event->button == PASSPORT_UP) focus = bounded_list ? (focus ? focus - 1 : 0) : (focus > first ? focus - 1 : entries() - 1);
+    else if (event->button == PASSPORT_DOWN) focus = bounded_list ? (focus + 1 < entries() ? focus + 1 : focus) : (focus + 1 < entries() ? focus + 1 : first);
     else {
         if ((page == WIFI_CONFIRM || page == WIFI_PENDING) && !confirmation_armed) return;
         page_t previous = page;
@@ -422,6 +458,7 @@ static void build_view(const char *http)
     view.layout = VIEW_LIST;
     view.count = entries();
     if (focus >= view.count) focus = 0;
+    home_focus();
     view.focus = focus;
     view.tone = !ble.synced || !ble.storage_known ? TONE_ERROR : ble.ready ? TONE_GOOD : TONE_WAIT;
     view.bluetooth_tone = !ble.synced ? TONE_ERROR : ble.ready ? TONE_GOOD : ble.connected || ble.advertising ? TONE_WAIT : TONE_MUTED;
@@ -439,8 +476,9 @@ static void build_view(const char *http)
     case HOME:
         view.layout = VIEW_HOME;
         snprintf(view.title, sizeof(view.title), "Your controls");
-        item(0, home[0], "Point + click", ICON_MOUSE);
-        item(1, home[1], "Quick actions", ICON_KEYS);
+        item(0, home[0], ble.ready ? "Point + click" : ble.connected ? "Not ready" : "No host", ICON_MOUSE);
+        item(1, home[1], ble.ready ? "Quick actions" : ble.connected ? "Not ready" : "No host", ICON_KEYS);
+        view.items[0].disabled = view.items[1].disabled = !ble.ready;
         item(2, home[2], wifi.phase == PW_ONLINE ? "BT / LAN" : wifi.ap_started ? "BT / AP" : "BT / WiFi offline", ICON_CONNECTIONS);
         item(3, home[3], "Device details", ICON_STATUS);
         break;
@@ -524,12 +562,16 @@ static void build_view(const char *http)
         view.layout = VIEW_MESSAGE;
         snprintf(view.title, sizeof(view.title), "Pair a host");
         snprintf(view.target, sizeof(view.target), "Bluetooth / Just Works");
-        snprintf(view.heading, sizeof(view.heading), "%s", ble.pairing ? "Ready to pair" : ble.connected ? "Check your host" : "Pairing window");
+        snprintf(view.heading, sizeof(view.heading), "%s", ble.connected ?
+                 (ble.encrypted && ble.bonded ? "Host saved" : "Securing link") :
+                 ble.pairing ? "Ready to pair" : "Pairing ended");
         if (ble.window_seconds) snprintf(view.hero, sizeof(view.hero), "%u s", ble.window_seconds);
         else view.hero_icon = ICON_BLUETOOTH;
-        snprintf(view.body, sizeof(view.body), "Choose Passport Input\nwhile the window is open.");
-        item(0, "Cancel / Back", "", ICON_BACK);
-        snprintf(view.ok, sizeof(view.ok), "Cancel");
+        if (ble.connected) snprintf(view.body, sizeof(view.body), "%s\nSaved hosts: %u", readiness(), ble.peer_count);
+        else if (ble.pairing) snprintf(view.body, sizeof(view.body), "Choose Passport Input\nwhile the window is open.");
+        else snprintf(view.body, sizeof(view.body), "%s\nSaved hosts: %u", ble.result, ble.peer_count);
+        item(0, ble.pairing ? "Cancel pairing" : "Back to Bluetooth", "", ICON_BACK);
+        snprintf(view.ok, sizeof(view.ok), "%s", ble.pairing ? "Cancel" : "Back");
         break;
     case MOUSE:
         view.layout = VIEW_MOUSE;
@@ -753,9 +795,19 @@ static void render_ui(const char *http)
 {
     build_view(http);
     if (memcmp(&view, &rendered_view, sizeof(view)) || !atomic_load(&text_applied)) {
+#if CONFIG_PASSPORT_DIAGNOSTICS
+        const uint64_t started = esp_timer_get_time() / 1000;
+#endif
         bool applied = passport_render(&view);
         atomic_store(&text_applied, applied);
         if (applied) rendered_view = view;
+#if CONFIG_PASSPORT_DIAGNOSTICS
+        const uint64_t finished = esp_timer_get_time() / 1000;
+        if (passport_board_diagnostics()) {
+            ESP_LOGI("passport_diag", "render_start=%llu render_end=%llu applied=%u page=%u focus=%u",
+                     (unsigned long long)started, (unsigned long long)finished, applied, (unsigned)page, focus);
+        }
+#endif
     }
     if ((page == WIFI_CONFIRM || page == WIFI_PENDING) && atomic_load(&text_applied) && confirmation_visible_after == UINT64_MAX) confirmation_visible_after = esp_timer_get_time() / 1000;
     if (page == LOCK_SCREEN && atomic_load(&text_applied) && lock_visible_after == UINT64_MAX) {
@@ -766,8 +818,31 @@ static void render_ui(const char *http)
 static void dispatch_button(const passport_button_event_t *event)
 {
     uint64_t now = esp_timer_get_time() / 1000;
-    if (now >= event->time_ms && now - event->time_ms <= 250) input(event);
-    else { repeat_active = false; passport_ble_emergency_lock(); }
+    const bool fresh = now >= event->time_ms && now - event->time_ms <= 250;
+    if (fresh) input(event);
+    else {
+        repeat_active = false;
+        memset(short_held, false, sizeof(short_held));
+        memset(suppress_click, true, sizeof(suppress_click));
+        confirmation_armed = unlock_armed = false;
+        passport_ble_emergency_lock();
+    }
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    if (passport_board_diagnostics()) {
+        ESP_LOGI("passport_diag", "event=%u button=%u t=%llu consumed=%llu fresh=%u page=%u focus=%u locked=%u awake=%u armed=%u requested=%u",
+                 (unsigned)event->kind, (unsigned)event->button,
+                 (unsigned long long)event->time_ms, (unsigned long long)now,
+                 fresh, (unsigned)page, focus, ble.locked, awake, unlock_armed, unlock_requested);
+    }
+#endif
+}
+
+static void service_idle(uint64_t now)
+{
+    if (awake && !wifi.setup_open && now - last_activity >= 60000) {
+        awake = false;
+        passport_backlight(false);
+    }
 }
 
 void passport_ui_run(const char *http, bool buttons_available)
@@ -782,6 +857,9 @@ void passport_ui_run(const char *http, bool buttons_available)
     for (;;) {
         observe_owner();
         if (!buttons_available || passport_button_overflow()) {
+#if CONFIG_PASSPORT_DIAGNOSTICS
+            if (passport_board_diagnostics()) ESP_LOGW("passport_diag", "Button safety reset: available=%u", buttons_available);
+#endif
             passport_ble_emergency_lock();
             enter_lock_screen();
         }
@@ -799,12 +877,8 @@ void passport_ui_run(const char *http, bool buttons_available)
             dispatch_button(&event);
         }
         service_repeat(esp_timer_get_time() / 1000);
-        if (awake && !wifi.setup_open && (uint64_t)(esp_timer_get_time() / 1000) - last_activity >= 60000) {
-            awake = false;
-            enter_lock_screen();
-            passport_backlight(false);
-            passport_ble_emergency_lock();
-        }
+        (void)passport_board_diagnostics();
+        service_idle(esp_timer_get_time() / 1000);
     }
 }
 

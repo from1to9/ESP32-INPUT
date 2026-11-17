@@ -6,6 +6,8 @@
 #include "bsp_display.h"
 #include "bsp_pins.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -80,6 +82,12 @@ unsigned passport_buttons_observed(void)
     return atomic_load(&observed_buttons);
 }
 
+unsigned passport_button_click_guard_ms(void)
+{
+    // The pinned button driver completes a click after ticks > short_press_ticks.
+    return BSP_BTN_SHORT_PRESS_MS + CONFIG_BUTTON_PERIOD_TIME_MS;
+}
+
 bool passport_render(const passport_view_t *view)
 {
     if (!display_ready || !bsp_lvgl_lock(50)) return false;
@@ -101,4 +109,54 @@ bool passport_button_overflow(void)
     return lost;
 }
 
-void passport_backlight(bool on) { bsp_display_backlight(on ? 60 : 0); }
+void passport_backlight(bool on)
+{
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    const uint64_t now = esp_timer_get_time() / 1000;
+#endif
+    bsp_display_backlight(on ? 60 : 0);
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    if (passport_board_diagnostics()) {
+        ESP_LOGI("passport_diag", "backlight=%u t=%llu", on, (unsigned long long)now);
+    }
+#endif
+}
+
+bool passport_board_diagnostics(void)
+{
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    static uint64_t started, next_sample, next_log;
+    static int minimum, maximum, latest = -1;
+    static unsigned samples, invalid;
+    const uint64_t now = esp_timer_get_time() / 1000;
+    if (!started) started = now;
+    if (now - started >= 180000) return false;
+    if (now >= next_sample) {
+        next_sample = now + 10;
+        // Normal UI waits are 20 ms. Aggregate any samples obtained between
+        // logs, so a short low pulse need not coincide with a log timestamp.
+        latest = bsp_button_read_mv();
+        if (latest < 0) ++invalid;
+        else {
+            if (!samples || latest < minimum) minimum = latest;
+            if (!samples || latest > maximum) maximum = latest;
+            ++samples;
+        }
+    }
+    if (now >= next_log) {
+        next_log = now + 250;
+        const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        // Independent calibrated reading from the BSP's shared ADC handle,
+        // not the decoder's cached sample. Never feed it into event handling.
+        ESP_LOGI("passport_diag", "t=%llu adc_mv=%d min=%d max=%d samples=%u invalid=%u glitches=%lu observed=%u heap=%zu largest=%zu",
+                 (unsigned long long)now, latest, samples ? minimum : -1,
+                 samples ? maximum : -1, samples, invalid,
+                 (unsigned long)bsp_button_glitch_count(), passport_buttons_observed(),
+                 heap_caps_get_free_size(caps), heap_caps_get_largest_free_block(caps));
+        samples = invalid = 0;
+    }
+    return true;
+#else
+    return false;
+#endif
+}

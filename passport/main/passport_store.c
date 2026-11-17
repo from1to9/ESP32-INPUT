@@ -1,10 +1,32 @@
 #include "passport_store.h"
 
 #include <strings.h>
+#include <string.h>
 #include "nvs.h"
+#include "esp_log.h"
 #include "store/config/ble_store_config.h"
 
-void ble_store_config_init(void);
+void __real_ble_store_config_init(void);
+
+static bool config_initialized;
+
+static void initialize_config(void)
+{
+    // The pinned void initializer returns before installing callbacks if its
+    // RAM allocation fails. Clear the old marker before every owner restart.
+    ble_hs_cfg.store_read_cb = NULL;
+    __real_ble_store_config_init();
+    config_initialized = ble_hs_cfg.store_read_cb == ble_store_config_read;
+}
+
+void __wrap_ble_store_config_init(void)
+{
+    // IDF's dynamic privacy startup calls this again after Passport has loaded
+    // NVS and installed its callbacks. Keep that startup from wiping both.
+    if (!config_initialized) {
+        initialize_config();
+    }
+}
 
 // One atomic NVS blob preserves the fixed SDK's store records. An SDK/ABI
 // change requires a deliberate migration; unknown formats remain unavailable.
@@ -19,7 +41,7 @@ static const int types[] = {
     BLE_STORE_OBJ_TYPE_CSFC, BLE_STORE_OBJ_TYPE_PEER_ADDR, BLE_STORE_OBJ_TYPE_LOCAL_IRK
 };
 static nvs_handle_t storage;
-static bool known, transaction, snapshot_full;
+static bool known, transaction, snapshot_full, selection_uncertain;
 static uint32_t security_revision;
 
 static int collect(int type, union ble_store_value *value, void *arg)
@@ -43,8 +65,24 @@ static int persist(void)
         // NimBLE treats a nonzero iterator callback as successful early stop.
         if (snapshot_full) rc = BLE_HS_ESTORE_CAP;
     }
-    if (!rc && nvs_set_blob(storage, "records", &snapshot, sizeof(snapshot)) != ESP_OK) rc = BLE_HS_ESTORE_FAIL;
-    if (!rc && nvs_commit(storage) != ESP_OK) rc = BLE_HS_ESTORE_FAIL;
+    if (!rc) {
+        esp_err_t err = nvs_set_blob(storage, "records", &snapshot, sizeof(snapshot));
+        if (err != ESP_OK) {
+#if CONFIG_PASSPORT_DIAGNOSTICS
+            ESP_LOGW("passport_store", "Bond snapshot write failed: status=%d", err);
+#endif
+            rc = BLE_HS_ESTORE_FAIL;
+        }
+    }
+    if (!rc) {
+        esp_err_t err = nvs_commit(storage);
+        if (err != ESP_OK) {
+#if CONFIG_PASSPORT_DIAGNOSTICS
+            ESP_LOGW("passport_store", "Bond snapshot commit failed: status=%d", err);
+#endif
+            rc = BLE_HS_ESTORE_FAIL;
+        }
+    }
     explicit_bzero(&snapshot, sizeof(snapshot));
     if (rc) known = false;
     return rc;
@@ -78,7 +116,12 @@ static int delete_record(int type, const union ble_store_key *key)
 
 int passport_store_init(void)
 {
-    ble_store_config_init();
+    // Explicit owner initialization also handles a full host restart. Only the
+    // SDK's subsequent initialization is idempotent through the linker wrapper.
+    known = false;
+    selection_uncertain = false;
+    initialize_config();
+    if (!config_initialized) return BLE_HS_ESTORE_FAIL;
     esp_err_t err = nvs_open("passport_bonds", NVS_READWRITE, &storage);
     if (err != ESP_OK) return BLE_HS_ESTORE_FAIL;
     size_t length = sizeof(snapshot);
@@ -111,12 +154,50 @@ int passport_store_init(void)
 bool passport_store_known(void) { return known; }
 uint32_t passport_store_security_revision(void) { return security_revision; }
 
+int passport_store_selected(ble_addr_t *peer)
+{
+    if (!known || selection_uncertain) return BLE_HS_ESTORE_FAIL;
+    ble_addr_t saved;
+    size_t length = sizeof(saved);
+    esp_err_t err = nvs_get_blob(storage, "selected", &saved, &length);
+    if (err == ESP_ERR_NVS_NOT_FOUND) return BLE_HS_ENOENT;
+    if (err != ESP_OK || length != sizeof(saved)) return BLE_HS_ESTORE_FAIL;
+    const ble_addr_t cleared = { .type = UINT8_MAX };
+    if (!memcmp(&saved, &cleared, sizeof(saved))) return PASSPORT_STORE_SELECTION_CLEARED;
+    if (saved.type != BLE_ADDR_PUBLIC &&
+        (saved.type != BLE_ADDR_RANDOM || (saved.val[5] & 0xc0) != 0xc0)) return BLE_HS_ESTORE_FAIL;
+    *peer = saved;
+    return 0;
+}
+
+int passport_store_select(const ble_addr_t *peer)
+{
+    if (!known) return BLE_HS_ESTORE_FAIL;
+    ble_addr_t saved;
+    if (!passport_store_selected(&saved) && !ble_addr_cmp(&saved, peer)) return 0;
+    // An explicit selection may replace an absent or unreadable preference;
+    // it never changes bond records or their admission rules.
+    selection_uncertain = true;
+    if (nvs_set_blob(storage, "selected", peer, sizeof(*peer)) != ESP_OK ||
+        nvs_commit(storage) != ESP_OK) return BLE_HS_ESTORE_FAIL;
+    selection_uncertain = false;
+    return 0;
+}
+
 int passport_store_forget(const ble_addr_t *peer)
 {
     if (!known) return BLE_HS_ESTORE_FAIL;
+    ble_addr_t saved;
+    int rc = passport_store_selected(&saved);
+    if (rc && rc != BLE_HS_ENOENT && rc != PASSPORT_STORE_SELECTION_CLEARED) { known = false; return rc; }
+    const bool clear_selection = rc == BLE_HS_ENOENT || (!rc && !ble_addr_cmp(&saved, peer));
     transaction = true;
-    int rc = ble_gap_unpair(peer);
+    rc = ble_gap_unpair(peer);
     transaction = false;
+    if (!rc && clear_selection) {
+        const ble_addr_t cleared = { .type = UINT8_MAX };
+        if (nvs_set_blob(storage, "selected", &cleared, sizeof(cleared)) != ESP_OK) rc = BLE_HS_ESTORE_FAIL;
+    }
     if (!rc) rc = persist();
     // A partial in-memory deletion or uncertain NVS commit cannot become ready.
     if (rc) known = false;

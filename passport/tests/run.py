@@ -16,7 +16,7 @@ headers = (
     'esp_log.h esp_timer.h lvgl.h'
 ).split()
 def sdk_function(source, name):
-    match = re.search(r'(?m)^(?:static )?(?:int|void|esp_err_t)\s+' + re.escape(name) + r'\(', source)
+    match = re.search(r'(?m)^(?:static )?(?:int|void|esp_err_t|uint32_t)\s+' + re.escape(name) + r'\(', source)
     if not match:
         raise RuntimeError(f'Missing pinned SDK function: {name}')
     start = source.index('{', match.start())
@@ -63,6 +63,14 @@ for test in sys.argv[1:] or tests:
                 raise RuntimeError('CCCD capacity must be explicit for this HID profile')
             defines = [f'-DTEST_BLE_STORE_MAX_CCCDS={capacity.group(1)}']
         sources = [root / f'passport/tests/test_{test}.c']
+        if test == 'store':
+            sdk = root / '.tools/passport-esp-idf/components/bt/host/nimble/nimble/nimble/host'
+            (work / 'sdk_store_init.inc').write_text(sdk_function(
+                (sdk / 'store/config/src/ble_store_config.c').read_text(), 'ble_store_config_init'))
+            (work / 'sdk_store_deinit.inc').write_text(sdk_function(
+                (sdk / 'store/config/src/ble_store_config.c').read_text(), 'ble_store_config_deinit'))
+            (work / 'sdk_default_irk.inc').write_text(sdk_function(
+                (sdk / 'src/ble_hs_pvcy.c').read_text(), 'ble_hs_pvcy_set_default_irk'))
         if test == 'setup':
             sdk_json = root / '.tools/passport-esp-idf/components/json/cJSON'
             (work / 'cJSON.h').write_text((sdk_json / 'cJSON.h').read_text())
@@ -87,8 +95,8 @@ for test in sys.argv[1:] or tests:
                 'components/interaction/interaction.c', 'components/control_protocol/control_protocol.c',
                 'components/control_protocol/control_json.c', 'components/control_protocol/control_registry.c',
                 'components/control_protocol/control_sha256.c')]
-            defines += ['-D_POSIX_C_SOURCE=200809L', '-DCP_MAX_RESULTS=16U', '-DCP_MAX_ACTIVE_REQUESTS=4U',
-                        '-DCJ_CAPACITY=4096U', '-DCJ_TOKENS=192U', '-DAPP_REMOTE_INPUT_JOBS=4U']
+            defines += ['-D_POSIX_C_SOURCE=200809L', '-DCP_MAX_RESULTS=4U', '-DCP_MAX_ACTIVE_REQUESTS=2U',
+                        '-DCJ_CAPACITY=4096U', '-DCJ_TOKENS=192U', '-DAPP_REMOTE_INPUT_JOBS=2U', '-DAPP_REMOTE_INPUT_RECENT=4U']
         if test == 'management':
             sources += [root / 'passport/main/passport_management.c', root / 'passport/main/passport_wifi_text.c']
         if test == 'sound':
@@ -101,6 +109,27 @@ for test in sys.argv[1:] or tests:
             sources += [driver, codec / 'esp_codec_dev_if.c', codec / 'esp_codec_dev_vol.c']
         if test == 'startup':
             sources += [root / 'passport/main/passport_wifi_text.c']
+            sys.path.insert(0, str(root / 'tools'))
+            from passport_button_patch import patch_source
+            button_dir = root / 'passport/managed_components/espressif__button'
+            source = patch_source((button_dir / 'iot_button.c').read_text())
+            declarations = source[source.index('enum {\n    PRESS_DOWN_CHECK'):source.index('//button handle list head.')]
+            macros = source[source.index('#define TICKS_INTERVAL'):source.index('/**\n  * @brief  Button driver core')]
+            (work / 'sdkconfig.h').write_text('#include "stubs.h"\n')
+            defines += ['-I', str(button_dir / 'include'), '-I', str(button_dir / 'interface'),
+                        '-DCONFIG_BUTTON_DEBOUNCE_TICKS=2', '-DCONFIG_BUTTON_LONG_PRESS_HOLD_SERIAL_TIME_MS=20']
+            # The actual pinned state machine drives production board/UI code.
+            # Only key-level/time/queue SDK boundaries are substituted. Suppress
+            # the upstream signedness warnings inside the extracted code only.
+            (work / 'sdk_button.inc').write_text(
+                '#include <stdlib.h>\n#include "iot_button.h"\n'
+                '#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored "-Wsign-compare"\n'
+                + declarations + macros + '#define BTN_CHECK(a, message, result) assert(a)\n'
+                + sdk_function(source, 'iot_button_get_pressed_time')
+                + sdk_function(source, 'button_handler')
+                + '#undef BTN_CHECK\n#pragma GCC diagnostic pop\n')
+        if test in ('startup', 'ble', 'store', 'setup'):
+            defines += ['-DCONFIG_PASSPORT_DIAGNOSTICS=1']
         binary = work / f'test_{test}'
         subprocess.run([
             os.environ.get('CC', 'cc'), '-std=c11', '-Wall', '-Wextra', '-Werror',

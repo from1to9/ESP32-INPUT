@@ -10,6 +10,7 @@ static uint64_t clock_ms;
 static bool store_ok, send_fail;
 static int stop_error, start_error, whitelist_error, terminate_error;
 static unsigned adv_calls, terminate_calls, forget_calls, report_count;
+static bool controller_advertising;
 static int filter_policy;
 static ble_addr_t saved[3], allowed;
 static unsigned saved_count;
@@ -20,6 +21,9 @@ static struct { unsigned handle, length; uint8_t bytes[8]; } reports[128];
 static passport_command_t queue[8];
 static unsigned queue_count;
 static struct os_mbuf mbuf;
+static unsigned diagnostic_heap_reads;
+size_t heap_caps_get_free_size(uint32_t caps) { (void)caps; ++diagnostic_heap_reads; return 20000; }
+size_t heap_caps_get_largest_free_block(uint32_t caps) { (void)caps; return 12000; }
 void passport_management_install(void) {} // Adapter tested separately; this suite exercises the real BLE backend.
 void passport_control_http_service(uint64_t now) { (void)now; }
 void passport_wifi_snapshot(passport_wifi_state_t *out) { *out=(passport_wifi_state_t){0}; }
@@ -29,11 +33,23 @@ void explicit_bzero(void *p, size_t size) { volatile uint8_t *b = p; while(size-
 int64_t esp_timer_get_time(void) { return clock_ms * 1000; }
 int ble_addr_cmp(const ble_addr_t *a,const ble_addr_t *b) { return memcmp(a,b,sizeof(*a)); }
 int passport_store_init(void) { return 0; }
+static ble_addr_t stored_selection;
+static bool selection_present, selection_failure, selection_cleared;
+int passport_store_selected(ble_addr_t *peer) {
+    if(selection_failure)return BLE_HS_ESTORE_FAIL;
+    if(selection_cleared)return PASSPORT_STORE_SELECTION_CLEARED;
+    if(!selection_present)return BLE_HS_ENOENT;*peer=stored_selection;return 0;
+}
+int passport_store_select(const ble_addr_t *peer) {
+    if(selection_failure)return BLE_HS_ESTORE_FAIL;
+    stored_selection=*peer;selection_present=true;selection_cleared=false;return 0;
+}
 bool passport_store_known(void) { return store_ok; }
 uint32_t passport_store_security_revision(void) { return fixture_security_revision; }
 int passport_store_write(int type,const union ble_store_value *value) { (void)type;(void)value;return store_ok?0:BLE_HS_ESTORE_FAIL; }
 int passport_store_forget(const ble_addr_t *peer) {
     ++forget_calls;
+    if(!selection_present||!ble_addr_cmp(peer,&stored_selection)){selection_present=false;selection_cleared=true;}
     for(unsigned i=0;i<saved_count;i++) if(!ble_addr_cmp(peer,&saved[i])) {
         memmove(saved+i,saved+i+1,(--saved_count-i)*sizeof(*saved)); return 0;
     }
@@ -67,11 +83,12 @@ int ble_gatts_notify_custom(uint16_t conn,uint16_t handle,struct os_mbuf *b) {
     reports[report_count].handle=handle;reports[report_count].length=b->len;
     memcpy(reports[report_count++].bytes,b->data,b->len);return 0;
 }
-int ble_gap_adv_stop(void) { return stop_error; }
+int ble_gap_adv_stop(void) { if(!stop_error)controller_advertising=false;return stop_error; }
+int ble_gap_adv_active(void) { return controller_advertising; }
 int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *f) { assert(f->name_len==14);return 0; }
 int ble_gap_wl_set(const ble_addr_t *peer,int n) { assert(n==1);allowed=*peer;return whitelist_error; }
 int ble_gap_adv_start(int type,const ble_addr_t *peer,int duration,const struct ble_gap_adv_params *p,int (*cb)(struct ble_gap_event *,void *),void *arg) {
-    (void)peer;(void)arg;assert(type==BLE_OWN_ADDR_PUBLIC&&duration>0&&duration<=300000&&cb==gap_event);++adv_calls;filter_policy=p->filter_policy;return start_error;
+    (void)peer;(void)arg;assert(type==BLE_OWN_ADDR_PUBLIC&&duration>0&&duration<=300000&&cb==gap_event);++adv_calls;filter_policy=p->filter_policy;if(!start_error)controller_advertising=true;return start_error;
 }
 int ble_gap_conn_find(uint16_t conn,struct ble_gap_conn_desc *desc) { assert(conn==connection);*desc=peer_desc;return 0; }
 int ble_gap_security_initiate(uint16_t conn) { assert(conn==connection);return 0; }
@@ -99,6 +116,8 @@ static void setup(void) {
     connection=BLE_HS_CONN_HANDLE_NONE;hid_engine_init(&engine);hid_engine_set_locked(&engine,true);
     suspended=new_connection=selected_valid=transition=disconnect_requested=closing=link_ready=false;
     pairing_failed=false;
+    startup_restore=selection_present=selection_failure=selection_cleared=false;
+    reconnect_end=reconnect_next=0;reconnect_attempts=0;
     window_end=release_end=lease_end=0;clock_ms=1000;queue_count=0;store_ok=true;send_fail=false;
     stop_error=start_error=whitelist_error=terminate_error=0;
     adv_calls=terminate_calls=forget_calls=report_count=0;saved_count=0;atomic_store(&emergency_lock,false);
@@ -196,6 +215,37 @@ static void test_input_release(void) {
     tick_once();assert(!published.release_pending && state.ready);
     reset(1);assert(!state.connected&&!state.synced&&engine.state.locked);
 }
+static void test_disconnect_diagnostics(void)
+{
+    setup(); advertise(true, 0);
+    peer_desc=(struct ble_gap_conn_desc){.peer_id_addr={.val={9}}};
+    gap(BLE_GAP_EVENT_CONNECT);
+    saved[0]=peer_desc.peer_id_addr; saved_count=1;
+    peer_desc.sec_state.encrypted=peer_desc.sec_state.bonded=true;
+    tick_once();
+    assert(!new_connection && !state.pairing && state.bonded && state.peer_count==1);
+    assert(!state.ready && !strcmp(state.result,"New host saved"));
+    assert(selection_present && !ble_addr_cmp(&stored_selection,&saved[0]));
+    setup(); connect_saved();
+    struct ble_gap_event encryption = {.type = BLE_GAP_EVENT_ENC_CHANGE, .enc_change = {.status = 7}};
+    gap_event(&encryption, NULL);
+    assert(closing && !strcmp(state.result, "Encryption failed"));
+    gap(BLE_GAP_EVENT_DISCONNECT);
+    assert(!state.connected && !strcmp(state.result, "Encryption failed"));
+    setup(); connect_saved();
+    gap(BLE_GAP_EVENT_DISCONNECT);
+    assert(!strcmp(state.result, "Disconnected"));
+    diagnostic_until = clock_ms + 20;
+    unsigned before = diagnostic_heap_reads;
+    diagnostic("probe", 0);
+    assert(diagnostic_heap_reads == before + 1);
+    clock_ms += 20;
+    diagnostic("expired", 0);
+    assert(diagnostic_heap_reads == before + 1);
+    advertise(true, 2000);
+    assert(diagnostic_until == clock_ms + 12000 && diagnostic_heap_reads > before + 1);
+}
+
 static void test_bond_names(void)
 {
     setup();
@@ -271,9 +321,87 @@ static void test_remote_management(void)
     assert(passport_ble_remote_poll(clock_ms,&r)&&r.error==CP_OK&&!state.advertising&&!state.pairing);
 }
 
+static void test_startup_reconnect(void)
+{
+    setup();hid_engine_set_locked(&engine,false);
+    saved[0]=(ble_addr_t){.val={1}};saved_count=1;
+    startup_restore=true;synced();tick_once();
+    assert(selection_present && selected_valid && !ble_addr_cmp(&selected,&saved[0]));
+    assert(adv_calls==1 && state.advertising && !state.pairing && reconnect_end);
+    assert(filter_policy==BLE_HCI_ADV_FILT_CONN && !ble_addr_cmp(&allowed,&saved[0]));
+    const uint64_t startup_deadline=window_end;
+    peer_desc=(struct ble_gap_conn_desc){.peer_id_addr=saved[0]};gap(BLE_GAP_EVENT_CONNECT);
+    peer_desc.sec_state.encrypted=peer_desc.sec_state.bonded=true;
+    subscribe(keyboard_handle,true);subscribe(mouse_handle,true);tick_once();tick_once();
+    assert(state.ready && !reconnect_end && !engine.count && !state.window_seconds);
+    // A completed restore stays usable past the old admission deadline. Local
+    // screen inactivity is an independent UI policy, not an expired BLE link.
+    clock_ms=startup_deadline;tick_once();tick_once();
+    assert(state.ready && !state.locked && !terminate_calls && adv_calls==1);
+    assert(strcmp(state.result,"Window expired") && report_count==2);
+    issue(PASSPORT_DISCONNECT);tick_once();tick_once();gap(BLE_GAP_EVENT_DISCONNECT);tick_once();
+    unsigned attempts=adv_calls;clock_ms+=1000;tick_once();assert(adv_calls==attempts);
+
+    setup();hid_engine_set_locked(&engine,false);
+    saved[0]=(ble_addr_t){.val={1}};saved[1]=(ble_addr_t){.val={2}};saved_count=2;
+    stored_selection=saved[1];selection_present=startup_restore=true;synced();tick_once();
+    assert(!ble_addr_cmp(&selected,&saved[1]) && adv_calls==1);
+    issue(PASSPORT_FORGET);tick_once();assert(!selection_present && !reconnect_end && !selected_valid);
+    clock_ms+=1000;tick_once();assert(adv_calls==1);
+    assert(saved_count==1 && selection_cleared);
+    startup_restore=true;synced();tick_once();assert(adv_calls==1 && !selected_valid);
+
+    setup();hid_engine_set_locked(&engine,false);saved_count=2;
+    saved[0]=(ble_addr_t){.val={1}};saved[1]=(ble_addr_t){.val={2}};
+    startup_restore=true;synced();tick_once();assert(!selected_valid && !adv_calls && !selection_present);
+    stored_selection=(ble_addr_t){.val={3}};selection_present=startup_restore=true;
+    synced();tick_once();assert(!selected_valid && !adv_calls);
+    selection_failure=startup_restore=true;synced();tick_once();assert(!selected_valid && !adv_calls);
+
+    setup();hid_engine_set_locked(&engine,false);saved[0]=(ble_addr_t){.val={1}};saved_count=1;
+    start_error=1;startup_restore=true;synced();tick_once();
+    for(unsigned i=0;i<5;++i){clock_ms+=1000;tick_once();}
+    assert(reconnect_attempts==3 && !reconnect_end && !state.advertising);
+
+    setup();hid_engine_set_locked(&engine,false);saved[0]=(ble_addr_t){.val={1}};saved_count=1;
+    startup_restore=true;synced();tick_once();clock_ms=reconnect_end;tick_once();
+    assert(!reconnect_end && !state.advertising && !state.pairing);
+    setup();hid_engine_set_locked(&engine,false);saved[0]=(ble_addr_t){.val={1}};saved_count=1;
+    startup_restore=true;synced();tick_once();
+    struct ble_gap_event failed={.type=BLE_GAP_EVENT_CONNECT,.connect={.status=1}};
+    gap_event(&failed,NULL);tick_once();assert(adv_calls==1);
+    clock_ms+=1000;tick_once();assert(adv_calls==2 && state.advertising);
+    saved[1]=(ble_addr_t){.val={2}};saved_count=2;refresh_peers();
+    passport_command_t change=action(PASSPORT_ADVERTISE);memcpy(change.peer,saved[1].val,6);
+    command(&change,clock_ms);tick_once();
+    assert(!reconnect_end && !ble_addr_cmp(&stored_selection,&saved[1]));
+    setup();saved[0]=(ble_addr_t){.val={1}};saved_count=1;
+    startup_restore=true;synced();tick_once();assert(!adv_calls && !reconnect_end); // Locked startup.
+
+    setup();connect_saved();selection_failure=true;
+    issue(PASSPORT_ADVERTISE);tick_once();tick_once();gap(BLE_GAP_EVENT_DISCONNECT);tick_once();
+    assert(!state.advertising && !strcmp(state.result,"Host selection not saved"));
+
+    for(unsigned remote=0;remote<2;++remote) {
+        setup();hid_engine_set_locked(&engine,false);saved[0]=(ble_addr_t){.val={1}};saved_count=1;
+        startup_restore=true;synced();tick_once();clock_ms+=1200;
+        if(remote) {
+            cp_command_t close=remote_request(CP_OP_BLUETOOTH_PAIRING_CLOSE);cp_result_t result;
+            assert(passport_ble_remote_begin(&close,clock_ms,&result)==CP_OK);
+            assert(passport_ble_remote_poll(clock_ms,&result) && result.error==CP_OK);
+        } else issue(PASSPORT_STOP_PAIR);
+        tick_once();assert(!state.advertising && !reconnect_end && adv_calls==1);
+    }
+}
+
 int main(void) {
-    setup();passport_control_deinit();assert(passport_ble_start()==ESP_OK);assert(ble_hs_cfg.sm_io_cap==BLE_HS_IO_NO_INPUT_OUTPUT&&ble_hs_cfg.sm_bonding);
-    test_security();test_input_release();test_bond_names();test_remote_management();
+    for (unsigned available=0;available<2;++available) {
+        setup();passport_control_deinit();assert(passport_ble_start(available)==ESP_OK);
+        assert(engine.state.locked==!available && state.locked==!available);
+        assert(!state.ready && !report_count); // Navigable Home does not send HID.
+        assert(ble_hs_cfg.sm_io_cap==BLE_HS_IO_NO_INPUT_OUTPUT&&ble_hs_cfg.sm_bonding);
+    }
+    test_security();test_input_release();test_disconnect_diagnostics();test_bond_names();test_remote_management();test_startup_reconnect();
     setup();connect_saved();tick_once();tick_once();
     passport_command_t old=action(PASSPORT_MOVE);old.x=12;
     unsigned revision=state.input_revision;issue(PASSPORT_TAKEOVER);

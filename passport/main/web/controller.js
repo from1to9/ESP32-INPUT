@@ -42,6 +42,7 @@ export class Controller {
     this.state = null;
     this.controlled = false;
     this.busy = false;
+    this.renewing = false;
     this.managing = false;
     this.closing = false;
     this.uncertain = false;
@@ -54,6 +55,7 @@ export class Controller {
     this.onchange = () => {};
     this.generation = 0;
   }
+  get foregroundBusy() { return this.busy && !this.renewing; }
   changed() { this.onchange(); }
   halt(message) {
     this.controlled = false;
@@ -65,8 +67,10 @@ export class Controller {
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), 3500);
     try {
+      // Preserve a concrete Origin under no-referrer in Safari. API paths are
+      // relative and the page's connect-src policy remains restricted to self.
       const response = await this.fetcher(path, {
-        method, mode: "same-origin", credentials: "same-origin", cache: "no-store", redirect: "error",
+        method, mode: "cors", credentials: "same-origin", cache: "no-store", redirect: "error",
         headers: {Accept: "application/json", ...(token ? {Authorization: `Bearer ${token}`} : {}),
           ...(path === "/api/v1/open-session" ? {"X-Passport-Open": "1"} : {}), ...(method === "GET" ? {} : {"Content-Type": "application/json"}),
           ...(csrf && method !== "GET" ? {"X-CSRF-Token": csrf} : {})},
@@ -215,11 +219,12 @@ export class Controller {
   async run(op, args = {}, total, sample) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     this.busy = true;
-    if (!sample && op !== "control.renew") this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
+    this.renewing = op === "control.renew";
+    if (!sample && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
     this.changed();
     try { return await this.send(op, args, total, sample); }
     catch (error) { this.halt(this.uncertain ? this.message : error.message); throw error; }
-    finally { this.busy = false; this.changed(); }
+    finally { this.busy = this.renewing = false; this.changed(); }
   }
   async acquire() {
     if (!this.session || this.uncertain) throw new Error("Connect a fresh browser session first.");
@@ -337,23 +342,26 @@ function mount() {
   const note = text => { $('management-result').textContent = text; };
   const clear = () => { pad = drag = movement = null; $('drag').setAttribute('aria-pressed', 'false'); $('pad').dataset.drag = 'false'; };
   const act = async fn => { try { await fn(); } catch (error) { if (!client.uncertain) { client.message = error.message; client.changed(); } } };
-  const can = op => client.session && !client.busy && !client.uncertain && !loading && !client.state?.locked && client.operations.get(op);
+  const can = op => client.session && !client.foregroundBusy && !client.uncertain && !loading && !client.state?.locked && client.operations.get(op);
   function paint() {
     const s = client.state, active = client.controlled && !client.uncertain && s?.input_ready && !s.locked && !s.release_pending;
-    $('connection').textContent = client.controlled ? 'This browser is controlling' : client.session ? s ? s.locked ? 'Passport is locked' : 'Browser connected · idle' : 'State unavailable' : 'Browser disconnected';
+    const connection = client.controlled ? 'This browser is controlling' : client.session ? s ? s.locked ? 'Passport is locked' : 'Browser connected · idle' : 'State unavailable' : 'Browser disconnected';
+    if ($('connection').textContent !== connection) $('connection').textContent = connection;
     $('status-dot').dataset.active = String(Boolean(client.session && s));
-    $('target').textContent = s ? `${s.target_id || 'No host selected'} · ${s.locked ? 'Unlock on Passport' : s.input_ready ? 'Input ready' : 'Input not ready'}` : 'Connect to read the host and Lock state.';
+    $('target').textContent = s ? `${s.target_id || 'No host selected'} · ${s.locked ? 'Unlock on Passport' : s.input_ready ? 'Input ready' : 'Input not ready'}` : client.message !== 'Nothing sent.' ? client.message : 'Connect to read the host and Lock state.';
     $('connect').hidden = Boolean(client.session); $('connect').disabled = client.busy || client.closing;
     $('acquire').hidden = !client.session || client.controlled;
     $('acquire').disabled = !can('control.acquire') || !s?.input_ready || s.release_pending;
     $('stop').disabled = !client.session; $('disconnect').hidden = !client.session; $('disconnect').disabled = client.closing;
     $('mouse-controls').disabled = !active || s.mode !== 'mouse';
     $('keyboard-controls').disabled = !active || s.mode !== 'keyboard';
-    document.querySelectorAll('[data-op]').forEach(button => { button.disabled = !active || client.busy || !client.operations.get(button.dataset.op); });
+    // Renewal still owns the command lane; only foreground work or actual
+    // control loss changes input availability in the page.
+    document.querySelectorAll('[data-op]').forEach(button => { button.disabled = !active || client.foregroundBusy || !client.operations.get(button.dataset.op); });
     $('drag').disabled = !active || !client.operations.get('mouse.drag.begin');
-    $('send').disabled = !active || client.busy || !client.operations.get('keyboard.text.enqueue');
-    $('result').textContent = client.message;
-    $('result-check').disabled = !client.session || !client.lastKey || client.busy;
+    $('send').disabled = !active || client.foregroundBusy || !client.operations.get('keyboard.text.enqueue');
+    if ($('result').textContent !== client.message) $('result').textContent = client.message;
+    $('result-check').disabled = !client.session || !client.lastKey || client.foregroundBusy;
     $('readiness').textContent = !s ? 'Unlock Passport and pair from your host’s Bluetooth settings.' : s.locked ? 'Locked on Passport. Unlock with a fresh OK hold.' : !s.input_ready ? 'Waiting for the host, encryption, subscriptions and neutral release.' : `${s.mode} input ready. ${client.controlled ? 'This browser owns the lease.' : 'Take control to begin.'}`;
     const peer = lists.peers?.peers?.find(p => p.original === s?.target_id);
     $('host-name').textContent = peer?.label || s?.target_id || 'Your host awaits';
@@ -363,7 +371,7 @@ function mount() {
     $('scan').disabled = !can('wifi.scan.start'); $('scan-cancel').disabled = !can('wifi.scan.cancel') || !lists.scan?.scanning;
     $('pair-open').disabled = !can('bluetooth.pairing.open'); $('pair-close').disabled = !can('bluetooth.pairing.close');
     $('pair-cancel').disabled = !can('bluetooth.pairing.cancel_handshake') || !lists.peers?.handshake;
-    $('refresh-lists').disabled = !client.session || client.busy || loading;
+    $('refresh-lists').disabled = !client.session || client.foregroundBusy || loading;
     document.querySelectorAll('[data-manage]').forEach(button => { button.disabled = !can(button.dataset.manage); });
   }
   client.onchange = paint;
@@ -519,6 +527,7 @@ function mount() {
     else if (announce) note(client.session ? 'Connection lists refreshed. Changes use the exact identity shown below.' : 'Browser disconnected. Connect to refresh these lists.');
   }
   async function manage(op,args,revision,release=false) {
+    if (client.busy) { note('Wait for the current action and try again.'); return; }
     const session = client.session;
     clear(); note('Waiting for Passport…');
     try {

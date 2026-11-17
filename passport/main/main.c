@@ -10,6 +10,7 @@
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
 #include "freertos/FreeRTOS.h"
@@ -26,6 +27,47 @@ static const char *TAG = "passport";
 static esp_err_t display_status;
 static esp_err_t button_status;
 static esp_err_t nimble_status;
+
+#if CONFIG_PASSPORT_DIAGNOSTICS
+static struct { const char *stage; esp_err_t status; size_t free, largest; } boot_stages[4];
+static atomic_uint boot_stage_count;
+static esp_timer_handle_t boot_replay;
+
+static void replay_boot(void *arg)
+{
+    (void)arg;
+    // A separate timer task can report retained stages even if the UI asserts.
+    unsigned count = atomic_load_explicit(&boot_stage_count, memory_order_acquire);
+    for (unsigned i = 0; i < count; ++i) {
+        ESP_LOGI(TAG, "Boot replay %s: status=%s free=%zu largest=%zu", boot_stages[i].stage,
+                 esp_err_to_name(boot_stages[i].status), boot_stages[i].free, boot_stages[i].largest);
+    }
+    passport_ble_state_t ble;
+    passport_ble_snapshot(&ble);
+    ESP_LOGI(TAG, "Boot replay owner: synced=%u control=%u storage=%u peers=%u ready=%u",
+             ble.synced, ble.network_available, ble.storage_known, ble.peer_count, ble.ready);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_timer_delete(boot_replay));
+    boot_replay = NULL;
+}
+#endif
+
+static void startup_heap(const char *stage, esp_err_t status)
+{
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    size_t free = heap_caps_get_free_size(caps), largest = heap_caps_get_largest_free_block(caps);
+    unsigned count = atomic_load_explicit(&boot_stage_count, memory_order_relaxed);
+    if (count < sizeof(boot_stages) / sizeof(boot_stages[0])) {
+        boot_stages[count].stage = stage; boot_stages[count].status = status;
+        boot_stages[count].free = free; boot_stages[count].largest = largest;
+        atomic_store_explicit(&boot_stage_count, count + 1, memory_order_release);
+    }
+    ESP_LOGI(TAG, "Heap after %s: free=%zu largest=%zu", stage,
+             free, largest);
+#else
+    (void)stage; (void)status;
+#endif
+}
 
 static esp_err_t health_get(httpd_req_t *request)
 {
@@ -94,28 +136,42 @@ static esp_err_t start_health_server(void)
 
 void app_main(void)
 {
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    const esp_timer_create_args_t replay = { .callback = replay_boot, .name = "boot_replay" };
+    esp_err_t replay_status = esp_timer_create(&replay, &boot_replay);
+    if (replay_status == ESP_OK) {
+        replay_status = esp_timer_start_once(boot_replay, 30000000);
+        if (replay_status != ESP_OK) { esp_timer_delete(boot_replay); boot_replay = NULL; }
+    }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(replay_status);
+#endif
     passport_wifi_prepare();
 
     display_status = passport_display_init();
     ESP_ERROR_CHECK_WITHOUT_ABORT(display_status);
     button_status = passport_buttons_init();
     ESP_ERROR_CHECK_WITHOUT_ABORT(button_status);
+    startup_heap("display/buttons", display_status != ESP_OK ? display_status : button_status);
 
     esp_err_t wifi_status = nvs_flash_init();
     nimble_status = wifi_status;
     if (wifi_status == ESP_OK) {
-        nimble_status = passport_ble_start();
+        nimble_status = passport_ble_start(button_status == ESP_OK);
+        startup_heap("BLE/control", nimble_status);
         wifi_status = passport_wifi_start();
+        startup_heap("Wi-Fi init", wifi_status);
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(nimble_status);
     ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_status);
 
     const char *http_status = "Unavailable";
+    esp_err_t http_result = wifi_status;
     if (wifi_status == ESP_OK) {
-        const esp_err_t http = start_health_server();
-        ESP_ERROR_CHECK_WITHOUT_ABORT(http);
-        http_status = http == ESP_OK ? "Listener created" : esp_err_to_name(http);
+        http_result = start_health_server();
+        ESP_ERROR_CHECK_WITHOUT_ABORT(http_result);
+        http_status = http_result == ESP_OK ? "Listener created" : esp_err_to_name(http_result);
     }
+    startup_heap(wifi_status == ESP_OK ? "HTTP init" : "HTTP skipped", http_result);
 
     passport_ui_run(http_status, button_status == ESP_OK);
 }

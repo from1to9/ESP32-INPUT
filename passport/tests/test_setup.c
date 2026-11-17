@@ -13,6 +13,8 @@ static const char session_token[] = "0123456789abcdef0123456789abcdef";
 static char output[8192];
 static size_t offset;
 static int station_result, recv_failure;
+static int socket_family = AF_INET;
+static bool socket_short, socket_error;
 static int64_t clock_us;
 static unsigned allocation, fail_allocation;
 static void *allocate(size_t size) { return ++allocation == fail_allocation ? NULL : malloc(size); }
@@ -27,7 +29,19 @@ int64_t esp_timer_get_time(void) { return clock_us+=1000; }
 esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *record) { (void)record; return station_result; }
 int httpd_req_to_sockfd(httpd_req_t *req) { (void)req; return 9; }
 int setup_getsockname(int fd,struct sockaddr *address,socklen_t *length)
-{ assert(fd==9 && *length==sizeof(struct sockaddr_in)); struct sockaddr_in *in=(void *)address; in->sin_family=AF_INET; assert(inet_pton(AF_INET,local_ip,&in->sin_addr)==1); return 0; }
+{
+ assert(fd==9 && *length==sizeof(struct sockaddr_storage));
+ if(socket_error)return -1;
+ if(socket_family==AF_INET6){
+  struct sockaddr_in6 in={.sin6_family=AF_INET6};assert(inet_pton(AF_INET6,local_ip,&in.sin6_addr)==1);
+  memcpy(address,&in,sizeof(in));*length=sizeof(in);
+ }else{
+  struct sockaddr_in in={.sin_family=socket_family};assert(inet_pton(AF_INET,local_ip,&in.sin_addr)==1);
+  memcpy(address,&in,sizeof(in));*length=sizeof(in);
+ }
+ if(socket_short)*length=1;
+ return 0;
+}
 static const char *value(const char *name)
 { if(!strcmp(name,"Host"))return host; if(!strcmp(name,"Origin"))return origin; if(!strcmp(name,"Content-Type"))return content_type; if(!strcmp(name,"X-Passport-Setup"))return request_token; return ""; }
 size_t httpd_req_get_hdr_value_len(httpd_req_t *req,const char *name) { (void)req; return strlen(value(name)); }
@@ -46,6 +60,7 @@ static void reset(void)
  queue_available=token_available=true; host=local_ip="192.168.4.1"; origin="http://192.168.4.1"; content_type="application/json"; request_token=session_token;
  input="{\"setupId\":17,\"scanRevision\":4,\"row\":0,\"password\":\"fixture123\"}";
  station_result=ESP_ERR_WIFI_NOT_CONNECT; submissions=scan_requests=offset=0; clock_us=0; recv_failure=0;
+ socket_family=AF_INET;socket_short=socket_error=false;
  output[0]=0; allocation=fail_allocation=0;
 }
 static void submit_expect(const char *status,unsigned count)
@@ -59,6 +74,12 @@ static void test_boundaries(void)
 {
  reset(); submit_expect("202 Accepted",1); assert(submitted.request_id==123456 && !strcmp(submitted.password,"fixture123")); assert(strstr(output,"queued"));
  reset(); local_ip="192.168.1.20"; submit_expect("403 Forbidden",0);
+ reset(); socket_family=AF_INET6;local_ip="::ffff:192.168.4.1";submit_expect("202 Accepted",1);
+ reset(); socket_family=AF_INET6;local_ip="::ffff:192.168.1.20";submit_expect("403 Forbidden",0);
+ reset(); socket_family=AF_INET6;local_ip="fd00::1";submit_expect("403 Forbidden",0);
+ reset(); socket_family=AF_UNSPEC;submit_expect("403 Forbidden",0);
+ reset(); socket_short=true;submit_expect("403 Forbidden",0);
+ reset(); socket_error=true;submit_expect("403 Forbidden",0);
  reset(); station_result=ESP_OK; submit_expect("403 Forbidden",0);
  reset(); station_result=ESP_FAIL; submit_expect("403 Forbidden",0);
  reset(); host="attacker.test"; submit_expect("403 Forbidden",0);
@@ -107,5 +128,8 @@ static void test_state_and_allocation(void)
  for(unsigned i=1;i<=6;++i){register_failure=i;registrations=0;assert(passport_setup_register((void *)1)==ESP_FAIL && !provider);}
  register_failure=registrations=0;assert(passport_setup_register((void *)1)==ESP_OK && provider && registrations==6);
  reset(); assert(html_get(&req)==ESP_OK && strstr(output,"doctype"));local_ip="192.168.1.20";assert(html_get(&req)==ESP_OK && !strcmp(req.status,"403 Forbidden"));
+ reset();socket_family=AF_INET6;local_ip="::ffff:192.168.4.1";req.status="200 OK";
+ assert(html_get(&req)==ESP_OK && !strcmp(req.status,"200 OK") && strstr(output,"doctype"));
+ host="attacker.test";assert(html_get(&req)==ESP_OK && !strcmp(req.status,"403 Forbidden"));
 }
 int main(void){test_boundaries();test_parser();test_state_and_allocation();puts("PASS: AP ingress, Host/Origin/token/window, bounded strict JSON, scan/submit queue receipts, secret redaction, full scan response, allocation and route failure");}

@@ -148,6 +148,14 @@ an explicit local forget action, which releases input first. Ready means the
 required HID service, encryption, bond, subscriptions, and neutral-release
 state are usable; a connected link alone is insufficient.
 
+Cold startup restores the last selected saved host and attempts bounded
+reconnection without opening new-host admission. Persist successful manual
+host selection and a newly bonded host; forgetting that host removes its
+selection. Manual host management and Lock override startup reconnection.
+The startup window lasts at most 60 seconds with at most three advertising
+starts; input never replays. A legacy installation with no selection adopts
+its sole bond, while multiple bonds require one explicit selection.
+
 The three-button Bluetooth page lists saved bonded hosts and marks the
 currently connected host. It offers Pair new, Advertise for selected host,
 Disconnect, Forget selected host, and Back. Selecting Advertise starts a
@@ -254,11 +262,25 @@ a verified link-key fingerprint. Legacy synthetic Wi-Fi profile IDs and
 scan rows without a usable exact SSID are unavailable for labeling.
 
 The Passport has a 240 x 320 display and UP, DOWN, OK on one ADC ladder.
+Cold boot opens a navigable Home page when button initialization succeeds.
+Manual and fault locks remain available; boot does not send HID. After 60
+seconds without local button activity, the screen turns off without locking
+or interrupting BLE/Web input. A local Wi-Fi setup window keeps it awake.
+Home Mouse and Keys cards are visibly disabled and skipped by focus until
+the output owner reports HID ready; a connection alone is insufficient.
+Connections and Status remain accessible. A lost ready state moves Home focus
+off a disabled card and cancels its pending selection; readiness enables the
+cards again. Passport's USB Serial/JTAG does not provide USB HID readiness.
 No two-button chord is required. The BSP callback queues events; UI,
-network, and HID work run in their owning tasks. Treat a double click
-explicitly and never turn a long press into a short action on release.
-The first press after a dark screen only wakes it. A long DOWN press from
-any page locks and releases input. Unlock requires a new complete gesture
+network, and HID work run in their owning tasks. Short actions run on confirmed
+release; delayed single/double-click notifications do not execute actions.
+Quick UP/DOWN taps each move focus. The first short OK release acts once;
+subsequent OK gestures within the BSP click window are consumed to avoid
+activation through a newly opened page. Never turn a long press into a short
+action on release. Retain the BSP ADC confirmation and release filtering.
+The first complete gesture after a dark screen only wakes it, without taking
+over an active Web controller. A long DOWN press from any page locks and
+releases input. Unlock requires a new complete gesture
 after the Lock screen appears, so one hold cannot lock then unlock.
 Local takeover first cancels and releases remote input; a subsequent
 gesture performs the local action. If button initialization fails, the

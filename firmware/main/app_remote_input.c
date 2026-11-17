@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define RI_RECENT 16U
+#define RI_RECENT APP_REMOTE_INPUT_RECENT
 #define RI_SAFETY_WAITERS CP_MAX_RESULTS
 #define RI_VIRTUAL_GESTURES 32U
 

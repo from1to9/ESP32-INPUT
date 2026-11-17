@@ -49,8 +49,10 @@ cp_error_t passport_ble_remote_begin(const cp_command_t *c, uint64_t now, cp_res
     uint64_t original_window=window_end;
     if (c->operation==CP_OP_BLUETOOTH_PAIRING_CANCEL_HANDSHAKE) {
         if (!new_connection || connection==BLE_HS_CONN_HANDLE_NONE || !state.pairing) return CP_UNAVAILABLE;
+        reconnect_end=0;
         if (disconnect_link()) return CP_UNAVAILABLE;
     } else if (c->operation==CP_OP_BLUETOOTH_PAIRING_CLOSE) {
+        reconnect_end=0;
         if (!stop_advertising()) return CP_UNAVAILABLE;
         if (new_connection && connection!=BLE_HS_CONN_HANDLE_NONE && disconnect_link()) return CP_UNAVAILABLE;
     } else {

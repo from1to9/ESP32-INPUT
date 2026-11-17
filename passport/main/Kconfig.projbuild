@@ -1,0 +1,14 @@
+menu "Passport diagnostics"
+    config PASSPORT_DIAGNOSTICS
+        bool "Log bounded heap, input and BLE diagnostics"
+        default n
+        help
+            Log startup internal heap and, for 180 seconds after the UI starts,
+            ADC ranges, backlight transitions, button events and LVGL update times.
+            BLE transition logging runs for 180 seconds after BLE startup and
+            each advertising window plus ten seconds. NVS failure codes are
+            logged before the failed store becomes unavailable. This
+            does not change button thresholds, event admission or Lock behavior.
+            Use only for device diagnosis; serial logging and additional ADC
+            reads affect timing. No credentials or peer identities are logged.
+endmenu

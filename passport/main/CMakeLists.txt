@@ -6,3 +6,6 @@ idf_component_register(
     PRIV_REQUIRES bootloader_support hid_engine interaction control_protocol bt esp_driver_i2c esp_driver_i2s esp_event esp_http_server esp_netif esp_wifi nvs_flash json mbedtls
     EMBED_TXTFILES "web/controller.html" "web/controller.css" "web/controller.js" "web/setup.html" "web/setup.css" "web/setup.js"
 )
+# The pinned host repeats this initializer while selecting its default IRK.
+# Passport owns the RAM-store lifecycle and its persistent callback wrappers.
+target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=ble_store_config_init")

@@ -49,7 +49,7 @@ typedef struct {
     char result[48];
 } passport_ble_state_t;
 
-esp_err_t passport_ble_start(void);
+esp_err_t passport_ble_start(bool buttons_available);
 void passport_ble_snapshot(passport_ble_state_t *state);
 // Admission only. Results and input readiness arrive in the next snapshot.
 bool passport_ble_request(const passport_command_t *command);

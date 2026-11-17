@@ -8,11 +8,26 @@
 #include "../../main/passport_ui.c"
 static lv_display_t *display;
 static uint16_t pixels[240 * 320];
+static uint16_t partial_pixels[240 * 16];
+static bool partial_render;
 static bool display_locked;
 static unsigned updates;
 static void flush(lv_display_t *d, const lv_area_t *area, uint8_t *map)
 {
-    (void)area; (void)map; ++updates; lv_display_flush_ready(d);
+    if (partial_render) {
+        const lv_draw_buf_t *buffer = lv_display_get_buf_active(d);
+        const unsigned width = lv_area_get_width(area);
+        const unsigned height = lv_area_get_height(area);
+        assert(area->x1 >= 0 && area->y1 >= 0 && area->x2 < 240 && area->y2 < 320);
+        assert(buffer->header.stride >= width * sizeof(uint16_t));
+        assert(buffer->header.stride * height <= sizeof(partial_pixels));
+        for (unsigned y = 0; y < height; ++y) {
+            memcpy(pixels + (area->y1 + y) * 240 + area->x1,
+                   map + y * buffer->header.stride, width * sizeof(uint16_t));
+        }
+    }
+    ++updates;
+    lv_display_flush_ready(d);
 }
 esp_err_t bsp_display_init(void) { return ESP_OK; }
 lv_display_t *bsp_lvgl_init(void) { return display; }
@@ -120,8 +135,14 @@ static void capture(const char *name, unsigned count)
 }
 int main(int argc, char **argv)
 {
-    bool setup_only = argc == 2 && !strcmp(argv[1], "--setup-only");
-    bool control_only = argc == 2 && !strcmp(argv[1], "--control-only");
+    bool setup_only = false, control_only = false, home_only = false;
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--setup-only")) setup_only = true;
+        else if (!strcmp(argv[i], "--control-only")) control_only = true;
+        else if (!strcmp(argv[i], "--home-only")) home_only = true;
+        else if (!strcmp(argv[i], "--partial")) partial_render = true;
+        else { fprintf(stderr, "Unknown argument: %s\n", argv[i]); return 2; }
+    }
     lv_init(); display = lv_display_create(240, 320);
     assert(passport_names_text_valid(LONG_DISPLAY_LABEL, 16));
     assert(strlen(MAX_BYTES_LABEL) == PASSPORT_NAME_BYTES &&
@@ -130,7 +151,11 @@ int main(int argc, char **argv)
     assert(!passport_names_text_valid("\xe5\xad\x97", 3));
     assert(!passport_names_text_valid("L\xe2\x80\xae", 4));
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
-    lv_display_set_buffers(display, pixels, NULL, sizeof(pixels), LV_DISPLAY_RENDER_MODE_DIRECT);
+    if (partial_render) {
+        lv_display_set_buffers(display, partial_pixels, NULL, sizeof(partial_pixels), LV_DISPLAY_RENDER_MODE_PARTIAL);
+    } else {
+        lv_display_set_buffers(display, pixels, NULL, sizeof(pixels), LV_DISPLAY_RENDER_MODE_DIRECT);
+    }
     lv_display_set_flush_cb(display, flush);
     assert(passport_display_init() == ESP_OK);
     unsigned count = objects(lv_display_get_screen_active(display));
@@ -161,6 +186,21 @@ int main(int argc, char **argv)
         wifi_confirmation=PW_FORGET;
         target = ble.peers[1];
         wifi.provisioning_available = true;
+        if (home_only) {
+            page=HOME;focus=0;capture("home-ready",count);
+            ble.connected=ble.encrypted=ble.bonded=ble.ready=false;
+            strcpy(ble.result,"Select Bluetooth to pair");capture("home-offline",count);
+            assert(focus==2);
+            assert(lv_obj_has_state(lv_obj_get_parent(assert_label_fits("Mouse")),LV_STATE_DISABLED));
+            assert(lv_obj_has_state(lv_obj_get_parent(assert_label_fits("Keys")),LV_STATE_DISABLED));
+            assert(!lv_obj_has_state(lv_obj_get_parent(assert_label_fits("Connections")),LV_STATE_DISABLED));
+            ble.connected=ble.encrypted=true;capture("home-waiting",count);
+            ble.bonded=ble.ready=true;focus=0;
+            strcpy(ble.result,"Connected / input ready");capture("home-restored",count);
+            assert(!lv_obj_has_state(lv_obj_get_parent(assert_label_fits("Mouse")),LV_STATE_DISABLED));
+            assert(!lv_obj_has_state(lv_obj_get_parent(assert_label_fits("Keys")),LV_STATE_DISABLED));
+            continue;
+        }
         if (control_only) {
             ble.network_available=true;page=STATUS;focus=0;capture("control-idle",count);
             ble.network_active=true;strcpy(ble.controller,"13ab45cd");capture("control-active",count);
@@ -251,6 +291,14 @@ int main(int argc, char **argv)
         snprintf(ble.result, sizeof(ble.result), "Pairing window open");
         capture("pair", count);
         ble.window_seconds = 1; capture("pair-last-second", count);
+        ble.connected = true; ble.advertising = false; ble.encrypted = ble.bonded = false; ble.peer_count = 0;
+        capture("pair-securing", count);
+        ble.encrypted = ble.bonded = true; ble.pairing = false; ble.window_seconds = 0; ble.peer_count = 1;
+        snprintf(ble.result, sizeof(ble.result), "New host saved");
+        capture("pair-saved", count);
+        ble.connected = ble.encrypted = ble.bonded = false; ble.peer_count = 0;
+        snprintf(ble.result, sizeof(ble.result), "Bond admission failed");
+        capture("pair-ended", count);
         ble.pairing = ble.advertising = false; ble.peer_count = 0; page = BLUETOOTH; focus = 0;
         capture("bluetooth-empty", count);
         ble.storage_known = false;

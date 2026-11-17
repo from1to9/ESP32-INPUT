@@ -14,15 +14,19 @@ const assets=new Map(await Promise.all(['html','css','js'].map(async ext=>[ext,a
 const catalog=JSON.parse(await readFile(path.join(root,'api/control-v1.json'))).operations;
 const supported=new Set(['control.acquire','control.renew','control.release','mouse.move_relative','mouse.click','mouse.scroll','mouse.drag.begin','mouse.drag.refresh','mouse.drag.end','keyboard.text.enqueue','keyboard.key_tap','keyboard.shortcut','mode.select','input.release_all','input.cancel','bluetooth.pairing.open','bluetooth.pairing.close','bluetooth.pairing.cancel_handshake','bluetooth.target.request','bluetooth.disconnect','wifi.scan.start','wifi.scan.cancel','display_name.list','display_name.set','display_name.clear']);
 const session={session_token:'a'.repeat(64),session_id:'b'.repeat(32),boot_id:'c'.repeat(32),request_prefix:'d'.repeat(16),csrf:'e'.repeat(32),next_seq:1,scopes:['view','input.control','connections.manage','wifi.configure']};
-let state,commands,results,seq,closed,delayState,failCommand,label,locked,pendingManagement;
+let state,commands,results,seq,closed,delayState,delayRenew,failSession,failRenew,failCommand,label,locked,pendingManagement;
 const host='10:20:30:40:50:60/0', bond='01'.padEnd(32,'0'), ap='12'.repeat(32);
 const hx=s=>Buffer.from(s).toString('hex');
-function reset(){state={boot_id:session.boot_id,now_ms:'10000',epoch:'2',transport_generation:'3',state_sequence:'5',ui_revision:'2',management_generation:'1',target_id:host,mode:'mouse',locked:false,release_pending:false,input_ready:true,remote_allowed:true,remote_owner:false,lease_active:false,lease_id:'f'.repeat(32),lease_expires_ms:'13000'};commands=[];results=new Map();seq=1;closed=0;delayState=0;failCommand=false;label='Studio laptop';locked=false;pendingManagement=false;}
+function reset(){state={boot_id:session.boot_id,now_ms:'10000',epoch:'2',transport_generation:'3',state_sequence:'5',ui_revision:'2',management_generation:'1',target_id:host,mode:'mouse',locked:false,release_pending:false,input_ready:true,remote_allowed:true,remote_owner:false,lease_active:false,lease_id:'f'.repeat(32),lease_expires_ms:'13000'};commands=[];results=new Map();seq=1;closed=0;delayState=delayRenew=0;failSession=failRenew=failCommand=false;label='Studio laptop';locked=false;pendingManagement=false;}
 reset();
 const server=http.createServer(async(req,res)=>{
   res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+  res.setHeader('Referrer-Policy','no-referrer');
   const url=new URL(req.url,'http://fixture');const send=(x,status=200)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(x));};
-  if(url.pathname==='/api/v1/open-session'){assert.equal(req.headers['x-passport-open'],'1');send({...session,next_seq:seq});return;}
+  if(url.pathname.startsWith('/api/')&&req.method!=='GET'&&req.headers['user-agent']?.includes('Chrome')){
+    assert.equal(req.headers['sec-fetch-mode'],'cors');assert.equal(req.headers.origin,origin);
+  }
+  if(url.pathname==='/api/v1/open-session'){assert.equal(req.headers['x-passport-open'],'1');send(failSession?{error:'busy'}:{...session,next_seq:seq},failSession?503:200);return;}
   if(url.pathname.startsWith('/api/')){
     assert.equal(req.headers.authorization,`Bearer ${session.session_token}`);
     if(req.method!=='GET')assert.equal(req.headers['x-csrf-token'],session.csrf);
@@ -34,6 +38,8 @@ const server=http.createServer(async(req,res)=>{
       let body='';for await(const chunk of req)body+=chunk;const c=JSON.parse(body);commands.push(c);
       assert.equal(c.seq,seq);assert.equal(c.session_id,session.session_id);assert.equal(c.boot_id,session.boot_id);assert(supported.has(c.op));
       assert.equal(c.request_id,session.request_prefix+BigInt(seq).toString(16).padStart(16,'0'));seq++;
+      if(c.op==='control.renew'&&delayRenew)await new Promise(r=>setTimeout(r,delayRenew));
+      if(c.op==='control.renew'&&failRenew){send({state:'failed',error:'not_ready',next_seq:seq},503);return;}
       if(failCommand){res.destroy();return;}
       let reason='';
       if(c.op==='control.acquire'){assert.equal(c.args.producer,'script');state.lease_active=true;state.remote_owner=true;}
@@ -72,6 +78,37 @@ try{
     assert.equal(await p.locator('#wifi-scan img').count(),0);
     await p.screenshot({path:path.join(out,`${name}-${theme}-connections.png`),fullPage:true});await ctx.close();
   }
+  // A slow renewal must retain the command lane without flashing controls.
+  reset();const renewalContext=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  const renewalPage=await open(renewalContext);await connect(renewalPage);await acquire(renewalPage);
+  await renewalPage.evaluate(()=>{
+    window.disabledDuringRenewal=[];
+    const controls=[...document.querySelectorAll('[data-op],#send,#scan,#pair-open,#refresh-lists')];
+    new MutationObserver(()=>{for(const node of controls)if(node.disabled)window.disabledDuringRenewal.push(node.id||node.dataset.op);})
+      .observe(document.querySelector('main'),{subtree:true,attributes:true,attributeFilter:['disabled']});
+  });
+  delayRenew=350;
+  const renewed=renewalPage.waitForResponse(r=>r.url().endsWith('/commands')&&r.request().postDataJSON()?.op==='control.renew');
+  await renewalPage.waitForRequest(r=>r.url().endsWith('/commands')&&r.postDataJSON()?.op==='control.renew');
+  const beforeOverlap=commands.filter(c=>c.op!=='control.renew').length;
+  await renewalPage.locator('[data-click=left]').click();
+  assert.match(await renewalPage.locator('#result').textContent(),/Wait for the current action/);
+  await renewed;
+  assert.equal(commands.filter(c=>c.op!=='control.renew').length,beforeOverlap);
+  assert(commands.some(c=>c.op==='control.renew'));assert.equal(await renewalPage.locator('#mouse-controls').isDisabled(),false);
+  assert.deepEqual(await renewalPage.evaluate(()=>window.disabledDuringRenewal),[]);
+  failRenew=true;
+  await renewalPage.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+  assert.match(await renewalPage.locator('#result').textContent(),/not_ready/);
+  await renewalContext.close();
+  // Failed Connect feedback stays beside its action on a narrow screen.
+  reset();failSession=true;
+  const failedContext=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  const failedPage=await open(failedContext);await failedPage.locator('#connect').click();
+  await failedPage.waitForFunction(()=>document.getElementById('target').textContent.includes('Session unavailable'));
+  const feedback=await failedPage.locator('#target').boundingBox();assert(feedback.y>=0&&feedback.y+feedback.height<=844);
+  await bounded(failedPage);await failedPage.screenshot({path:path.join(out,'iphone-connect-failed.png'),fullPage:true});
+  await failedContext.close();
   reset();const ctx=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,colorScheme:'light'});const p=await open(ctx);
   await p.locator('#theme').selectOption('dark');await p.reload();assert.equal(await p.locator('html').getAttribute('data-theme'),'dark');await connect(p);await acquire(p);
   await p.locator('[data-click=middle]').click();await p.waitForTimeout(180);assert(commands.some(c=>c.op==='mouse.click'&&c.args.button==='middle'));
@@ -179,5 +216,5 @@ try{
   await assert.rejects(replaced.manage('bluetooth.pairing.open',{generation:'3'},'7',{update:()=>{replaced.session={...session};}}),/session closed/);
   assert.equal(polls,0);assert.equal(replaced.uncertain,false);
   assert.match(describeResult({state:'cancelled',error:'result_unknown',started_prefix:2,completed_pairs:1,uncertain_index:1},2),/1 \/ 2 key pairs complete.*Character 2 has an uncertain/);
-  console.log('PASS: production controller in Chromium, desktop/phone/tablet dual themes, bounded layout and touch targets, literal identities, Ctrl/Command, independent wheel axes, typed commands, blur/held-input stop, no replay, management polling uncertainty and session isolation, memory-only credentials and persistent theme');
+  console.log(`PASS: production controller in Chromium (${process.argv.includes('--behavior-only')?'behavior checks':'desktop/phone/tablet dual themes'}), bounded layout and touch targets, Origin under no-referrer, steady renewal controls and serialized input, failed-renewal stop, visible Connect failure, literal identities, Ctrl/Command, independent wheel axes, typed commands, blur/held-input stop, no replay, management polling uncertainty and session isolation, memory-only credentials and persistent theme`);
 }finally{await browser.close();await new Promise(r=>server.close(r));}

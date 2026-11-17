@@ -8,6 +8,8 @@ const char controller_js_fixture[] __asm__("_binary_controller_js_start")="'use 
 static hid_engine_t engine;
 static passport_wifi_state_t network;
 static const char *host,*origin,*type,*authorization,*csrf,*open_header,*subprotocol,*input,*local_ip;
+static int socket_family=AF_INET;
+static bool socket_short,socket_error;
 static char output[8192],token[65],csrf_token[33],auth[80],ticket[65],protocol_header[96];
 static size_t offset;
 static TickType_t ticks=100;
@@ -44,7 +46,19 @@ int xSemaphoreTake(SemaphoreHandle_t s,TickType_t wait)
 }
 int httpd_req_to_sockfd(httpd_req_t *req) { (void)req;return 9; }
 int setup_getsockname(int fd,struct sockaddr *address,socklen_t *length)
-{ assert(fd==9&&*length==sizeof(struct sockaddr_in));struct sockaddr_in *in=(void *)address;in->sin_family=AF_INET;assert(inet_pton(AF_INET,local_ip,&in->sin_addr)==1);return 0; }
+{
+ assert(fd==9&&*length==sizeof(struct sockaddr_storage));
+ if(socket_error)return -1;
+ if(socket_family==AF_INET6){
+  struct sockaddr_in6 in={.sin6_family=AF_INET6};assert(inet_pton(AF_INET6,local_ip,&in.sin6_addr)==1);
+  memcpy(address,&in,sizeof(in));*length=sizeof(in);
+ }else{
+  struct sockaddr_in in={.sin_family=socket_family};assert(inet_pton(AF_INET,local_ip,&in.sin_addr)==1);
+  memcpy(address,&in,sizeof(in));*length=sizeof(in);
+ }
+ if(socket_short)*length=1;
+ return 0;
+}
 static const char *value(const char *name)
 {
     if(!strcmp(name,"Host"))return host;if(!strcmp(name,"Origin"))return origin;
@@ -116,6 +130,7 @@ static void reset(void)
     passport_control_observation_t observed={.ap_ip="192.168.4.1"};passport_control_observe(&observed,ticks);
     mailbox=IDLE;signalled=delay_owner=stale_signal=false;memset(channels,0,sizeof(channels));
     host=local_ip="192.168.4.1";origin="http://192.168.4.1";type="application/json";open_header="1";
+    socket_family=AF_INET;socket_short=socket_error=false;
     authorization=csrf=subprotocol="";input="{}";offset=0;
 }
 static void call(const char *path,int method,const char *body,const char *expected)
@@ -139,9 +154,17 @@ int main(void)
     reset();host="evil.test";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
     reset();origin="http://evil.test";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
     reset();local_ip="192.168.1.3";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
+    reset();socket_family=AF_INET6;local_ip="::ffff:192.168.4.1";session_open();
+    assert(web(&asset)==ESP_OK&&!strcmp(output,controller_html_fixture));
+    reset();socket_family=AF_INET6;local_ip="::ffff:192.168.1.3";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
+    reset();socket_family=AF_INET6;local_ip="fd00::1";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
+    reset();socket_family=AF_UNSPEC;call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
+    reset();socket_short=true;call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
+    reset();socket_error=true;call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
     reset();type="text/plain";call("/api/v1/open-session",HTTP_POST,"{}","400 Bad Request");
     reset();open_header="";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
     reset();network.phase=PW_ONLINE;strcpy(network.sta_ip,"192.168.1.3");host=local_ip="192.168.1.3";origin="http://192.168.1.3";session_open();
+    reset();network.phase=PW_ONLINE;strcpy(network.sta_ip,"192.168.1.3");host="192.168.1.3";local_ip="::ffff:192.168.1.3";socket_family=AF_INET6;origin="http://192.168.1.3";session_open();
     call("/api/v1/state",HTTP_GET,"","200 OK");
     call("/api/v1/operations?cursor=20&limit=4",HTTP_GET,"","200 OK");assert(strstr(output,"control.acquire"));
     reset();delay_owner=true;call("/api/v1/open-session",HTTP_POST,"{}","503 Service Unavailable");assert(mailbox==ABANDONED&&!begin());

@@ -21,7 +21,9 @@ typedef struct {
 esp_err_t passport_display_init(void);
 esp_err_t passport_buttons_init(void);
 unsigned passport_buttons_observed(void);
+unsigned passport_button_click_guard_ms(void);
 bool passport_render(const passport_view_t *view);
 bool passport_next_button(passport_button_event_t *event);
 bool passport_button_overflow(void);
 void passport_backlight(bool on);
+bool passport_board_diagnostics(void);

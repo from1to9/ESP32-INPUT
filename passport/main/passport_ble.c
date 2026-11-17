@@ -11,6 +11,8 @@
 #include <string.h>
 #include <strings.h>
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -34,6 +36,9 @@ static hid_engine_t engine;
 static uint16_t connection = BLE_HS_CONN_HANDLE_NONE, keyboard_handle, mouse_handle;
 static uint8_t keyboard[8], mouse[4], leds;
 static bool suspended, new_connection, selected_valid, transition, disconnect_requested, closing;
+static bool startup_restore;
+static uint64_t reconnect_end, reconnect_next;
+static unsigned reconnect_attempts;
 static ble_addr_t selected;
 static passport_command_t pending;
 static uint64_t window_end, release_end, lease_end;
@@ -54,7 +59,37 @@ static void remote_management_cancel(cp_error_t error);
 
 
 static uint64_t now_ms(void) { return esp_timer_get_time() / 1000; }
-static void result(const char *text) { snprintf(state.result, sizeof(state.result), "%s", text); }
+#if CONFIG_PASSPORT_DIAGNOSTICS
+static uint64_t diagnostic_until;
+static uint32_t diagnostic_flags = UINT32_MAX;
+static bool diagnostic_active(void) { return now_ms() < diagnostic_until; }
+#endif
+static void diagnostic(const char *event, int status)
+{
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    if (diagnostic_active()) {
+        const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        ESP_LOGI("passport_ble_diag", "event=%s t=%llu status=%d connected=%u encrypted=%u bonded=%u storage=%u peers=%u pairing=%u handshake=%u closing=%u window=%u keyboard=%u mouse=%u ready=%u adv_active=%u control=%u heap=%zu largest=%zu",
+                 event, (unsigned long long)now_ms(), status, state.connected, state.encrypted,
+                 state.bonded, state.storage_known, state.peer_count, state.pairing, new_connection, closing, window_end > now_ms(),
+                 state.keyboard_subscribed, state.mouse_subscribed, state.ready,
+                 (unsigned)ble_gap_adv_active(), state.network_available,
+                 heap_caps_get_free_size(caps), heap_caps_get_largest_free_block(caps));
+    }
+#else
+    (void)event; (void)status;
+#endif
+}
+static void result(const char *text)
+{
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    if (diagnostic_active() && strcmp(state.result, text)) {
+        // Callers supply fixed outcome text, never peer identities or key data.
+        ESP_LOGI("passport_ble_diag", "t=%llu result=%s", (unsigned long long)now_ms(), text);
+    }
+#endif
+    snprintf(state.result, sizeof(state.result), "%s", text);
+}
 static bool same(const ble_addr_t *a, const ble_addr_t *b) { return ble_addr_cmp(a, b) == 0; }
 static bool stable_identity(const ble_addr_t *peer)
 {
@@ -254,17 +289,34 @@ static const struct ble_gatt_svc_def services[] = {
     }}, {0}
 };
 
+static int store_result(int type, const union ble_store_value *value, int status)
+{
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    if (diagnostic_active()) {
+        const bool security = type == BLE_STORE_OBJ_TYPE_OUR_SEC || type == BLE_STORE_OBJ_TYPE_PEER_SEC;
+        ESP_LOGI("passport_ble_diag", "t=%llu store_type=%d status=%d identity_type=%d random_class=%d stable=%u",
+                 (unsigned long long)now_ms(), type, status, security ? value->sec.peer_addr.type : -1,
+                 security && value->sec.peer_addr.type == BLE_ADDR_RANDOM ? value->sec.peer_addr.val[5] >> 6 : -1,
+                 security && stable_identity(&value->sec.peer_addr));
+        diagnostic("store", status);
+    }
+#else
+    (void)type; (void)value;
+#endif
+    return status;
+}
+
 static int secure_write(int type, const union ble_store_value *value)
 {
     if (type == BLE_STORE_OBJ_TYPE_OUR_SEC || type == BLE_STORE_OBJ_TYPE_PEER_SEC) {
         if (!new_connection || closing || !state.pairing || now_ms() >= window_end) {
             pairing_failed = true;
-            return BLE_HS_EREJECT;
+            return store_result(type, value, BLE_HS_EREJECT);
         }
         if (!stable_identity(&value->sec.peer_addr)) {
             pairing_failed = true;
             result("Stable peer identity required");
-            return BLE_HS_EREJECT;
+            return store_result(type, value, BLE_HS_EREJECT);
         }
         // Identity exchange can reveal an existing bond behind an unrecognized RPA.
         // The cached list predates this synchronous SDK key-persistence callback.
@@ -273,13 +325,13 @@ static int secure_write(int type, const union ble_store_value *value)
                 !memcmp(state.peers[i].address, value->sec.peer_addr.val, 6)) {
                 pairing_failed = true;
                 result("Forget this bond before re-pairing");
-                return BLE_HS_EREJECT;
+                return store_result(type, value, BLE_HS_EREJECT);
             }
         }
     }
     int rc = passport_store_write(type, value);
     if (rc && new_connection) pairing_failed = true;
-    return rc;
+    return store_result(type, value, rc);
 }
 
 static int store_full(struct ble_store_status_event *event, void *arg)
@@ -312,6 +364,11 @@ static void close_pairing(void)
 static void advertise(bool pairing, uint32_t duration)
 {
     if (!duration) duration=WINDOW_MS;
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    diagnostic_until = now_ms() + duration + 10000;
+    diagnostic_flags = UINT32_MAX;
+#endif
+    diagnostic("advertise_request", 0);
     refresh_peers();
     if (!state.synced || !state.storage_known || connection != BLE_HS_CONN_HANDLE_NONE) {
         result("Bluetooth unavailable");
@@ -336,6 +393,7 @@ static void advertise(bool pairing, uint32_t duration)
         params.filter_policy = BLE_HCI_ADV_FILT_CONN;
     }
     if (!rc) rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, duration, &params, gap_event, NULL);
+    diagnostic("advertise_start", rc);
     if (rc) { result("Advertising failed"); return; }
     state.advertising = true;
     state.pairing = pairing;
@@ -362,9 +420,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         {
+        diagnostic("connect", event->connect.status);
         bool window_open = state.advertising && window_end > now_ms() && state.storage_known;
         state.advertising = false;
         if (event->connect.status) {
+            reconnect_next = now_ms() + 1000;
             state.pairing = false;
             window_end = 0;
             result("Connection failed");
@@ -387,14 +447,20 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         }
         if (!new_connection) format_peer(state.current, sizeof(state.current), &desc.peer_id_addr);
         result(new_connection ? "Pairing" : "Connected; securing link");
-        if (ble_gap_security_initiate(connection)) {
+        int rc = ble_gap_security_initiate(connection);
+        diagnostic("security_request", rc);
+        if (rc) {
             result("Security request failed");
             disconnect_link();
         }
         return 0;
         }
     case BLE_GAP_EVENT_DISCONNECT:
+        {
+        const bool locally_closing = closing;
+        diagnostic("disconnect", event->disconnect.reason);
         connection = BLE_HS_CONN_HANDLE_NONE;
+        reconnect_next = now_ms() + 1000;
         ++state.generation;
         state.connected = state.encrypted = state.bonded = false;
         state.keyboard_subscribed = state.mouse_subscribed = false;
@@ -407,9 +473,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         hid_engine_set_link(&engine, false, false);
         link_ready = false;
         stop_advertising();
-        if (!transition) result("Disconnected");
+        if (!transition && !locally_closing) result("Disconnected");
         return 0;
+        }
     case BLE_GAP_EVENT_ENC_CHANGE:
+        diagnostic("encryption", event->enc_change.status);
         hid_engine_cancel(&engine);
         ++state.generation;
         if (event->enc_change.status) {
@@ -427,6 +495,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 ++state.generation;
             }
         }
+        diagnostic("subscribe", 0);
         return 0;
     case BLE_GAP_EVENT_REPEAT_PAIRING:
         result("Forget this bond before re-pairing");
@@ -455,9 +524,15 @@ static void execute_management(void)
         transition = false;
         return;
     }
+    reconnect_end = 0; // Explicit host management replaces startup intent.
     switch (pending.kind) {
     case PASSPORT_PAIR: selected_valid = false; advertise(true,pending.window_ms); break;
     case PASSPORT_ADVERTISE:
+        if (passport_store_select(&peer)) {
+            result("Host selection not saved");
+            if (remote_management.key) { remote_management.error=CP_UNAVAILABLE; remote_management.done=true; }
+            break;
+        }
         selected = peer;
         selected_valid = true;
         advertise(false,pending.window_ms);
@@ -481,6 +556,7 @@ static void command(const passport_command_t *request, uint64_t now)
 {
     remote_management_cancel(CP_STALE);
     if (request->kind == PASSPORT_LOCK) {
+        if (reconnect_end) { reconnect_end = 0; stop_advertising(); }
         passport_control_local(now);
         hid_engine_set_locked(&engine, true);
         close_pairing();
@@ -488,7 +564,10 @@ static void command(const passport_command_t *request, uint64_t now)
         return;
     }
     // Closing a visible pairing window remains valid across its connect event.
-    if (request->kind == PASSPORT_STOP_PAIR) { close_pairing(); result("Pairing closed"); return; }
+    if (request->kind == PASSPORT_STOP_PAIR) {
+        if (reconnect_end) { reconnect_end = 0; stop_advertising(); }
+        close_pairing(); result("Pairing closed"); return;
+    }
     if (request->generation != state.generation) { result("Stale action rejected"); return; }
     if (request->kind == PASSPORT_UNLOCK) { hid_engine_set_locked(&engine, false); result("Unlocked"); return; }
     if (request->kind == PASSPORT_CANCEL) {
@@ -537,18 +616,32 @@ static void command(const passport_command_t *request, uint64_t now)
 
 #include "passport_ble_control.inc"
 
+static void reconnect_startup(uint64_t now)
+{
+    if (!reconnect_end) return;
+    if (now >= reconnect_end || state.ready || !state.storage_known ||
+        !selected_valid || engine.state.locked) { reconnect_end = 0; return; }
+    if (state.connected || state.advertising || transition || now < reconnect_next) return;
+    if (reconnect_attempts == 3) { reconnect_end = 0; return; }
+    ++reconnect_attempts;
+    reconnect_next = now + 1000;
+    advertise(false, (uint32_t)(reconnect_end - now));
+}
+
 static void service(struct ble_npl_event *event)
 {
     (void)event;
     const uint64_t now = now_ms();
     refresh_peers();
     if (atomic_exchange(&emergency_lock, false)) {
+        if (reconnect_end) { reconnect_end = 0; stop_advertising(); }
         remote_management_cancel(CP_LOCKED);
         passport_control_local(now);
         hid_engine_set_locked(&engine, true);
         close_pairing();
         xQueueReset(commands);
-        result("Queue pressure; input locked");
+        // The UI also uses this priority path for inactivity and button faults.
+        result("Input locked");
     }
     struct ble_gap_conn_desc desc;
     bool transport_ready = false;
@@ -561,12 +654,19 @@ static void service(struct ble_npl_event *event)
         }
         if (new_connection && !pairing_failed && state.bonded && state.encrypted && !closing &&
             state.pairing && now < window_end) {
-            selected = desc.peer_id_addr;
-            selected_valid = true;
-            new_connection = false;
-            state.pairing = false;
-            window_end = 0;
-            format_peer(state.current, sizeof(state.current), &selected);
+            if (passport_store_select(&desc.peer_id_addr)) {
+                pairing_failed = true;
+                result("Host selection not saved");
+                disconnect_link();
+            } else {
+                selected = desc.peer_id_addr;
+                selected_valid = true;
+                new_connection = false;
+                state.pairing = false;
+                window_end = 0;
+                format_peer(state.current, sizeof(state.current), &selected);
+                result("New host saved");
+            }
         }
         transport_ready = selected_valid && same(&selected, &desc.peer_id_addr) &&
             state.encrypted && state.bonded && state.keyboard_subscribed && state.mouse_subscribed &&
@@ -619,6 +719,8 @@ static void service(struct ble_npl_event *event)
     state.locked = engine.state.locked;
     state.release_pending = engine.state.release_pending;
     state.ready = transport_ready && engine.ready && !engine.state.release_pending && !state.locked && !transition;
+    if (state.ready) window_end = 0;
+    reconnect_startup(now);
     state.updating=transition; state.handshake=new_connection;
     state.selected_id[0]=0;
     for (unsigned i=0;selected_valid && i<state.peer_count;++i) {
@@ -626,6 +728,16 @@ static void service(struct ble_npl_event *event)
         for (unsigned j=0;j<16;++j) snprintf(state.selected_id+j*2,3,"%02x",state.peers[i].bond_id[j]);
     }
     state.window_seconds = window_end > now ? (window_end - now + 999) / 1000 : 0;
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    const uint32_t flags = state.connected | (state.encrypted << 1) | (state.bonded << 2) |
+        (state.storage_known << 3) | (state.pairing << 4) | (new_connection << 5) |
+        (state.keyboard_subscribed << 6) | (state.mouse_subscribed << 7) | (state.ready << 8) |
+        (state.advertising << 9) | (state.peer_count << 10);
+    if (flags != diagnostic_flags) {
+        diagnostic_flags = flags;
+        diagnostic("state", 0);
+    }
+#endif
     passport_control_view_t view; passport_control_view(&view);
     state.network_available=view.available; state.network_active=view.active;
     memcpy(state.controller,view.controller,sizeof(state.controller));
@@ -639,6 +751,26 @@ static void synced(void)
 {
     state.synced = true;
     result("Select Bluetooth to pair");
+    if (!startup_restore) return;
+    startup_restore = false;
+    refresh_peers();
+    ble_addr_t peer;
+    int rc = passport_store_selected(&peer);
+    // Upgrade an older installation only when its sole saved bond is unambiguous.
+    if (rc == BLE_HS_ENOENT && state.storage_known && state.peer_count == 1) {
+        peer.type = state.peers[0].type;
+        memcpy(peer.val, state.peers[0].address, sizeof(peer.val));
+        rc = passport_store_select(&peer);
+    }
+    if (rc == BLE_HS_ENOENT || rc == PASSPORT_STORE_SELECTION_CLEARED) return;
+    if (rc) { result("Saved selection unavailable"); return; }
+    if (!is_saved(&peer)) { result("Selected bond unavailable"); return; }
+    selected = peer;
+    selected_valid = true;
+    reconnect_attempts = 0;
+    reconnect_next = now_ms();
+    reconnect_end = reconnect_next + WINDOW_MS;
+    result("Restoring saved host");
 }
 
 static void reset(int reason)
@@ -653,6 +785,7 @@ static void reset(int reason)
     state.encrypted = state.bonded = false;
     suspended = new_connection = transition = disconnect_requested = closing = false;
     window_end = lease_end = 0;
+    reconnect_end = 0;
     state.release_unknown = true;
     memset(keyboard, 0, sizeof(keyboard));
     memset(mouse, 0, sizeof(mouse));
@@ -676,15 +809,22 @@ static void host_task(void *arg)
 static bool random_bytes(void *user, uint8_t *out, size_t length)
 { (void)user; esp_fill_random(out,length); return true; }
 
-esp_err_t passport_ble_start(void)
+esp_err_t passport_ble_start(bool buttons_available)
 {
+    startup_restore = true;
+    selected_valid = false;
+    reconnect_end = reconnect_next = 0;
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    diagnostic_until = now_ms() + 180000;
+    diagnostic_flags = UINT32_MAX;
+#endif
     commands = xQueueCreate(8, sizeof(passport_command_t));
     if (!commands) return ESP_ERR_NO_MEM;
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) { vQueueDelete(commands); commands = NULL; return err; }
     hid_engine_init(&engine);
-    hid_engine_set_locked(&engine, true);
-    state.locked = true;
+    hid_engine_set_locked(&engine, !buttons_available);
+    state.locked = !buttons_available;
     state.generation = 1;
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -703,6 +843,7 @@ esp_err_t passport_ble_start(void)
     passport_names_load(PN_BLE);
     // Failure disables network input explicitly; native BLE controls still work.
     state.network_available=passport_control_init(&engine,random_bytes);
+    diagnostic("control_init",state.network_available ? 0 : CP_UNAVAILABLE);
     if (state.network_available) passport_management_install();
     ble_hs_cfg.store_write_cb = secure_write;
     ble_hs_cfg.store_status_cb = store_full;

@@ -13,10 +13,28 @@ CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_18=y
 
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+# This no-PSRAM controller needs RAM for BLE, LVGL, HTTP and optional sound.
+# Prefer bounded low-rate control traffic over Wi-Fi throughput optimizations.
+# Keep the four-frame RX BA window no larger than the static RX pool.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=4
+CONFIG_ESP_WIFI_RX_BA_WIN=4
+# CONFIG_ESP_WIFI_IRAM_OPT is not set
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
+# Limit unsent/unacknowledged TCP payload to two 1440-byte segments per socket.
+# The HTTP task sends full assets; lwIP refills the queue as ACKs arrive.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=2880
 CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# One peripheral link and one advertising activity; no scan/central roles.
+CONFIG_BT_CTRL_BLE_MAX_ACT=2
+# Keep controller interrupt code in RAM; move only host GAP/GATT/NPL paths.
+CONFIG_BT_NIMBLE_LOW_SPEED_MODE=y
+# Bounded HID traffic does not need the generic 24-block bulk-data pool.
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
 # CONFIG_BT_NIMBLE_ROLE_CENTRAL is not set
 # CONFIG_BT_NIMBLE_ROLE_OBSERVER is not set
 # CONFIG_BT_NIMBLE_NVS_PERSIST is not set

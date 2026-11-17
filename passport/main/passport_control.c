@@ -5,6 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#include "esp_log.h"
+#endif
 
 static cp_context_t *protocol;
 static app_remote_input_t *remote;
@@ -17,6 +21,18 @@ static cp_result_t completions[APP_REMOTE_INPUT_JOBS];
 static size_t completion_count;
 static bool known;
 static const passport_control_provider_t *provider;
+static void early_failure(const char *stage, cp_error_t error)
+{
+#if defined(ESP_PLATFORM) && CONFIG_PASSPORT_DIAGNOSTICS
+    static unsigned logged;
+    if (logged < 16) {
+        ++logged;
+        ESP_LOGW("passport_control_diag", "stage=%s error=%s", stage, cp_error_name(error));
+    }
+#else
+    (void)stage; (void)error;
+#endif
+}
 void passport_control_set_provider(const passport_control_provider_t *p) { provider=p; }
 
 static bool observe(void *user, app_remote_input_state_t *out)
@@ -99,16 +115,29 @@ static cp_error_t read_resource(void *user, const cp_identity_t *identity, const
 bool passport_control_init(hid_engine_t *input, cp_random_fn random)
 {
     if (!input || !random || protocol || remote) return false;
-    void *p=calloc(1,cp_context_size()), *r=calloc(1,app_remote_input_bytes());
-    if (!p || !r) { free(p); free(r); return false; }
+    // IDF calloc guarantees only four-byte alignment; both owners publish a
+    // stricter contract. Their initializers clear their own complete objects.
+    void *p=aligned_alloc(cp_context_alignment(),cp_context_size());
+    void *r=aligned_alloc(app_remote_input_alignment(),app_remote_input_bytes());
+#if defined(ESP_PLATFORM) && CONFIG_PASSPORT_DIAGNOSTICS
+    ESP_LOGI("passport_control_diag", "init protocol=%u bytes=%zu align=%zu remote=%u bytes=%zu align=%zu",
+             p!=NULL, cp_context_size(), cp_context_alignment(), r!=NULL,
+             app_remote_input_bytes(), app_remote_input_alignment());
+#endif
+    if (!p || !r) { free(p); free(r); early_failure("allocation",CP_UNAVAILABLE); return false; }
     provider=NULL; engine=input; sequence=ui_revision=allowance=1; known=false; completion_count=0;
     memset(&observed,0,sizeof(observed)); memset(&previous,0,sizeof(previous));
     interaction_init(&interaction);
     app_remote_input_port_t port={.engine=engine,.interaction=&interaction,.observe=observe,
         .changed=changed,.complete=complete,.delegate_available=delegate_available,.delegate=delegate};
     cp_callbacks_t callbacks={.random=random,.available=available,.dispatch=dispatch,.safety=safety,.read=read_resource};
-    if (app_remote_input_init(r,app_remote_input_bytes(),&port,&remote)!=CP_OK ||
-        cp_initialize_policy(p,cp_context_size(),&callbacks,CP_POLICY_PASSPORT_OPEN_HTTP,&protocol)!=CP_OK) {
+    cp_error_t rc=app_remote_input_init(r,app_remote_input_bytes(),&port,&remote);
+    if (rc!=CP_OK) early_failure("remote_init",rc);
+    else {
+        rc=cp_initialize_policy(p,cp_context_size(),&callbacks,CP_POLICY_PASSPORT_OPEN_HTTP,&protocol);
+        if (rc!=CP_OK) early_failure("protocol_init",rc);
+    }
+    if (rc!=CP_OK) {
         free(p); free(r); protocol=NULL; remote=NULL; engine=NULL; return false;
     }
     cp_set_transport_capabilities(protocol,true,false);
@@ -162,7 +191,7 @@ void passport_control_execute(passport_control_request_t *request, uint64_t time
     now=time;
     memset(&request->response,0,sizeof(request->response));
     request->error=CP_UNAVAILABLE;
-    if (!protocol) return;
+    if (!protocol) { early_failure("execute_without_protocol",request->error); return; }
     passport_control_service(now);
     cp_http_security_t sec={.host=request->host,.origin=request->origin[0] ? request->origin : NULL,
         .authorization=request->authorization[0] ? request->authorization : NULL,
@@ -170,7 +199,7 @@ void passport_control_execute(passport_control_request_t *request, uint64_t time
     if (request->kind==PC_HTTP || request->kind==PC_WS_OPEN) {
         char expected[48]; snprintf(expected,sizeof(expected),"http://%s",request->host);
         request->error=cp_http_configure(protocol,request->host,expected);
-        if (request->error!=CP_OK) return;
+        if (request->error!=CP_OK) { early_failure("http_configure",request->error); return; }
     }
     switch (request->kind) {
     case PC_HTTP: request->error=cp_http(protocol,request->method,request->resource,&sec,request->body,request->length,now,&request->response); break;

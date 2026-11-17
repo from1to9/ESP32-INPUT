@@ -17,6 +17,47 @@ static char token[65],session[33],prefix[17],boot[33],csrf[33],lease[33];
 static char epoch[24],transport[24],revision[24],sequence[24];
 static bool random_bytes(void *u,uint8_t *out,size_t n)
 { (void)u; while(n--) *out++=(uint8_t)++entropy; return true; }
+#ifdef TEST_CONTROL_ALLOCATIONS
+// IDF's ordinary heap contract permits 4 mod 8 addresses. Keep that boundary
+// visible on hosts whose libc otherwise masks the alignment defect.
+static struct { void *base, *memory; } allocations[2];
+static unsigned allocation_calls, allocation_failure;
+static void *fixture_allocate(size_t alignment,size_t size)
+{
+    if (++allocation_calls==allocation_failure) return NULL;
+    void *base=malloc(size+alignment+8); assert(base);
+    uintptr_t address=((uintptr_t)base+alignment-1)&~(alignment-1);
+    if (alignment==4 && !(address%8)) address+=4;
+    for(unsigned i=0;i<2;++i) if(!allocations[i].base) {
+        allocations[i].base=base;allocations[i].memory=(void *)address;
+        memset((void *)address,0xa5,size);return (void *)address;
+    }
+    assert(!"allocation fixture exhausted");return NULL;
+}
+void *fixture_calloc(size_t count,size_t size) { assert(count==1);return fixture_allocate(4,size); }
+void *fixture_aligned_alloc(size_t alignment,size_t size)
+{ assert(alignment>=8 && !(size%alignment));return fixture_allocate(alignment,size); }
+void fixture_free(void *memory)
+{
+    if(!memory)return;
+    for(unsigned i=0;i<2;++i) if(allocations[i].memory==memory) {
+        free(allocations[i].base);allocations[i].base=allocations[i].memory=NULL;return;
+    }
+    assert(!"unknown fixture allocation");
+}
+static void test_allocation_failures(void)
+{
+    for(unsigned fail=1;fail<=2;++fail) {
+        allocation_calls=0;allocation_failure=fail;
+        assert(!passport_control_init(&input,random_bytes));
+        assert(!allocations[0].base && !allocations[1].base);
+        passport_control_view_t view;passport_control_view(&view);assert(!view.available);
+        request=(passport_control_request_t){0};passport_control_execute(&request,0);
+        assert(request.error==CP_UNAVAILABLE && !request.response.status);
+    }
+    allocation_failure=0;
+}
+#endif
 static bool send_report(void *u,uint8_t id,const uint8_t *data,size_t n)
 { (void)u;if(id==1 && n==8 && data[2]){pressed_modifier=data[0];pressed_usage=data[2];}assert(input.state.release_pending || passport_control_report_authorized(clock_ms));++reports;return true; }
 static void tick(void)
@@ -68,8 +109,36 @@ static void acquire(void)
     assert(e==CP_OK);assert(input.state.owner==INPUT_REMOTE&&input.state.release_pending);
     tick();tick();state();assert(passport_control_report_authorized(clock_ms));
 }
+static void test_capacity(void)
+{
+    setup();acquire();
+    assert(http("GET","/api/v1/capabilities",NULL)==CP_OK);parse();
+    int64_t capacity;assert(cj_integer(&document,cj_get(&document,0,"results"),&capacity));
+    assert(capacity==CP_MAX_RESULTS);
+    char first[2049],key[24],path[64];
+    for(unsigned i=0;i<=CP_MAX_RESULTS;++i) {
+        state();assert(command("mouse.move_relative","{\"dx\":1,\"dy\":0}")==CP_OK);
+        if(!i) { strcpy(first,request.body);parse();field(0,"command_key",key,sizeof(key)); }
+        tick();tick();
+    }
+    snprintf(path,sizeof(path),"/api/v1/requests/%s",key);
+    assert(http("GET",path,NULL)==CP_RESULT_UNKNOWN);
+    unsigned sent=reports;
+    assert(http("POST","/api/v1/commands",first)==CP_RESULT_UNKNOWN);
+    tick();assert(reports==sent); // Eviction must never re-execute old input.
+    setup();acquire();
+    assert(command("mouse.move_relative","{\"dx\":1,\"dy\":0}")==CP_OK);
+    // The HID owner serializes report jobs more tightly than the protocol cap.
+    assert(command("mouse.move_relative","{\"dx\":1,\"dy\":0}")==CP_BUSY);
+    assert(command("input.cancel","{}")==CP_OK); // Safety remains available during pending HID work.
+    tick();tick();assert(!input.count && !input.state.release_pending);
+}
 int main(void)
 {
+#ifdef TEST_CONTROL_ALLOCATIONS
+    test_allocation_failures();
+#endif
+    test_capacity();
     setup();acquire();
     assert(command("mode.select","{\"mode\":\"keyboard\"}")==CP_OK);tick();tick();state();
     assert(input.state.mode==INPUT_KEYBOARD && passport_control_report_authorized(clock_ms));

@@ -1,8 +1,10 @@
 #include "passport_setup.h"
 #include "passport_wifi.h"
+#include "passport_http_address.h"
 #include "esp_wifi.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_log.h"
 #include "lwip/sockets.h"
 #include "cJSON.h"
 #include <stdio.h>
@@ -36,26 +38,39 @@ static bool header(httpd_req_t *req, const char *key, char *out, size_t capacity
     size_t length = httpd_req_get_hdr_value_len(req, key);
     return length && length < capacity && httpd_req_get_hdr_value_str(req, key, out, capacity) == ESP_OK;
 }
+static bool deny_ap(const char *reason, int status)
+{
+#if CONFIG_PASSPORT_DIAGNOSTICS
+    static unsigned reports;
+    if (reports < 16) {
+        ++reports;
+        ESP_LOGW("passport_setup", "AP request rejected: reason=%s status=%d initialized=%u ap=%u dhcp=%u",
+                 reason, status, wifi.initialized, wifi.ap_started, wifi.dhcp_running);
+    }
+#else
+    (void)reason; (void)status;
+#endif
+    return false;
+}
 static bool ap_request(httpd_req_t *req)
 {
     passport_wifi_snapshot(&wifi);
-    if (!wifi.initialized || !wifi.ap_started || !wifi.dhcp_running || !wifi.ap_ip[0]) return false;
-    struct sockaddr_in local;
-    socklen_t length = sizeof(local);
-    struct in_addr expected;
-    if (inet_pton(AF_INET, wifi.ap_ip, &expected) != 1 || !expected.s_addr ||
-        getsockname(httpd_req_to_sockfd(req), (struct sockaddr *)&local, &length) != 0 ||
-        length != sizeof(local) || local.sin_family != AF_INET || local.sin_addr.s_addr != expected.s_addr) return false;
+    if (!wifi.initialized || !wifi.ap_started || !wifi.dhcp_running || !wifi.ap_ip[0]) return deny_ap("state", 0);
+    struct in_addr local, expected;
+    if (inet_pton(AF_INET, wifi.ap_ip, &expected) != 1 || !expected.s_addr) return deny_ap("ap_address", 0);
+    if (!passport_http_local_ipv4(httpd_req_to_sockfd(req), &local)) return deny_ap("socket_address", 0);
+    if (local.s_addr != expected.s_addr) return deny_ap("local_address", 0);
     // Provisioning runs only in a physically selected AP session. Also reject an
     // associated STA, including overlapping LAN/AP subnets and ambiguous ingress.
     wifi_ap_record_t station;
-    if (esp_wifi_sta_get_ap_info(&station) != ESP_ERR_WIFI_NOT_CONNECT) return false;
+    const esp_err_t station_status = esp_wifi_sta_get_ap_info(&station);
+    if (station_status != ESP_ERR_WIFI_NOT_CONNECT) return deny_ap("station", station_status);
     char host[32], with_port[32], origin[48], expected_origin[48];
     snprintf(with_port, sizeof(with_port), "%s:80", wifi.ap_ip);
-    if (!header(req, "Host", host, sizeof(host)) || (strcmp(host, wifi.ap_ip) && strcmp(host, with_port))) return false;
+    if (!header(req, "Host", host, sizeof(host)) || (strcmp(host, wifi.ap_ip) && strcmp(host, with_port))) return deny_ap("host", 0);
     if (httpd_req_get_hdr_value_len(req, "Origin")) {
         snprintf(expected_origin, sizeof(expected_origin), "http://%s", host);
-        if (!header(req, "Origin", origin, sizeof(origin)) || strcmp(origin, expected_origin)) return false;
+        if (!header(req, "Origin", origin, sizeof(origin)) || strcmp(origin, expected_origin)) return deny_ap("origin", 0);
     }
     return true;
 }

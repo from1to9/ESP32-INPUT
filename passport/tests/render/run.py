@@ -5,6 +5,7 @@ import argparse
 import shutil
 import struct
 import subprocess
+import tempfile
 import zlib
 import sys
 
@@ -14,11 +15,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--output', type=Path, default=root / '.agent/local/passport-wifi/render')
 parser.add_argument('--setup-only', action='store_true', help='Render only the enabled setup window, details, URL QR and confirmation')
 parser.add_argument('--control-only', action='store_true', help='Render network controller status, active mouse and Lock')
+parser.add_argument('--home-only', action='store_true', help='Render Home readiness transitions in both themes')
+parser.add_argument('--compare-partial', action='store_true', help='Compare every selected page with the 16-line partial DMA buffer layout')
 args = parser.parse_args()
 out = args.output.resolve()
 out.mkdir(parents=True, exist_ok=True)
 headers = out / 'headers'
-for name in ('esp_err.h bsp_button.h bsp_display.h bsp_pins.h esp_timer.h '
+for name in ('esp_err.h esp_heap_caps.h esp_log.h bsp_button.h bsp_display.h bsp_pins.h esp_timer.h '
              'freertos/FreeRTOS.h freertos/task.h freertos/queue.h').split():
     path = headers / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +42,17 @@ target_include_directories(render PRIVATE "{headers}" "{source}")
 ''')
 subprocess.run([cmake, '-S', str(out), '-B', str(out / 'build'), '-G', 'Ninja', f'-DCMAKE_MAKE_PROGRAM={ninja}'], check=True)
 subprocess.run([cmake, '--build', str(out / 'build'), '-j', '4'], check=True)
-subprocess.run([str(out / 'build/render')] + (['--setup-only'] if args.setup_only else ['--control-only'] if args.control_only else []), cwd=out, check=True)
+render_command = [str(out / 'build/render')] + (['--setup-only'] if args.setup_only else ['--control-only'] if args.control_only else ['--home-only'] if args.home_only else [])
+subprocess.run(render_command, cwd=out, check=True)
+if args.compare_partial:
+    with tempfile.TemporaryDirectory(prefix='partial-', dir=out) as partial_dir:
+        partial = Path(partial_dir)
+        subprocess.run(render_command + ['--partial'], cwd=partial, check=True)
+        frames = sorted(partial.glob('*.ppm'))
+        assert frames, 'No partial frames rendered'
+        for frame in frames:
+            assert frame.read_bytes() == (out / frame.name).read_bytes(), f'Partial render differs: {frame.name}'
+        print(f'PASS: {len(frames)} direct and 16-line partial frames are pixel-identical')
 
 def chunk(kind, data):
     return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
@@ -51,7 +64,7 @@ def png(path, width, height, data):
 for path in out.glob('*.ppm'):
     data = path.read_bytes().split(b'\n', 3)[3]
     png(path.with_suffix('.png'), 240, 320, data)
-if args.setup_only or args.control_only:
+if args.setup_only or args.control_only or args.home_only:
     sys.exit(0)
 for theme in ('dark', 'light'):
     names = ('home', 'mouse', 'keys', 'connections', 'bluetooth-scroll', 'forget', 'pair', 'appearance', 'appearance-error', 'bluetooth-empty', 'wifi', 'lock')

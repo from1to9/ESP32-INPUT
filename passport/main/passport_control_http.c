@@ -2,6 +2,7 @@
 #include "passport_control_http.h"
 #include "passport_control.h"
 #include "passport_wifi.h"
+#include "passport_http_address.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -87,11 +88,10 @@ static bool header(httpd_req_t *req,const char *name,char *out,size_t size,bool 
 static bool binding(httpd_req_t *req)
 {
     passport_wifi_snapshot(&wifi);
-    struct sockaddr_in local; socklen_t length=sizeof(local);
-    if (getsockname(httpd_req_to_sockfd(req),(struct sockaddr *)&local,&length) ||
-        length!=sizeof(local) || local.sin_family!=AF_INET) return false;
+    struct in_addr local;
+    if (!passport_http_local_ipv4(httpd_req_to_sockfd(req), &local)) return false;
     char ip[16], with_port[32];
-    if (!inet_ntop(AF_INET,&local.sin_addr,ip,sizeof(ip))) return false;
+    if (!inet_ntop(AF_INET,&local,ip,sizeof(ip))) return false;
     bool sta=wifi.phase==PW_ONLINE && !strcmp(ip,wifi.sta_ip);
     bool ap=wifi.ap_started && wifi.dhcp_running && !strcmp(ip,wifi.ap_ip);
     if (!sta && !ap) return false;

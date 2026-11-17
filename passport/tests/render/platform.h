@@ -9,6 +9,8 @@ typedef int esp_err_t;
 #define ESP_ERR_NO_MEM 1
 #define ESP_ERR_TIMEOUT 2
 #define BSP_LCD_W 240
+#define BSP_BTN_SHORT_PRESS_MS 180
+#define CONFIG_BUTTON_PERIOD_TIME_MS 5
 #define pdTRUE 1
 #define pdMS_TO_TICKS(x) (x)
 typedef void *QueueHandle_t;

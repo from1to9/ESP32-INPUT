@@ -17,7 +17,7 @@ typedef enum {
 typedef struct {
     char title[72], subtitle[48];
     passport_icon_t icon;
-    bool checked;
+    bool checked, disabled;
 } passport_item_t;
 
 typedef struct {

@@ -16,8 +16,10 @@ typedef int esp_err_t;
     (void)(tag); ret = (call); if (ret != ESP_OK) goto label; \
 } while (0)
 #define ESP_ERROR_CHECK_WITHOUT_ABORT(call) ((void)(call))
-#define ESP_LOGW(tag, format, ...) ((void)(tag), (void)(format), (void)(__VA_ARGS__))
-#define ESP_LOGI(tag, format, ...) ((void)(tag), (void)(format), (void)(__VA_ARGS__))
+static inline __attribute__((format(printf, 2, 3)))
+void test_log(const char *tag, const char *format, ...) { (void)tag; (void)format; }
+#define ESP_LOGW(...) test_log(__VA_ARGS__)
+#define ESP_LOGI(...) test_log(__VA_ARGS__)
 const char *esp_err_to_name(esp_err_t err);
 void explicit_bzero(void *buffer, size_t size);
 void bootloader_random_enable(void);
@@ -109,12 +111,19 @@ void vQueueDelete(QueueHandle_t queue);
 int xQueueSend(QueueHandle_t queue, const void *item, TickType_t ticks);
 int xQueueReset(QueueHandle_t queue);
 int64_t esp_timer_get_time(void);
+typedef void *esp_timer_handle_t;
+typedef struct { void (*callback)(void *); const char *name; } esp_timer_create_args_t;
+int esp_timer_create(const esp_timer_create_args_t *, esp_timer_handle_t *);
+int esp_timer_start_once(esp_timer_handle_t, uint64_t);
+int esp_timer_delete(esp_timer_handle_t);
 int xQueueReceive(QueueHandle_t queue, void *item, TickType_t ticks);
 
 typedef enum { BSP_BTN_UP, BSP_BTN_DOWN, BSP_BTN_OK } bsp_btn_t;
 typedef enum { BSP_BTN_PRESS, BSP_BTN_CLICK, BSP_BTN_DOUBLE, BSP_BTN_LONG, BSP_BTN_RELEASE } bsp_btn_ev_t;
 typedef void (*bsp_btn_cb_t)(bsp_btn_t, bsp_btn_ev_t, void *);
 #define BSP_LCD_W 240
+#define BSP_BTN_SHORT_PRESS_MS 180
+#define CONFIG_BUTTON_PERIOD_TIME_MS 5
 #define LV_ALIGN_TOP_MID 1
 typedef struct { const char *text; } lv_obj_t;
 typedef struct { int unused; } lv_display_t;
@@ -124,6 +133,8 @@ bool bsp_lvgl_lock(int timeout_ms);
 void bsp_lvgl_unlock(void);
 void bsp_display_backlight(uint8_t percent);
 esp_err_t bsp_button_init(bsp_btn_cb_t callback, void *user);
+int bsp_button_read_mv(void);
+uint32_t bsp_button_glitch_count(void);
 lv_obj_t *lv_display_get_screen_active(lv_display_t *display);
 lv_obj_t *lv_label_create(lv_obj_t *parent);
 void lv_obj_set_width(lv_obj_t *object, int width);

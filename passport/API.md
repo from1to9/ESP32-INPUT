@@ -320,6 +320,10 @@ or host delivery guarantees.
 Management uses the same v1 envelope, `management_generation` from state,
 and `resource_revision` from the relevant list. No input lease is required.
 The protocol remains the owner of duplicate requests and retained results.
+Passport retains four protocol results, allows two active requests, and uses
+two remote-input jobs with four recent owner results. `/api/v1/capabilities`
+reports the result capacity. Exhaustion and eviction preserve the existing
+busy and result-unknown outcomes; clients must consume results promptly.
 
 | Read | Identity and revision |
 | --- | --- |
