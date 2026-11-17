@@ -36,8 +36,11 @@ python3 .tools/passport-esp-idf/tools/idf_tools.py install cmake ninja
 
 Run the build and size checks from the repository root in Bash. A first
 build fetches dependencies using [the manifest](main/idf_component.yml)
-and [the lockfile](dependencies.lock). SDK/tool downloads, generated
-configuration, and build output are local.
+and [the lockfile](dependencies.lock). Start each baseline or integration build
+with a fresh configuration derived from the tracked defaults. An existing
+`passport/sdkconfig` takes precedence over defaults; `reconfigure` does not reset
+its values. The following commands preserve existing configuration and builds.
+SDK/tool downloads, generated configuration, and build output are local.
 
 ```bash
 set -e
@@ -46,20 +49,32 @@ export IDF_COMPONENT_CACHE_PATH="$PWD/.tools/passport-components"
 test "$(git -C .tools/passport-esp-idf rev-parse HEAD)" = 2c211b236707889e8400c4dc5644dd5c4ee071e0
 source .tools/passport-esp-idf/export.sh
 idf.py --version
-idf.py -C passport reconfigure
-idf.py -C passport build
-idf.py -C passport size size-components
+mkdir -p .agent/local
+passport_build_dir="$(mktemp -d "$PWD/.agent/local/passport-build.XXXXXX")"
+idf.py -C passport -B "$passport_build_dir/build" \
+    -D "SDKCONFIG=$passport_build_dir/sdkconfig" \
+    -D "SDKCONFIG_DEFAULTS=$PWD/passport/sdkconfig.defaults" \
+    build size size-components
 ```
 
-The application binary and linker map are written to
-`passport/build/passport_c3.bin` and `passport/build/passport_c3.map`.
+The generated configuration is `$passport_build_dir/sdkconfig`; the application
+binary and linker map are `$passport_build_dir/build/passport_c3.bin` and
+`$passport_build_dir/build/passport_c3.map`. Retain that directory with the build
+results. For an incremental build or an intentional `menuconfig` change, reuse
+the same `-B`, `SDKCONFIG` and `SDKCONFIG_DEFAULTS` arguments. Do not run a bare
+`idf.py -C passport build` afterward: it selects the separate default build and
+its potentially stale configuration. Before deployment, check
+`$passport_build_dir/build/config/sdkconfig.h` against the buffer profile below.
+After boot, verify the effective values in the Wi-Fi startup log; a Git revision
+alone does not identify the generated configuration.
 Assess flash and static RAM with the map and size reports. SPI DMA buffers,
 LVGL allocations, RTOS task stacks, Wi-Fi, and BLE also use heap at runtime.
 The build does not measure free heap, fragmentation, stack high-water marks,
 or radio coexistence.
 
-For an existing generated configuration, select `ESP_SYSTEM_USE_FRAME_POINTER`
-in `idf.py -C passport menuconfig` before rebuilding this revision. The checked-in
+If deliberately retaining an existing generated configuration, select
+`ESP_SYSTEM_USE_FRAME_POINTER` using `menuconfig` with that build's explicit
+arguments before rebuilding this revision. The checked-in
 defaults select it for fresh configurations. Also enable `HTTPD_WS_SUPPORT`,
 `HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT`, and set `BT_NIMBLE_HOST_TASK_STACK_SIZE`
 to 6144 for an existing configuration. Panic register and frame-pointer
