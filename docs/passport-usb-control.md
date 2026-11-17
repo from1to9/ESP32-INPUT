@@ -33,14 +33,16 @@ python tools/passport_usb.py --port /dev/cu.YOUR_PASSPORT_PORT status
 ```
 
 The port is mandatory. Close a serial monitor before opening it. The CLI requests
-exclusive access on POSIX, sets DTR/RTS false before opening, and never deliberately
-pulses reset, scans other devices, flashes, unlocks, reconnects or retries a mutation.
-Some OS/driver implementations can change modem lines on open; a reset is never
-treated as success. The command's boot nonce prevents old requests from executing
-after a new boot. There is one writer per port; exclusivity is cooperative on some
-platforms and does not replace ownership coordination.
+exclusive access on POSIX and sets DTR/RTS false before opening. This does **not**
+guarantee a reset-free open: pyserial applies the requested modem-line states only
+after the OS opens/configures the port. The open/configuration sequence can reset
+the board. Do not carry generations, scan rows, revisions or observations from one
+CLI process into another. Use the persistent session below for dependent operations.
+The CLI never deliberately pulses reset, scans other devices, flashes, unlocks,
+reconnects or retries a mutation. There is one writer per port; exclusivity is
+cooperative on some platforms and does not replace ownership coordination.
 
-Each invocation obtains `hello`, then sends the requested command exactly once.
+Each one-command invocation obtains `hello`, then sends that command exactly once.
 JSON stdout contains `boot`, `id`, `accepted`, `result`, `detail`, and `data` records.
 `accepted` records whether the queue ACK was observed, not whether the host app
 handled an input. It can be false if an ACK was lost but a final reply was received.
@@ -49,29 +51,68 @@ transport/handshake or an unknown command outcome. Failure output includes its p
 Console logs are discarded, never mixed into JSON. Default final timeout is 75 s;
 `--timeout` accepts 1..120 s. A local timeout does not cancel a device operation.
 
-Read `status` first. Use its current generation/revisions explicitly; the CLI does
-not silently refresh and replay rejected work. For example, with BLE generation 4
-and input revision 9, Enter is:
+For automated control, start one process and keep both stdin and stdout connected:
 
 ```sh
-python tools/passport_usb.py --port /dev/cu.YOUR_PASSPORT_PORT key 4 9 0 40
+python tools/passport_usb.py --port /dev/cu.YOUR_PASSPORT_PORT session
 ```
 
-If locked, issue `unlock GENERATION`, observe status, then explicitly `takeover
-GENERATION` when changing from Web control or another mode. Read the new input
-revision before sending input. `release_required` means the mode/ownership changed
-and requires a fresh request; the original input was not queued.
+The first stdout line is the initial hello result with `event: "hello"`. Each
+subsequent stdin line is a JSON object with `operation` and optional `arguments`
+(an array of strings or integers). One JSON result line is flushed for each input
+line. The port stays open while waiting for the next request. Requests are sequential,
+so the caller can inspect a result and choose its next operation without reopening:
 
-Wi-Fi join selects an exact scan row, not a free-form SSID. Pass the station password
-through stdin so it is absent from argv and shell history:
+```python
+import json
+import subprocess
 
-```sh
-python tools/passport_usb.py --port /dev/cu.YOUR_PASSPORT_PORT --password-stdin wifi.join SCAN_REVISION ROW < private-passphrase.txt
+with subprocess.Popen(
+    ["python", "tools/passport_usb.py", "--port", PORT, "session"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
+) as session:
+    hello = json.loads(session.stdout.readline())
+    assert hello["result"] == "applied"
+
+    def request(operation, arguments=()):
+        session.stdin.write(json.dumps({"operation": operation, "arguments": list(arguments)}) + "\n")
+        session.stdin.flush()
+        return json.loads(session.stdout.readline())
+
+    state = request("status")
+    assert state["result"] == "applied"
+    ble = next(r for r in state["data"] if r["type"] == "ble")
+    revision = next(r for r in state["data"] if r["type"] == "ble_revision")
+    # Example: Enter on an already-ready, unlocked BLE host.
+    if ble["ready"] == "1":
+        result = request("key", [revision["generation"], revision["input"], 0, 40])
+        print(result)
+    session.stdin.close()
 ```
 
-The file contains one passphrase line; an empty line selects an open network. Protect
-and remove such files according to your own credential handling policy. Input passwords
-are never returned or logged by this API. Firmware wipes the parser, local decoded
+If locked, explicitly request `unlock` with the observed generation, observe status,
+then explicitly `takeover` when changing from Web control or another mode. Read the
+new input revision before sending input. `release_required` means a fresh request
+is needed; the original input was not queued. A rejected command is never replayed.
+`Client(port)` remains available to Python callers that own an already-open port;
+call `hello()` once, then `command()` repeatedly on that same client and port.
+
+After an unknown transport/completeness outcome, the session keeps the port open
+but rejects further ordinary commands with `hello_required`. An explicit
+`{"operation":"hello"}` establishes fresh boot identity; then read status and
+decide whether another mutation is appropriate. The old mutation is never resent.
+A device-reported final failure remains a normal result. EOF closes the session;
+exit 0 means the input stream ended normally, not that every command succeeded.
+Malformed records return `invalid` without writing to the device. Lines exceeding
+1024 bytes terminate the session with exit 2. No automatic reopening is attempted.
+
+Wi-Fi join selects an exact scan row. In session mode, provide the passphrase as a
+separate `password` field, with two arguments (scan revision and row). An empty
+password string selects an open network. Do not put passphrases in `arguments`.
+Use a private stdin pipe; requests and passwords are not echoed to stdout. The
+one-command `--password-stdin` option is retained, but dependent scan/join workflows
+must use one persistent connection. Input passwords are never returned or logged
+by this API. Firmware wipes the parser, local decoded
 submission, USB mailbox and owner incoming copy; a USB password never enters retained
 FreeRTOS queue storage. Normal active/persisted Wi-Fi owner credentials remain necessary
 for connection. Python/OS/pyserial immutable copies are not guaranteed to be securely
@@ -83,6 +124,10 @@ generated AP password, never a read of a saved station password; protect its JSO
 All numeric arguments are unsigned decimal unless specified. Indexes are zero-based.
 Strings are byte-preserving hex; `-` represents an empty string. SSID bytes are not
 assumed to be UTF-8. Label validation follows the existing 16-scalar/48-byte contract.
+CLI data records use JSON `type` as their record discriminator. In a `peer` record,
+the UC2 wire field `type` (BLE address type) is exposed as `address_type`; the
+record discriminator remains `type: "peer"`. This normalization works with the
+existing UC2 firmware and preserves address/bond data without requiring a flash.
 
 | Operation | Arguments | Final observation |
 | --- | --- | --- |

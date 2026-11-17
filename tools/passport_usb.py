@@ -8,6 +8,7 @@ import sys
 import time
 
 FRAME_LIMIT = 256
+SESSION_LINE_LIMIT = 1024
 
 
 def encode(boot, request_id, operation, arguments=()):
@@ -115,7 +116,12 @@ class Client:
             if reply["kind"] == "ack":
                 self.accepted = reply["code"] == "accepted"
             elif reply["kind"] == "data":
-                self.data.append({"type": reply["code"], **reply["fields"]})
+                fields = reply["fields"]
+                if reply["code"] == "peer" and "type" in fields:
+                    # UC2's wire 'type' is the BLE address type, not the JSON
+                    # record discriminator. Keep both without firmware changes.
+                    fields = {"address_type": fields["type"], **{k: v for k, v in fields.items() if k != "type"}}
+                self.data.append({"type": reply["code"], **fields})
                 if len(self.data) > 16:
                     raise OutcomeUnknown("too_many_reply_records")
             else:
@@ -147,12 +153,76 @@ class Client:
         return self.exchange(self.boot, self.last, operation, arguments)
 
 
+def session_request(record):
+    """Validate stdin without reflecting its contents, including credentials."""
+    if not isinstance(record, dict) or set(record) - {"operation", "arguments", "password"}:
+        raise ValueError("invalid_request")
+    operation, arguments = record.get("operation"), record.get("arguments", [])
+    if not isinstance(operation, str) or not isinstance(arguments, list) or any(type(a) not in (str, int) for a in arguments):
+        raise ValueError("invalid_request")
+    arguments = [str(a) for a in arguments]
+    if operation in ("session", "hello") and (operation == "session" or arguments):
+        raise ValueError("invalid_request")
+    if operation == "wifi.join":
+        password = record.get("password")
+        if len(arguments) != 2 or not isinstance(password, str) or len(password) > 63 or any(ord(c) < 32 or ord(c) > 126 for c in password):
+            raise ValueError("invalid_password")
+        arguments.append(password.encode("ascii").hex() or "-")
+    elif "password" in record:
+        raise ValueError("unexpected_password")
+    encode(1, 1, operation, arguments)
+    return operation, arguments
+
+
+def run_session(client, stream, output):
+    """One already-open port; one JSON response per request, without replay."""
+    def emit(result):
+        output.write(json.dumps(result, ensure_ascii=True) + "\n")
+        output.flush()
+
+    while True:
+        try:
+            raw = stream.readline(SESSION_LINE_LIMIT + 1)
+        except KeyboardInterrupt:
+            return 0  # No command is in flight while waiting for stdin.
+        if not raw:
+            return 0
+        if len(raw) > SESSION_LINE_LIMIT:
+            emit({"result": "invalid", "reason": "line_too_long"})
+            return 2
+        try:
+            operation, arguments = session_request(json.loads(raw))
+        except (ValueError, TypeError, UnicodeError):
+            emit({"result": "invalid", "reason": "request_schema"})
+            continue
+        finally:
+            raw = None  # No request/secret is copied to an error or diagnostic.
+        if operation != "hello" and not client.boot:
+            emit({"result": "unavailable", "reason": "hello_required"})
+            continue
+        try:
+            result = client.hello() if operation == "hello" else client.command(operation, arguments)
+            emit(result)
+        except OutcomeUnknown as exc:
+            emit({"result": "unknown", "reason": str(exc), "accepted": client.accepted, "id": client.request_id})
+            # Keep the port open. Only an explicit read-only hello can establish
+            # fresh identity after uncertainty; never repeat the prior mutation.
+            client.boot = 0
+        except KeyboardInterrupt:
+            emit({"result": "unknown", "reason": "interrupted", "accepted": client.accepted, "id": client.request_id})
+            return 3
+        except ValueError:
+            emit({"result": "unavailable", "reason": "sequence_exhausted"})
+        finally:
+            arguments.clear()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", required=True, help="Explicit USB serial port; never auto-detected")
     parser.add_argument("--timeout", type=float, default=75, help="Final-result deadline in seconds (1..120)")
     parser.add_argument("--password-stdin", action="store_true", help="wifi.join only: read a passphrase line from stdin")
-    parser.add_argument("operation", help="Protocol operation; see docs/passport-usb-control.md")
+    parser.add_argument("operation", help="Protocol operation or 'session' for persistent JSON-lines control")
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args(argv)
     if not 1 <= args.timeout <= 120:
@@ -172,8 +242,8 @@ def main(argv=None):
         password[:] = b"\0" * len(password)
     elif args.password_stdin:
         parser.error("--password-stdin is only valid for wifi.join")
-    if args.operation == "hello" and args.arguments:
-        parser.error("hello takes no arguments")
+    if args.operation in ("hello", "session") and args.arguments:
+        parser.error("hello/session take no arguments")
     # Validate before opening a port. Never include request content in errors.
     try:
         encode(1, 1, args.operation, args.arguments)
@@ -192,6 +262,10 @@ def main(argv=None):
         client = Client(port, args.timeout)
         phase = "hello"
         result = client.hello()
+        if args.operation == "session":
+            print(json.dumps({"event": "hello", **result}, ensure_ascii=True), flush=True)
+            phase = "session"
+            return run_session(client, sys.stdin.buffer, sys.stdout)
         if args.operation != "hello":
             phase = "command"
             result = client.command(args.operation, args.arguments)
@@ -199,7 +273,7 @@ def main(argv=None):
         return 0 if result["result"] == "applied" else 2
     except (Exception, KeyboardInterrupt) as exc:
         reason = str(exc) if isinstance(exc, OutcomeUnknown) else type(exc).__name__
-        print(json.dumps({"result": "unknown" if phase == "command" else "unavailable", "phase": phase, "reason": reason,
+        print(json.dumps({"result": "unknown" if phase in ("command", "session") else "unavailable", "phase": phase, "reason": reason,
                           "accepted": bool(client and client.accepted),
                           "id": client.request_id if client else None}))
         return 3
