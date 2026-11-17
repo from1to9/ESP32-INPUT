@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_command_bridge.h"
+#include "control_registry.h"
+#include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
 #define SAFETY_CAPACITY 4U
@@ -96,6 +99,14 @@ static const cp_operation_info_t *operation_info(cp_operation_id_t id)
     }
     return NULL;
 }
+static void movement_expiry_reason(const cp_command_t *command, cp_result_t *result,
+                                   const char *stage, uint64_t now)
+{
+    if (command->identity.browser && command->operation == CP_OP_MOUSE_MOVE_RELATIVE)
+        snprintf(result->reason, sizeof(result->reason), "%s now=%" PRIu64 " deadline=%" PRIu64,
+                 stage, now, command->deadline_ms);
+}
+
 cp_error_t app_command_bridge_submit(void *context, const cp_command_t *command, cp_result_t *result)
 {
     app_command_bridge_t *b = context;
@@ -105,7 +116,10 @@ cp_error_t app_command_bridge_submit(void *context, const cp_command_t *command,
     uint64_t now = b->port.now_ms(b->port.user);
     const cp_operation_info_t *op = operation_info(command->operation);
     bool priority = op && op->safety;
-    if (!priority && command->deadline_ms <= now) return CP_EXPIRED;
+    if (!priority && command->deadline_ms <= now) {
+        movement_expiry_reason(command, result, "submit", now);
+        return CP_EXPIRED;
+    }
     cp_error_t error = CP_OK;
     queued_command_t *queued = NULL;
     b->port.lock(b->port.user);
@@ -256,6 +270,7 @@ static cp_result_t execute_flight(app_command_bridge_t *b)
     const cp_operation_info_t *op = operation_info(b->flight.command.operation);
     cp_error_t error = cancelled ? CP_STALE :
         !(op && op->safety) && b->flight.command.deadline_ms <= now ? CP_EXPIRED : CP_OK;
+    if (error == CP_EXPIRED) movement_expiry_reason(&b->flight.command, &result, "dequeue", now);
     if (error == CP_OK) error = b->port.execute(b->port.user, &b->flight.command, &result);
     if (error != CP_OK) { result.state = CP_RESULT_REJECTED; result.error = error; }
     result.command_key = b->flight.command.command_key;

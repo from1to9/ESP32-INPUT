@@ -23,6 +23,8 @@ struct dual_transport {
     app_command_bridge_t *bridge;
     listener_t listeners[2], *interleave;
     bool locked;
+    uint64_t bridge_now;
+    cp_error_t expected_execute_error;
     uint64_t keys[32], interleaved_key;
     unsigned executed;
     cp_command_t oldest;
@@ -153,7 +155,11 @@ static void dual_open(dual_transport_t *test, unsigned slot, unsigned seed)
 
 static void dual_lock(void *user) { dual_transport_t *d = user; assert(!d->locked); d->locked = true; }
 static void dual_unlock(void *user) { dual_transport_t *d = user; assert(d->locked); d->locked = false; }
-static uint64_t dual_clock(void *user) { return ((dual_transport_t *)user)->input.now; }
+static uint64_t dual_clock(void *user)
+{
+    dual_transport_t *test = user;
+    return test->bridge_now ? test->bridge_now : test->input.now;
+}
 static void dual_safety(void *user, cp_safety_reason_t reason, const cp_identity_t *identity)
 { (void)user; (void)reason; (void)identity; }
 static cp_error_t dual_read(void *user, const cp_identity_t *identity, const char *resource, char *out,
@@ -167,7 +173,7 @@ static cp_error_t dual_execute(void *user, const cp_command_t *command, cp_resul
     test->keys[test->executed++] = command->command_key;
     if (test->executed == 1) test->oldest = *command;
     cp_error_t error = app_remote_input_execute(test->input.remote, command, test->input.now, result);
-    assert(error == CP_OK);
+    assert(error == test->expected_execute_error);
     return error;
 }
 static unsigned dual_deliver(dual_transport_t *test, const cp_result_t *result)
@@ -281,4 +287,109 @@ static void dual_listener_order_and_restart(void)
         finish(&test.input);
     }
     puts("PASS: TLS/HTTP dual listeners, reordered admission, neutral release, context replacement and old completion isolation");
+}
+
+static void browser_motion_expiry_stage(void)
+{
+    dual_transport_t test = {0};
+    fixture_t *input = &test.input;
+    setup(input, INPUT_MOUSE);
+    void *bridge = calloc(1, app_command_bridge_bytes());
+    assert(bridge);
+    app_command_bridge_port_t port = {.user = &test, .lock = dual_lock, .unlock = dual_unlock,
+        .now_ms = dual_clock, .available = dual_available, .execute = dual_execute,
+        .safety = dual_safety, .read = dual_read, .complete = dual_complete};
+    assert(app_command_bridge_init(bridge, app_command_bridge_bytes(), &port, &test.bridge) == CP_OK);
+    app_command_bridge_refresh(test.bridge);
+    dual_open(&test, 0, 0x10);
+    dual_open(&test, 1, 0x90);
+    listener_t *http = &test.listeners[1];
+    assert(cp_http(http->context, "GET", "/api/v1/state?view=protocol", &http->security,
+        NULL, 0, input->now, http->response) == CP_OK);
+    char args[80];
+    snprintf(args, sizeof(args), "{\"state_sequence\":\"%" PRIu64 "\"}", input->state.state_sequence);
+    const uint64_t acquired = dual_send(http, "control.acquire", args);
+    app_command_bridge_service(test.bridge);
+    step(input);
+    step(input);
+    dual_publish(&test);
+    cp_result_t result = last_result(input, acquired);
+    assert(result.state == CP_RESULT_APPLIED && dual_deliver(&test, &result) == 1);
+    assert(cp_http(http->context, "GET", "/api/v1/state?view=protocol", &http->security,
+        NULL, 0, input->now, http->response) == CP_OK);
+    char lease[33];
+    dual_field(http->response->body, "lease_id", lease, sizeof(lease));
+
+    cp_set_transport_capabilities(http->context, true, false);
+    cp_set_motion_terminal_available(http->context, true);
+    assert(cp_http(http->context, "POST", "/api/v1/ws-ticket", &http->security,
+        NULL, 0, input->now, http->response) == CP_OK);
+    char ticket[65];
+    dual_field(http->response->body, "ticket", ticket, sizeof(ticket));
+    cp_identity_t identity;
+    assert(cp_transport_upgrade(http->context, &http->security, ticket, input->now, &identity) == CP_OK);
+    cp_motion_terminal_t motion = {.enabled = true};
+    const size_t before = input->reports_count;
+    const char *stages[] = {"protocol", "submit", "dequeue", "input"};
+    for (size_t i = 0; i <= sizeof(stages) / sizeof(stages[0]); ++i) {
+        const bool succeeds = i == sizeof(stages) / sizeof(stages[0]);
+        const uint64_t deadline = input->now + 100;
+        if (i == 0) input->now = deadline;
+        test.bridge_now = i == 1 ? deadline : 0;
+        char body[1024], key[32], observed[CP_REASON_CAPACITY], expected[CP_REASON_CAPACITY];
+        const unsigned sequence = ++http->sequence;
+        int n = snprintf(body, sizeof(body),
+            "{\"v\":1,\"boot_id\":\"%s\",\"session_id\":\"%s\",\"request_id\":\"%s%016x\",\"seq\":%u,"
+            "\"deadline_ms\":\"%" PRIu64 "\",\"epoch\":\"%" PRIu64 "\",\"transport_generation\":\"%" PRIu64 "\","
+            "\"target_id\":\"%s\",\"lease_id\":\"%s\",\"op\":\"mouse.move_relative\",\"args\":{\"dx\":5,\"dy\":0}}",
+            http->boot, http->session, http->prefix, sequence, sequence, deadline, input->engine.state.epoch,
+            input->state.transport_generation, input->state.target_id, lease);
+        assert(n > 0 && (size_t)n < sizeof(body));
+        const cp_error_t admission = cp_transport_frame_motion(http->context, &identity, body,
+            (size_t)n, input->now, http->response, &motion);
+        assert(admission == (i < 2 ? CP_EXPIRED : CP_OK));
+        dual_field(http->response->body, "command_key", key, sizeof(key));
+        const uint64_t command_key = strtoull(key, NULL, 10);
+        assert(motion.accepted_key == (i < 2 ? 0 : command_key));
+        if (i >= 2) {
+            if (!succeeds) input->now = deadline;
+            test.bridge_now = i == 3 ? deadline - 1 : 0;
+            test.expected_execute_error = i == 3 ? CP_EXPIRED : CP_OK;
+            app_command_bridge_service(test.bridge);
+            if (succeeds) step(input);
+            if (succeeds) {
+                result = last_result(input, command_key);
+                assert(result.state == CP_RESULT_SENT && dual_deliver(&test, &result) == 1);
+            }
+            assert(cp_transport_motion_result(http->context, &identity, command_key, input->now,
+                http->response) == CP_OK);
+            char terminal_key[32];
+            dual_field(http->response->body, "command_key", terminal_key, sizeof(terminal_key));
+            assert(!strcmp(key, terminal_key));
+            assert(strstr(http->response->body, "\"motion_terminal\":true"));
+        }
+        dual_field(http->response->body, "reason", observed, sizeof(observed));
+        if (succeeds) assert(!strcmp(observed, "transport_accepted_reports"));
+        else {
+            snprintf(expected, sizeof(expected), "%s now=%" PRIu64 " deadline=%" PRIu64,
+                     stages[i], deadline, deadline);
+            assert(!strcmp(observed, expected) && http->response->status == 400);
+            assert(strstr(http->response->body, "\"state\":\"rejected\",\"error\":\"expired\""));
+        }
+        assert(input->reports_count == before + (size_t)succeeds);
+        char path[80], retained[CP_REASON_CAPACITY], next[32];
+        snprintf(path, sizeof(path), "/api/v1/requests/%s", key);
+        assert(cp_http(http->context, "GET", path, &http->security, NULL, 0,
+            input->now, http->response) == (succeeds ? CP_OK : CP_EXPIRED));
+        dual_field(http->response->body, "reason", retained, sizeof(retained));
+        assert(!strcmp(observed, retained));
+        snprintf(next, sizeof(next), "\"next_seq\":%u,", sequence + 1);
+        assert(strstr(http->response->body, next));
+        test.bridge_now = 0;
+    }
+    dual_close(http);
+    dual_close(&test.listeners[0]);
+    free(bridge);
+    finish(input);
+    puts("PASS: browser move expiry receipts at protocol, bridge submit, dequeue and input checks");
 }
