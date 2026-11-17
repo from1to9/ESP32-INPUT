@@ -46,11 +46,15 @@ Lock when remote input should stop.
 
 Passport retains BLE HID and optional local speaker cues, which start Off.
 It has no native USB HID, motion sensor input, touch input, microphone,
-Bluetooth audio, or media workflow. The ESP32-C3 USB Serial/JTAG port is for
-flashing and diagnostics. This target has passed source, host, browser, and
-ESP32-C3 build checks; physical Passport and host compatibility remain to be
-qualified. [Passport setup, build, and validation](passport/README.md) ·
+Bluetooth audio, or media workflow. Its USB Serial/JTAG port also exposes a
+local command API for automated Wi-Fi, Bluetooth, mouse, keyboard and settings
+control; it remains a serial protocol, not USB HID. Source, host, browser and
+ESP32-C3 builds pass, and bounded tests on one Passport cover BLE HID input,
+USB control, AP/DHCP and unattended LAN health. Sustained Web reliability and
+broader phone, tablet and computer compatibility remain to be qualified.
+[Passport setup, build, and validation](passport/README.md) ·
 [Passport API](passport/API.md) ·
+[Passport USB control](docs/passport-usb-control.md) ·
 [Community release requirements](docs/passport-community-release.md)
 
 ## Control an iPad or iPhone
