@@ -54,6 +54,7 @@ export class Controller {
     this.state = null;
     this.controlled = false;
     this.busy = false;
+    this.renewing = false;
     this.managing = false;
     this.closing = false;
     this.uncertain = false;
@@ -65,6 +66,7 @@ export class Controller {
     this.onchange = () => {};
     this.generation = 0;
   }
+  get foregroundBusy() { return this.busy && !this.renewing; }
   changed() { this.onchange(); }
   halt(message) {
     this.controlled = false;
@@ -76,8 +78,10 @@ export class Controller {
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), 3500);
     try {
+      // Safari sends Origin: null for same-origin POSTs in same-origin mode
+      // under no-referrer. API paths stay relative and connect-src is 'self'.
       const response = await this.fetcher(path, {
-        method, mode: "same-origin", credentials: "same-origin", cache: "no-store", redirect: "error",
+        method, mode: "cors", credentials: "same-origin", cache: "no-store", redirect: "error",
         headers: {Accept: "application/json", ...(method === "GET" ? {} : {"Content-Type": "application/json"}),
           ...(csrf && method !== "GET" ? {"X-CSRF-Token": csrf} : {})},
         ...(body === undefined ? {} : {body: JSON.stringify(body)}), signal: abort.signal, keepalive,
@@ -221,11 +225,12 @@ export class Controller {
   async run(op, args = {}, total, sample) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     this.busy = true;
-    if (!sample && op !== "control.renew") this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
+    this.renewing = op === "control.renew";
+    if (!sample && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
     this.changed();
     try { return await this.send(op, args, total, sample); }
     catch (error) { this.halt(this.uncertain ? this.message : error.message); throw error; }
-    finally { this.busy = false; this.changed(); }
+    finally { this.busy = this.renewing = false; this.changed(); }
   }
   async acquire() {
     if (!this.session || this.uncertain) throw new Error("Connect a fresh browser session first.");
@@ -399,9 +404,9 @@ function mountManagement(client, $, clearInput) {
     status.textContent = message;
     status.hidden = !message;
   };
-  const blocked = () => !client.session || !client.state || client.state.locked || client.uncertain || client.busy || loading;
+  const blocked = () => !client.session || !client.state || client.state.locked || client.uncertain || client.foregroundBusy || loading;
   const controls = () => {
-    $("refresh-connections").disabled = !client.session || loading || client.busy;
+    $("refresh-connections").disabled = !client.session || loading || client.foregroundBusy;
     $("scan").disabled = blocked() || !has("wifi.configure") || !supports("wifi.scan.start");
     $("pair-duration").disabled = blocked() || !supports("bluetooth.pairing.open");
     document.querySelectorAll("[data-manage]").forEach(button => {
@@ -491,10 +496,12 @@ function mountManagement(client, $, clearInput) {
   async function command(op, args, revision, {
     release = false, timeout, success = "Device change confirmed.", scan = model.scan !== null
   } = {}) {
-    if (release) clearInput();
     const active = document.activeElement?.closest("#connections section");
     const fallback = $(op.startsWith("bluetooth.") ? "bluetooth-title" : op.startsWith("wifi.") ? "wifi-title" : "labels-title");
-    note("Sending request…", active || fallback.closest("section"));
+    const section = active || fallback.closest("section");
+    if (client.busy) { note("Wait for the current action and try again.", section); return; }
+    if (release) clearInput();
+    note("Sending request…", section);
     try {
       const result = await client.manage(op, args, revision, {release, timeout, update: current => {
         if (ACTIVE.has(current.state)) note(managementMessages[current.reason] || "Waiting for Mosaico.");
@@ -671,11 +678,11 @@ function mountManagement(client, $, clearInput) {
     note("");
     render();
   }
-  $("refresh-connections").onclick = () => refresh({announce: true});
+  $("refresh-connections").onclick = () => { if (!client.busy) return refresh({announce: true}); };
   $("scan").onclick = () => command("wifi.scan.start", {}, String(model.scan?.generation || 0),
     {scan: true, success: "Scan complete."});
   setInterval(async () => {
-    if (blocked() || document.hidden || !(model.peers?.pairing_open || model.peers?.pairing_handshake)) return;
+    if (blocked() || client.busy || document.hidden || !(model.peers?.pairing_open || model.peers?.pairing_handshake)) return;
     const session = client.session;
     try {
       const observed = await peers();
@@ -707,10 +714,28 @@ function mount() {
   const management = mountManagement(client, $, () => { pad = movement = null; });
   const error = value => { client.message = value.message; client.changed(); };
   const act = async fn => { try { await fn(); } catch (value) { if (!client.uncertain) error(value); } };
+  async function authorize(fn, revealError = true) {
+    if (pairingBusy || client.closing) return;
+    pairingBusy = true;
+    paint();
+    try {
+      await fn();
+    } catch (value) {
+      $("approval").textContent = value.message;
+      if (revealError) {
+        $("pairing").open = true;
+        $("approval").scrollIntoView({block: "nearest"});
+      }
+    } finally {
+      pairingBusy = false;
+      paint();
+    }
+  }
   function paint() {
     const s = client.state;
     const inputPermission = client.session?.scopes.includes("input.control");
-    $("connection").textContent = client.controlled ? "Controlling" : client.session ? s ? "Connected / idle" : "State unavailable" : "Disconnected";
+    const connection = client.controlled ? "Controlling" : client.session ? s ? "Connected / idle" : "State unavailable" : "Disconnected";
+    if ($("connection").textContent !== connection) $("connection").textContent = connection;
     $("connection").dataset.state = client.controlled ? "controlling" : client.session && s ? "online" : "offline";
     $("target").textContent = s ? `${s.target_id.startsWith("usb:") ? "USB" : s.target_id.startsWith("bluetooth:") ? "Bluetooth" : "Input"} · ${s.target_id || "unavailable"}` : "Unavailable";
     $("readiness").textContent = !s ? "Connect to read the actual input state." : !inputPermission ?
@@ -718,7 +743,9 @@ function mount() {
       !s.input_ready ? "Input not ready" : s.release_pending ? "Waiting for input releases" :
       !s.remote_allowed ? "Remote input is not allowed on Mosaico" : `${s.mode} · ready${client.controlled ? " · this browser owns control" : " · no control acquired here"}`;
     const active = client.controlled && !client.uncertain && s?.input_ready && !s.release_pending && !s.locked && s.remote_allowed;
-    const ready = active && !client.busy;
+    // A renewal still owns the command lane. Keep the controls steady until
+    // control actually changes or the user starts a foreground action.
+    const ready = active && !client.foregroundBusy;
     $("mouse-controls").disabled = !active || s.mode !== "mouse";
     $("keyboard-controls").disabled = !active || s.mode !== "keyboard";
     $("mouse-controls").hidden = s?.mode === "keyboard";
@@ -731,12 +758,12 @@ function mount() {
     $("acquire").disabled = !inputPermission || client.busy || client.uncertain || client.controlled || !s?.input_ready || s.locked || s.release_pending || !s.remote_allowed;
     $("stop").disabled = !inputPermission || (client.managing && !client.controlled);
     $("disconnect").disabled = !client.session;
-    $("refresh").disabled = !client.session || client.busy;
+    $("refresh").disabled = !client.session || client.foregroundBusy;
     $("connect").disabled = !identity || client.busy || client.closing || pairingBusy || Boolean(client.session);
     $("pair").disabled = pairingBusy || client.closing || Boolean(client.session);
     $("check").disabled = !identity || pairingBusy || client.closing || Boolean(client.session);
-    $("result-check").disabled = !client.lastKey || !client.session || client.busy;
-    $("result").textContent = client.message;
+    $("result-check").disabled = !client.lastKey || !client.session || client.foregroundBusy;
+    if ($("result").textContent !== client.message) $("result").textContent = client.message;
     if (!active || s.mode !== "mouse") { pad = null; movement = null; }
     management.paint();
   }
@@ -748,48 +775,58 @@ function mount() {
   }
   async function status() {
     if (!identity) throw new Error("Pair this browser first.");
-    if (pairingBusy) throw new Error("Wait for the current browser pairing request.");
-    pairingBusy = true; paint();
+    let response;
     try {
-      const response = await client.request("/api/v1/pairing/status", "POST", identity, null);
-      const data = response.json;
-      const fingerprint = await verifiedFingerprint(identity);
-      if (![200, 202].includes(response.status) || !HEX64.test(data.fingerprint || "") ||
-          data.client_id !== identity.client_id || (fingerprint && data.fingerprint !== fingerprint)) {
-        throw new Error("Pairing status unavailable or identity mismatch.");
-      }
-      $("approval").textContent = describeApproval(data);
-      if (data.state === "approved") {
+      response = await client.request("/api/v1/pairing/status", "POST", identity, null);
+    } catch {
+      throw new Error("Could not read browser approval. Check the connection and try again.");
+    }
+    const data = response.json;
+    const fingerprint = await verifiedFingerprint(identity);
+    if (![200, 202].includes(response.status) || !HEX64.test(data?.fingerprint || "") ||
+        data.client_id !== identity.client_id || (fingerprint && data.fingerprint !== fingerprint)) {
+      throw new Error("Pairing status unavailable or identity mismatch.");
+    }
+    $("approval").textContent = describeApproval(data);
+    if (data.state === "approved") {
+      try {
         await client.login(identity);
-        $("pair-title").textContent = "Browser access · approved";
-        $("pairing").open = false;
+      } catch {
+        throw new Error(client.session ? "Browser access approved. Device state unavailable. Try Refresh." :
+          "Browser access approved. Could not connect. Try Connect saved browser.");
       }
-      return data.state;
-    } finally { pairingBusy = false; paint(); }
+      $("pair-title").textContent = "Browser access · approved";
+      $("pairing").open = false;
+    }
+    return data.state;
   }
-  $("pair").onclick = () => act(async () => {
+  $("pair").onclick = () => authorize(async () => {
     const label = $("client-name").value.trim();
     if (!/^[\x20-\x7e]{1,32}$/.test(label)) throw new Error("Use 1–32 printable ASCII characters for this browser's name.");
     const code = $("access-code").value;
     if (!/^[0-9]{8}$/.test(code)) throw new Error("Enter the 8-digit access code from Mosaico settings.");
     const duration = $("access-duration").value;
-    pairingBusy = true; paint();
+    let response;
     try {
       identity = await browserIdentity(true); await showIdentity();
-      const response = await client.request("/api/v1/pairing/code", "POST", {...identity, label, code, duration}, null);
-      if (response.status !== 202) throw new Error(response.status === 401 ? "Access code rejected." :
-        response.status === 429 ? "Pairing is busy. Wait a minute before trying again." : "Authorization unavailable. Check the code and available browser slots on Mosaico.");
-      $("approval").textContent = "Saving browser authorization…";
-    } finally { $("access-code").value = ""; pairingBusy = false; paint(); }
+      try {
+        response = await client.request("/api/v1/pairing/code", "POST", {...identity, label, code, duration}, null);
+      } catch {
+        throw new Error("Authorization reply unavailable. Check approval before submitting the code again.");
+      }
+    } finally { $("access-code").value = ""; }
+    if (response.status !== 202) throw new Error(response.status === 401 ? "Access code rejected." :
+      response.status === 429 ? "Pairing is busy. Wait a minute before trying again." : "Mosaico could not accept the browser authorization request.");
+    $("approval").textContent = "Saving browser authorization…";
     for (let attempt = 0; attempt < 12; ++attempt) {
       await sleep(250);
       if (await status() !== "pending") break;
     }
   });
-  $("check").onclick = () => act(() => status());
-  $("connect").onclick = () => act(() => status());
+  $("check").onclick = () => authorize(status);
+  $("connect").onclick = () => authorize(status);
   $("acquire").onclick = () => act(() => client.acquire());
-  $("refresh").onclick = () => act(() => client.refresh());
+  $("refresh").onclick = () => { if (!client.busy) return act(() => client.refresh()); };
   $("disconnect").onclick = () => act(() => client.disconnect());
   $("stop").onclick = () => act(async () => {
     pad = movement = null;
@@ -816,7 +853,7 @@ function mount() {
   }
   $("send").onclick = () => act(() => client.text($("text").value));
   $("text").oninput = () => { $("text-count").textContent = `${$("text").value.length} / 32 characters`; };
-  $("result-check").onclick = () => act(() => client.checkResult());
+  $("result-check").onclick = () => { if (!client.busy) return act(() => client.checkResult()); };
   $("forget").onclick = () => act(async () => {
     await client.disconnect(); localStorage.removeItem(IDENTITY_KEY); identity = null;
     $("pair-title").textContent = "Connect this browser"; $("pairing").open = true;
@@ -868,11 +905,11 @@ function mount() {
   });
   globalThis.addEventListener("pagehide", suspend);
   globalThis.addEventListener("offline", suspend);
-  act(async () => {
+  authorize(async () => {
     if (!["http:", "https:"].includes(location.protocol) || !crypto.getRandomValues) throw new Error("Open Mosaico’s address over Wi-Fi or its control hotspot.");
     identity = await browserIdentity(); await showIdentity(); paint();
     if (identity) await status();
-  });
+  }, false);
   paint();
 }
 if (typeof document !== "undefined") mount();

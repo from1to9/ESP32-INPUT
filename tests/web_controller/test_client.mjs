@@ -37,8 +37,13 @@ for (const text of ["", "x".repeat(33), "A\nB", "A\rB", "A\tB", "ok\u4e2d", "okð
   assert.equal(command.request_id, prefix + "0000000000000001");
   assert.equal(command.epoch, "8"); assert.equal(command.lease_id, lease);
   assert.equal(f.calls[1].options.headers["X-CSRF-Token"], id);
-  assert.equal(f.calls[1].options.mode, "same-origin");
-  assert.equal(f.calls[1].options.redirect, "error");
+  for (const {path, options} of f.calls) {
+    assert.match(path, /^\/api\/v1\//);
+    assert.equal(options.mode, "cors");
+    assert.equal(options.credentials, "same-origin");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.cache, "no-store");
+  }
   assert.equal(f.client.session.next_seq, 2);
   assert.match(f.client.message, /32 \/ 32 key pairs complete/);
   const originalMessage = f.client.message, originalKey = f.client.lastKey;

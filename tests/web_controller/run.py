@@ -77,7 +77,8 @@ def main():
     parser.add_argument("--browser-executable", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--http", action="store_true", help="Exercise authenticated plaintext browser transport")
-    parser.add_argument("--case", choices=("all", "pad-freshness", "management"), default="all")
+    parser.add_argument("--case", choices=("all", "pad-freshness", "management", "authorization-feedback", "lease-renewal"),
+                        default="all")
     args = parser.parse_args()
     args.protocol_root = args.protocol_root.resolve()
     output = args.output_dir.resolve()
@@ -147,7 +148,9 @@ def main():
             try:
                 with (output / "browser.log").open("w") as log:
                     script = {"all": "test_browser.mjs", "pad-freshness": "test_pad_freshness.mjs",
-                              "management": "test_management.mjs"}[args.case]
+                              "management": "test_management.mjs",
+                              "authorization-feedback": "test_authorization_feedback.mjs",
+                              "lease-renewal": "test_lease_renewal.mjs"}[args.case]
                     result = subprocess.run(["node", SUITE / script], env=environment, stdout=log, stderr=subprocess.STDOUT)
             finally:
                 server.shutdown(); backend.stdin.close(); backend.wait(timeout=10)
