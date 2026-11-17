@@ -686,12 +686,11 @@ static struct {
 } s_quarantine[APP_WIFI_PROFILE_CAPACITY];
 static void profile_reconnect(uint64_t now, uint16_t reason)
 {
-    /* One station attempt at a time, saved priority order, five-minute auth
-     * quarantine, and the existing capped backoff. Transient join-once networks
-     * never silently become saved-catalog reconnect selection. */
+    /* Prefer non-quarantined profiles in saved order after an auth failure.
+     * If no alternative is eligible, keep the current station on the worker's
+     * capped backoff. A transient join stays outside saved-profile selection. */
     credentials_t next = {0};
     bool found = false;
-    uint64_t earliest = UINT64_MAX;
     portENTER_CRITICAL(&s_lock);
     unsigned current = s_profiles.count;
     if (s_profiles.known && !s_profiles.uncertain) {
@@ -728,12 +727,7 @@ static void profile_reconnect(uint64_t now, uint16_t reason)
                     until = s_quarantine[j].until;
                 }
             }
-            if (until > now) {
-                if (until < earliest) {
-                    earliest = until;
-                }
-                continue;
-            }
+            if (until > now) continue;
             next = s_profiles.items[i].credentials;
             found = i != current;
             break;
@@ -751,8 +745,6 @@ static void profile_reconnect(uint64_t now, uint16_t reason)
             s_snapshot.connection_error = e;
         }
         portEXIT_CRITICAL(&s_lock);
-    } else if (earliest != UINT64_MAX && earliest > s_retry_at) {
-        s_retry_at = earliest;
     }
     clear_secret(&next, sizeof(next));
 }

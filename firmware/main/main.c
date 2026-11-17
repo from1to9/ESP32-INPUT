@@ -358,11 +358,13 @@ static void __attribute__((noinline)) report_runtime_diagnostics(void)
     app_control_runtime_snapshot(&observed->control);
     app_wifi_get_scan_diagnostics(&observed->scan);
     ESP_LOGI(TAG, "Runtime Wi-Fi initialized=%d state=%d lan_ready=%d backend_available=%d "
-             "error=%d backend_error=%d",
+             "error=%d backend_error=%d connection_error=%d disconnect_reason=%u retry_in_ms=%u",
              observed->wifi.initialized,
              observed->wifi.initialized ? (int)observed->wifi.state : -1,
              observed->wifi.lan_ready, observed->wifi.backend_available,
-             (int)observed->wifi.last_error, (int)observed->wifi.backend_error);
+             (int)observed->wifi.last_error, (int)observed->wifi.backend_error,
+             (int)observed->wifi.connection_error, (unsigned)observed->wifi.disconnect_reason,
+             (unsigned)observed->wifi.retry_in_ms);
     ESP_LOGI(TAG, "Runtime media snapshot_available=%d initialized=%d audio_known=%d "
              "audio_state=%d audio_error=%d off_confirmed=%d speech_known=%d speech_state=%d "
              "speech_result=%d busy=%d result_known=%d result=%d",

@@ -1013,6 +1013,68 @@ static void test_selection_owner_domains(void) {
     assert(connects==1 && !s_pending.password[0]);
 }
 
+static void fail_station_attempt(uint16_t reason)
+{
+    linked = false;
+    wifi_event_sta_disconnected_t event = {.reason = reason};
+    wifi_event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event);
+    service_step();
+    app_wifi_snapshot_t wifi = snapshot();
+    assert(wifi.state == APP_WIFI_BACKOFF && !wifi.lan_ready);
+    assert(wifi.connection_error == ESP_FAIL && wifi.disconnect_reason == reason);
+}
+
+static void test_boot_retries_saved_network_after_auth_failure(void)
+{
+    seed_network();
+    reset(true);
+    app_wifi_profiles_snapshot_t saved;
+    app_wifi_profiles_snapshot(&saved);
+    assert(saved.known && saved.count == 1 && saved.profiles[0].enabled);
+    assert(snapshot().configured && connects == 0);
+    ++clock_ms;
+    service_step();
+    assert(snapshot().state == APP_WIFI_CONNECTING && connects == 1);
+
+    const uint16_t reasons[] = {WIFI_REASON_AUTH_FAIL, WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT,
+        WIFI_REASON_HANDSHAKE_TIMEOUT};
+    const uint32_t delays[] = {1000, 2000, 4000, 8000, 16000, RETRY_MAX_MS, RETRY_MAX_MS};
+    for (unsigned i = 0; i < sizeof(delays) / sizeof(delays[0]); ++i) {
+        fail_station_attempt(reasons[i % (sizeof(reasons) / sizeof(reasons[0]))]);
+        assert(snapshot().retry_in_ms == delays[i]);
+        clock_ms += delays[i] - 1;
+        service_step();
+        assert(connects == i + 1 && !snapshot().setup_active);
+        ++clock_ms;
+        service_step();
+        assert(connects == i + 2 && snapshot().state == APP_WIFI_CONNECTING);
+    }
+
+    linked = true;
+    service_step();
+    app_wifi_snapshot_t wifi = snapshot();
+    assert(wifi.lan_ready && wifi.state == APP_WIFI_CONNECTED);
+    assert(wifi.connection_error == ESP_OK && wifi.disconnect_reason == 0 && wifi.retry_in_ms == 0);
+    fail_station_attempt(WIFI_REASON_AUTH_FAIL);
+    assert(snapshot().retry_in_ms == 1000);
+    const unsigned before_join = connects;
+    assert(app_wifi_profile_join(saved.profiles[0].id, saved.revision) == ESP_OK);
+    service_step();
+    assert(connects == before_join + 1 && snapshot().state == APP_WIFI_CONNECTING && commits == 0);
+
+    app_wifi_profile_save_t disabled = {.expected_revision = saved.revision, .keep_password = true};
+    memcpy(disabled.id, saved.profiles[0].id, sizeof(disabled.id));
+    memcpy(disabled.ssid, saved.profiles[0].ssid, sizeof(disabled.ssid));
+    assert(app_wifi_profile_save(&disabled) == ESP_OK);
+    service_step();
+    reset(true);
+    app_wifi_profiles_snapshot(&saved);
+    assert(saved.known && saved.count == 1 && !saved.profiles[0].enabled);
+    clock_ms += RETRY_MAX_MS;
+    service_step();
+    assert(!snapshot().configured && snapshot().state == APP_WIFI_IDLE && connects == 0);
+}
+
 static void test_multiple_profiles(void) {
     reset(false);
     app_wifi_profiles_snapshot_t view;app_wifi_profiles_snapshot(&view);
@@ -1392,7 +1454,7 @@ static void test_control_ap_driver_and_dhcp_recovery(void)
 int main(void) {
     test_setup_and_reconnect(); test_security_and_limits(); test_failures();
     test_cleanup_recovery(); test_storage_uncertainty(); test_unreadable_recovery();
-    test_profile_join_atomic_admission();
+    test_profile_join_atomic_admission(); test_boot_retries_saved_network_after_auth_failure();
     test_selection_owner_domains();
     test_device_station_provisioning(); test_scan_bounds_and_identity();
     test_scan_cancel_cleanup_and_pressure(); test_station_storage_and_scan_reconnect();
