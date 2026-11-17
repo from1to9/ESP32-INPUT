@@ -115,6 +115,8 @@ static esp_err_t health_get(httpd_req_t *request)
 static esp_err_t start_health_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    // HTTP needs byte-addressable internal RAM, not Wi-Fi's DMA-capable DRAM.
+    config.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_RTCRAM;
     config.max_open_sockets = 3; // HTML, CSS and JS may be fetched concurrently.
     config.lru_purge_enable = true;
     config.max_uri_handlers = 14; // Health + setup (6) + API/WS (4) + controller assets (3).

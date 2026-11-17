@@ -39,6 +39,8 @@ static bool run_main_loop;
 static unsigned polls;
 static unsigned adc_reads;
 static jmp_buf main_done;
+static esp_err_t http_start_result;
+static unsigned http_start_calls, http_registrations;
 
 const char *esp_err_to_name(esp_err_t err)
 {
@@ -50,13 +52,18 @@ size_t heap_caps_get_free_size(uint32_t caps) { (void)caps; return 10000; }
 size_t heap_caps_get_largest_free_block(uint32_t caps) { (void)caps; return 1000; }
 esp_err_t httpd_start(httpd_handle_t *server, const httpd_config_t *config)
 {
+    ++http_start_calls;
+    assert(config->stack_size == 4096);
+    assert(config->task_caps == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_RTCRAM));
     assert(config->max_uri_handlers == 14 && config->recv_wait_timeout == 2 && config->uri_match_fn==httpd_uri_match_wildcard);
     assert(config->max_open_sockets == 3 && config->lru_purge_enable);
+    if (http_start_result != ESP_OK) return http_start_result;
     *server = &label;
     return ESP_OK;
 }
 esp_err_t httpd_register_uri_handler(httpd_handle_t server, const httpd_uri_t *uri)
 {
+    ++http_registrations;
     assert(server && strcmp(uri->uri, "/health") == 0 && uri->method == HTTP_GET);
     return ESP_OK;
 }
@@ -237,6 +244,15 @@ static void check_health(const char *expected)
     assert(strstr(request.body, "</html>"));
     assert(!strstr(request.body, "ABABABABABABABAB"));
     assert(!strstr(request.body, "Password"));
+}
+
+static void test_http_stack_failure(void)
+{
+    const unsigned calls = http_start_calls, registrations = http_registrations;
+    http_start_result = ESP_ERR_NO_MEM;
+    assert(start_health_server() == ESP_ERR_NO_MEM);
+    assert(http_start_calls == calls + 1 && http_registrations == registrations);
+    http_start_result = ESP_OK;
 }
 
 static void test_button_observation(void)
@@ -881,6 +897,7 @@ static void test_pinned_button_holds(void)
 int main(void)
 {
     test_main_render_retry();
+    test_http_stack_failure();
     test_button_observation();
     test_cold_home_navigation();
     test_home_readiness();

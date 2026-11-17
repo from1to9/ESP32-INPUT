@@ -80,6 +80,13 @@ heap margin under radio traffic, scanning, rendering or sound output.
 The [control-owner limits](#direct-network-input) reserve RAM alongside LVGL
 and radios. A failed owner is not a usable baseline for measuring that combined
 load. Mosaico retains its default capacities.
+The HTTP task keeps its 4096-byte stack in C3 RTC fast RAM, using the SDK's
+`task_caps` allocation contract. Enable `ESP_SYSTEM_ALLOW_RTC_FAST_MEM_AS_HEAP`
+in existing configurations as well. This preserves DMA-capable DRAM for Wi-Fi
+without reducing the HTTP stack or buffer quotas. If that RTC allocation fails,
+HTTP startup reports its error; it does not fall back to consuming DMA-capable
+DRAM. General internal-heap totals include RTC memory, which is not DMA-capable,
+so those totals alone cannot establish Wi-Fi allocation headroom.
 Bluetooth reserves two controller activities for its single peripheral link
 and advertising, and twelve MSYS-2 packet blocks instead of the generic 24.
 `BT_NIMBLE_LOW_SPEED_MODE` moves host GAP/GATT/NPL routines to flash. The
