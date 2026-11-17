@@ -235,7 +235,7 @@ static void test_main_render_retry(void)
     assert(!strcmp(applied_view.title, "Changed"));
 }
 
-static void check_health(const char *expected)
+static const char *check_health(const char *expected)
 {
     httpd_req_t request = { .status = "200 OK" };
     assert(health_get(&request) == ESP_OK);
@@ -244,6 +244,7 @@ static void check_health(const char *expected)
     assert(strstr(request.body, "</html>"));
     assert(!strstr(request.body, "ABABABABABABABAB"));
     assert(!strstr(request.body, "Password"));
+    return request.body;
 }
 
 static void test_http_stack_failure(void)
@@ -258,16 +259,22 @@ static void test_http_stack_failure(void)
 static void test_button_observation(void)
 {
     assert(passport_buttons_observed() == 0);
-    check_health("503 Service Unavailable");
+    assert(strstr(check_health("200 OK"), "UP pending, DOWN pending, OK pending"));
     button_callback(BSP_BTN_UP, BSP_BTN_RELEASE, button_user);
     assert(passport_buttons_observed() == 0);
     button_callback(BSP_BTN_UP, BSP_BTN_PRESS, button_user);
     button_callback(BSP_BTN_DOWN, BSP_BTN_PRESS, button_user);
-    check_health("503 Service Unavailable");
+    assert(strstr(check_health("200 OK"), "UP yes, DOWN yes, OK pending"));
     button_callback(BSP_BTN_OK, BSP_BTN_PRESS, button_user);
     // Full event queue preserves order independently of cumulative observations.
     assert(passport_buttons_observed() == PASSPORT_ALL_BUTTONS);
     check_health("200 OK");
+    display_status = ESP_FAIL;
+    check_health("503 Service Unavailable");
+    display_status = ESP_OK;
+    button_status = ESP_FAIL;
+    check_health("503 Service Unavailable");
+    button_status = ESP_OK;
     atomic_store(&text_applied, false);
     check_health("503 Service Unavailable");
     atomic_store(&text_applied, true);

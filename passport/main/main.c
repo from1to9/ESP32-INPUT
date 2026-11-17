@@ -76,8 +76,7 @@ static esp_err_t health_get(httpd_req_t *request)
     const bool synced = ble.synced;
     const unsigned observed = passport_buttons_observed();
     const bool applied = passport_ui_text_applied();
-    if (display_status != ESP_OK || !applied || button_status != ESP_OK ||
-        observed != PASSPORT_ALL_BUTTONS || !synced) {
+    if (display_status != ESP_OK || !applied || button_status != ESP_OK || !synced) {
         httpd_resp_set_status(request, "503 Service Unavailable");
     }
     const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;

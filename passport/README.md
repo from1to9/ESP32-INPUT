@@ -354,10 +354,12 @@ coexistence, flash power-loss behavior and physical rendering remain untested.
 
 Health reports startup results, NimBLE synchronization, internal free heap
 and largest block, and cumulative observed UP/DOWN/OK presses. HTTP 503
-continues until all three press callbacks have occurred, the display and
-buttons initialized, the UI view was applied to LVGL, and NimBLE synchronized.
-HTTP 200 describes those bootstrap observations, not HID readiness or
-continuing device health. Applying a view to LVGL is distinct from physical
+indicates a display or button initialization failure, an unapplied UI view,
+or NimBLE not synchronized. A healthy unattended boot can return HTTP 200
+while all three press observations remain pending in the response. Those
+observations are diagnostic evidence, not a service availability requirement;
+HTTP 200 does not verify physical buttons, HID readiness or continuing device
+health. Applying a view to LVGL is distinct from physical
 screen verification. A failed update is retried after the next bounded
 20 ms button wait. The LVGL lock attempt is bounded at 50 ms.
 
