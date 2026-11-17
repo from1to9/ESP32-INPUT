@@ -403,7 +403,7 @@ static void websocket_closed(channel_t *c)
         portENTER_CRITICAL(&s_lock);
         port = s_media_port;
         portEXIT_CRITICAL(&s_lock);
-        if (port.channel_lost) {
+        if (!c->server->slot && port.channel_lost) {
             port.channel_lost(port.user, &c->identity, c->generation);
         }
     }
@@ -446,7 +446,7 @@ static esp_err_t websocket_authenticate(httpd_req_t *request)
     cp_error_t error = CP_INVALID;
     if (valid && xSemaphoreTake(s->mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         drain_channel_closures(s);
-        cp_http_security_t security = {.tls = true,
+        cp_http_security_t security = {.tls = !s->slot,
                                        .host = request_host,
                                        .origin = origin[0] ? origin : NULL,
                                        .authorization = auth[0] ? auth : NULL,
@@ -546,7 +546,7 @@ static esp_err_t websocket_data(httpd_req_t *request)
     httpd_ws_frame_t frame = {0};
     esp_err_t e = httpd_ws_recv_frame(request, &frame, 0);
     if (e != ESP_OK || !frame.final || frame.len > CP_MAX_FRAME_BYTES ||
-        (frame.type != HTTPD_WS_TYPE_TEXT && frame.type != HTTPD_WS_TYPE_BINARY)) {
+        (frame.type != HTTPD_WS_TYPE_TEXT && (s->slot || frame.type != HTTPD_WS_TYPE_BINARY))) {
         return ESP_FAIL;
     }
     frame.payload = (uint8_t *)s->body;

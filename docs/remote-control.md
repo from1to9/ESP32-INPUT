@@ -29,6 +29,10 @@ target, runtime readiness and available operations. The catalog defines the
 wire shape. A listed operation may be unavailable for a missing or unready
 provider or a caller with insufficient scope.
 
+`GET /api/v1/state?view=protocol` returns the same authenticated `protocol`
+snapshot and records its sequence for control acquire and renew. It omits
+device details and does not wait for the coordinator's device-detail read.
+
 ## Transport and authorization
 
 - Native API and MCP clients validate the HTTPS identity and use enrolled
@@ -42,6 +46,9 @@ provider or a caller with insufficient scope.
   open HTTP policy is a separate firmware policy.
 - Commands enter `POST /api/v1/commands` or the authenticated
   `/api/v1/channel` WebSocket. Both paths use the same operation registry.
+  Mosaico's enrolled HTTP channel accepts text frames from approved browsers
+  with input permission and a CSRF-issued single-use ticket. Binary media
+  stays on the HTTPS channel.
   Read status and job resources separately. A session can remain valid
   after its input lease ends.
 - Remote input requires an explicitly acquired short lease and current input

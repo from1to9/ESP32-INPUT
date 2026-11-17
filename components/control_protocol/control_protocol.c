@@ -1480,7 +1480,8 @@ static cp_error_t provider_read(cp_context_t *c, unsigned session, const char *r
     }
     return CP_OK;
 }
-static cp_error_t state_response(cp_context_t *c, unsigned session, cp_http_response_t *out)
+static cp_error_t state_response(cp_context_t *c, unsigned session, bool include_device,
+                                 cp_http_response_t *out)
 {
     if (!c->state_known) {
         return failure(out, CP_UNAVAILABLE);
@@ -1517,19 +1518,22 @@ static cp_error_t state_response(cp_context_t *c, unsigned session, cp_http_resp
                ",\"lease_id\":\"%s\",\"lease_active\":%s,\"lease_expires_ms\":\"%" PRIu64 "\"",
                lease, c->lease.active ? "true" : "false", c->lease.expires);
     }
-    append(out->body, sizeof(out->body), &used, "},\"device\":");
-    size_t device_length = 0;
-    cp_error_t error = provider_read(c, session, "/api/v1/state", out->body + used,
-                                     sizeof(out->body) - used - 100, &device_length);
-    if (error == CP_OK) {
-        used += device_length;
-        append(out->body, sizeof(out->body), &used, "}");
-    } else if (error == CP_UNAVAILABLE || error == CP_NOT_IMPLEMENTED) {
-        append(out->body, sizeof(out->body), &used, "null,\"device_reason\":\"%s\"}",
-               cp_error_name(error));
-    } else {
-        return failure(out, error);
+    append(out->body, sizeof(out->body), &used, "}");
+    if (include_device) {
+        append(out->body, sizeof(out->body), &used, ",\"device\":");
+        size_t device_length = 0;
+        cp_error_t error = provider_read(c, session, "/api/v1/state", out->body + used,
+                                         sizeof(out->body) - used - 100, &device_length);
+        if (error == CP_OK) {
+            used += device_length;
+        } else if (error == CP_UNAVAILABLE || error == CP_NOT_IMPLEMENTED) {
+            append(out->body, sizeof(out->body), &used, "null,\"device_reason\":\"%s\"",
+                   cp_error_name(error));
+        } else {
+            return failure(out, error);
+        }
     }
+    append(out->body, sizeof(out->body), &used, "}");
     s->state_at = c->now;
     s->delivered_sequence = c->state.state_sequence;
     out->status = 200;
@@ -1684,7 +1688,10 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
         return failure(out, CP_FORBIDDEN);
     }
     if (strcmp(resource, "/api/v1/state") == 0) {
-        return state_response(c, session, out);
+        return state_response(c, session, true, out);
+    }
+    if (strcmp(resource, "/api/v1/state?view=protocol") == 0) {
+        return state_response(c, session, false, out);
     }
     if (strcmp(resource, "/api/v1/capabilities") == 0) {
         out->status = 200;
@@ -1892,6 +1899,10 @@ static cp_error_t http_inner(cp_context_t *c, const char *method, const char *re
         session_t *owner = &c->sessions[session];
         if (!owner->browser || length != 0) {
             return failure(out, CP_INVALID);
+        }
+        if (c->policy == CP_POLICY_ENROLLED_HTTP &&
+            !(c->principals[owner->principal].scopes & CP_SCOPE_INPUT_CONTROL)) {
+            return failure(out, CP_FORBIDDEN);
         }
         uint8_t secret[32];
         char ticket[65];
@@ -2228,6 +2239,11 @@ cp_error_t cp_transport_upgrade(cp_context_t *c, const cp_http_security_t *secur
     cp_error_t error = cp_transport_authenticate(c, security, false, now, out);
     if (error != CP_OK) {
         return error;
+    }
+    if (c->policy == CP_POLICY_ENROLLED_HTTP &&
+        (!out->browser || !(out->scopes & CP_SCOPE_INPUT_CONTROL))) {
+        wipe(out, sizeof(*out));
+        return CP_FORBIDDEN;
     }
     if (!out->browser) {
         if (!ticket) {

@@ -4,23 +4,31 @@ import {readFile} from "node:fs/promises";
 const source = await readFile(new URL("../../firmware/main/web/controller.js", import.meta.url), "utf8");
 const {Controller, validateText, describeResult} = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 const id = "1".repeat(32), prefix = "2".repeat(16), boot = "3".repeat(32), lease = "4".repeat(32);
+const statePath = "/api/v1/state?view=protocol";
+function movementSample(args, lifetime, current = () => true) {
+  const expiresAt = performance.now() + lifetime;
+  return () => current() && performance.now() < expiresAt ? {args, expiresAt} : null;
+}
 function fixture() {
   const calls = [];
   const state = {boot_id: boot, now_ms: "100", epoch: "8", transport_generation: "17", state_sequence: "1", ui_revision: "4",
     target_id: "bluetooth:17", mode: "keyboard", locked: false, release_pending: false, input_ready: true, remote_allowed: true,
     lease_active: true, lease_id: lease, lease_expires_ms: "3100"};
-  let fail = false, result = {state: "sent", error: "ok", completed_pairs: 3, started_prefix: 3, uncertain_index: -1};
+  let fail = false, status = 200;
+  let result = {state: "sent", error: "ok", completed_pairs: 3, started_prefix: 3, uncertain_index: -1};
   const client = new Controller(async (path, options) => {
     calls.push({path, options});
-    if (path === "/api/v1/state") return {status: 200, json: async () => ({protocol: {...state}})};
+    if (path === statePath) return {status: 200, json: async () => ({protocol: {...state}})};
     if (fail) throw new Error("Disconnected after command write");
     const command = JSON.parse(options.body);
-    return {status: 200, json: async () => ({...result, command_key: "12", next_seq: command.seq + 1})};
+    return {status, json: async () => ({...result, command_key: "12", next_seq: command.seq + 1})};
   });
   client.session = {session_id: id, request_prefix: prefix, boot_id: boot, csrf: id, next_seq: 1};
   client.state = {...state}; client.controlled = true;
   client.pin = {target_id: state.target_id, transport_generation: state.transport_generation, epoch: state.epoch, lease_id: lease};
-  return {client, calls, state, fail: () => { fail = true; }, result: value => { result = value; }};
+  return {client, calls, state, fail: () => { fail = true; }, result: (value, code = 200) => {
+    result = value; status = code;
+  }};
 }
 for (let code = 32; code <= 126; ++code) assert.equal(validateText(String.fromCharCode(code)), String.fromCharCode(code));
 for (const text of ["", "x".repeat(33), "A\nB", "A\rB", "A\tB", "ok\u4e2d", "ok😀", "A\0B", "x\x7f"]) {
@@ -66,6 +74,53 @@ for (const change of [s => { s.target_id = "usb:18"; }, s => { s.epoch = "9"; },
   assert(!f.client.controlled);
   assert.equal(f.calls.filter(call => call.options.method === "POST").length, 0);
 }
+for (const leaseLost of [false, true]) {
+  const f = fixture();
+  f.result({state: "rejected", error: "expired"}, 400);
+  if (leaseLost) {
+    const fetch = f.client.fetcher;
+    f.client.fetcher = (url, options) => {
+      if (options.method === "POST") f.state.lease_active = false;
+      return fetch(url, options);
+    };
+  }
+  const result = await f.client.run("mouse.move_relative", {dx: 8, dy: 3});
+  assert.equal(result.state, "rejected");
+  assert.equal(result.error, "expired");
+  assert.equal(f.client.controlled, !leaseLost);
+  assert.equal(f.client.lastKey, "12");
+  assert.equal(f.client.session.next_seq, 2);
+  assert.deepEqual(f.calls.map(call => call.options.method), ["GET", "POST", "GET"]);
+}
+for (const outcome of ["sent", "stale", "reply lost"]) {
+  const {client, calls} = fixture();
+  client.state.mode = "mouse";
+  client.stateAt = performance.now();
+  let submitted;
+  client.motionChannel = {
+    exchange: async command => {
+      assert(!submitted);
+      submitted = command;
+      const estimatedTime = BigInt(command.deadline_ms) - 200n;
+      assert(estimatedTime >= 100n &&
+        estimatedTime <= 100n + BigInt(Math.floor(performance.now() - client.stateAt)));
+      if (outcome === "reply lost") throw new Error(outcome);
+      return outcome === "sent" ? {state: "sent", error: "ok", next_seq: "2", command_key: "12"} :
+        {state: "rejected", error: "stale", next_seq: "2", command_key: "12"};
+    },
+    close() {},
+  };
+  const button = client.run("mouse.move_relative", {dx: 24, dy: 0});
+  if (outcome === "sent") assert.equal((await button).state, "sent");
+  else await assert.rejects(button, /stale|reply lost/);
+  assert.equal(submitted.op, "mouse.move_relative");
+  assert.deepEqual(submitted.args, {dx: 24, dy: 0});
+  assert.equal(submitted.lease_id, lease);
+  assert.equal(submitted.epoch, "8");
+  assert.equal(calls.length, 0);
+  assert.equal(client.controlled, outcome === "sent");
+  assert.equal(client.uncertain, outcome === "reply lost");
+}
 {
   const f = fixture(); f.state.now_ms = "2500";
   await f.client.run("keyboard.key_tap", {usage: 4});
@@ -83,7 +138,7 @@ for (const change of [s => { s.target_id = "usb:18"; }, s => { s.epoch = "9"; },
 assert.match(describeResult(null), /unknown/);
 // The same local sample survives every awaited preflight/renewal read, but may
 // never become a new command after its contact ends or original deadline passes.
-for (const stage of [1, 2, 3, 4]) {
+for (const stage of [1, 2, 3]) {
   const f = fixture();
   if (stage > 1) f.state.now_ms = "2500";
   let active = true, reads = 0, arrived, resume;
@@ -91,12 +146,12 @@ for (const stage of [1, 2, 3, 4]) {
   const proceed = new Promise(resolve => { resume = resolve; });
   const fetcher = f.client.fetcher;
   f.client.fetcher = async (url, options) => {
-    if (url === "/api/v1/state" && ++reads === stage) { arrived(); await proceed; }
+    if (url === statePath && ++reads === stage) { arrived(); await proceed; }
     return fetcher(url, options);
   };
   const beforeMessage = f.client.message;
-  const moving = f.client.run("mouse.move_relative", {dx: 27, dy: 9}, undefined,
-    {expiresAt: performance.now() + 10000, current: () => active});
+  const moving = f.client.run("mouse.move_relative", {}, undefined,
+    movementSample({dx: 27, dy: 9}, 10000, () => active));
   await paused; active = false; resume();
   assert.equal(await moving, null, "contact invalidation must discard an unsubmitted sample after any asynchronous stage");
   const posts = f.calls.filter(call => call.options.method === "POST").map(call => JSON.parse(call.options.body));
@@ -111,11 +166,10 @@ for (const stage of [1, 2, 3, 4]) {
   const proceed = new Promise(resolve => { resume = resolve; });
   const fetcher = f.client.fetcher;
   f.client.fetcher = async (url, options) => {
-    if (url === "/api/v1/state") { arrived(); await proceed; }
+    if (url === statePath) { arrived(); await proceed; }
     return fetcher(url, options);
   };
-  const moving = f.client.run("mouse.move_relative", {dx: 27, dy: 9}, undefined,
-    {expiresAt: performance.now() + 30, current: () => true});
+  const moving = f.client.run("mouse.move_relative", {}, undefined, movementSample({dx: 27, dy: 9}, 30));
   await paused; await new Promise(resolve => setTimeout(resolve, 60)); resume();
   assert.equal(await moving, null);
   assert(!f.calls.some(call => call.options.method === "POST"));
@@ -123,8 +177,7 @@ for (const stage of [1, 2, 3, 4]) {
 }
 {
   const f = fixture();
-  await f.client.run("mouse.move_relative", {dx: 8, dy: 3}, undefined,
-    {expiresAt: performance.now() + 150, current: () => true});
+  await f.client.run("mouse.move_relative", {}, undefined, movementSample({dx: 8, dy: 3}, 150));
   const command = JSON.parse(f.calls.find(call => call.options.method === "POST").options.body);
   assert(BigInt(command.deadline_ms) > 100n && BigInt(command.deadline_ms) <= 250n,
     "the wire deadline may use only the sample's original remaining freshness");
@@ -140,8 +193,7 @@ for (const lostReply of [false, true]) {
     }
     return fetcher(url, options);
   };
-  const moving = f.client.run("mouse.move_relative", {dx: 8, dy: 3}, undefined,
-    {expiresAt: performance.now() + 150, current: () => active});
+  const moving = f.client.run("mouse.move_relative", {}, undefined, movementSample({dx: 8, dy: 3}, 150, () => active));
   await posted; active = false;
   if (lostReply) {
     finish(new Error("Reply lost after submission"));

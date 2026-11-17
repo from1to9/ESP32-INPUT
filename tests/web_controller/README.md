@@ -67,3 +67,10 @@ pairing review. Wi-Fi, labels and BLE worker completions use host fixtures.
 The suite checks theme persistence, exact AP label set and clear, and
 writes six Chromium screenshots for desktop and iPhone/iPad-sized touch
 viewports.
+
+Use `--case motion-channel` to exercise Chromium through the local TLS relay
+with the existing full state route. Add `--channel-direct` for the device
+HTTPS origin and its CSP, or `--channel-direct --http` for enrolled LAN HTTP.
+The fixture models 70 ms WebSocket round trips, delayed coordinator dispatch
+and a lost reply. It records continuing touch and mouse HID reports, button
+stability, renewal and stop behavior.

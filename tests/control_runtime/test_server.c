@@ -11,6 +11,7 @@
 #include "../../firmware/main/app_network_task.h"
 #include "weak_heap.h"
 typedef struct server {
+    unsigned slot;
     cp_session_view_t sessions[CP_MAX_SESSIONS];
     size_t session_count;
     char host[129], hotspot_ip_host[32];
@@ -36,6 +37,7 @@ static server_t *s_server;
 static portMUX_TYPE s_lock;
 static app_control_media_port_t s_media_port;
 static uint64_t clock_ms = 100;
+static bool offer_binary_frame;
 static unsigned critical, allocations, random_seed, safety_calls, dispatch_calls;
 static bool sem_available = true;
 static cp_command_t dispatched;
@@ -270,8 +272,11 @@ void *httpd_sess_get_ctx(httpd_handle_t h, int fd)
 esp_err_t httpd_ws_recv_frame(httpd_req_t *r, httpd_ws_frame_t *frame, size_t n)
 {
     (void)r;
-    (void)frame;
-    (void)n;
+    if (offer_binary_frame) {
+        assert(n == 0); /* Enrolled HTTP must reject before reading binary payload. */
+        *frame = (httpd_ws_frame_t){.type = HTTPD_WS_TYPE_BINARY, .final = true, .len = 2};
+        return ESP_OK;
+    }
     return ESP_FAIL;
 }
 esp_err_t httpd_ws_send_frame(httpd_req_t *r, httpd_ws_frame_t *frame)
@@ -410,7 +415,7 @@ static cp_error_t dispatch_command(void *u, const cp_command_t *command, cp_resu
     *result = (cp_result_t){.state = CP_RESULT_ACCEPTED, .uncertain_index = -1};
     return CP_OK;
 }
-static void setup_server(bool browser)
+static void setup_server_transport(bool browser, bool plain, cp_scope_mask_t scopes)
 {
     if (ws_request.sess_ctx) {
         websocket_free(ws_request.sess_ctx);
@@ -425,6 +430,7 @@ static void setup_server(bool browser)
     memset(&identity, 0, sizeof(identity));
     server.listener = (void *)1;
     server.mutex = (void *)1;
+    server.slot = plain ? 1U : 0U;
     s_server = &server; strcpy(server.host, "device.test");
     clock_ms = 100;
     random_seed = 0;
@@ -446,8 +452,10 @@ static void setup_server(bool browser)
                                 .available = operation_available,
                                 .dispatch = dispatch_command,
                                 .safety = safety};
-    assert(cp_initialize(memory, cp_context_size(), &callbacks, &server.protocol) == CP_OK &&
-           cp_http_configure(server.protocol, "device.test", "https://device.test") == CP_OK);
+    const char *origin = plain ? "http://device.test" : "https://device.test";
+    assert(cp_initialize_policy(memory, cp_context_size(), &callbacks,
+               plain ? CP_POLICY_ENROLLED_HTTP : CP_POLICY_ENROLLED_TLS, &server.protocol) == CP_OK &&
+           cp_http_configure(server.protocol, "device.test", origin) == CP_OK);
     device = (cp_device_state_t){.management_generation = 1,
                                  .input_epoch = 1,
                                  .transport_generation = 17,
@@ -461,16 +469,16 @@ static void setup_server(bool browser)
     cp_set_device_state(server.protocol, &device, clock_ms);
     uint8_t secret[32];
     memset(secret, 0x22, 32);
-    cp_principal_t principal = {.scopes = CP_SCOPE_ALL, .enabled = true, .native_only = !browser};
+    cp_principal_t principal = {.scopes = scopes, .enabled = true, .native_only = !browser};
     memset(principal.id, 0x11, 16);
     cp_sha256(secret, 32, principal.credential_sha256);
     assert(cp_load_principal(server.protocol, &principal) == CP_OK);
     const char *login = "{\"client_id\":\"11111111111111111111111111111111\",\"credential\":"
                         "\"2222222222222222222222222222222222222222222222222222222222222222\"}";
-    cp_http_security_t security = {.tls = true, .host = "device.test"};
+    cp_http_security_t security = {.tls = !plain, .host = "device.test"};
     cp_http_response_t response;
     if (browser) {
-        security.origin = "https://device.test";
+        security.origin = origin;
         assert(cp_http(server.protocol, "GET", "/api/v1/login-challenge", &security, NULL, 0,
                        clock_ms, &response) == CP_OK);
         field(&response, "csrf", csrf, sizeof(csrf));
@@ -511,7 +519,7 @@ static void setup_server(bool browser)
     ws_request.headers[ws_request.header_count++] = (test_header_t){"Host", "device.test"};
     if (browser) {
         ws_request.headers[ws_request.header_count++] =
-            (test_header_t){"Origin", "https://device.test"};
+            (test_header_t){"Origin", origin};
         ws_request.headers[ws_request.header_count++] = (test_header_t){"Cookie", cookie};
     } else {
         ws_request.headers[ws_request.header_count++] =
@@ -522,6 +530,10 @@ static void setup_server(bool browser)
                                      .playback = playback,
                                      .channel_lost = channel_lost};
     app_control_server_set_media_port(&port);
+}
+static void setup_server(bool browser)
+{
+    setup_server_transport(browser, false, CP_SCOPE_ALL);
 }
 static void handshake(void)
 {
@@ -646,6 +658,50 @@ typedef struct {
     char auth[80], prefix[17], sid[33], boot[33];
     unsigned sequence;
 } test_client_t;
+
+static void test_enrolled_http_upgrade(void)
+{
+    setup_server_transport(true, true, CP_SCOPE_VIEW);
+    cp_http_security_t security = {.host = "device.test", .origin = "http://device.test",
+                                    .cookie = cookie, .csrf = csrf};
+    cp_http_response_t response;
+    assert(cp_http(server.protocol, "POST", "/api/v1/ws-ticket", &security, NULL, 0,
+                   clock_ms, &response) == CP_FORBIDDEN);
+
+    setup_server_transport(true, true, CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL);
+    assert(!strncmp(cookie, "control-http=", 13) && !strstr(cookie, "Secure"));
+    handshake();
+    assert(upgrade_101 == 0);
+    security.csrf = NULL;
+    assert(cp_http(server.protocol, "POST", "/api/v1/ws-ticket", &security, NULL, 0,
+                   clock_ms, &response) == CP_UNAUTHENTICATED);
+    security.csrf = csrf;
+    assert(cp_http(server.protocol, "POST", "/api/v1/ws-ticket", &security, NULL, 0,
+                   clock_ms, &response) == CP_OK);
+    char ticket[65], protocol[100];
+    field(&response, "ticket", ticket, sizeof(ticket));
+    snprintf(protocol, sizeof(protocol), "esp32-control-v1, ticket.%s", ticket);
+    ws_request.headers[ws_request.header_count++] = (test_header_t){"Sec-WebSocket-Protocol", protocol};
+    ws_request.headers[1].value = "null";
+    handshake();
+    ws_request.headers[1].value = "http://other.test";
+    handshake();
+    ws_request.headers[1].value = "http://device.test";
+    ws_request.headers[0].value = "other.test";
+    handshake();
+    assert(upgrade_101 == 0);
+    ws_request.headers[0].value = "device.test";
+    handshake();
+    assert(upgrade_101 == 1 && ws_request.sess_ctx);
+    offer_binary_frame = true;
+    assert(websocket_data(&ws_request) == ESP_FAIL);
+    offer_binary_frame = false;
+    websocket_free(ws_request.sess_ctx);
+    ws_request.sess_ctx = NULL;
+    assert(!channel_losses && cp_transport_heartbeat(server.protocol, &identity, clock_ms) == CP_OK);
+    handshake();
+    assert(upgrade_101 == 1 && !ws_request.sess_ctx);
+}
 static test_client_t login_client(void)
 {
     const char *login = "{\"client_id\":\"11111111111111111111111111111111\",\"credential\":"
@@ -948,6 +1004,7 @@ int main(void)
 {
     test_download_stack_allocation_failure();
     test_auth_before_upgrade();
+    test_enrolled_http_upgrade();
     test_channel_loss_revokes_exact_logical_owner();
     test_capture_queue_and_owner_thread_send();
     test_channel_media_binding_and_send_failures();

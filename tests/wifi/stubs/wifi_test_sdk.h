@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <net/if.h>
 typedef int esp_err_t;
+void wifi_test_log(const char *tag, const char *format, ...);
+#define ESP_LOGI wifi_test_log
+#define ESP_LOGW wifi_test_log
 #define WIFI_REASON_AUTH_FAIL 202
 #define WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT 15
 #define WIFI_REASON_HANDSHAKE_TIMEOUT 204
@@ -121,6 +124,9 @@ esp_err_t esp_wifi_set_storage(int);
 esp_err_t esp_wifi_set_config(int, wifi_config_t *);
 esp_err_t esp_wifi_set_mode(int);
 esp_err_t esp_wifi_start(void);
+typedef enum { WIFI_PS_NONE, WIFI_PS_MIN_MODEM, WIFI_PS_MAX_MODEM } wifi_ps_type_t;
+esp_err_t esp_wifi_get_ps(wifi_ps_type_t *mode);
+esp_err_t esp_wifi_set_ps(wifi_ps_type_t mode);
 esp_err_t esp_wifi_stop(void);
 esp_err_t esp_wifi_deinit(void);
 esp_err_t esp_wifi_disconnect(void);

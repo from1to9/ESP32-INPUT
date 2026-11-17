@@ -20,6 +20,7 @@ static char credential[65], client_id[33], session_id[33], token[65], prefix[17]
 static unsigned seq;
 static cp_scope_mask_t enrolled_scopes;
 static unsigned resource_reads;
+static bool resource_busy;
 static bool is_available = true, redaction_failure;
 static unsigned dispatch_override;
 static bool random_source(void *u, uint8_t *out, size_t length)
@@ -72,6 +73,7 @@ static cp_error_t read_resource(void *u, const cp_identity_t *who, const char *r
     (void)who;
     (void)resource;
     ++resource_reads;
+    if (resource_busy) return CP_BUSY;
     int n = snprintf(out, capacity,
                      redaction_failure ? "{\"password\":\"synthetic\"}"
                                        : "{\"wifi_backend\":\"available\",\"measurement\":null}");
@@ -117,6 +119,7 @@ static void reset(cp_scope_mask_t scopes, bool browser)
     seq = 0;
     enrolled_scopes = scopes;
     resource_reads = 0;
+    resource_busy = false;
     cp_callbacks_t callbacks = {.random = random_source,
                                 .available = available,
                                 .dispatch = dispatch,
@@ -257,6 +260,29 @@ static void test_json_sha(void)
     assert(strstr(canonical, "\"z\":1}"));
     free(d);
 }
+static void test_protocol_only_state(void)
+{
+    static const char path[] = "/api/v1/state?view=protocol";
+    reset(CP_SCOPE_ALL, false);
+    assert(request("GET", path, NULL) == CP_UNAUTHENTICATED && resource_reads == 0);
+    login_native();
+    resource_busy = true;
+    clock_ms += 1501;
+    device.state_sequence = 6;
+    cp_set_device_state(context, &device, clock_ms);
+    assert(request("GET", "/api/v1/state", NULL) == CP_BUSY && response.status == 429);
+    assert(send("control.acquire", "{\"state_sequence\":\"5\"}", true, false) == CP_STALE);
+    const unsigned reads = resource_reads;
+    assert(request("GET", path, NULL) == CP_OK && response.status == 200);
+    assert(resource_reads == reads && strstr(response.body, "\"state_sequence\":\"6\""));
+    assert(!strstr(response.body, "\"device\":"));
+    assert(send("control.acquire", "{\"state_sequence\":\"6\"}", true, false) == CP_OK);
+    assert(last_command.operation == CP_OP_CONTROL_ACQUIRE && response.status == 202);
+    reset(CP_SCOPE_DIAGNOSTICS_READ, false);
+    login_native();
+    assert(request("GET", path, NULL) == CP_FORBIDDEN && resource_reads == 0);
+}
+
 static void test_auth_and_scopes(void)
 {
     reset(CP_SCOPE_ALL, false);
@@ -815,6 +841,7 @@ static void test_authenticated_runtime_diagnostics(void)
 }
 int main(void)
 {
+    test_protocol_only_state();
     test_authenticated_runtime_diagnostics();
     test_authenticated_sensor_reads();
     test_context_storage_contract();

@@ -29,6 +29,10 @@ static size_t web_cancel_after;
 static uint8_t web_banks[2][1024];
 static size_t web_bank_sizes[2];
 static bool web_management, web_scanned;
+static bool web_hold_next_move;
+static uint64_t web_hold_coordinator_until;
+static cp_identity_t web_channel_identity;
+static bool web_channel_open;
 static uint64_t web_label_revision;
 static char web_label[49];
 static const char web_ap[] = "3333333333333333333333333333333333333333333333333333333333333333";
@@ -127,7 +131,14 @@ static bool web_available(void *user, cp_operation_id_t op, char reason[CP_REASO
 }
 static cp_error_t web_dispatch(void *user, const cp_command_t *command, cp_result_t *result)
 {
-    if (!web_test_owner(command->operation)) return app_command_bridge_submit(user, command, result);
+    if (!web_test_owner(command->operation)) {
+        cp_error_t error = app_command_bridge_submit(user, command, result);
+        if (error == CP_OK && command->operation == CP_OP_MOUSE_MOVE_RELATIVE && web_hold_next_move) {
+            web_hold_next_move = false;
+            web_hold_coordinator_until = s_now_ms + 200U;
+        }
+        return error;
+    }
     assert(command->identity.scopes & CP_SCOPE_WIFI_CONFIGURE);
     *result = (cp_result_t){.command_key = command->command_key, .state = CP_RESULT_APPLIED, .uncertain_index = -1};
     if (command->operation == CP_OP_WIFI_SCAN_START) web_scanned = true;
@@ -224,6 +235,7 @@ static void web_service(void)
         web_cancel_after = 0; remote_local_override(false); cp_physical_override(web_server.protocol, false, s_now_ms);
     }
     cp_tick(web_server.protocol, s_now_ms);
+    if (s_now_ms < web_hold_coordinator_until) return;
     remote_control_service();
     (void)hid_engine_step(&s_engine, send_report, &test_link.generation);
     sync_interaction(); remote_control_service();
@@ -235,6 +247,35 @@ static void web_service(void)
         (void)cp_complete(web_server.protocol, test_control_result.command_key, &test_control_result, s_now_ms);
     }
 }
+static void web_channel(httpd_req_t *r)
+{
+    cp_http_response_t *reply = &web_server.response;
+    if (!strcmp(r->uri, "/_fixture/ws-open")) {
+        char host[129], origin[193], cookie[512];
+        if (!header(r, "Host", host, sizeof(host), true) || !header(r, "Origin", origin, sizeof(origin), true) ||
+            !header(r, "Cookie", cookie, sizeof(cookie), true)) {
+            r->status = 401;
+            return;
+        }
+        cp_http_security_t security = {.tls = !web_server.slot, .host = host, .origin = origin, .cookie = cookie};
+        web_channel_open = cp_transport_upgrade(web_server.protocol, &security, r->body, s_now_ms,
+            &web_channel_identity) == CP_OK;
+        r->status = web_channel_open ? 101 : 401;
+        return;
+    }
+    assert(web_channel_open);
+    if (!strcmp(r->uri, "/_fixture/ws-close")) {
+        (void)cp_transport_close(web_server.protocol, &web_channel_identity, s_now_ms);
+        web_channel_open = false;
+        return;
+    }
+    assert(!strcmp(r->uri, "/_fixture/ws-frame"));
+    (void)cp_transport_frame(web_server.protocol, &web_channel_identity, r->body, r->content_len, s_now_ms, reply);
+    r->status = reply->status;
+    assert(httpd_resp_send(r, reply->body, (ssize_t)reply->length) == ESP_OK);
+    clear(reply, sizeof(*reply));
+}
+
 static void web_fixture(httpd_req_t *r)
 {
     if (!strcmp(r->uri, "/_fixture/approve") || !strcmp(r->uri, "/_fixture/approve-management")) {
@@ -275,6 +316,8 @@ static void web_fixture(httpd_req_t *r)
         test_link.pairing_open = false;
     } else if (!strcmp(r->uri, "/_fixture/takeover")) {
         remote_local_override(false); cp_physical_override(web_server.protocol, false, s_now_ms);
+    } else if (!strcmp(r->uri, "/_fixture/hold-motion")) {
+        web_hold_next_move = true;
     } else if (!strcmp(r->uri, "/_fixture/partial")) {
         web_cancel_after = trace_count + 3U;
     } else if (!strcmp(r->uri, "/_fixture/target")) {
@@ -321,6 +364,8 @@ int main(int argc, char **argv)
     web_server.slot = !strncmp(web_origin, "http://", 7);
     assert(cp_initialize_policy(storage, cp_context_size(), &callbacks, web_server.slot ? CP_POLICY_ENROLLED_HTTP : CP_POLICY_ENROLLED_TLS, &web_server.protocol) == CP_OK);
     assert(cp_http_configure(web_server.protocol, web_host, web_origin) == CP_OK);
+    const bool test_channel = getenv("WEB_TEST_CHANNEL") != NULL;
+    if (test_channel) cp_set_transport_capabilities(web_server.protocol, true, false);
     web_service();
     static char input[8192]; static cj_document_t document; static httpd_req_t request;
     while (fgets(input, sizeof(input), stdin)) {
@@ -338,10 +383,14 @@ int main(int argc, char **argv)
             const char *value = cj_string(&document, cj_get(&document, 0, names[i]));
             if (value) request.headers[request.header_count++] = (web_header_t){names[i], value};
         }
-        if (!strncmp(request.uri, "/_fixture/", 10)) web_fixture(&request);
+        if (!strncmp(request.uri, "/_fixture/ws-", 13)) web_channel(&request);
+        else if (!strncmp(request.uri, "/_fixture/", 10)) web_fixture(&request);
         else if (!strncmp(request.uri, "/api/", 5)) (void)handle_request(&request);
         else (void)app_control_web_serve(&request, web_host, web_origin);
-        web_service(); web_service(); web_reply(&request);
+        /* A stream's command and result frames can arrive inside one tick.
+         * Do not advance the device clock once per received frame. */
+        if (!test_channel) { web_service(); web_service(); }
+        web_reply(&request);
     }
     free(storage); return 0;
 }

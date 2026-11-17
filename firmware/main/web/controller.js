@@ -6,10 +6,10 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/;
 const IDENTITY_KEY = "mosaico.browser.identity.v1";
 const THEME_KEY = "mosaico.browser.theme.v1";
+const PAD_CHANNEL_BATCH_MS = 30;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 const decimal = value => typeof value === "string" && DECIMAL.test(value) && BigInt(value) <= 18446744073709551615n;
-const currentPadSample = sample => !sample || (sample.current() && performance.now() < sample.expiresAt);
 
 export function validateText(text) {
   if (typeof text !== "string" || !text.length || text.length > 32) {
@@ -47,14 +47,75 @@ function describeApproval(data) {
   return `Last checked: ${states[data.state] || "Approval unavailable"} · ${permissions} · ${duration}${expires}`;
 }
 
+class MotionChannel {
+  static async open(url, ticket, lost) {
+    const socket = new WebSocket(url, ["esp32-control-v1", `ticket.${ticket}`]);
+    return new Promise((resolve, reject) => {
+      function failed() {
+        clearTimeout(timeout);
+        socket.close();
+        reject(new Error("Could not open the device input channel."));
+      }
+      const timeout = setTimeout(failed, 3500);
+      socket.addEventListener("error", failed, {once: true});
+      socket.addEventListener("close", failed, {once: true});
+      socket.addEventListener("open", () => {
+        clearTimeout(timeout);
+        socket.removeEventListener("error", failed);
+        socket.removeEventListener("close", failed);
+        if (socket.protocol !== "esp32-control-v1") return failed();
+        resolve(new MotionChannel(socket, lost));
+      }, {once: true});
+    });
+  }
+  constructor(socket, lost) {
+    this.socket = socket;
+    this.pending = null;
+    socket.onmessage = event => {
+      const pending = this.pending;
+      if (!pending) { this.close(); return; }
+      try {
+        const json = JSON.parse(event.data);
+        if (!json || typeof json !== "object" || Array.isArray(json)) throw new Error();
+        pending.resolve(json);
+      } catch { this.close(); }
+    };
+    socket.onclose = () => { this.close(); lost(this); };
+  }
+  async exchange(payload) {
+    if (this.pending || this.socket.readyState !== WebSocket.OPEN || this.socket.bufferedAmount) {
+      throw new Error("Input channel unavailable.");
+    }
+    let timeout;
+    try {
+      return await new Promise((resolve, reject) => {
+        this.pending = {resolve, reject};
+        timeout = setTimeout(() => this.close(), 3500);
+        this.socket.send(JSON.stringify(payload));
+      });
+    } finally {
+      clearTimeout(timeout);
+      this.pending = null;
+    }
+  }
+  close() {
+    this.pending?.reject(new Error("Input channel reply unavailable."));
+    this.socket.close();
+  }
+}
+
 export class Controller {
-  constructor(fetcher = globalThis.fetch.bind(globalThis)) {
+  constructor(fetcher = globalThis.fetch.bind(globalThis), motionURL = null) {
     this.fetcher = fetcher;
+    this.motionURL = motionURL;
+    this.motionChannel = null;
     this.session = null;
     this.state = null;
+    this.stateAt = 0;
     this.controlled = false;
     this.busy = false;
     this.renewing = false;
+    this.moving = false;
     this.managing = false;
     this.closing = false;
     this.uncertain = false;
@@ -66,13 +127,35 @@ export class Controller {
     this.onchange = () => {};
     this.generation = 0;
   }
-  get foregroundBusy() { return this.busy && !this.renewing; }
+  get foregroundBusy() { return this.busy && !this.renewing && !this.moving; }
   changed() { this.onchange(); }
   halt(message) {
     this.controlled = false;
     this.pin = null;
+    const channel = this.motionChannel;
+    this.motionChannel = null;
+    channel?.close();
     if (message) this.message = message;
     this.changed();
+  }
+  async openMotionChannel(generation) {
+    const capabilities = await this.request("/api/v1/capabilities");
+    if (capabilities.status !== 200 || this.generation !== generation) {
+      throw new Error("Could not check the device input channel.");
+    }
+    if (capabilities.json.websocket !== true) return;
+    const reply = await this.request("/api/v1/ws-ticket", "POST");
+    if (reply.status !== 200 || !HEX64.test(reply.json.ticket || "") || this.generation !== generation) {
+      throw new Error("Could not authorize the device input channel.");
+    }
+    const channel = await MotionChannel.open(this.motionURL, reply.json.ticket, channel => {
+      if (this.motionChannel === channel) this.halt("Input channel closed. Take control explicitly to resume.");
+    });
+    if (this.generation !== generation) {
+      channel.close();
+      throw new Error("Browser session changed while opening the input channel.");
+    }
+    this.motionChannel = channel;
   }
   async request(path, method = "GET", body, csrf = this.session?.csrf, keepalive = false) {
     const abort = new AbortController();
@@ -118,12 +201,15 @@ export class Controller {
     try {
       for (const delay of [0, 20, 40, 80]) {
         if (delay) await sleep(delay);
-        response = await this.request("/api/v1/state");
+        if (this.session !== session) throw new Error("Browser session changed while reading state.");
+        response = await this.request("/api/v1/state?view=protocol");
         if (![429, 503].includes(response.status) || response.json.error !== "busy") break;
       }
     } catch (error) {
-      this.state = null;
-      this.halt("Connection unavailable. Control stopped locally; reconnect explicitly after checking the target.");
+      if (this.session === session) {
+        this.state = null;
+        this.halt("Connection unavailable. Control stopped locally; reconnect explicitly after checking the target.");
+      }
       throw error;
     }
     if (this.session !== session) throw new Error("Browser session changed while reading state.");
@@ -140,6 +226,7 @@ export class Controller {
       throw new Error(this.message);
     }
     this.state = s;
+    this.stateAt = performance.now();
     if (this.controlled && (!s.lease_active || s.lease_id !== this.pin.lease_id ||
         s.target_id !== this.pin.target_id || s.transport_generation !== this.pin.transport_generation ||
         (!allowEpochChange && s.epoch !== this.pin.epoch) || s.locked || !s.remote_allowed || !s.input_ready)) {
@@ -149,88 +236,134 @@ export class Controller {
     this.changed();
     return s;
   }
-  async send(op, args, total, sample) {
+  async send(op, args, total, readSample) {
     // A discarded local sample has no protocol result or sequence consumption.
-    if (!currentPadSample(sample)) return null;
+    if (readSample && !readSample()) return null;
     const observe = op !== "control.renew";
-    let s = await this.refresh();
-    if (!currentPadSample(sample)) return null;
+    const relativeMove = op === "mouse.move_relative";
+    const channel = relativeMove || op === "control.renew" ? this.motionChannel : null;
+    const acquireChannel = op === "control.acquire" ? this.motionChannel : null;
+    let s = relativeMove && channel && this.state && performance.now() - this.stateAt < 1500 ?
+      this.state : await this.refresh();
+    // The device timestamp was already sampled when the response arrived.
+    // Advancing it by local monotonic elapsed time gives a conservative clock.
+    const deviceTime = at => BigInt(s.now_ms) + (channel ? BigInt(Math.floor(at - this.stateAt)) : 0n);
+    if (acquireChannel && this.motionChannel !== acquireChannel) throw new Error("Input channel closed before acquisition.");
+    if (readSample && !readSample()) return null;
     if (op !== "control.acquire" && op !== "control.release" && !this.controlled) throw new Error("Take control again before sending input.");
     if (this.uncertain) throw new Error("A reply is unknown. Reconnect explicitly; no command will be replayed.");
     if (!["control.acquire", "control.release", "control.renew"].includes(op)) {
       if (!decimal(s.lease_expires_ms)) throw new Error("Input lease deadline is unavailable.");
       /* Busy input must not starve the timer that normally renews this already
        * explicit lease. Renew before a new action, never reacquire or replay. */
-      if (BigInt(s.lease_expires_ms) - BigInt(s.now_ms) < 1800n) {
+      if (BigInt(s.lease_expires_ms) - deviceTime(performance.now()) < 1800n) {
         await this.send("control.renew", {});
-        s = await this.refresh();
+        s = this.state; // Successful renewal already refreshed state.
         if (!this.controlled) throw new Error("Input control ended before the new action.");
       }
     }
     const seq = this.session.next_seq;
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
-    const lifetime = sample ? Math.min(200, Math.floor(sample.expiresAt - performance.now())) :
-      op === "mouse.move_relative" ? 200 : 1500;
-    if (sample && (!sample.current() || lifetime <= 0)) return null;
+    const sample = readSample?.(true);
+    if (readSample && !sample) return null;
+    const sentAt = performance.now();
+    const lifetime = sample ? Math.min(200, Math.floor(sample.expiresAt - sentAt)) :
+      relativeMove ? 200 : 1500;
+    if (lifetime <= 0) return null;
     const envelope = {
       v: 1, boot_id: this.session.boot_id, session_id: this.session.session_id,
       request_id: this.session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
-      deadline_ms: (BigInt(s.now_ms) + BigInt(lifetime)).toString(),
+      deadline_ms: (deviceTime(sentAt) + BigInt(lifetime)).toString(),
       epoch: s.epoch, transport_generation: s.transport_generation, target_id: s.target_id,
       ui_revision: s.ui_revision, op,
-      args: op === "control.acquire" || op === "control.renew" ? {...args, state_sequence: s.state_sequence} : args,
+      args: op === "control.acquire" || op === "control.renew" ? {...args, state_sequence: s.state_sequence} : sample?.args ?? args,
       ...(op !== "control.acquire" && s.lease_id ? {lease_id: s.lease_id} : {}),
     };
-    // Nothing asynchronous may intervene between this check and request/fetch.
-    // Once POST starts, retain its real result/uncertainty even if contact ends.
-    if (!currentPadSample(sample)) return null;
+    // No await separates taking the current sample from starting the POST.
+    // After POST starts, contact end does not change its result or uncertainty.
+    if (sample && performance.now() >= sample.expiresAt) return null;
     const generation = this.generation;
-    let answer;
+    let answer, confirmedMove = false;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
-      const response = await this.request("/api/v1/commands", "POST", envelope);
+      const response = channel ? {json: await channel.exchange(envelope)} : await this.request("/api/v1/commands", "POST", envelope);
       answer = response.json;
       const next = Number(answer.next_seq);
       if (!Number.isInteger(next) || (next !== seq && next !== seq + 1)) throw new Error("Missing sequence acknowledgement.");
       if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
       this.session.next_seq = next;
       key = decimal(answer.command_key) ? answer.command_key : null;
+      confirmedMove = relativeMove && Boolean(channel || [202, 400].includes(response.status)) &&
+        key !== null && next === seq + 1;
       if (observe) { this.last = answer; this.lastKey = key; }
       const until = performance.now() + 2200;
+      let delay = channel ? 0 : 100;
       while (ACTIVE.has(answer.state)) {
-        if (observe) this.message = describeResult(answer, total);
+        if (observe && !readSample) this.message = describeResult(answer, total);
         this.changed();
         if (!key || performance.now() >= until) throw new Error("Completion not established before the input deadline.");
-        await sleep(100);
-        const result = await this.request(`/api/v1/requests/${key}`);
-        if (![200, 202, 400].includes(result.status) || !result.json.state) throw new Error("Result is unavailable.");
+        if (delay) await sleep(delay);
+        if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
+        const resource = `/api/v1/requests/${key}`;
+        const result = channel ? {json: await channel.exchange({v: 1, resource})} : await this.request(resource);
+        if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
+        if ((channel ? result.json.command_key !== key : ![200, 202, 400].includes(result.status)) || !result.json.state) {
+          throw new Error("Result is unavailable.");
+        }
         answer = result.json;
         if (observe) this.last = answer;
+        if (channel) delay = 20;
       }
     } catch (error) {
-      this.uncertain = true;
-      this.halt(`${describeResult(null)} ${error.message}`);
+      if (generation === this.generation) {
+        this.uncertain = true;
+        this.halt(`${describeResult(null)} ${error.message}`);
+      }
       throw error;
     }
     if (observe) this.message = describeResult(answer, total);
+    if (confirmedMove && answer.state === "rejected" && answer.error === "expired") {
+      // This movement was definitively rejected before any effect. Read back
+      // the lease so a simultaneous takeover or expiry still stops input.
+      await this.refresh();
+      return answer;
+    }
     if (answer.error !== "ok" || !["applied", "sent", "completed"].includes(answer.state)) {
       this.halt(describeResult(answer, total));
       throw new Error(this.message);
     }
-    await this.refresh(op === "mode.select");
+    if (channel && op === "control.renew") {
+      if (answer.lease_active !== true || answer.lease_id !== this.pin?.lease_id ||
+          !decimal(answer.lease_expires_ms) || !decimal(s.lease_expires_ms) ||
+          BigInt(answer.lease_expires_ms) <= BigInt(s.lease_expires_ms)) {
+        throw new Error("The device did not confirm an active renewed lease.");
+      }
+      this.state = {...s, lease_expires_ms: answer.lease_expires_ms};
+    } else if (!channel) {
+      await this.refresh(op === "mode.select");
+    }
+    if (acquireChannel && this.motionChannel !== acquireChannel) throw new Error("Input channel closed during acquisition.");
     this.changed();
     return answer;
   }
-  async run(op, args = {}, total, sample) {
+  async run(op, args = {}, total, readSample) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
+    const generation = this.generation;
     this.busy = true;
     this.renewing = op === "control.renew";
-    if (!sample && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
+    this.moving = Boolean(readSample);
+    if (!readSample && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
     this.changed();
-    try { return await this.send(op, args, total, sample); }
-    catch (error) { this.halt(this.uncertain ? this.message : error.message); throw error; }
-    finally { this.busy = this.renewing = false; this.changed(); }
+    try {
+      if (op === "control.acquire" && this.motionURL && !this.motionChannel) await this.openMotionChannel(generation);
+      return await this.send(op, args, total, readSample);
+    }
+    catch (error) {
+      if (generation === this.generation) this.halt(this.uncertain ? this.message : error.message);
+      throw error;
+    }
+    finally { this.busy = this.renewing = this.moving = false; this.changed(); }
   }
   async acquire() {
     if (!this.session || this.uncertain) throw new Error("Connect a fresh browser session first.");
@@ -708,12 +841,19 @@ function mountManagement(client, $, clearInput) {
 
 function mount() {
   const $ = id => document.getElementById(id);
-  const client = new Controller();
+  const motionURL = ["https:", "http:"].includes(location.protocol) ?
+    `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/v1/channel` : null;
+  const client = new Controller(undefined, motionURL);
   let identity = null, pad = null, movement = null, pairingBusy = false;
+  let lastMovementAt = 0;
   themeControl($("theme"));
   const management = mountManagement(client, $, () => { pad = movement = null; });
   const error = value => { client.message = value.message; client.changed(); };
-  const act = async fn => { try { await fn(); } catch (value) { if (!client.uncertain) error(value); } };
+  const act = async fn => {
+    const generation = client.generation;
+    try { await fn(); }
+    catch (value) { if (generation === client.generation && !client.uncertain) error(value); }
+  };
   async function authorize(fn, revealError = true) {
     if (pairingBusy || client.closing) return;
     pairingBusy = true;
@@ -743,8 +883,8 @@ function mount() {
       !s.input_ready ? "Input not ready" : s.release_pending ? "Waiting for input releases" :
       !s.remote_allowed ? "Remote input is not allowed on Mosaico" : `${s.mode} · ready${client.controlled ? " · this browser owns control" : " · no control acquired here"}`;
     const active = client.controlled && !client.uncertain && s?.input_ready && !s.release_pending && !s.locked && s.remote_allowed;
-    // A renewal still owns the command lane. Keep the controls steady until
-    // control actually changes or the user starts a foreground action.
+    // Renewal and continuous movement still own the command lane without
+    // interrupting the visual state of controls.
     const ready = active && !client.foregroundBusy;
     $("mouse-controls").disabled = !active || s.mode !== "mouse";
     $("keyboard-controls").disabled = !active || s.mode !== "keyboard";
@@ -868,7 +1008,8 @@ function mount() {
     if (!pad || pad.id !== event.pointerId || $("mouse-controls").disabled) return;
     event.preventDefault();
     const now = performance.now();
-    if (!movement || now - movement.at > 150) movement = {dx: 0, dy: 0, at: now, contact: pad};
+    const batch = client.motionChannel ? PAD_CHANNEL_BATCH_MS : 150;
+    if (!movement || now - movement.at >= batch) movement = {dx: 0, dy: 0, at: now, contact: pad};
     movement.dx = Math.max(-127, Math.min(127, movement.dx + event.clientX - pad.x));
     movement.dy = Math.max(-127, Math.min(127, movement.dy + event.clientY - pad.y));
     pad.x = event.clientX; pad.y = event.clientY;
@@ -882,12 +1023,22 @@ function mount() {
   };
   setInterval(() => {
     if (!movement || !pad || !client.controlled || client.busy) return;
+    const now = performance.now();
+    if (!client.motionChannel && now - lastMovementAt < 60) return;
+    lastMovementAt = now;
     const next = movement; movement = null;
-    if (performance.now() - next.at > 150) return;
-    const dx = Math.trunc(next.dx), dy = Math.trunc(next.dy);
-    if (dx || dy) act(() => client.run("mouse.move_relative", {dx, dy}, undefined,
-      {expiresAt: next.at + 150, current: () => pad === next.contact}));
-  }, 60);
+    act(() => client.run("mouse.move_relative", {}, undefined, consume => {
+      if (pad !== next.contact) return null;
+      // Prefer the current contact's newer deltas after waiting for state.
+      // Keep each batch's own deadline and never carry an older batch forward.
+      const latest = movement?.contact === pad ? movement : next;
+      const expiresAt = latest.at + 150;
+      if (performance.now() >= expiresAt) return null;
+      const dx = Math.trunc(latest.dx), dy = Math.trunc(latest.dy);
+      if (consume && latest === movement) movement = null;
+      return dx || dy ? {args: {dx, dy}, expiresAt} : null;
+    }));
+  }, PAD_CHANNEL_BATCH_MS);
   setInterval(() => {
     if (!client.session || client.busy || document.hidden) return;
     act(async () => {

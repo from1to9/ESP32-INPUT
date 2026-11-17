@@ -13,6 +13,7 @@
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
+#include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -100,6 +101,13 @@ static struct {
     uint64_t retry_at;
     esp_err_t error;
 } s_network;
+static uint64_t s_input_lease_deadline;
+static uint32_t s_input_lease_network;
+/* Wi-Fi worker only. Keep the original mode until restoration is verified. */
+static struct {
+    wifi_ps_type_t original;
+    bool eligible, restore, restore_warned;
+} s_input_ps;
 static void station_network_lost_locked(void)
 {
     ++s_network.generation;
@@ -1142,9 +1150,64 @@ static bool service_control_mode(uint64_t now)
     return true;
 }
 
+static esp_err_t set_input_power_mode(wifi_ps_type_t mode)
+{
+    esp_err_t error = esp_wifi_set_ps(mode);
+    wifi_ps_type_t observed;
+    if (error == ESP_OK) error = esp_wifi_get_ps(&observed);
+    if (error == ESP_OK && observed != mode) error = ESP_ERR_INVALID_STATE;
+    return error;
+}
+
+static void service_input_power(uint64_t now)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool profile_forget = (s_commands & PROFILE_MUTATION) &&
+        (s_profile_request.action == PROFILE_FORGET || s_profile_request.action == PROFILE_FORGET_ALL);
+    bool eligible = s_input_lease_deadline > now && s_input_lease_network == s_network.generation &&
+        s_network.ready && s_snapshot.lan_ready && s_radio_mode_ready &&
+        !s_snapshot.control_ap && !s_snapshot.control_switch && !s_snapshot.setup_active &&
+        !s_snapshot.cleanup_pending && !s_maintenance && !profile_forget &&
+        !(s_commands & (START_SETUP | FORGET_NETWORK | SAVE_NETWORK | JOIN_NETWORK));
+    portEXIT_CRITICAL(&s_lock);
+    if (!eligible) s_input_ps.eligible = false;
+    if (!s_input_ps.eligible && s_input_ps.restore) {
+        esp_err_t error = set_input_power_mode(s_input_ps.original);
+        if (error != ESP_OK) {
+            if (!s_input_ps.restore_warned)
+                ESP_LOGW("app_wifi", "Restore remote input power save failed: %d", (int)error);
+            s_input_ps.restore_warned = true;
+            return;
+        }
+        ESP_LOGI("app_wifi", "Restored power save after remote input: %d", (int)s_input_ps.original);
+        s_input_ps.restore = false;
+        s_input_ps.restore_warned = false;
+    }
+    if (!eligible || s_input_ps.eligible) return;
+    s_input_ps.eligible = true;
+    esp_err_t error = esp_wifi_get_ps(&s_input_ps.original);
+    if (error != ESP_OK) {
+        ESP_LOGW("app_wifi", "Remote input power save mode unavailable: %d", (int)error);
+        return;
+    }
+    if (s_input_ps.original == WIFI_PS_NONE) {
+        ESP_LOGI("app_wifi", "Power save already off for remote input");
+        return;
+    }
+    /* A failed write or readback can still have changed the driver. */
+    s_input_ps.restore = true;
+    error = set_input_power_mode(WIFI_PS_NONE);
+    if (error == ESP_OK)
+        ESP_LOGI("app_wifi", "Disabled power save for remote input (was %d)", (int)s_input_ps.original);
+    else
+        ESP_LOGW("app_wifi", "Disable power save for remote input failed: %d", (int)error);
+}
+
 static void service_step(void)
 {
-    if (service_control_mode(now_ms())) return;
+    uint64_t now = now_ms();
+    service_input_power(now);
+    if (service_control_mode(now)) return;
     uint32_t commands, pending_generation;
     uint32_t pending_scan_generation;
     uint16_t pending_record_index;
@@ -1168,7 +1231,7 @@ static void service_step(void)
     s_disconnected = false;
     portEXIT_CRITICAL(&s_lock);
     esp_err_t error = ESP_OK;
-    uint64_t now = now_ms();
+    now = now_ms();
     service_scan(commands & (SCAN_CANCEL | FORGET_NETWORK));
     if (commands & PROFILE_MUTATION) {
         esp_err_t mutation = service_profile_mutation();
@@ -1488,6 +1551,13 @@ void app_wifi_set_backend_state(bool available,esp_err_t error)
 {
     portENTER_CRITICAL(&s_lock);
     if(s_snapshot.backend_available!=available||s_snapshot.backend_error!=error){s_snapshot.backend_available=available;s_snapshot.backend_error=error;publish();}
+    portEXIT_CRITICAL(&s_lock);
+}
+void app_wifi_set_remote_input_deadline(uint64_t deadline_ms)
+{
+    portENTER_CRITICAL(&s_lock);
+    if (deadline_ms && !s_input_lease_deadline) s_input_lease_network = s_network.generation;
+    s_input_lease_deadline = deadline_ms;
     portEXIT_CRITICAL(&s_lock);
 }
 void app_wifi_set_maintenance(bool active)
@@ -1852,6 +1922,7 @@ void app_wifi_get_scan_diagnostics(app_wifi_scan_diagnostics_t *out)
 { if (out) memset(out, 0, sizeof(*out)); }
 esp_err_t app_wifi_profile_result(uint64_t id,app_wifi_profile_result_t *out){(void)id;if(out)memset(out,0,sizeof(*out));return ESP_ERR_NOT_SUPPORTED;}
 void app_wifi_set_backend_state(bool available,esp_err_t error){(void)available;(void)error;}
+void app_wifi_set_remote_input_deadline(uint64_t deadline_ms) { (void)deadline_ms; }
 esp_err_t app_wifi_profiles_forget_all_request(uint64_t rev,bool ack,uint64_t *id){(void)rev;(void)ack;if(id)*id=0;return ESP_ERR_NOT_SUPPORTED;}
 void app_wifi_set_maintenance(bool active){(void)active;}
 void app_wifi_profiles_snapshot(app_wifi_profiles_snapshot_t *out) { if(out)*out=(app_wifi_profiles_snapshot_t){.capacity=APP_WIFI_PROFILE_CAPACITY,.error=ESP_ERR_NOT_SUPPORTED}; }

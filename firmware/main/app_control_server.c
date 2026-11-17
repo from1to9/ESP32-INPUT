@@ -500,7 +500,7 @@ static esp_err_t initialize(server_t *s)
     config.httpd.uri_match_fn = httpd_uri_match_wildcard;
     error = httpd_ssl_start(&s->listener, &config);
 #if CONFIG_HTTPD_WS_SUPPORT && CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT
-    if (error == ESP_OK && !s->slot) {
+    if (error == ESP_OK) {
         httpd_uri_t channel = {.uri = "/api/v1/channel",
                                .method = HTTP_GET,
                                .handler = websocket_data,
@@ -530,7 +530,7 @@ static esp_err_t initialize(server_t *s)
     }
     bool websocket = false;
 #if CONFIG_HTTPD_WS_SUPPORT && CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT
-    websocket = error == ESP_OK && !s->slot;
+    websocket = error == ESP_OK;
 #endif
     cp_set_transport_capabilities(s->protocol, websocket, error == ESP_OK);
     portENTER_CRITICAL(&s_lock);

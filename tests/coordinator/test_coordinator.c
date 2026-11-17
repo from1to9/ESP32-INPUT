@@ -232,6 +232,7 @@ bool app_update_flash_busy(void) { return test_update_busy; }
 esp_err_t app_update_confirm_health(bool gates)
 { assert(gates); ++test_update_health_requests; return test_update_health_error; }
 void app_wifi_set_maintenance(bool active) { test_wifi_maintenance = active; }
+void app_wifi_set_remote_input_deadline(uint64_t deadline_ms) { (void)deadline_ms; }
 esp_err_t ble_hid_target_select(uint64_t revision, const ble_hid_target_t *target)
 {
     ++test_remote_target_calls;

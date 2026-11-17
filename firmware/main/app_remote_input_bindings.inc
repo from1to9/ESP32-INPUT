@@ -97,6 +97,7 @@ static bool remote_publish(void)
     (void)remote_observe(NULL, &observed);
     app_remote_input_view_t remote = {0};
     app_remote_input_snapshot(s_remote_input, &remote);
+    app_wifi_set_remote_input_deadline(remote.active && !remote.pending ? remote.lease_expires_ms : 0);
     cp_device_state_t state = {.management_generation = s_management_generation,
         .input_epoch = s_engine.state.epoch, .transport_generation = observed.transport_generation,
         .ui_revision = s_ui_revision, .state_sequence = s_state_sequence,

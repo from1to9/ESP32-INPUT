@@ -101,6 +101,19 @@ remains unknown. Inspect the target before explicitly disconnecting/reconnecting
 and sending any new action. A current target snapshot cannot prove the outcome
 of an earlier unknown command.
 
+If the device definitively rejects a relative move as expired, the page
+reports the rejection and checks the lease before accepting fresh input.
+The expired move is never resent. During a continuous touch, the page can use
+newer deltas from that same contact when its state read completes. Each batch
+keeps its own deadline.
+
+If the enrolled HTTP or HTTPS listener offers the authenticated input
+channel, touchpad and direction buttons use it after **Take control**.
+Movement shares the existing command sequence with other button actions.
+Lease renewal and device checks continue while the page is visible. A lost
+channel stops control and discards the pending contact. Reconnect if a result
+is unknown, then take control explicitly to resume.
+
 The active input lease is at most three seconds and is explicitly renewed
 while the visible page controls input. Local takeover, lock, changed target,
 boot, authorization loss and lease loss stop the controller. Hiding/leaving the
@@ -123,3 +136,37 @@ See the [browser regression instructions](../tests/web_controller/README.md)
 for Chromium and native-client tests. The tests use production firmware paths
 with substitutes for the listener, NVS, trusted time and HID send boundary.
 LAN and hotspot reachability on a physical unit require device observation.
+
+## Local development
+
+Run the loopback development server from the checkout and open
+`http://127.0.0.1:8765/`. Replace the example device address with the HTTP
+address of the Mosaico under test.
+
+```sh
+python3 tools/serve_web_controller.py --device-origin http://mosaico.local
+```
+
+Refresh to load edits to the local HTML, CSS and JavaScript. The local proxy
+validates the loopback Host and Origin before forwarding API traffic to the
+single configured device. Mosaico validates authorization, session cookies and
+CSRF, and executes each action through its normal input path.
+
+For an existing approved test browser, pass `--identity-file /path/to/identity.json`
+with a private file containing its `client_id` and `credential`. The loopback
+page imports the identity before signing in. Taking control remains an explicit
+action. On firmware that only offers the full state API, pass `--legacy-state`
+to forward protocol-only state reads to that route and preserve its responses.
+
+For the existing TLS input channel, use the device's commissioned HTTPS
+address and its public trust certificate. This keeps the device's certificate
+and host verification and uses the same browser cookies and channel ticket.
+
+```sh
+python3 tools/serve_web_controller.py --device-origin https://mosaico.local \
+  --device-ca /path/to/public-device-certificate.pem --port 8766
+```
+
+Open `http://127.0.0.1:8766/` in the local test browser. The proxy relays
+WebSocket frames only to the fixed HTTPS device. Add the same identity and
+legacy-state options when using a saved test identity and older firmware.
