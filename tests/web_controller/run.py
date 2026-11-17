@@ -81,6 +81,8 @@ def main():
     parser.add_argument("--http", action="store_true", help="Exercise authenticated plaintext browser transport")
     parser.add_argument("--channel-direct", action="store_true",
                         help="Run the motion-channel case directly on the device origin and its CSP")
+    parser.add_argument("--motion-poll", action="store_true",
+                        help="Exercise the legacy WebSocket polling feature set in the motion-channel case")
     parser.add_argument("--case", choices=("all", "pad-freshness", "management", "authorization-feedback", "lease-renewal",
                                            "control-timing", "motion-channel"),
                         default="all")
@@ -88,6 +90,8 @@ def main():
     channel_test = args.case == "motion-channel"
     if args.channel_direct and not channel_test:
         parser.error("--channel-direct requires --case motion-channel")
+    if args.motion_poll and not channel_test:
+        parser.error("--motion-poll requires --case motion-channel")
     args.protocol_root = args.protocol_root.resolve()
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -143,6 +147,13 @@ def main():
                 self.send_header("Sec-WebSocket-Protocol", offered[0])
                 self.end_headers()
                 self.close_connection = True
+                motion_enabled = False
+
+                def send_text(payload):
+                    payload = payload.encode()
+                    prefix = bytes((0x81, len(payload))) if len(payload) < 126 else struct.pack("!BBH", 0x81, 126, len(payload))
+                    self.wfile.write(prefix + payload)
+
                 try:
                     while True:
                         header = self.rfile.read(2)
@@ -164,13 +175,31 @@ def main():
                         # without advancing the native command clock early.
                         time.sleep(0.035)
                         reply, operation = self.submit("/_fixture/ws-frame", frame.decode())
-                        time.sleep(0.035)
+                        admitted_at = time.monotonic()
+                        reply_data = json.loads(reply["body"])
+                        motion_enabled = motion_enabled or reply_data.get("motion_terminal") is True
+                        push = motion_enabled and operation == "mouse.move_relative" and reply_data.get("state") == "accepted"
+                        terminal = None
+                        if push:
+                            time.sleep(0.020)
+                            terminal, _ = self.submit("/_fixture/ws-motion-result", "")
+                            terminal_at = time.monotonic()
+                        time.sleep(max(0, admitted_at + 0.035 - time.monotonic()))
                         if operation == "mouse.move_relative" and drop_motion:
                             drop_motion = False
+                            if push:
+                                send_text(reply["body"])  # Drop the terminal after the known admission.
                             return
-                        payload = reply["body"].encode()
-                        prefix = bytes((0x81, len(payload))) if len(payload) < 126 else struct.pack("!BBH", 0x81, 126, len(payload))
-                        self.wfile.write(prefix + payload)
+                        send_text(reply["body"])
+                        if push:
+                            while terminal["status"] == 202 and time.monotonic() - admitted_at < 2.2:
+                                time.sleep(0.010)
+                                terminal, _ = self.submit("/_fixture/ws-motion-result", "")
+                                terminal_at = time.monotonic()
+                            if terminal["status"] not in (200, 400):
+                                return
+                            time.sleep(max(0, terminal_at + 0.035 - time.monotonic()))
+                            send_text(terminal["body"])
                 finally:
                     self.submit("/_fixture/ws-close", "")
 
@@ -206,6 +235,8 @@ def main():
             backend_env = dict(os.environ)
             if channel_test:
                 backend_env["WEB_TEST_CHANNEL"] = "1"
+                if not args.motion_poll:
+                    backend_env["WEB_TEST_MOTION_TERMINAL"] = "1"
             backend = subprocess.Popen([temporary / "native_bridge", f"localhost:{server.server_port}", origin],
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error, text=True, bufsize=1,
                                        env=backend_env)
@@ -215,6 +246,7 @@ def main():
                                WEB_PLAYWRIGHT_MODULE=str(args.playwright_module.resolve()))
             if channel_test:
                 environment["WEB_FIXTURE_ORIGIN"] = origin
+                environment["WEB_EXPECT_MOTION_TERMINAL"] = "0" if args.motion_poll else "1"
                 if not args.channel_direct:
                     sys.path.insert(0, str(ROOT / "tools"))
                     from serve_web_controller import ControllerServer

@@ -148,6 +148,77 @@ for (const terminal of [
     statePath, "/api/v1/commands", "/api/v1/requests/12", ...(recoverable ? [statePath] : []),
   ]);
 }
+for (const outcome of ["matched", "wrong key", "duplicate admission", "lost terminal", "inline terminal", "early terminal"]) {
+  const {client, calls} = fixture();
+  const OriginalSocket = globalThis.WebSocket;
+  const messages = [];
+  class FakeSocket extends EventTarget {
+    static OPEN = 1;
+    readyState = FakeSocket.OPEN;
+    bufferedAmount = 0;
+    protocol = "esp32-control-v1";
+    constructor() {
+      super();
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send(serialized) {
+      const input = JSON.parse(serialized);
+      messages.push(input);
+      queueMicrotask(() => {
+        const reply = value => this.onmessage?.({data: JSON.stringify(value)});
+        if (input.type === "motion_terminal") {
+          reply({motion_terminal: true});
+          return;
+        }
+        const admission = {command_key: "12", next_seq: 2, state: "accepted", error: "ok"};
+        const terminal = {...admission, motion_terminal: true, state: "sent"};
+        if (outcome === "inline terminal") {
+          reply({command_key: "12", next_seq: 2, state: "sent", error: "ok"});
+          return;
+        }
+        if (outcome !== "early terminal") reply(admission);
+        if (outcome === "lost terminal") this.close();
+        else if (outcome === "wrong key") reply({...terminal, command_key: "13"});
+        else if (outcome === "duplicate admission") reply(admission);
+        else reply(terminal);
+      });
+    }
+    close() {
+      if (this.readyState !== FakeSocket.OPEN) return;
+      this.readyState = 3;
+      queueMicrotask(() => this.onclose?.());
+    }
+  }
+  globalThis.WebSocket = FakeSocket;
+  try {
+    client.motionURL = "ws://device.test/api/v1/channel";
+    client.state.mode = "mouse";
+    client.stateAt = performance.now();
+    const request = client.request.bind(client);
+    client.request = async (path, ...args) => {
+      if (path === "/api/v1/capabilities") return {status: 200, json: {websocket: true, websocket_motion_terminal: true}};
+      if (path === "/api/v1/ws-ticket") return {status: 200, json: {ticket: "0".repeat(64)}};
+      return request(path, ...args);
+    };
+    await client.openMotionChannel(client.generation);
+    const move = client.run("mouse.move_relative", {dx: 8, dy: 3});
+    const success = outcome === "matched" || outcome === "inline terminal";
+    if (success) assert.equal((await move).state, "sent");
+    else {
+      await assert.rejects(move, /reply unavailable/);
+      assert.match(client.message, /Reply unknown/);
+      await assert.rejects(client.run("mouse.move_relative", {dx: 8, dy: 3}));
+    }
+    assert.equal(client.uncertain, !success);
+    assert.equal(client.controlled, success);
+    assert.equal(client.lastKey, outcome === "early terminal" ? null : "12");
+    assert.deepEqual(messages.map(item => item.op || item.type), ["motion_terminal", "mouse.move_relative"]);
+    assert(!calls.some(call => call.path.startsWith("/api/v1/commands") || call.path.startsWith("/api/v1/requests/")));
+  } finally {
+    client.motionChannel?.close();
+    globalThis.WebSocket = OriginalSocket;
+  }
+}
 {
   const f = fixture(); f.state.now_ms = "2500";
   await f.client.run("keyboard.key_tap", {usage: 4});

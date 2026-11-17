@@ -49,6 +49,14 @@ device details and does not wait for the coordinator's device-detail read.
   Mosaico's enrolled HTTP channel accepts text frames from approved browsers
   with input permission and a CSRF-issued single-use ticket. Binary media
   stays on the HTTPS channel.
+  When `websocket_motion_terminal` is advertised, an input-authorized
+  browser can opt in on that channel with `{"v":1,"type":"motion_terminal"}`.
+  The device acknowledges the opt-in with `{"motion_terminal":true}`.
+  A newly accepted relative move keeps its usual admission reply and key.
+  Wait for the matching terminal result, marked `"motion_terminal":true`,
+  before sending another command on that channel. An immediate terminal
+  reply needs no second frame. HTTP, other operations, and channels without
+  opt-in use the usual result reads.
   Read status and job resources separately. A session can remain valid
   after its input lease ends.
 - Remote input requires an explicitly acquired short lease and current input

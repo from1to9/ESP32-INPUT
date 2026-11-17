@@ -237,6 +237,7 @@ typedef struct cp_principal {
 cp_error_t cp_load_principal(cp_context_t *, const cp_principal_t *);
 cp_error_t cp_revoke_principal(cp_context_t *, const uint8_t id[CP_ID_BYTES], uint64_t now_ms);
 void cp_set_transport_capabilities(cp_context_t *, bool websocket, bool binary_download);
+void cp_set_motion_terminal_available(cp_context_t *, bool available);
 
 typedef struct {
     bool tls;
@@ -275,6 +276,19 @@ typedef struct {
 } cp_http_response_t;
 cp_error_t cp_transport_frame(cp_context_t *, const cp_identity_t *, const char *frame,
                               size_t length, uint64_t now_ms, cp_http_response_t *);
+/* Optional state owned by one enrolled browser channel. The key is returned
+ * only for a newly accepted relative move on an opted-in channel. */
+typedef struct {
+    bool enabled;
+    uint64_t accepted_key;
+} cp_motion_terminal_t;
+cp_error_t cp_transport_frame_motion(cp_context_t *, const cp_identity_t *, const char *frame,
+                                     size_t length, uint64_t now_ms, cp_http_response_t *,
+                                     cp_motion_terminal_t *);
+/* Read an authoritative terminal result without refreshing browser liveness.
+ * A NULL response checks readiness. CP_OK includes terminal action failures. */
+cp_error_t cp_transport_motion_result(cp_context_t *, const cp_identity_t *, uint64_t key,
+                                      uint64_t now_ms, cp_http_response_t *);
 cp_error_t cp_http_configure(cp_context_t *, const char *host, const char *browser_origin);
 cp_error_t cp_http(cp_context_t *, const char *method, const char *resource,
                    const cp_http_security_t *, const char *body, size_t body_length,

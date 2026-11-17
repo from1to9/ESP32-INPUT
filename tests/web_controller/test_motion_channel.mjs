@@ -11,6 +11,7 @@ const browser = await chromium.launch({headless: true,
 const evidence = {motionCommands: [], motionResults: [], renewals: [], httpCommands: [], httpStateReads: 0, movementReports: []};
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const atMs = () => Math.round(performance.timeOrigin + performance.now());
+const expectPush = process.env.WEB_EXPECT_MOTION_TERMINAL === "1";
 
 try {
   const page = await browser.newPage({ignoreHTTPSErrors: true, viewport: {width: 1100, height: 920}, hasTouch: true});
@@ -21,6 +22,30 @@ try {
   const fixture = action => page.request.post(`${device}/_fixture/${action}`);
   const reports = async () => (await (await page.request.get(`${device}/_fixture/reports`)).json()).reports;
   const sentFrames = [];
+  // Instrument the exact discard points only in this loopback test. The
+  // shipping controller never collects or exposes pointer samples.
+  await page.route("**/controller.js", async route => {
+    const response = await route.fetch();
+    let source = await response.text();
+    const observe = "globalThis.recordMotionDiscard?.";
+    const insertions = [
+      ["    if (!movement || now - movement.at >= batch) movement =",
+        `    if (movement && now - movement.at >= batch) ${observe}("rollover", movement);\n`],
+      ["  const endPad = event => { if (pad?.id === event.pointerId) { pad = null;",
+        `  const endPad = event => { if (pad?.id === event.pointerId) { ${observe}("contact_end", movement); pad = null;`],
+      ["      if (pad !== next.contact) return null;",
+        `      if (pad !== next.contact) { ${observe}("contact_end", next); return null; }`],
+      ["      if (performance.now() >= expiresAt) return null;",
+        `      if (performance.now() >= expiresAt) { ${observe}("expired_before_submit", latest); return null; }`],
+      ["      if (consume && latest === movement) movement = null;",
+        `      if (consume && latest !== next) ${observe}("superseded_before_submit", next);\n`],
+    ];
+    for (const [needle, injected] of insertions) {
+      assert.equal(source.split(needle).length, 2);
+      source = source.replace(needle, injected.endsWith("\n") ? injected + needle : injected);
+    }
+    await route.fulfill({response, body: source});
+  });
   page.on("request", request => {
     const resource = new URL(request.url()).pathname;
     if (resource === "/api/v1/state") ++evidence.httpStateReads;
@@ -30,7 +55,7 @@ try {
     assert.equal(socket.url(), origin.replace(/^http/, "ws") + "/api/v1/channel");
     socket.on("framesent", ({payload}) => {
       const frame = JSON.parse(payload);
-      if (frame.op || frame.resource) sentFrames.push({op: frame.op, seq: frame.seq, resource: frame.resource, atMs: atMs()});
+      sentFrames.push({op: frame.op, seq: frame.seq, resource: frame.resource, type: frame.type, atMs: atMs()});
       if (frame.op === "mouse.move_relative") evidence.motionCommands.push({
         seq: frame.seq, deadline: frame.deadline_ms, args: frame.args, atMs: atMs(),
       });
@@ -39,7 +64,8 @@ try {
     socket.on("framereceived", ({payload}) => {
       if (typeof payload !== "string") return;
       const frame = JSON.parse(payload);
-      if (frame.state) evidence.motionResults.push({state: frame.state, error: frame.error, key: frame.command_key, atMs: atMs()});
+      if (frame.state) evidence.motionResults.push({state: frame.state, error: frame.error, key: frame.command_key,
+        pushed: frame.motion_terminal === true, atMs: atMs()});
     });
   });
   await page.goto(origin);
@@ -52,6 +78,7 @@ try {
   evidence.secureCookieRetained = cookie.secure;
   await page.locator("#acquire").click();
   await waitText("connection", "Controlling");
+  assert.equal(sentFrames.filter(frame => frame.type === "motion_terminal").length, expectPush ? 1 : 0);
   await page.locator("#pad").scrollIntoViewIfNeeded();
   const pad = await page.locator("#pad").boundingBox();
   const point = {id: 1, x: pad.x + 35, y: pad.y + 50};
@@ -81,6 +108,8 @@ try {
   await waitText("result", "rejected: expired");
   const rejection = evidence.motionResults.find(result => result.state === "rejected" && result.error === "expired");
   assert(rejection && evidence.motionResults.some(result => result.state === "accepted" && result.key === rejection.key));
+  assert.equal(rejection.pushed, expectPush);
+  assert.equal(sentFrames.some(frame => frame.resource === `/api/v1/requests/${rejection.key}`), !expectPush);
   assert.equal(await page.locator("#connection").textContent(), "Controlling");
   assert(!(await reports()).some(report => report.id === 2 && (report.bytes[1] || report.bytes[2])));
   evidence.beforeEffectExpiry = {accepted: true, rejected: true, noHid: true, controlRetained: true};
@@ -88,11 +117,21 @@ try {
   point.x = pad.x + 35;
   const beforeTouch = atMs();
   await page.evaluate(() => {
-    const samples = [];
+    const samples = [], discarded = [];
+    const counted = new WeakSet();
     const pad = document.getElementById("pad");
     const record = event => samples.push({x: event.clientX, atMs: Math.round(performance.timeOrigin + performance.now())});
     pad.addEventListener("pointermove", record, {capture: true, passive: true});
-    window.finishTouchTiming = () => { pad.removeEventListener("pointermove", record, true); return samples; };
+    window.recordMotionDiscard = (reason, sample) => {
+      if (!sample || counted.has(sample)) return;
+      counted.add(sample);
+      discarded.push({reason, dx: sample.dx, ageMs: Math.round(performance.now() - sample.at)});
+    };
+    window.finishTouchTiming = () => {
+      pad.removeEventListener("pointermove", record, true);
+      delete window.recordMotionDiscard;
+      return {samples, discarded};
+    };
   });
   await touch("touchStart");
   for (let i = 0; i < 90; ++i) {
@@ -106,9 +145,9 @@ try {
   }
   await touch("touchEnd");
   const afterTouch = atMs();
-  const samples = await page.evaluate(() => window.finishTouchTiming());
+  const {samples, discarded} = await page.evaluate(() => window.finishTouchTiming());
   evidence.touchTiming = {
-    startedAtMs: beforeTouch, endedAtMs: afterTouch, samples,
+    startedAtMs: beforeTouch, endedAtMs: afterTouch, samples, discarded,
     sent: sentFrames.filter(frame => frame.atMs >= beforeTouch && frame.atMs <= afterTouch),
     received: evidence.motionResults.filter(frame => frame.atMs >= beforeTouch && frame.atMs <= afterTouch),
     hid: (await reports()).filter(report => report.id === 2 && report.atMs >= beforeTouch && report.atMs <= afterTouch &&
@@ -178,6 +217,7 @@ try {
   assert(!evidence.httpCommands.includes("control.renew") && evidence.renewals.length >= 2);
 
   const sentBeforeLoss = evidence.motionCommands.length;
+  const resultsBeforeLoss = evidence.motionResults.length;
   assert.equal((await fixture("drop-motion")).status(), 200);
   await page.locator("#pad").scrollIntoViewIfNeeded();
   const currentPad = await page.locator("#pad").boundingBox();
@@ -187,6 +227,13 @@ try {
   point.x += 9;
   await touch("touchMove");
   await waitText("result", "Reply unknown");
+  const lost = evidence.motionResults.slice(resultsBeforeLoss).filter(reply => reply.state !== "applied");
+  if (expectPush) {
+    const accepted = lost.at(-1);
+    assert.equal(accepted.state, "accepted");
+    assert.equal(await page.locator("#result-check").isEnabled(), true);
+    assert(!sentFrames.some(frame => frame.resource === `/api/v1/requests/${accepted.key}`));
+  }
   await touch("touchEnd");
   assert.equal(await page.locator("#connection").textContent(), "Connected / idle");
   assert(await page.locator("#mouse-mode").isDisabled());

@@ -54,7 +54,7 @@ struct cp_context {
     uint64_t next_key, session_generation, now, challenge_until;
     uint64_t blocked_allowance, login_window;
     unsigned failed_logins;
-    bool clock_failed, state_known, websocket_available, binary_download_available;
+    bool clock_failed, state_known, websocket_available, binary_download_available, motion_terminal_available;
     char host[129], origin[193];
     cj_document_t document;
     char canonical[CJ_CAPACITY + 1U];
@@ -1146,7 +1146,7 @@ static cp_error_t result_response(cp_context_t *c, unsigned session, const recor
     return r->result.error;
 }
 static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, size_t length,
-                           cp_http_response_t *out)
+                           cp_http_response_t *out, uint64_t *accepted_move)
 {
     session_t *s = &c->sessions[session];
     cj_document_t *d = &c->document;
@@ -1390,6 +1390,10 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
             c->lease.session_generation == s->generation) {
             wipe(&c->lease, sizeof(c->lease));
         }
+    }
+    if (accepted_move && r->operation == CP_OP_MOUSE_MOVE_RELATIVE && r->active &&
+        r->result.state == CP_RESULT_ACCEPTED && r->result.error == CP_OK) {
+        *accepted_move = r->key;
     }
     return result_response(c, session, r, out);
 }
@@ -1708,11 +1712,13 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
             out->body, sizeof(out->body),
             "{\"api_version\":1,\"catalog_sha256\":\"%s\",\"command_bytes\":%u,"
             "\"args_bytes\":%u,\"authenticated_clients\":%u,\"principals\":%u,"
-            "\"results\":%u,\"websocket\":%s,\"binary_download\":%s,\"enrollment\":\"protected_"
+            "\"results\":%u,\"websocket\":%s,\"websocket_motion_terminal\":%s,"
+            "\"binary_download\":%s,\"enrollment\":\"protected_"
             "local_"
             "import\",\"operations\":%u,\"configuration_fields\":%u}",
             cp_catalog_sha256(), CP_MAX_FRAME_BYTES, CP_MAX_ARGS_BYTES, CP_MAX_SESSIONS,
             CP_MAX_PRINCIPALS, CP_MAX_RESULTS, c->websocket_available ? "true" : "false",
+            c->motion_terminal_available ? "true" : "false",
             c->binary_download_available ? "true" : "false", (unsigned)cp_operation_count(),
             (unsigned)cp_config_count());
         return CP_OK;
@@ -1937,7 +1943,7 @@ static cp_error_t http_inner(cp_context_t *c, const char *method, const char *re
         return CP_OK;
     }
     if (strcmp(resource, "/api/v1/commands") == 0 && strcmp(method, "POST") == 0) {
-        return commands(c, (unsigned)session, body, length, out);
+        return commands(c, (unsigned)session, body, length, out, NULL);
     }
     if (strcmp(method, "GET") == 0) {
         return get_resource(c, (unsigned)session, resource, out);
@@ -2159,17 +2165,16 @@ void cp_set_transport_capabilities(cp_context_t *c, bool ws, bool binary)
     if (c) {
         c->websocket_available = ws;
         c->binary_download_available = binary;
+        if (!ws) c->motion_terminal_available = false;
     }
 }
-static int transport_session(cp_context_t *c, const cp_identity_t *who, uint64_t now)
+void cp_set_motion_terminal_available(cp_context_t *c, bool available)
 {
-    if (!c || !who) {
-        return -1;
-    }
-    cp_tick(c, now);
-    if (c->clock_failed) {
-        return -1;
-    }
+    if (c) c->motion_terminal_available =
+        available && c->websocket_available && c->policy != CP_POLICY_PASSPORT_OPEN_HTTP;
+}
+static int find_transport_session(cp_context_t *c, const cp_identity_t *who)
+{
     for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i) {
         session_t *s = &c->sessions[i];
         if (!s->used) {
@@ -2179,11 +2184,45 @@ static int transport_session(cp_context_t *c, const cp_identity_t *who, uint64_t
         if (actual.browser == who->browser && actual.scopes == who->scopes &&
             equal(actual.principal_id, who->principal_id, 16) &&
             equal(actual.session_id, who->session_id, 16)) {
-            s->last_seen = c->now;
             return (int)i;
         }
     }
     return -1;
+}
+static int transport_session(cp_context_t *c, const cp_identity_t *who, uint64_t now)
+{
+    if (!c || !who) return -1;
+    cp_tick(c, now);
+    int session = c->clock_failed ? -1 : find_transport_session(c, who);
+    if (session >= 0) c->sessions[session].last_seen = c->now;
+    return session;
+}
+static bool motion_terminal_allowed(const cp_context_t *c, const cp_identity_t *who)
+{
+    const cp_scope_mask_t scopes = CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL;
+    return c->motion_terminal_available && who->browser && (who->scopes & scopes) == scopes;
+}
+cp_error_t cp_transport_motion_result(cp_context_t *c, const cp_identity_t *who, uint64_t key,
+                                      uint64_t now, cp_http_response_t *out)
+{
+    if (!c || !who || !key) return CP_INVALID;
+    cp_tick(c, now);
+    if (c->clock_failed || !motion_terminal_allowed(c, who)) return CP_UNAUTHENTICATED;
+    int session = find_transport_session(c, who);
+    if (session < 0) return CP_UNAUTHENTICATED;
+    record_t *r = find_key(c, key);
+    if (!r || r->session != (unsigned)session || r->session_generation != c->sessions[session].generation ||
+        r->operation != CP_OP_MOUSE_MOVE_RELATIVE) return CP_RESULT_UNKNOWN;
+    if (r->active) return CP_BUSY;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        (void)result_response(c, (unsigned)session, r, out);
+        if (!out->length || (out->status != 200 && out->status != 400)) return CP_INTERNAL;
+        size_t used = out->length - 1U;
+        if (!append(out->body, sizeof(out->body), &used, ",\"motion_terminal\":true}")) return CP_INTERNAL;
+        out->length = used;
+    }
+    return CP_OK;
 }
 cp_error_t cp_transport_authenticate(cp_context_t *c, const cp_http_security_t *security,
                                      bool mutation, uint64_t now, cp_identity_t *out)
@@ -2286,24 +2325,28 @@ cp_error_t cp_transport_heartbeat(cp_context_t *c, const cp_identity_t *who, uin
 {
     return transport_session(c, who, now) >= 0 ? CP_OK : CP_UNAUTHENTICATED;
 }
-cp_error_t cp_transport_frame(cp_context_t *c, const cp_identity_t *who, const char *frame,
-                              size_t length, uint64_t now, cp_http_response_t *out)
+cp_error_t cp_transport_frame_motion(cp_context_t *c, const cp_identity_t *who, const char *frame,
+                                     size_t length, uint64_t now, cp_http_response_t *out,
+                                     cp_motion_terminal_t *motion)
 {
     if (!out) {
         return CP_INVALID;
     }
     memset(out, 0, sizeof(*out));
+    if (motion) motion->accepted_key = 0;
     int session = transport_session(c, who, now);
     if (session < 0) {
         return failure(out, CP_UNAUTHENTICATED);
     }
+    const bool motion_allowed = motion && motion_terminal_allowed(c, who);
     cp_error_t error = CP_INVALID;
     if (!frame || length > CP_MAX_FRAME_BYTES) {
         error = CP_TOO_LARGE;
     } else if (cj_parse(&c->document, frame, length) && c->document.nodes[0].type == CJ_OBJECT) {
         uint16_t op = cj_get(&c->document, 0, "op");
         if (op != CJ_NONE) {
-            error = commands(c, (unsigned)session, frame, length, out);
+            error = commands(c, (unsigned)session, frame, length, out,
+                             motion_allowed && motion->enabled ? &motion->accepted_key : NULL);
         } else {
             unsigned count = 0;
             for (uint16_t t = c->document.nodes[0].child; t != CJ_NONE;
@@ -2321,6 +2364,12 @@ cp_error_t cp_transport_frame(cp_context_t *c, const cp_identity_t *who, const c
                         (size_t)snprintf(out->body, sizeof(out->body),
                                          "{\"authenticated\":true,\"media_idle_limit_ms\":5000}");
                     error = CP_OK;
+                } else if (kind && !strcmp(kind, "motion_terminal") && motion_allowed) {
+                    motion->enabled = true;
+                    strcpy(out->body, "{\"motion_terminal\":true}");
+                    out->length = strlen(out->body);
+                    out->status = 200;
+                    error = CP_OK;
                 } else if (resource && strlen(resource) < 160 && safe_resource(resource)) {
                     char path[160];
                     strcpy(path, resource);
@@ -2336,6 +2385,11 @@ cp_error_t cp_transport_frame(cp_context_t *c, const cp_identity_t *who, const c
         return failure(out, error);
     }
     return error;
+}
+cp_error_t cp_transport_frame(cp_context_t *c, const cp_identity_t *who, const char *frame,
+                              size_t length, uint64_t now, cp_http_response_t *out)
+{
+    return cp_transport_frame_motion(c, who, frame, length, now, out, NULL);
 }
 
 cp_error_t cp_transport_close(cp_context_t *c, const cp_identity_t *who, uint64_t now)

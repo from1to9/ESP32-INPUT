@@ -34,6 +34,8 @@ static bool web_hold_next_move;
 static uint64_t web_hold_coordinator_until;
 static cp_identity_t web_channel_identity;
 static bool web_channel_open;
+static cp_motion_terminal_t web_motion;
+static uint64_t web_motion_key;
 static bool web_timed_reports;
 static uint64_t web_report_times[sizeof(trace) / sizeof(trace[0])];
 static uint64_t web_label_revision;
@@ -270,6 +272,8 @@ static void web_channel(httpd_req_t *r)
         cp_http_security_t security = {.tls = !web_server.slot, .host = host, .origin = origin, .cookie = cookie};
         web_channel_open = cp_transport_upgrade(web_server.protocol, &security, r->body, s_now_ms,
             &web_channel_identity) == CP_OK;
+        web_motion = (cp_motion_terminal_t){0};
+        web_motion_key = 0;
         r->status = web_channel_open ? 101 : 401;
         return;
     }
@@ -279,8 +283,20 @@ static void web_channel(httpd_req_t *r)
         web_channel_open = false;
         return;
     }
-    assert(!strcmp(r->uri, "/_fixture/ws-frame"));
-    (void)cp_transport_frame(web_server.protocol, &web_channel_identity, r->body, r->content_len, s_now_ms, reply);
+    if (!strcmp(r->uri, "/_fixture/ws-motion-result")) {
+        cp_error_t result = cp_transport_motion_result(web_server.protocol, &web_channel_identity,
+            web_motion_key, s_now_ms, reply);
+        if (result != CP_OK) {
+            r->status = result == CP_BUSY ? 202 : 503;
+            return;
+        }
+        web_motion_key = 0;
+    } else {
+        assert(!strcmp(r->uri, "/_fixture/ws-frame") && !web_motion_key);
+        (void)cp_transport_frame_motion(web_server.protocol, &web_channel_identity, r->body,
+            r->content_len, s_now_ms, reply, &web_motion);
+        web_motion_key = web_motion.accepted_key;
+    }
     r->status = reply->status;
     assert(httpd_resp_send(r, reply->body, (ssize_t)reply->length) == ESP_OK);
     clear(reply, sizeof(*reply));
@@ -381,6 +397,7 @@ int main(int argc, char **argv)
     const bool test_channel = getenv("WEB_TEST_CHANNEL") != NULL;
     web_timed_reports = test_channel;
     if (test_channel) cp_set_transport_capabilities(web_server.protocol, true, false);
+    cp_set_motion_terminal_available(web_server.protocol, getenv("WEB_TEST_MOTION_TERMINAL") != NULL);
     web_service();
     static char input[8192]; static cj_document_t document; static httpd_req_t request;
     while (fgets(input, sizeof(input), stdin)) {

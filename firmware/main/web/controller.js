@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The browser owns no HID state. Every action uses the device's typed input API.
 const ACTIVE = new Set(["accepted", "running", "applying", "cleanup_pending"]);
+const TERMINAL = new Set(["rejected", "applied", "sent", "completed", "cancelled", "failed"]);
 const HEX32 = /^[0-9a-f]{32}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/;
@@ -71,25 +72,48 @@ class MotionChannel {
   constructor(socket, lost) {
     this.socket = socket;
     this.pending = null;
+    this.motionTerminal = false;
     socket.onmessage = event => {
       const pending = this.pending;
-      if (!pending) { this.close(); return; }
+      if (!pending || pending.done) { this.close(); return; }
       try {
         const json = JSON.parse(event.data);
         if (!json || typeof json !== "object" || Array.isArray(json)) throw new Error();
+        const next = (Number.isInteger(json.next_seq) || decimal(json.next_seq)) && Number(json.next_seq);
+        if (pending.admitted) {
+          if (json.command_key !== pending.admitted.command_key || next !== pending.sequence + 1 ||
+              json.motion_terminal !== true || !TERMINAL.has(json.state) || typeof json.error !== "string") throw new Error();
+        } else if (json.motion_terminal === true && (!pending.negotiating || json.state !== undefined)) {
+          throw new Error();
+        } else if (pending.accepted && ACTIVE.has(json.state)) {
+          if (json.state !== "accepted" || json.error !== "ok" || !decimal(json.command_key) ||
+              next !== pending.sequence + 1) throw new Error();
+          pending.admitted = json;
+          pending.accepted(json);
+          return;
+        } else if (pending.accepted && (!TERMINAL.has(json.state) || typeof json.error !== "string" || !decimal(json.command_key) ||
+                   next !== pending.sequence + 1)) {
+          throw new Error();
+        }
+        pending.done = true;
         pending.resolve(json);
       } catch { this.close(); }
     };
     socket.onclose = () => { this.close(); lost(this); };
   }
-  async exchange(payload) {
+  async exchange(payload, onAccepted) {
     if (this.pending || this.socket.readyState !== WebSocket.OPEN || this.socket.bufferedAmount) {
       throw new Error("Input channel unavailable.");
     }
     let timeout;
     try {
       return await new Promise((resolve, reject) => {
-        this.pending = {resolve, reject};
+        this.pending = {resolve, reject, sequence: payload.seq, negotiating: payload.type === "motion_terminal",
+          accepted: onAccepted && (answer => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => this.close(), 2200);
+            onAccepted(answer);
+          })};
         timeout = setTimeout(() => this.close(), 3500);
         this.socket.send(JSON.stringify(payload));
       });
@@ -151,6 +175,16 @@ export class Controller {
     const channel = await MotionChannel.open(this.motionURL, reply.json.ticket, channel => {
       if (this.motionChannel === channel) this.halt("Input channel closed. Take control explicitly to resume.");
     });
+    try {
+      if (capabilities.json.websocket_motion_terminal === true) {
+        const selected = await channel.exchange({v: 1, type: "motion_terminal"});
+        if (selected.motion_terminal !== true) throw new Error("Device input channel negotiation failed.");
+        channel.motionTerminal = true;
+      }
+    } catch (error) {
+      channel.close();
+      throw error;
+    }
     if (this.generation !== generation) {
       channel.close();
       throw new Error("Browser session changed while opening the input channel.");
@@ -287,7 +321,16 @@ export class Controller {
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
-      const response = channel ? {json: await channel.exchange(envelope)} : await this.request("/api/v1/commands", "POST", envelope);
+      const moveAccepted = channel?.motionTerminal && relativeMove ? admitted => {
+        if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
+        this.session.next_seq = seq + 1;
+        this.lastKey = admitted.command_key;
+        this.last = admitted;
+        if (!readSample) this.message = describeResult(admitted, total);
+        this.changed();
+      } : undefined;
+      const response = channel ? {json: await channel.exchange(envelope, moveAccepted)} :
+        await this.request("/api/v1/commands", "POST", envelope);
       answer = response.json;
       const next = Number(answer.next_seq);
       if (!Number.isInteger(next) || (next !== seq && next !== seq + 1)) throw new Error("Missing sequence acknowledgement.");

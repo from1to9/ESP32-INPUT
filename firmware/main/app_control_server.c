@@ -63,10 +63,18 @@ struct server {
     unsigned channel_closure_count;
     uint64_t next_channel_generation;
     struct {
+        bool queued;
+        unsigned slot;
+        uint64_t generation, key;
+        int fd;
+    } motion_work;
+    struct {
         bool used;
         int fd;
         uint64_t generation;
         cp_identity_t identity;
+        uint64_t motion_key;
+        bool motion_ready;
     } channels[CP_MAX_SESSIONS];
 };
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -533,6 +541,7 @@ static esp_err_t initialize(server_t *s)
     websocket = error == ESP_OK;
 #endif
     cp_set_transport_capabilities(s->protocol, websocket, error == ESP_OK);
+    cp_set_motion_terminal_available(s->protocol, websocket);
     portENTER_CRITICAL(&s_lock);
     s_snapshots[s->slot].websocket_available = websocket;
     portEXIT_CRITICAL(&s_lock);
@@ -580,7 +589,8 @@ static void worker(void *argument)
                 cp_set_device_state(s->protocol, &state, now_ms());
             }
             if (has_completion) {
-                (void)cp_complete(s->protocol, completion.key, &completion.result, now_ms());
+                cp_error_t recorded = cp_complete(s->protocol, completion.key, &completion.result, now_ms());
+                motion_terminal_recorded(s, &completion, recorded);
                 portENTER_CRITICAL(&s_lock);
                 s->completion_head = (s->completion_head + 1) % COMPLETION_CAPACITY;
                 --s->completion_count;
@@ -604,10 +614,11 @@ static void worker(void *argument)
             s->override_locked |= locked;
             portEXIT_CRITICAL(&s_lock);
         }
+        if (!stop) queue_motion_terminal(s);
         if (stop) {
             hotspot_dns_close(s);
             portENTER_CRITICAL(&s_lock);
-            bool transport_pending = s->download_active || s->media_pending_count != 0;
+            bool transport_pending = s->download_active || s->media_pending_count != 0 || s->motion_work.queued;
             portEXIT_CRITICAL(&s_lock);
             if (transport_pending) {
                 vTaskDelay(pdMS_TO_TICKS(20));

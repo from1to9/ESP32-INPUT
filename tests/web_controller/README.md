@@ -71,7 +71,9 @@ viewports.
 Use `--case motion-channel` to exercise Chromium through the local relay
 with the existing full state route. Add `--http` for an enrolled HTTP
 upstream. Add `--channel-direct` to connect directly to the device origin
-and use its CSP.
+and use its CSP. Use `--motion-poll` to run the same 90-event drag with the
+legacy polling feature set. The default case negotiates a motion terminal
+reply and includes loss after a known admission.
 The fixture models 70 ms WebSocket round trips, delayed coordinator dispatch
 and a lost reply. It records continuing touch and mouse HID reports, button
 stability, renewal and stop behavior.
