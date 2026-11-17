@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_remote_input.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -476,6 +477,11 @@ static cp_error_t remember_result(app_remote_input_t *m, const cp_command_t *cmd
                                   cp_result_state_t state, cp_error_t error, const char *reason)
 {
     *r = result_for(cmd->command_key, state, error, reason);
+    /* Only Mosaico routes browser commands through the ordered bridge. */
+    if (error == CP_EXPIRED && cmd->operation == CP_OP_MOUSE_MOVE_RELATIVE && cmd->identity.browser &&
+        cmd->admission_order && m->now_ms >= cmd->deadline_ms)
+        snprintf(r->reason, sizeof(r->reason), "input now=%" PRIu64 " deadline=%" PRIu64,
+                 m->now_ms, cmd->deadline_ms);
     remember(m, cmd->operation, &cmd->identity, r);
     return error;
 }

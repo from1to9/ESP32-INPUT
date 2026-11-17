@@ -676,6 +676,7 @@ int main(void)
 {
 #ifdef TEST_DUAL_TRANSPORT
     dual_listener_order_and_restart();
+    browser_motion_expiry_stage();
 #endif
     current_authority_stops_held_and_queued_input();
     recenter_applies_once_without_realigning_duplicates();

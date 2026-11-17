@@ -1239,6 +1239,12 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
                     cmd->deadline_ms - c->now >
                         (cp_operation_flag(o->id, "script_movement") ? 250U : 2000U))) {
             error = CP_EXPIRED;
+            if (o->id == CP_OP_MOUSE_MOVE_RELATIVE && s->browser &&
+                c->policy != CP_POLICY_PASSPORT_OPEN_HTTP &&
+                (c->principals[s->principal].scopes & CP_SCOPE_INPUT_CONTROL)) {
+                snprintf(r->result.reason, sizeof(r->result.reason),
+                         "protocol now=%" PRIu64 " deadline=%" PRIu64, c->now, cmd->deadline_ms);
+            }
         } else {
             error = gates(c, session, o, args);
         }
@@ -1366,6 +1372,11 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
                             error = cp_complete(c, r->key, &result, c->now);
                         }
                     }
+                } else if (error == CP_EXPIRED && o->id == CP_OP_MOUSE_MOVE_RELATIVE &&
+                           cmd->identity.browser && c->policy != CP_POLICY_PASSPORT_OPEN_HTTP &&
+                           memchr(result.reason, 0, sizeof(result.reason))) {
+                    // Preserve the observed bridge submission rejection without admitting work.
+                    memcpy(r->result.reason, result.reason, sizeof(result.reason));
                 }
             }
         }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "app_command_bridge.h"
+#include "control_registry.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -163,10 +164,24 @@ static void dequeued_command_remains_revocable_at_clock_boundary(void)
     assert(f->effects == 0 && f->safeties == 1 && f->result.error == CP_STALE);
     destroy(f);
 }
+static void browser_move_expiry_keeps_both_full_timestamps(void)
+{
+    fixture_t *f = create();
+    f->now = UINT64_MAX;
+    cp_command_t c = {.operation = CP_OP_MOUSE_MOVE_RELATIVE, .command_key = 1,
+                      .deadline_ms = UINT64_MAX, .identity = {.browser = true}};
+    cp_result_t result = {0};
+    assert(app_command_bridge_submit(f->bridge, &c, &result) == CP_EXPIRED);
+    assert(!strcmp(result.reason, "submit now=18446744073709551615 deadline=18446744073709551615"));
+    app_command_bridge_service(f->bridge);
+    assert(!f->effects && !f->completions);
+    destroy(f);
+}
 int main(void)
 {
     storage_alignment_rejects_without_mutation_and_recovers();
     dequeued_command_remains_revocable_at_clock_boundary();
+    browser_move_expiry_keeps_both_full_timestamps();
     local_takeover_preserves_independent_management_commands();
     bounded_queue_and_exact_once_after_completion_backpressure();
     expired_and_revoked_commands_never_execute();
