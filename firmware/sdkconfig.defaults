@@ -92,7 +92,7 @@ CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
 CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
 # Each control listener uses three internal sockets and up to four clients.
 # STA can also host the five-socket setup portal and one outbound update.
-# Leave one accept slot per control listener to reject excess clients cleanly.
+# Keep two global descriptors in reserve beyond those concurrent allocations.
 CONFIG_LWIP_MAX_SOCKETS=22
 
 # Explicit local spoken-letter windows; no WakeNet model is selected.
