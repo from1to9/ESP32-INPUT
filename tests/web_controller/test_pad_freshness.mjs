@@ -15,25 +15,25 @@ page.on("request", request => {
   if (request.url() === `${origin}/api/v1/commands`) commands.push(request.postDataJSON());
 });
 const moves = () => commands.filter(command => command.op === "mouse.move_relative");
+const stateURL = `${origin}/api/v1/state?view=protocol`;
 const waitText = (id, text) => page.waitForFunction(({id, text}) => document.getElementById(id).textContent.includes(text), {id, text});
 const fixture = action => page.request.post(`${origin}/_fixture/${action}`);
 const reports = async () => (await (await page.request.get(`${origin}/_fixture/reports`)).json()).reports;
 async function afterRenewal() {
   await page.waitForRequest(request => request.url().endsWith("/api/v1/commands") && request.postDataJSON().op === "control.renew");
-  await page.waitForResponse(response => response.url().endsWith("/api/v1/state") && response.status() === 200);
+  await page.waitForResponse(response => response.url() === stateURL && response.status() === 200);
   await page.waitForTimeout(25);
 }
 async function pauseState() {
   let arrived, resume;
   const paused = new Promise(resolve => { arrived = resolve; });
   const proceed = new Promise(resolve => { resume = resolve; });
-  await page.route("**/api/v1/state", async route => { arrived(); await proceed; await route.continue(); }, {times: 1});
+  await page.route(stateURL, async route => { arrived(); await proceed; await route.continue(); }, {times: 1});
   return {paused, resume};
 }
 try {
   await page.goto(origin);
-  await page.locator("#pair").click(); await waitText("approval", "Waiting for approval");
-  await fixture("approve"); await page.locator("#check").click(); await waitText("connection", "Connected / idle");
+  await page.locator("#access-code").fill("12345678"); await page.locator("#pair").click(); await waitText("connection", "Connected / idle");
   await page.locator("#acquire").click(); await waitText("connection", "Controlling");
   await page.locator("#pad").scrollIntoViewIfNeeded();
   const box = await page.locator("#pad").boundingBox();

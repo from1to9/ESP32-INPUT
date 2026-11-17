@@ -7,7 +7,7 @@ receives ordinary input and needs no Mosaico application or LAN connection.
 
 ```mermaid
 flowchart LR
-    Browser["Phone or computer browser"] -->|HTTPS| Device["ESP32-INPUT"]
+    Browser["Phone or computer browser"] -->|Local HTTP or enrolled HTTPS| Device["ESP32-INPUT"]
     Script["Script or test harness"] -->|HTTPS API| Device
     Assistant["AI assistant"] -->|MCP| Companion["Local companion"]
     Companion -->|HTTPS API| Device
@@ -36,8 +36,8 @@ device in QuickTime Player's **New Movie Recording** source menu for a live
 preview. The [iPhone and iPad guide](user-guide.md#control-an-ipad-or-iphone)
 covers pairing, wired input, QuickTime and screenshot import.
 
-Open Mosaico's **Settings → Wi-Fi → Web/API** HTTPS address and pair and
-approve the browser, or enroll an API/MCP client as described below. Check
+Open the HTTP address in **Settings → Wi-Fi → Web/API** and use the device
+code to authorize the browser, or enroll an HTTPS API/MCP client as described below. Check
 the selected input target before acquiring control. A script or AI client
 can then move the pointer, click and send keyboard input while its operator
 or a separate screen capture tool observes the result.
@@ -56,9 +56,9 @@ image to decide the next input action.
 
 ## Browser controller
 
-Join Mosaico to an existing LAN, commission its HTTPS identity, and open the
-station address from a trusted browser. Choose **Pair this browser** and
-approve the browser's fingerprint and keyboard/mouse permission on the device.
+Join Mosaico to an existing LAN, open the displayed HTTP address and use the
+device access code to authorize the browser. Long-term authorization lets that
+browser reconnect without a new code.
 Check the selected HID host, choose **Take control**, and select Mouse or
 Keyboard. Try one pointer move or send `Hello from Mosaico` to a disposable
 editor. Choose **Stop** to release control. The
@@ -66,7 +66,7 @@ editor. Choose **Stop** to release control. The
 
 ## HTTP API
 
-The HTTP API runs over HTTPS on the station interface. A native client
+The native HTTP API examples use enrolled HTTPS. A native client
 requires enrollment with `view` and `input.control` for these examples.
 Use the [companion enrollment procedure](../bridge/README.md#local-enrollment)
 and its [native client](../bridge/control_bridge.py) as the session reference.

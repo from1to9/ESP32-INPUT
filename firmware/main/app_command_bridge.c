@@ -26,6 +26,7 @@ struct app_command_bridge {
     app_command_bridge_port_t port;
     queued_command_t commands[APP_COMMAND_CAPACITY];
     uint8_t head, count;
+    uint64_t admission_order;
     priority_command_t priority[APP_COMMAND_SAFETY_CAPACITY];
     queued_command_t flight;
     bool admitting;
@@ -106,20 +107,30 @@ cp_error_t app_command_bridge_submit(void *context, const cp_command_t *command,
     bool priority = op && op->safety;
     if (!priority && command->deadline_ms <= now) return CP_EXPIRED;
     cp_error_t error = CP_OK;
+    queued_command_t *queued = NULL;
     b->port.lock(b->port.user);
-    if (!priority && !b->available[command->operation]) error = CP_UNAVAILABLE;
+    if (b->admission_order == UINT64_MAX) error = CP_BUSY;
+    else if (!priority && !b->available[command->operation]) error = CP_UNAVAILABLE;
     else if (priority) {
         unsigned slot = 0;
         while (slot < APP_COMMAND_SAFETY_CAPACITY && b->priority[slot].used) ++slot;
         if (slot == APP_COMMAND_SAFETY_CAPACITY) error = CP_BUSY;
-        else b->priority[slot] = (priority_command_t){.used = true, .queued = {.command = *command}};
+        else {
+            b->priority[slot] = (priority_command_t){.used = true};
+            queued = &b->priority[slot].queued;
+        }
     } else if (b->count == APP_COMMAND_CAPACITY) error = CP_BUSY;
     else {
         unsigned tail = (unsigned)(b->head + b->count) % APP_COMMAND_CAPACITY;
-        b->commands[tail] = (queued_command_t){.command = *command}; ++b->count;
+        queued = &b->commands[tail];
+        ++b->count;
     }
-    if (error == CP_OK) *result = (cp_result_t){.state = CP_RESULT_ACCEPTED,
-        .command_key = command->command_key, .uncertain_index = -1};
+    if (queued) {
+        *queued = (queued_command_t){.command = *command};
+        queued->command.admission_order = ++b->admission_order;
+        *result = (cp_result_t){.state = CP_RESULT_ACCEPTED,
+            .command_key = command->command_key, .uncertain_index = -1};
+    }
     b->port.unlock(b->port.user);
     return error;
 }
@@ -251,6 +262,16 @@ static cp_result_t execute_flight(app_command_bridge_t *b)
     b->port.lock(b->port.user); wipe(&b->flight, sizeof(b->flight)); b->port.unlock(b->port.user);
     return result;
 }
+static int next_priority(const app_command_bridge_t *b)
+{
+    int first = -1;
+    for (unsigned i = 0; i < APP_COMMAND_SAFETY_CAPACITY; ++i) {
+        const priority_command_t *current = &b->priority[i];
+        if (current->used && !current->done && (first < 0 || current->queued.command.admission_order <
+            b->priority[first].queued.command.admission_order)) first = (int)i;
+    }
+    return first;
+}
 void app_command_bridge_service(app_command_bridge_t *b)
 {
     if (!b) return;
@@ -267,10 +288,8 @@ void app_command_bridge_service(app_command_bridge_t *b)
             b->port.lock(b->port.user); wipe(&b->priority[i], sizeof(b->priority[i])); b->port.unlock(b->port.user);
         }
     }
-    int priority = -1;
     b->port.lock(b->port.user);
-    for (unsigned i = 0; i < APP_COMMAND_SAFETY_CAPACITY; ++i)
-        if (b->priority[i].used && !b->priority[i].done) { priority = (int)i; break; }
+    int priority = next_priority(b);
     if (priority >= 0) { b->flight = b->priority[priority].queued; b->admitting = true; }
     b->port.unlock(b->port.user);
     if (priority >= 0) {
@@ -285,7 +304,8 @@ void app_command_bridge_service(app_command_bridge_t *b)
     }
     bool have = false;
     b->port.lock(b->port.user);
-    if (b->count) {
+    /* A later ordinary command must not overtake an earlier pending release. */
+    if (b->count && next_priority(b) < 0) {
         b->flight = b->commands[b->head]; wipe(&b->commands[b->head], sizeof(b->flight));
         b->head = (uint8_t)((b->head + 1U) % APP_COMMAND_CAPACITY); --b->count;
         b->admitting = have = true;

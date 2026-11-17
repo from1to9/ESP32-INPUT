@@ -76,9 +76,9 @@ qualified. [Passport setup, build, and validation](passport/README.md) ·
    [Image Capture](https://support.apple.com/guide/image-capture/image-capture-imgcp1003/mac) ·
    [libimobiledevice](https://github.com/libimobiledevice/libimobiledevice)
 
-3. **Send input from the web or an AI client.** Open the HTTPS address
-   shown in Mosaico **Settings → Wi-Fi → Web/API**. Pair your browser,
-   approve it on Mosaico, check the intended input target, and choose
+3. **Send input from the web or an AI client.** Open the HTTP address
+   shown in Mosaico **Settings → Wi-Fi → Web/API**. Authorize your browser
+   with the code shown there, check the intended input target, and choose
    **Take control**. The web page provides a touchpad and keyboard. Scripts
    and AI clients can send input through the HTTPS API or MCP companion.
    View the screen separately using step 2.

@@ -38,10 +38,10 @@ static void channel_closed(server_t *s, const cp_identity_t *who)
         }
     }
     bool current = false;
-    for (size_t i = 0; i < s_session_count; ++i) {
-        if (s_sessions[i].authenticated &&
-            !memcmp(s_sessions[i].identity.session_id, who->session_id, 16) &&
-            !memcmp(s_sessions[i].identity.principal_id, who->principal_id, 16)) {
+    for (size_t i = 0; i < s->session_count; ++i) {
+        if (s->sessions[i].authenticated &&
+            !memcmp(s->sessions[i].identity.session_id, who->session_id, 16) &&
+            !memcmp(s->sessions[i].identity.principal_id, who->principal_id, 16)) {
             current = true;
         }
     }
@@ -385,7 +385,7 @@ typedef struct {
     int fd;
     unsigned slot;
     uint64_t generation;
-    bool closed;
+    bool closed, motion_terminal;
 } channel_t;
 static void websocket_closed(channel_t *c)
 {
@@ -395,6 +395,8 @@ static void websocket_closed(channel_t *c)
     c->closed = true;
     if (current) {
         c->server->channels[c->slot].used = false;
+        c->server->channels[c->slot].motion_key = 0;
+        c->server->channels[c->slot].motion_ready = false;
     }
     portEXIT_CRITICAL(&s_lock);
     if (current) {
@@ -403,7 +405,7 @@ static void websocket_closed(channel_t *c)
         portENTER_CRITICAL(&s_lock);
         port = s_media_port;
         portEXIT_CRITICAL(&s_lock);
-        if (port.channel_lost) {
+        if (!c->server->slot && port.channel_lost) {
             port.channel_lost(port.user, &c->identity, c->generation);
         }
     }
@@ -446,7 +448,7 @@ static esp_err_t websocket_authenticate(httpd_req_t *request)
     cp_error_t error = CP_INVALID;
     if (valid && xSemaphoreTake(s->mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         drain_channel_closures(s);
-        cp_http_security_t security = {.tls = true,
+        cp_http_security_t security = {.tls = !s->slot,
                                        .host = request_host,
                                        .origin = origin[0] ? origin : NULL,
                                        .authorization = auth[0] ? auth : NULL,
@@ -543,10 +545,14 @@ static esp_err_t websocket_data(httpd_req_t *request)
         return ESP_FAIL;
     }
     server_t *s = channel->server;
+    portENTER_CRITICAL(&s_lock);
+    bool blocked = channel->closed || s->stop_requested || s->channels[channel->slot].motion_key;
+    portEXIT_CRITICAL(&s_lock);
+    if (blocked) return ESP_FAIL;
     httpd_ws_frame_t frame = {0};
     esp_err_t e = httpd_ws_recv_frame(request, &frame, 0);
     if (e != ESP_OK || !frame.final || frame.len > CP_MAX_FRAME_BYTES ||
-        (frame.type != HTTPD_WS_TYPE_TEXT && frame.type != HTTPD_WS_TYPE_BINARY)) {
+        (frame.type != HTTPD_WS_TYPE_TEXT && (s->slot || frame.type != HTTPD_WS_TYPE_BINARY))) {
         return ESP_FAIL;
     }
     frame.payload = (uint8_t *)s->body;
@@ -561,8 +567,17 @@ static esp_err_t websocket_data(httpd_req_t *request)
     drain_channel_closures(s);
     cp_error_t error;
     if (frame.type == HTTPD_WS_TYPE_TEXT) {
-        error = cp_transport_frame(s->protocol, &channel->identity, s->body, frame.len, now_ms(),
-                                   &s->response);
+        cp_motion_terminal_t motion = {.enabled = channel->motion_terminal};
+        error = cp_transport_frame_motion(s->protocol, &channel->identity, s->body, frame.len,
+                                          now_ms(), &s->response, &motion);
+        channel->motion_terminal = motion.enabled;
+        if (motion.accepted_key) {
+            // Mark before the admission frame is written. Queued terminal work
+            // can only run on this same HTTP owner after this handler returns.
+            portENTER_CRITICAL(&s_lock);
+            s->channels[channel->slot].motion_key = motion.accepted_key;
+            portEXIT_CRITICAL(&s_lock);
+        }
     } else {
         error = cp_transport_heartbeat(s->protocol, &channel->identity, now_ms());
         s->response = (cp_http_response_t){0};
@@ -603,6 +618,81 @@ static esp_err_t websocket_data(httpd_req_t *request)
     e = httpd_ws_send_frame(request, &response);
     clear(&s->response, sizeof(s->response));
     return e;
+}
+/* Called by this listener's worker after applying the coordinator mailbox. */
+static void motion_terminal_recorded(server_t *s, const completion_t *completion, cp_error_t recorded)
+{
+    if ((recorded != CP_OK && recorded != CP_STALE) ||
+        completion->result.state == CP_RESULT_ACCEPTED || completion->result.state == CP_RESULT_RUNNING ||
+        completion->result.state == CP_RESULT_CLEANUP_PENDING) return;
+    portENTER_CRITICAL(&s_lock);
+    for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i) {
+        if (s->channels[i].used && s->channels[i].motion_key == completion->key)
+            s->channels[i].motion_ready = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void send_motion_terminal(void *argument)
+{
+    server_t *s = argument;
+    portENTER_CRITICAL(&s_lock);
+    unsigned slot = s->motion_work.slot;
+    uint64_t generation = s->motion_work.generation, key = s->motion_work.key;
+    int fd = s->motion_work.fd;
+    bool current = !s->stop_requested && s->channels[slot].used &&
+        s->channels[slot].generation == generation && s->channels[slot].motion_key == key;
+    portEXIT_CRITICAL(&s_lock);
+    channel_t *channel = current ? httpd_sess_get_ctx(s->listener, fd) : NULL;
+    if (channel && !channel->closed && channel->server == s && channel->slot == slot &&
+        channel->generation == generation && xSemaphoreTake(s->mutex, 0) == pdTRUE) {
+        drain_channel_closures(s);
+        cp_error_t result = cp_transport_motion_result(s->protocol, &channel->identity, key, now_ms(), &s->response);
+        portENTER_CRITICAL(&s_lock);
+        s->channels[slot].motion_key = 0;
+        s->channels[slot].motion_ready = false;
+        bool stopping = s->stop_requested;
+        portEXIT_CRITICAL(&s_lock);
+        xSemaphoreGive(s->mutex);
+        if (!stopping) {
+            httpd_ws_frame_t frame = {.final = true, .type = HTTPD_WS_TYPE_TEXT,
+                .payload = (uint8_t *)s->response.body, .len = s->response.length};
+            if (result != CP_OK || httpd_ws_send_frame_async(s->listener, fd, &frame) != ESP_OK) {
+                // This is the HTTP owner and the fd still belongs to this
+                // channel. Let the usual HTTPD close path free the context.
+                websocket_closed(channel);
+                (void)shutdown(fd, SHUT_RDWR);
+            }
+        }
+        clear(&s->response, sizeof(s->response));
+    }
+    portENTER_CRITICAL(&s_lock);
+    s->motion_work.queued = false;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void queue_motion_terminal(server_t *s)
+{
+    bool queue = false;
+    portENTER_CRITICAL(&s_lock);
+    if (!s->stop_requested && !s->motion_work.queued) {
+        for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i) {
+            if (s->channels[i].used && s->channels[i].motion_ready) {
+                s->motion_work.queued = queue = true;
+                s->motion_work.slot = i;
+                s->motion_work.generation = s->channels[i].generation;
+                s->motion_work.key = s->channels[i].motion_key;
+                s->motion_work.fd = s->channels[i].fd;
+                break;
+            }
+        }
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (queue && httpd_queue_work(s->listener, send_motion_terminal, s) != ESP_OK) {
+        portENTER_CRITICAL(&s_lock);
+        s->motion_work.queued = false;
+        portEXIT_CRITICAL(&s_lock);
+    }
 }
 typedef struct {
     server_t *server;
@@ -738,6 +828,9 @@ void app_control_server_capture_cancel(const cp_identity_t *identity, const uint
     portEXIT_CRITICAL(&s_lock);
 }
 #else
+static void motion_terminal_recorded(server_t *s, const completion_t *completion, cp_error_t recorded)
+{ (void)s; (void)completion; (void)recorded; }
+static void queue_motion_terminal(server_t *s) { (void)s; }
 esp_err_t app_control_server_capture_send(const cp_identity_t *identity, const uint8_t job[16],
                                           uint64_t generation, uint64_t channel_generation,
                                           const uint8_t *bytes, size_t length)

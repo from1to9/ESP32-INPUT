@@ -1,20 +1,13 @@
 # LAN control API
 
-The ESP-Mosaico firmware exposes HTTPS and WebSocket control over the
-station connection or the locally selected [control hotspot](wifi-provisioning.md#persistent-control-hotspot).
-The selected USB or Bluetooth HID host remains the input target. The device
-requires an enrolled identity and checks the caller's permissions at the
-operation boundary.
-
-Use the address shown in Web/API. In control hotspot mode the browser uses
-the exact enrolled hotspot DNS name and port for Host, Origin and TLS. The
-fixed IP `192.168.4.1` is reserved for native TLS clients using credential
-login and Bearer authorization. Browser assets, cookies, pairing and WS
-tickets are served at the device-specific name. A mode switch retires the previous sessions
-and input lease. Open a fresh session and acquire a new lease on the selected
-network. Time-limited authorization is unavailable after an offline cold
-boot until the device has usable time. Valid permanent grants follow their
-existing enrollment and permission rules.
+ESP-Mosaico serves a local HTTP browser controller and an enrolled HTTPS/WSS
+API over station Wi-Fi or the selected
+[control hotspot](wifi-provisioning.md#persistent-control-hotspot).
+Both control paths use the selected USB or Bluetooth HID host and its current
+input readiness. Web/API shows the active HTTP address. The HTTPS browser
+uses the enrolled server name or address, including the enrolled hotspot
+name in hotspot mode. A mode switch closes both listeners' sessions and
+releases remote input before the interface changes.
 
 For a browser remote, direct HTTP commands or an AI-assisted input session,
 see [control examples](automation.md).
@@ -36,15 +29,34 @@ target, runtime readiness and available operations. The catalog defines the
 wire shape. A listed operation may be unavailable for a missing or unready
 provider or a caller with insufficient scope.
 
+`GET /api/v1/state?view=protocol` returns the same authenticated `protocol`
+snapshot and records its sequence for control acquire and renew. It omits
+device details and does not wait for the coordinator's device-detail read.
+
 ## Transport and authorization
 
-- Native clients validate the HTTPS identity and authenticate their session.
-  Browser clients use their own approved identity, secure cookie and CSRF
-  token. The browser checks the exact HTTPS origin and obtains a single-use
-  ticket before opening the WebSocket. See the
-  [companion transport details](../bridge/README.md#http-and-media).
+- Native API and MCP clients validate the HTTPS identity and use enrolled
+  credentials with Bearer sessions. The enrolled HTTPS browser can use its
+  own cookie session and obtain a single-use ticket for WSS.
+- The Mosaico HTTP browser reads the page without authentication and uses
+  the persistent device code to enroll an independent browser credential.
+  Subsequent sign-in uses the browser's credential, exact Origin and
+  preauthentication cookie. The authenticated cookie and CSRF token are
+  separate from the device code. HTTP provides plaintext transport. Passport's
+  open HTTP policy is a separate firmware policy.
 - Commands enter `POST /api/v1/commands` or the authenticated
   `/api/v1/channel` WebSocket. Both paths use the same operation registry.
+  Mosaico's enrolled HTTP channel accepts text frames from approved browsers
+  with input permission and a CSRF-issued single-use ticket. Binary media
+  stays on the HTTPS channel.
+  When `websocket_motion_terminal` is advertised, an input-authorized
+  browser can opt in on that channel with `{"v":1,"type":"motion_terminal"}`.
+  The device acknowledges the opt-in with `{"motion_terminal":true}`.
+  A newly accepted relative move keeps its usual admission reply and key.
+  Wait for the matching terminal result, marked `"motion_terminal":true`,
+  before sending another command on that channel. An immediate terminal
+  reply needs no second frame. HTTP, other operations, and channels without
+  opt-in use the usual result reads.
   Read status and job resources separately. A session can remain valid
   after its input lease ends.
 - Remote input requires an explicitly acquired short lease and current input
@@ -55,6 +67,26 @@ provider or a caller with insufficient scope.
   An input lease does not authorize those operations. See
   [audio and recording](api-audio-recording.md) and
   [Wi-Fi and firmware updates](wifi-management-ota.md).
+
+## Browser authorization
+
+`POST /api/v1/pairing/code` accepts same-origin JSON containing `client_id`
+(32 hex digits), `credential` (64 hex digits from the browser's random
+credential), `label` (1–32 printable ASCII characters), `code` (eight
+digits), and `duration` (`permanent`, `24h`, or `6h`). A 202 response
+acknowledges a pending storage operation. Poll `POST /api/v1/pairing/status`
+with only `client_id` and `credential` to check the grant before signing in.
+A wrong code is rejected. Attempt limits or an occupied authorization
+owner can temporarily return 429. An unavailable or uncertain store can
+return 503. A timed grant requires usable device time.
+
+The existing HTTPS-only `/api/v1/pairing/requests` route still supports
+physical review and the existing credential proof. The code route grants
+input and management scopes. Updates and capture retain their own
+authorization. Replacing the code prevents new grants from the old code.
+Saved grants remain individually revocable. An approved grant can sign in
+while input is locked. Input still requires an explicit short lease and an
+unlocked, ready target.
 
 ## Results and retries
 

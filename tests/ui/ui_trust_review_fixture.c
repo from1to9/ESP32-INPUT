@@ -1,3 +1,4 @@
+#include "app_control_access.h"
 // SPDX-License-Identifier: Apache-2.0
 /* Compose the unchanged production connectivity owner and real UI. Only its
  * public cached runtime/radio boundaries are synthetic, as in host owner tests. */
@@ -53,6 +54,8 @@ esp_err_t ble_hid_forget_bond_request(uint64_t generation, uint64_t revision, co
 { (void)generation; (void)revision; (void)target; (void)id; assert(false); return ESP_FAIL; }
 esp_err_t ble_hid_forget_bond_cancel(uint64_t id) { (void)id; assert(false); return ESP_FAIL; }
 ble_hid_bond_forget_snapshot_t ble_hid_bond_forget_snapshot(void) { return (ble_hid_bond_forget_snapshot_t){0}; }
+void app_control_access_code_snapshot(app_control_access_code_t *out) { *out = (app_control_access_code_t){.known = true, .revision = 1}; }
+cp_error_t app_control_access_code_generate(uint64_t revision) { (void)revision; assert(false); return CP_UNAVAILABLE; }
 void app_control_runtime_snapshot(app_control_runtime_snapshot_t *out) { *out = fixture_runtime; }
 void app_control_trust_snapshot(app_control_trust_snapshot_t *out) { *out = fixture_runtime.trust; }
 bool app_control_runtime_commissioning_review(app_control_trust_review_t *out) { *out = fixture_review; return fixture_runtime.trust.review_pending; }

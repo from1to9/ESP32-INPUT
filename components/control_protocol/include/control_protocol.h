@@ -88,6 +88,7 @@ typedef struct {
     uint32_t version;
     cp_operation_id_t operation;
     uint64_t command_key;
+    uint64_t admission_order; /* Optional local coordinator order, never a wire field. */
     cp_identity_t identity;
     uint64_t deadline_ms;
     uint64_t management_generation;
@@ -172,6 +173,14 @@ typedef struct {
     bool (*input_authorized)(void *, const cp_identity_t *);
     cp_error_t (*pairing)(void *, bool status, const char *client, const char *proof,
                          const char *label, char *json, size_t capacity, size_t *length);
+    /* The owning access service verifies its device code and persists a separate
+     * browser principal. The HTTP engine never treats a code as a session. */
+    cp_error_t (*pairing_code)(void *, const char *client, const char *credential,
+                              const char *label, const char *code, const char *duration,
+                              char *json, size_t capacity, size_t *length);
+    /* Shared result identity for contexts completing through the same owner.
+     * Return the next strictly increasing nonzero key, or zero on exhaustion. */
+    uint64_t (*next_command_key)(void *);
 } cp_callbacks_t;
 
 const cp_operation_info_t *cp_operation_find(const char *name);
@@ -186,7 +195,11 @@ bool cp_command_boolean(const cp_command_t *, const char *key, bool *out);
 bool cp_command_json(const cp_command_t *, const char *key, char *out, size_t capacity);
 
 typedef struct cp_context cp_context_t;
-typedef enum { CP_POLICY_ENROLLED_TLS, CP_POLICY_PASSPORT_OPEN_HTTP } cp_access_policy_t;
+typedef enum {
+    CP_POLICY_ENROLLED_TLS,
+    CP_POLICY_PASSPORT_OPEN_HTTP,
+    CP_POLICY_ENROLLED_HTTP
+} cp_access_policy_t;
 bool cp_policy_allows(cp_access_policy_t, cp_operation_id_t);
 size_t cp_context_size(void);
 /* Caller-owned storage must satisfy both the size and alignment queries. */
@@ -224,6 +237,7 @@ typedef struct cp_principal {
 cp_error_t cp_load_principal(cp_context_t *, const cp_principal_t *);
 cp_error_t cp_revoke_principal(cp_context_t *, const uint8_t id[CP_ID_BYTES], uint64_t now_ms);
 void cp_set_transport_capabilities(cp_context_t *, bool websocket, bool binary_download);
+void cp_set_motion_terminal_available(cp_context_t *, bool available);
 
 typedef struct {
     bool tls;
@@ -250,8 +264,9 @@ cp_error_t cp_transport_upgrade(cp_context_t *, const cp_http_security_t *, cons
  * retain their own liveness/grants. Ordinary HTTP close never calls this. */
 cp_error_t cp_transport_close(cp_context_t *, const cp_identity_t *, uint64_t now_ms);
 /* Server/bridge consume this same bounded HTTP engine. The default policy
- * requires a real verified TLS listener. Only an explicitly initialized
- * Passport open policy accepts plaintext HTTP; requests cannot select policy.
+ * requires a real verified TLS listener. Explicit enrolled HTTP keeps the same
+ * credential, permission and session checks over a local plaintext transport.
+ * Passport open HTTP remains a separate policy; requests cannot select policy.
  * The response never contains private drafts or an unredacted argument echo. */
 typedef struct {
     unsigned status;
@@ -261,6 +276,19 @@ typedef struct {
 } cp_http_response_t;
 cp_error_t cp_transport_frame(cp_context_t *, const cp_identity_t *, const char *frame,
                               size_t length, uint64_t now_ms, cp_http_response_t *);
+/* Optional state owned by one enrolled browser channel. The key is returned
+ * only for a newly accepted relative move on an opted-in channel. */
+typedef struct {
+    bool enabled;
+    uint64_t accepted_key;
+} cp_motion_terminal_t;
+cp_error_t cp_transport_frame_motion(cp_context_t *, const cp_identity_t *, const char *frame,
+                                     size_t length, uint64_t now_ms, cp_http_response_t *,
+                                     cp_motion_terminal_t *);
+/* Read an authoritative terminal result without refreshing browser liveness.
+ * A NULL response checks readiness. CP_OK includes terminal action failures. */
+cp_error_t cp_transport_motion_result(cp_context_t *, const cp_identity_t *, uint64_t key,
+                                      uint64_t now_ms, cp_http_response_t *);
 cp_error_t cp_http_configure(cp_context_t *, const char *host, const char *browser_origin);
 cp_error_t cp_http(cp_context_t *, const char *method, const char *resource,
                    const cp_http_security_t *, const char *body, size_t body_length,

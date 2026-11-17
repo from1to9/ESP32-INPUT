@@ -42,7 +42,7 @@ typedef struct {
 } test_httpd_config_t;
 typedef struct {
     test_httpd_config_t httpd;
-    unsigned transport_mode, port_secure;
+    unsigned transport_mode, port_secure, port_insecure;
     const uint8_t *servercert, *prvtkey_pem;
     size_t servercert_len, prvtkey_len;
 } httpd_ssl_config_t;
@@ -51,6 +51,7 @@ typedef struct {
         .httpd = {.stack_size = 4096, .task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT }         \
     }
 #define HTTPD_SSL_TRANSPORT_SECURE 1U
+#define HTTPD_SSL_TRANSPORT_INSECURE 0U
 #define HTTP_GET 0
 #define HTTP_POST 1
 #define HTTP_DELETE 2
@@ -58,10 +59,11 @@ typedef struct {
 /* TYPES */
 /* PORTS */
 static portMUX_TYPE s_lock;
-static server_t *s_server;
-static app_control_server_snapshot_t s_snapshot;
-static cp_session_view_t s_sessions[CP_MAX_SESSIONS];
-static size_t s_session_count;
+static uint64_t s_command_key;
+static server_t *s_servers[2];
+static app_control_server_snapshot_t s_snapshots[2];
+#define s_server s_servers[0]
+#define s_snapshot s_snapshots[0]
 static unsigned critical, creates, caps_creates, legacy_creates, caps_deletes, legacy_deletes;
 static unsigned live, cleared, http_starts, http_stops, mutex_deletes, delays;
 static bool fail_create, fail_listen, fail_stop_once, fail_dns, control_ap;
@@ -166,8 +168,14 @@ void vTaskDeleteWithCaps(void *handle)
 }
 void vTaskDelay(TickType_t delay)
 {
-    assert(delay == 1000 && !critical && live == 2 && s_server && s_server->listener);
-    ++delays; /* Failed stop retains both resources until the next actual ACK. */
+    assert(!critical && live == 2 && s_server && s_server->listener);
+    if (delay == 20) {
+        assert(s_server->motion_work.queued && !http_stops);
+        s_server->motion_work.queued = false; /* Stub HTTP owner completion. */
+    } else {
+        assert(delay == 1000);
+    }
+    ++delays;
 }
 static esp_netif_t *esp_netif_get_handle_from_ifkey(const char *key)
 {
@@ -251,6 +259,10 @@ static esp_err_t websocket_control(httpd_req_t *request, httpd_ws_frame_t *frame
     return ESP_FAIL;
 }
 static void drain_channel_closures(server_t *server) { assert(!server->channel_closure_count); }
+/* The HTTP-owner work itself is covered in test_server.c. */
+static void motion_terminal_recorded(server_t *server, const completion_t *completion, cp_error_t result)
+{ (void)server; (void)completion; (void)result; }
+static void queue_motion_terminal(server_t *server) { (void)server; }
 static esp_err_t hotspot_dns_start(server_t *server, uint32_t address)
 {
     if (!control_ap) {
@@ -322,7 +334,7 @@ static void setup(void)
     task_entry = NULL;
     task_argument = NULL;
 }
-static esp_err_t start(void)
+static esp_err_t start_test_server(void)
 {
     static const uint8_t cert[] = "CERT", key[] = "KEY";
     cp_principal_t principal = {.enabled = true, .native_only = true, .scopes = CP_SCOPE_VIEW};
@@ -379,7 +391,7 @@ static void test_dns_reply(void)
 static void run_stopped_owner(unsigned expected_cleared)
 {
     assert(task_entry && s_server == task_argument);
-    s_server->stop_requested = true;
+    assert(app_control_server_stop() == ESP_OK);
     if (setjmp(exited) == 0) {
         task_entry(task_argument);
     }
@@ -391,30 +403,35 @@ int main(void)
 {
     setup();
     test_heap_fail_next = 2;
-    assert(start() == ESP_ERR_NO_MEM && !s_server && !live && !test_heap_live && !task_entry);
+    assert(start_test_server() == ESP_ERR_NO_MEM && !s_server && !live && !test_heap_live && !task_entry);
     setup();
     test_heap_fail_external = true;
-    assert(start() == ESP_OK);
+    assert(start_test_server() == ESP_OK);
     run_stopped_owner(2);
     assert(test_heap_external_failures >= 2);
     setup();
-    assert(start() == ESP_OK);
+    assert(start_test_server() == ESP_OK);
     test_heap_fail_next = 2; /* Both protocol storage capability attempts fail. */
     run_stopped_owner(1);
     assert(!http_starts && s_snapshot.state == APP_CONTROL_ERROR &&
            s_snapshot.error == ESP_ERR_NO_MEM);
     setup();
     fail_create = true;
-    assert(start() == ESP_ERR_NO_MEM && !s_server && !live && cleared == 1 && !task_entry);
+    assert(start_test_server() == ESP_ERR_NO_MEM && !s_server && !live && cleared == 1 && !task_entry);
     assert(creates == 1 && (APP_NETWORK_EXTERNAL_STACK ? caps_creates : legacy_creates) == 1 &&
            (APP_NETWORK_EXTERNAL_STACK ? legacy_creates : caps_creates) == 0);
     setup();
-    assert(start() == ESP_OK);
+    assert(start_test_server() == ESP_OK);
     run_stopped_owner(2);
     assert(http_starts == 1 && http_stops == 1);
     setup();
+    assert(start_test_server() == ESP_OK);
+    s_server->motion_work.queued = true;
+    run_stopped_owner(2);
+    assert(http_starts == 1 && http_stops == 1 && delays == 1);
+    setup();
     control_ap = true;
-    assert(start() == ESP_OK);
+    assert(start_test_server() == ESP_OK);
     const char *alias = "192.168.4.1:8443";
     assert(!strcmp(accepted_control_host(s_server, alias, "", "", "", true), TEST_HOTSPOT_NAME ":8443"));
     assert(!accepted_control_host(s_server, "192.168.4.1", "", "", "", true));
@@ -426,17 +443,17 @@ int main(void)
     assert(http_starts == 1 && http_stops == 1 && dns_starts == 1 && dns_closes == 1);
     setup();
     control_ap = fail_dns = true;
-    assert(start() == ESP_OK);
+    assert(start_test_server() == ESP_OK);
     run_stopped_owner(2);
     assert(!http_starts && dns_starts == 1 && dns_closes == 1 && s_snapshot.state == APP_CONTROL_ERROR);
     setup();
     fail_stop_once = true;
-    assert(start() == ESP_OK);
+    assert(start_test_server() == ESP_OK);
     run_stopped_owner(2);
     assert(http_stops == 2 && delays == 1 && s_snapshot.state == APP_CONTROL_STOPPED);
     setup();
     fail_listen = true;
-    assert(start() == ESP_OK);
+    assert(start_test_server() == ESP_OK);
     run_stopped_owner(2);
     assert(http_starts == 1 && !http_stops && s_snapshot.state == APP_CONTROL_ERROR &&
            s_snapshot.error == ESP_ERR_NO_MEM);

@@ -18,7 +18,7 @@ static connection_binding_t s_connection_pressed;
 static size_t s_connection_count;
 static lv_obj_t *s_connection_state, *s_connection_detail, *s_connection_reason;
 static lv_obj_t *s_connection_allow_note;
-static lv_obj_t *s_connection_actions[4], *s_connection_pages[2], *s_connection_page;
+static lv_obj_t *s_connection_actions[5], *s_connection_pages[2], *s_connection_page;
 static lv_obj_t *s_saved_names[4], *s_saved_status[4], *s_saved_actions[4][3];
 static lv_obj_t *s_device_tabs[2], *s_device_rows[4], *s_device_labels[4];
 static lv_obj_t *s_device_name, *s_device_status, *s_device_empty, *s_device_page;
@@ -115,7 +115,8 @@ static void create_connection_panel(lv_obj_t *body, lv_obj_t *title, app_overlay
         s_connection_state = connection_label(body, 0, 32, INK);
         s_connection_detail = connection_label(body, 36, 56, MUTED);
         s_connection_reason = connection_label(body, 92, 56, MUTED);
-        button(body, "Wi-Fi controllers", 0, 152, 456, 48, APP_MENU, APP_OVERLAY_CONTROLLERS);
+        s_connection_actions[4] = button(body, "Generate code", 0, 152, 224, 48, APP_API_COMMISSIONING, 0);
+        button(body, "Browsers", 232, 152, 224, 48, APP_MENU, APP_OVERLAY_CONTROLLERS);
         lv_obj_set_style_text_font(s_connection_reason, META_FONT, 0);
         s_connection_actions[0] = button(body, "Open USB window", 0, 208, 224, 48, APP_API_COMMISSIONING, 0);
         s_connection_actions[1] = button(body, "Close window", 232, 208, 224, 48, APP_API_COMMISSIONING, 0);
@@ -248,15 +249,21 @@ static void render_connection_panel(void)
         for (unsigned i = 0; review && i < api->review_page_count; ++i)
             review = review_text_fits(api->review_pages[i], 128);
         if (s_view.overlay == APP_OVERLAY_API_CONNECTION) {
-            label_text(s_connection_state, !api->known ? "Web/API status unavailable" : api->ready && api->tls ? "HTTPS service ready" :
-                api->commissioning_open ? "Local USB enrollment open" : "HTTPS service not ready");
-            label_text(s_connection_detail, api->known && api->ready && api->tls && *api->url ? api->url :
-                s_view.wifi_control_ap ? "HTTPS is unavailable on the control hotspot." :
-                "No confirmed HTTPS address.\nConnect this device to your existing Wi-Fi.");
-            if (api->remaining_known && api->commissioning_open)
-                label_format(s_connection_reason, "USB import open: %us left. Review the imported identity here.\n%.96s", api->remaining_seconds, api->reason);
-            else label_text(s_connection_reason, *api->reason ? api->reason :
-                "Request pairing in your browser, then review it below.");
+            if (api->code_pending) label_text(s_connection_state, "Saving access code…");
+            else if (api->code_present && api->access_code[0]) label_format(s_connection_state, "Access code: %.8s", api->access_code);
+            else label_text(s_connection_state, !api->code_known ? "Access code unavailable" : "No access code yet");
+            label_text(s_connection_detail, api->ready && *api->url ? api->url :
+                "Connect Wi-Fi or enable the control hotspot.");
+            if (api->commissioning_open && api->remaining_known)
+                label_format(s_connection_reason, "USB enrollment open: %us left", api->remaining_seconds);
+            else if (api->commissioning_open) label_text(s_connection_reason, "USB enrollment open");
+            else if (*api->tls_url) label_text(s_connection_reason, api->tls_url);
+            else if (*api->reason) label_text(s_connection_reason, api->reason);
+            else label_text(s_connection_reason, api->code_present ? "Use this code to authorize browsers.\nIt stays valid until you replace it." :
+                "Generate a code here, then enter it in your browser.");
+            text(s_connection_actions[4], api->code_present ? "Replace code" : "Generate code");
+            connection_request_t code = {.api = {.operation = APP_API_CODE_GENERATE, .revision = api->revision}};
+            connection_bind(s_connection_actions[4], APP_API_COMMISSIONING, code, api->code_revision && !api->code_pending);
             connection_request_t request = {.api = {.operation = APP_API_WINDOW_OPEN, .revision = api->revision}};
             connection_bind(s_connection_actions[0], APP_API_COMMISSIONING, request, api->known && api->can_open);
             request.api.operation = APP_API_WINDOW_CLOSE;
@@ -472,7 +479,8 @@ static void sanitize_connections(void)
     app_api_view_t *api = &s_view.api;
     if (bounded_length(api->review_digest, sizeof(api->review_digest)) == sizeof(api->review_digest) ||
         bounded_length(api->review_host, sizeof(api->review_host)) == sizeof(api->review_host)) api->review_complete = false;
-    api->url[255] = api->reason[96] = api->review_digest[64] = api->review_host[128] = 0;
+    api->access_code[8] = 0;
+    api->url[255] = api->tls_url[255] = api->reason[96] = api->review_digest[64] = api->review_host[128] = 0;
     for (size_t i = 0; i < APP_API_REVIEW_PAGES; ++i) {
         if (bounded_length(api->review_pages[i], sizeof(api->review_pages[i])) == sizeof(api->review_pages[i])) api->review_complete = false;
         api->review_pages[i][256] = 0;

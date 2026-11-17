@@ -35,7 +35,7 @@ struct app_remote_input {
     app_remote_input_view_t view;
     app_remote_input_state_t state;
     bool state_known, clock_seen, servicing;
-    uint64_t now_ms, highest_key, lease_epoch, lease_transport;
+    uint64_t now_ms, highest_order, lease_epoch, lease_transport;
     cp_identity_t lease_identity;
     char lease_target[CP_TARGET_CAPACITY];
     uint64_t drag_started_ms, drag_expires_ms;
@@ -988,10 +988,13 @@ cp_error_t app_remote_input_execute(app_remote_input_t *m, const cp_command_t *c
             }
             *out=result_for(cmd->command_key,CP_RESULT_CLEANUP_PENDING,CP_OK,"neutral_release_pending"); return CP_OK;
         }
-    if (cmd->command_key <= m->highest_key) {
+    /* The Mosaico bridge stamps shared queue order. Single-context callers
+     * retain their monotonic transport key as the replay watermark. */
+    uint64_t order = cmd->admission_order ? cmd->admission_order : cmd->command_key;
+    if (order <= m->highest_order) {
         *out=result_for(cmd->command_key,CP_RESULT_REJECTED,CP_STALE,"old_command_key");return CP_STALE;
     }
-    m->highest_key=cmd->command_key;
+    m->highest_order=order;
     app_remote_input_service(m,now_ms);
     cp_error_t error=CP_OK;
     char unavailable[CP_REASON_CAPACITY];

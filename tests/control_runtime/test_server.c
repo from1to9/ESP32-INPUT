@@ -4,13 +4,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 #include "server_test_sdk.h"
 #include "control_json.h"
 #include "../../firmware/main/app_control_server.h"
 #include "../../firmware/main/app_remote_media_runtime_port.h"
 #include "../../firmware/main/app_network_task.h"
 #include "weak_heap.h"
+typedef struct { uint64_t key; cp_result_t result; } completion_t;
+typedef struct {
+    cp_identity_t identity;
+    char auth[80], prefix[17], sid[33], boot[33];
+    unsigned sequence;
+} test_client_t;
+static test_client_t browser_client;
 typedef struct server {
+    unsigned slot;
+    cp_session_view_t sessions[CP_MAX_SESSIONS];
+    size_t session_count;
+    char host[129], hotspot_ip_host[32];
     cp_context_t *protocol;
     SemaphoreHandle_t mutex;
     httpd_handle_t listener;
@@ -21,10 +33,18 @@ typedef struct server {
     void *media_pending[2];
     unsigned media_pending_count;
     struct {
+        bool queued;
+        unsigned slot;
+        uint64_t generation, key;
+        int fd;
+    } motion_work;
+    struct {
         bool used;
         int fd;
         uint64_t generation;
         cp_identity_t identity;
+        uint64_t motion_key;
+        bool motion_ready;
     } channels[CP_MAX_SESSIONS];
     char body[CP_MAX_FRAME_BYTES + 1];
     cp_http_response_t response;
@@ -33,6 +53,7 @@ static server_t *s_server;
 static portMUX_TYPE s_lock;
 static app_control_media_port_t s_media_port;
 static uint64_t clock_ms = 100;
+static bool offer_binary_frame;
 static unsigned critical, allocations, random_seed, safety_calls, dispatch_calls;
 static bool sem_available = true;
 static cp_command_t dispatched;
@@ -55,6 +76,7 @@ static void safety(void *u, cp_safety_reason_t reason, const cp_identity_t *who)
         for (size_t i = 0; i < s_session_count; ++i) {
             if (!who || !memcmp(who->session_id, s_sessions[i].identity.session_id, 16)) {
                 s_sessions[i].authenticated = false;
+                s_server->sessions[i].authenticated = false;
             }
         }
     }
@@ -63,6 +85,7 @@ static void cache_sessions(server_t *s)
 {
     memset(s_sessions, 0, sizeof(s_sessions));
     s_session_count = cp_sessions_snapshot(s->protocol, s_sessions);
+    s->session_count = s_session_count; memcpy(s->sessions, s_sessions, sizeof(s_sessions));
 }
 bool app_control_server_session_alive(const uint8_t session[16], const uint8_t principal[16])
 {
@@ -97,10 +120,18 @@ static esp_err_t error_response(httpd_req_t *r, const char *status, const char *
     snprintf(r->response, sizeof(r->response), "%s", body);
     return ESP_FAIL;
 }
+#include "server_host_fixture.inc"
+static int mock_shutdown(int fd, int how);
+#define shutdown mock_shutdown
 #include "../../firmware/main/app_control_server_media.inc"
+#undef shutdown
 
 static server_t server;
 static httpd_req_t ws_request, *active_download;
+static unsigned ws_shutdowns, ws_text_sends;
+static char ws_text[CP_MAX_RESPONSE_BYTES + 1];
+static const char *ws_offer_text;
+static bool sync_move;
 static void (*download_task)(void *);
 static void *download_argument;
 static struct {
@@ -121,6 +152,12 @@ static size_t binary_length;
 static ae_record_metadata_t record;
 static cp_identity_t identity;
 static char authorization[80], cookie[256], csrf[33];
+static int mock_shutdown(int fd, int how)
+{
+    assert(http_owner && fd == ws_request.fd && how == SHUT_RDWR);
+    ++ws_shutdowns;
+    return 0;
+}
 void test_enter(void) { ++critical; }
 void test_leave(void)
 {
@@ -264,14 +301,30 @@ void *httpd_sess_get_ctx(httpd_handle_t h, int fd)
 esp_err_t httpd_ws_recv_frame(httpd_req_t *r, httpd_ws_frame_t *frame, size_t n)
 {
     (void)r;
-    (void)frame;
-    (void)n;
+    if (offer_binary_frame) {
+        assert(n == 0); /* Enrolled HTTP must reject before reading binary payload. */
+        *frame = (httpd_ws_frame_t){.type = HTTPD_WS_TYPE_BINARY, .final = true, .len = 2};
+        return ESP_OK;
+    }
+    if (ws_offer_text) {
+        if (!n) {
+            *frame = (httpd_ws_frame_t){.type = HTTPD_WS_TYPE_TEXT, .final = true, .len = strlen(ws_offer_text)};
+        } else {
+            assert(frame->len <= n);
+            memcpy(frame->payload, ws_offer_text, frame->len);
+        }
+        return ESP_OK;
+    }
     return ESP_FAIL;
 }
 esp_err_t httpd_ws_send_frame(httpd_req_t *r, httpd_ws_frame_t *frame)
 {
     (void)r;
-    (void)frame;
+    if (frame->type != HTTPD_WS_TYPE_TEXT) return ESP_OK;
+    assert(frame->len < sizeof(ws_text));
+    memcpy(ws_text, frame->payload, frame->len);
+    ws_text[frame->len] = 0;
+    ++ws_text_sends;
     return ESP_OK;
 }
 esp_err_t httpd_ws_send_data(httpd_handle_t h, int fd, httpd_ws_frame_t *frame)
@@ -285,8 +338,10 @@ esp_err_t httpd_ws_send_data(httpd_handle_t h, int fd, httpd_ws_frame_t *frame)
 }
 esp_err_t httpd_ws_send_frame_async(httpd_handle_t h, int fd, httpd_ws_frame_t *frame)
 {
-    assert(http_owner && !critical && h == server.listener && fd == ws_request.fd &&
-           frame->type == HTTPD_WS_TYPE_BINARY && frame->len <= sizeof(binary_received));
+    assert(http_owner && !critical && h == server.listener && fd == ws_request.fd);
+    if (frame->type == HTTPD_WS_TYPE_TEXT)
+        return fail_send ? ESP_FAIL : httpd_ws_send_frame(&ws_request, frame);
+    assert(frame->type == HTTPD_WS_TYPE_BINARY && frame->len <= sizeof(binary_received));
     ++low_level_sends;
     if (fail_send) {
         return ESP_FAIL;
@@ -401,10 +456,11 @@ static cp_error_t dispatch_command(void *u, const cp_command_t *command, cp_resu
     (void)u;
     dispatched = *command;
     ++dispatch_calls;
-    *result = (cp_result_t){.state = CP_RESULT_ACCEPTED, .uncertain_index = -1};
+    *result = (cp_result_t){.state = sync_move && command->operation == CP_OP_MOUSE_MOVE_RELATIVE ?
+        CP_RESULT_SENT : CP_RESULT_ACCEPTED, .uncertain_index = -1};
     return CP_OK;
 }
-static void setup_server(bool browser)
+static void setup_server_transport(bool browser, bool plain, cp_scope_mask_t scopes)
 {
     if (ws_request.sess_ctx) {
         websocket_free(ws_request.sess_ctx);
@@ -417,9 +473,14 @@ static void setup_server(bool browser)
     memset(&server, 0, sizeof(server));
     memset(&ws_request, 0, sizeof(ws_request));
     memset(&identity, 0, sizeof(identity));
+    browser_client = (test_client_t){0};
+    ws_shutdowns = ws_text_sends = 0;
+    ws_offer_text = NULL;
+    sync_move = false;
     server.listener = (void *)1;
     server.mutex = (void *)1;
-    s_server = &server;
+    server.slot = plain ? 1U : 0U;
+    s_server = &server; strcpy(server.host, "device.test");
     clock_ms = 100;
     random_seed = 0;
     reads = cancellations = low_level_sends = blocking_helper_calls = capture_failures =
@@ -440,8 +501,10 @@ static void setup_server(bool browser)
                                 .available = operation_available,
                                 .dispatch = dispatch_command,
                                 .safety = safety};
-    assert(cp_initialize(memory, cp_context_size(), &callbacks, &server.protocol) == CP_OK &&
-           cp_http_configure(server.protocol, "device.test", "https://device.test") == CP_OK);
+    const char *origin = plain ? "http://device.test" : "https://device.test";
+    assert(cp_initialize_policy(memory, cp_context_size(), &callbacks,
+               plain ? CP_POLICY_ENROLLED_HTTP : CP_POLICY_ENROLLED_TLS, &server.protocol) == CP_OK &&
+           cp_http_configure(server.protocol, "device.test", origin) == CP_OK);
     device = (cp_device_state_t){.management_generation = 1,
                                  .input_epoch = 1,
                                  .transport_generation = 17,
@@ -455,16 +518,16 @@ static void setup_server(bool browser)
     cp_set_device_state(server.protocol, &device, clock_ms);
     uint8_t secret[32];
     memset(secret, 0x22, 32);
-    cp_principal_t principal = {.scopes = CP_SCOPE_ALL, .enabled = true, .native_only = !browser};
+    cp_principal_t principal = {.scopes = scopes, .enabled = true, .native_only = !browser};
     memset(principal.id, 0x11, 16);
     cp_sha256(secret, 32, principal.credential_sha256);
     assert(cp_load_principal(server.protocol, &principal) == CP_OK);
     const char *login = "{\"client_id\":\"11111111111111111111111111111111\",\"credential\":"
                         "\"2222222222222222222222222222222222222222222222222222222222222222\"}";
-    cp_http_security_t security = {.tls = true, .host = "device.test"};
+    cp_http_security_t security = {.tls = !plain, .host = "device.test"};
     cp_http_response_t response;
     if (browser) {
-        security.origin = "https://device.test";
+        security.origin = origin;
         assert(cp_http(server.protocol, "GET", "/api/v1/login-challenge", &security, NULL, 0,
                        clock_ms, &response) == CP_OK);
         field(&response, "csrf", csrf, sizeof(csrf));
@@ -477,6 +540,9 @@ static void setup_server(bool browser)
     if (browser) {
         strcpy(cookie, response.set_cookie);
         field(&response, "csrf", csrf, sizeof(csrf));
+        field(&response, "request_prefix", browser_client.prefix, sizeof(browser_client.prefix));
+        field(&response, "session_id", browser_client.sid, sizeof(browser_client.sid));
+        field(&response, "boot_id", browser_client.boot, sizeof(browser_client.boot));
         security.cookie = cookie;
     } else {
         char token[65];
@@ -486,6 +552,7 @@ static void setup_server(bool browser)
     }
     assert(cp_transport_authenticate(server.protocol, &security, true, clock_ms, &identity) ==
            CP_OK);
+    if (browser) browser_client.identity = identity;
     cp_set_transport_capabilities(server.protocol, true, true);
     cache_sessions(&server);
     for (unsigned i = 0; i < sizeof(file_bytes); ++i) {
@@ -505,7 +572,7 @@ static void setup_server(bool browser)
     ws_request.headers[ws_request.header_count++] = (test_header_t){"Host", "device.test"};
     if (browser) {
         ws_request.headers[ws_request.header_count++] =
-            (test_header_t){"Origin", "https://device.test"};
+            (test_header_t){"Origin", origin};
         ws_request.headers[ws_request.header_count++] = (test_header_t){"Cookie", cookie};
     } else {
         ws_request.headers[ws_request.header_count++] =
@@ -516,6 +583,10 @@ static void setup_server(bool browser)
                                      .playback = playback,
                                      .channel_lost = channel_lost};
     app_control_server_set_media_port(&port);
+}
+static void setup_server(bool browser)
+{
+    setup_server_transport(browser, false, CP_SCOPE_ALL);
 }
 static void handshake(void)
 {
@@ -635,11 +706,49 @@ static void test_auth_before_upgrade(void)
     handshake();
     assert(upgrade_101 == 1 && !ws_request.sess_ctx);
 }
-typedef struct {
-    cp_identity_t identity;
-    char auth[80], prefix[17], sid[33], boot[33];
-    unsigned sequence;
-} test_client_t;
+static void test_enrolled_http_upgrade(void)
+{
+    setup_server_transport(true, true, CP_SCOPE_VIEW);
+    cp_http_security_t security = {.host = "device.test", .origin = "http://device.test",
+                                    .cookie = cookie, .csrf = csrf};
+    cp_http_response_t response;
+    assert(cp_http(server.protocol, "POST", "/api/v1/ws-ticket", &security, NULL, 0,
+                   clock_ms, &response) == CP_FORBIDDEN);
+
+    setup_server_transport(true, true, CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL);
+    assert(!strncmp(cookie, "control-http=", 13) && !strstr(cookie, "Secure"));
+    handshake();
+    assert(upgrade_101 == 0);
+    security.csrf = NULL;
+    assert(cp_http(server.protocol, "POST", "/api/v1/ws-ticket", &security, NULL, 0,
+                   clock_ms, &response) == CP_UNAUTHENTICATED);
+    security.csrf = csrf;
+    assert(cp_http(server.protocol, "POST", "/api/v1/ws-ticket", &security, NULL, 0,
+                   clock_ms, &response) == CP_OK);
+    char ticket[65], protocol[100];
+    field(&response, "ticket", ticket, sizeof(ticket));
+    snprintf(protocol, sizeof(protocol), "esp32-control-v1, ticket.%s", ticket);
+    ws_request.headers[ws_request.header_count++] = (test_header_t){"Sec-WebSocket-Protocol", protocol};
+    ws_request.headers[1].value = "null";
+    handshake();
+    ws_request.headers[1].value = "http://other.test";
+    handshake();
+    ws_request.headers[1].value = "http://device.test";
+    ws_request.headers[0].value = "other.test";
+    handshake();
+    assert(upgrade_101 == 0);
+    ws_request.headers[0].value = "device.test";
+    handshake();
+    assert(upgrade_101 == 1 && ws_request.sess_ctx);
+    offer_binary_frame = true;
+    assert(websocket_data(&ws_request) == ESP_FAIL);
+    offer_binary_frame = false;
+    websocket_free(ws_request.sess_ctx);
+    ws_request.sess_ctx = NULL;
+    assert(!channel_losses && cp_transport_heartbeat(server.protocol, &identity, clock_ms) == CP_OK);
+    handshake();
+    assert(upgrade_101 == 1 && !ws_request.sess_ctx);
+}
 static test_client_t login_client(void)
 {
     const char *login = "{\"client_id\":\"11111111111111111111111111111111\",\"credential\":"
@@ -661,15 +770,9 @@ static test_client_t login_client(void)
     cache_sessions(&server);
     return client;
 }
-static cp_error_t client_command(test_client_t *client, const char *op, const char *args,
-                                 const char *lease)
+static size_t format_client_command(test_client_t *client, const char *op, const char *args,
+                                    const char *lease, char *body, size_t capacity)
 {
-    cp_http_security_t security = {
-        .tls = true, .host = "device.test", .authorization = client->auth};
-    cp_http_response_t response;
-    assert(cp_http(server.protocol, "GET", "/api/v1/state", &security, NULL, 0, clock_ms,
-                   &response) == CP_OK);
-    char body[1500];
     ++client->sequence;
     char context_fields[256];
     const cp_operation_info_t *operation = cp_operation_find(op);
@@ -682,14 +785,27 @@ static cp_error_t client_command(test_client_t *client, const char *op, const ch
         strcpy(context_fields, "\"management_generation\":\"1\",\"resource_revision\":\"0\",");
     }
     int n = snprintf(
-        body, sizeof(body),
+        body, capacity,
         "{\"v\":1,\"boot_id\":\"%s\",\"session_id\":\"%s\",\"request_id\":\"%s%016llx\",\"seq\":%u,"
         "\"deadline_ms\":\"%llu\",%s\"op\":\"%s\",\"args\":%s%s%s%s}",
         client->boot, client->sid, client->prefix, (unsigned long long)client->sequence,
         client->sequence, (unsigned long long)(clock_ms + 100), context_fields, op, args,
         lease ? ",\"lease_id\":\"" : "", lease ? lease : "", lease ? "\"" : "");
-    assert(n > 0 && (size_t)n < sizeof(body));
-    return cp_http(server.protocol, "POST", "/api/v1/commands", &security, body, (size_t)n,
+    assert(n > 0 && (size_t)n < capacity);
+    return (size_t)n;
+}
+static cp_error_t client_command(test_client_t *client, const char *op, const char *args,
+                                 const char *lease)
+{
+    cp_http_security_t security = client->identity.browser ?
+        (cp_http_security_t){.host = "device.test", .origin = "http://device.test", .cookie = cookie, .csrf = csrf} :
+        (cp_http_security_t){.tls = true, .host = "device.test", .authorization = client->auth};
+    cp_http_response_t response;
+    assert(cp_http(server.protocol, "GET", "/api/v1/state", &security, NULL, 0, clock_ms,
+                   &response) == CP_OK);
+    char body[1500];
+    size_t n = format_client_command(client, op, args, lease, body, sizeof(body));
+    return cp_http(server.protocol, "POST", "/api/v1/commands", &security, body, n,
                    clock_ms, &response);
 }
 static void apply_acquire(test_client_t *owner, char lease[33])
@@ -704,6 +820,107 @@ static void apply_acquire(test_client_t *owner, char lease[33])
     cp_set_device_state(server.protocol, &device, clock_ms);
     cp_result_t applied = {.state = CP_RESULT_APPLIED, .uncertain_index = -1};
     assert(cp_complete(server.protocol, dispatched.command_key, &applied, clock_ms) == CP_OK);
+}
+static esp_err_t receive_text(const char *text)
+{
+    ws_offer_text = text;
+    esp_err_t result = websocket_data(&ws_request);
+    ws_offer_text = NULL;
+    return result;
+}
+static void open_browser_channel(void)
+{
+    cp_http_security_t security = {.host = "device.test", .origin = "http://device.test", .cookie = cookie, .csrf = csrf};
+    cp_http_response_t response;
+    assert(cp_http(server.protocol, "POST", "/api/v1/ws-ticket", &security, NULL, 0, clock_ms, &response) == CP_OK);
+    char ticket[65], protocol[100];
+    field(&response, "ticket", ticket, sizeof(ticket));
+    snprintf(protocol, sizeof(protocol), "esp32-control-v1, ticket.%s", ticket);
+    ws_request.headers[ws_request.header_count++] = (test_header_t){"Sec-WebSocket-Protocol", protocol};
+    handshake();
+    --ws_request.header_count;
+    assert(ws_request.sess_ctx);
+}
+static void test_motion_terminal_delivery(void)
+{
+    setup_server_transport(true, true, CP_SCOPE_INPUT_CONTROL);
+    cp_set_motion_terminal_available(server.protocol, true);
+    open_browser_channel();
+    assert(receive_text("{\"v\":1,\"type\":\"motion_terminal\"}") == ESP_OK);
+    assert(!((channel_t *)ws_request.sess_ctx)->motion_terminal && !strstr(ws_text, "\"motion_terminal\":true"));
+    enum { LEGACY, SYNCHRONOUS, NORMAL, TAKEOVER, REPLACED, STOPPING, REVOKED, SEND_LOST };
+    for (unsigned scenario = LEGACY; scenario <= SEND_LOST; ++scenario) {
+        setup_server_transport(true, true, CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL);
+        cp_set_motion_terminal_available(server.protocol, true);
+        open_browser_channel();
+        const unsigned slot = ((channel_t *)ws_request.sess_ctx)->slot;
+        if (scenario != LEGACY) {
+            assert(receive_text("{\"v\":1,\"type\":\"motion_terminal\"}") == ESP_OK);
+            assert(!strcmp(ws_text, "{\"motion_terminal\":true}"));
+        }
+        char lease[33], body[1500];
+        apply_acquire(&browser_client, lease);
+        format_client_command(&browser_client, "mouse.move_relative", "{\"dx\":1,\"dy\":0}", lease, body, sizeof(body));
+        sync_move = scenario == SYNCHRONOUS;
+        assert(receive_text(body) == ESP_OK);
+        uint64_t key = dispatched.command_key;
+        assert(strstr(ws_text, sync_move ? "\"state\":\"sent\"" : "\"state\":\"accepted\""));
+        assert(!strstr(ws_text, "motion_terminal") && !queued_count);
+        if (scenario == SYNCHRONOUS) {
+            assert(!server.channels[slot].motion_key);
+            continue;
+        }
+        if (scenario == TAKEOVER) cp_physical_override(server.protocol, false, clock_ms);
+        completion_t completion = {.key = key, .result = {.state = CP_RESULT_SENT, .uncertain_index = -1}};
+        cp_error_t recorded = cp_complete(server.protocol, key, &completion.result, clock_ms);
+        assert(recorded == (scenario == TAKEOVER ? CP_STALE : CP_OK));
+        motion_terminal_recorded(&server, &completion, recorded);
+        if (scenario == LEGACY) {
+            queue_motion_terminal(&server);
+            assert(!queued_count && !server.channels[slot].motion_key);
+            continue;
+        }
+        assert(server.channels[slot].motion_key == key);
+        unsigned sent = ws_text_sends;
+        assert(receive_text(body) == ESP_FAIL && ws_text_sends == sent);
+        reject_queue = true;
+        queue_motion_terminal(&server);
+        assert(!server.motion_work.queued && !queued_count);
+        reject_queue = false;
+        queue_motion_terminal(&server);
+        assert(server.motion_work.queued && queued_count == 1);
+        if (scenario == NORMAL) {
+            sem_available = false;
+            drain();
+            assert(ws_text_sends == sent && server.channels[slot].motion_key == key);
+            sem_available = true;
+            queue_motion_terminal(&server);
+        } else if (scenario == REPLACED) {
+            websocket_free(ws_request.sess_ctx);
+            ws_request.sess_ctx = NULL;
+            open_browser_channel(); // Same fd and slot, new channel generation.
+        } else if (scenario == STOPPING) {
+            server.stop_requested = true;
+        } else if (scenario == REVOKED) {
+            assert(cp_revoke_principal(server.protocol, identity.principal_id, clock_ms) == CP_OK);
+        } else if (scenario == SEND_LOST) {
+            fail_send = true;
+        }
+        drain();
+        assert(!server.motion_work.queued);
+        if (scenario == NORMAL || scenario == TAKEOVER) {
+            char expected[80];
+            snprintf(expected, sizeof(expected), "\"command_key\":\"%llu\"", (unsigned long long)key);
+            assert(ws_text_sends == sent + 1 && strstr(ws_text, expected) &&
+                   strstr(ws_text, "\"motion_terminal\":true"));
+            assert(strstr(ws_text, scenario == NORMAL ? "\"state\":\"sent\"" : "\"state\":\"cancelled\""));
+            motion_terminal_recorded(&server, &completion, cp_complete(server.protocol, key, &completion.result, clock_ms));
+            queue_motion_terminal(&server);
+            assert(!queued_count);
+        } else {
+            assert(ws_text_sends == sent && ws_shutdowns == (scenario == REVOKED || scenario == SEND_LOST));
+        }
+    }
 }
 static void test_channel_loss_revokes_exact_logical_owner(void)
 {
@@ -942,6 +1159,8 @@ int main(void)
 {
     test_download_stack_allocation_failure();
     test_auth_before_upgrade();
+    test_enrolled_http_upgrade();
+    test_motion_terminal_delivery();
     test_channel_loss_revokes_exact_logical_owner();
     test_capture_queue_and_owner_thread_send();
     test_channel_media_binding_and_send_failures();

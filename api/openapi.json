@@ -11,6 +11,16 @@
         "device": {
           "default": "device.invalid"
         }
+      },
+      "description": "Mosaico enrolled HTTPS API, WSS and browser controller"
+    },
+    {
+      "url": "http://{device}",
+      "description": "Mosaico authorized local browser controller on LAN or control hotspot. Native Bearer login and WSS require HTTPS.",
+      "variables": {
+        "device": {
+          "default": "device.invalid"
+        }
       }
     }
   ],
@@ -20,6 +30,9 @@
     },
     {
       "browserSession": []
+    },
+    {
+      "httpBrowserSession": []
     }
   ],
   "paths": {
@@ -5318,7 +5331,23 @@
     },
     "/api/v1/ws-ticket": {
       "post": {
-        "description": "Browser cookie, exact Origin and X-CSRF-Token required. Empty JSON-content-type POST issues one random ticket, replacing the previous ticket for this session. Consume once before WSS upgrade within 10000 ms.",
+        "description": "HTTPS browser cookie, exact Origin and X-CSRF-Token required. Empty JSON-content-type POST issues one random ticket, replacing the previous ticket for this session. Consume once before WSS upgrade within 10000 ms.",
+        "security": [
+          {
+            "browserSession": []
+          }
+        ],
+        "servers": [
+          {
+            "url": "https://{device}",
+            "variables": {
+              "device": {
+                "default": "device.invalid"
+              }
+            },
+            "description": "Mosaico enrolled HTTPS API, WSS and browser controller"
+          }
+        ],
         "parameters": [
           {
             "name": "X-CSRF-Token",
@@ -5367,7 +5396,7 @@
     "/api/v1/pairing/requests": {
       "post": {
         "security": [],
-        "description": "Exact same-origin HTTPS JSON only. Proposals expire after 120 seconds and require physical device approval. Status proves this browser credential; wrong/unknown credentials are rejected. This endpoint never starts an input lease.",
+        "description": "Same-origin HTTPS JSON. Submit a proposal for physical approval on Mosaico. A proposal expires after 120 seconds.",
         "requestBody": {
           "required": true,
           "content": {
@@ -5402,7 +5431,7 @@
         },
         "responses": {
           "202": {
-            "description": "Pending proposal or credential-proved status",
+            "description": "Pending authorization or credential-proved status",
             "content": {
               "application/json": {
                 "schema": {
@@ -5434,24 +5463,38 @@
             "description": "Invalid schema"
           },
           "401": {
-            "description": "Credential not proved"
+            "description": "Code or browser credential rejected"
           },
           "403": {
             "description": "Origin or existing identity rejected"
           },
           "409": {
-            "description": "Another proposal or local save is busy"
+            "description": "Authorization state changed"
+          },
+          "429": {
+            "description": "Access owner busy, capacity reached or attempts rate limited"
           },
           "503": {
-            "description": "Trusted storage unavailable"
+            "description": "Trusted storage unavailable or uncertain"
           }
-        }
+        },
+        "servers": [
+          {
+            "url": "https://{device}",
+            "variables": {
+              "device": {
+                "default": "device.invalid"
+              }
+            },
+            "description": "Mosaico enrolled HTTPS API, WSS and browser controller"
+          }
+        ]
       }
     },
-    "/api/v1/pairing/status": {
+    "/api/v1/pairing/code": {
       "post": {
         "security": [],
-        "description": "Exact same-origin HTTPS JSON only. Proposals expire after 120 seconds and require physical device approval. Status proves this browser credential; wrong/unknown credentials are rejected. This endpoint never starts an input lease.",
+        "description": "Same-origin Mosaico HTTP or HTTPS JSON. A current device access code admits a durable browser grant. Poll pairing status with the browser credential. This endpoint creates no session or input lease.",
         "requestBody": {
           "required": true,
           "content": {
@@ -5465,7 +5508,105 @@
                   },
                   "credential": {
                     "type": "string",
-                    "pattern": "^[0-9a-f]{64}$"
+                    "pattern": "^[0-9a-f]{64}$",
+                    "writeOnly": true
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "pattern": "^[ -~]+$"
+                  },
+                  "code": {
+                    "type": "string",
+                    "pattern": "^[0-9]{8}$",
+                    "writeOnly": true
+                  },
+                  "duration": {
+                    "enum": [
+                      "6h",
+                      "24h",
+                      "permanent"
+                    ]
+                  }
+                },
+                "required": [
+                  "client_id",
+                  "credential",
+                  "label",
+                  "code",
+                  "duration"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Pending authorization or credential-proved status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "const": "pending"
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "format": "uint64"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "request_id"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid schema"
+          },
+          "401": {
+            "description": "Code or browser credential rejected"
+          },
+          "403": {
+            "description": "Origin or existing identity rejected"
+          },
+          "409": {
+            "description": "Authorization state changed"
+          },
+          "429": {
+            "description": "Access owner busy, capacity reached or attempts rate limited"
+          },
+          "503": {
+            "description": "Trusted storage unavailable or uncertain"
+          }
+        }
+      }
+    },
+    "/api/v1/pairing/status": {
+      "post": {
+        "security": [],
+        "description": "Same-origin Mosaico HTTP or HTTPS JSON. Read browser authorization status using that browser credential.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "client_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{32}$"
+                  },
+                  "credential": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "writeOnly": true
                   }
                 },
                 "required": [
@@ -5479,7 +5620,7 @@
         },
         "responses": {
           "200": {
-            "description": "Pending proposal or credential-proved status",
+            "description": "Pending authorization or credential-proved status",
             "content": {
               "application/json": {
                 "schema": {
@@ -5577,16 +5718,19 @@
             "description": "Invalid schema"
           },
           "401": {
-            "description": "Credential not proved"
+            "description": "Code or browser credential rejected"
           },
           "403": {
             "description": "Origin or existing identity rejected"
           },
           "409": {
-            "description": "Another proposal or local save is busy"
+            "description": "Authorization state changed"
+          },
+          "429": {
+            "description": "Access owner busy, capacity reached or attempts rate limited"
           },
           "503": {
-            "description": "Trusted storage unavailable"
+            "description": "Trusted storage unavailable or uncertain"
           }
         }
       }
@@ -5602,6 +5746,12 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "__Host-control"
+      },
+      "httpBrowserSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "control-http",
+        "description": "Local HTTP browser cookie with HttpOnly and SameSite=Strict. Requests that change state require exact Origin and the session CSRF token."
       }
     }
   }

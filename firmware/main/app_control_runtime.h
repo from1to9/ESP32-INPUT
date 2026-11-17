@@ -36,7 +36,7 @@ typedef struct {
 } app_control_host_t;
 typedef struct {
     bool initialized, commissioning_open, usb_import_active;
-    app_control_server_snapshot_t server;
+    app_control_server_snapshot_t server, web;
     app_control_trust_snapshot_t trust;
     app_clock_snapshot_t clock;
     esp_err_t error;

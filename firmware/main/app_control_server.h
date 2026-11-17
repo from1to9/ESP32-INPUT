@@ -11,7 +11,7 @@ typedef struct {
     uint32_t abi_version;
     const char *interface_key;  /* WIFI_STA_DEF or the persistent control AP's WIFI_AP_DEF. */
     const char *allowed_host;   /* Exact Host, including non-default port. */
-    const char *browser_origin; /* Exact HTTPS origin; no wildcard/null origin. */
+    const char *browser_origin; /* Exact HTTP(S) origin; no wildcard/null origin. */
     const char *hotspot_name;   /* AP only. DNS SAN and exclusive browser host. */
     const uint8_t *certificate_pem;
     size_t certificate_length;
@@ -45,6 +45,11 @@ typedef struct {
  * HTTP downgrade, provisioning-server reuse, auto-enrollment or device write.
  * Coordinator callbacks are nonblocking; read must scope/redact its output. */
 esp_err_t app_control_server_start(const app_control_server_config_t *);
+/* Separate authenticated HTTP listener; no TLS material required. It retains
+ * principal/session/scope checks and never selects the Passport open policy. */
+esp_err_t app_control_server_start_http(const app_control_server_config_t *);
+esp_err_t app_control_server_stop_http(void);
+void app_control_server_http_snapshot(app_control_server_snapshot_t *);
 esp_err_t app_control_server_stop(void);
 void app_control_server_snapshot(app_control_server_snapshot_t *);
 /* Nonblocking coordinator-to-server mailboxes. Physical takeover must already

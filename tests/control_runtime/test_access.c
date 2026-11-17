@@ -17,7 +17,10 @@ static app_control_trust_snapshot_t trusted;
 static app_update_snapshot_t update;
 static cp_capture_grant_t capture;
 static uint8_t banks[2][BANK_BYTES];
-static size_t sizes[2];
+static size_t sizes[2], code_size;
+static char stored_code[9];
+static uint32_t random_code;
+void esp_fill_random(void *p, size_t n) { assert(n == 4); ++random_code; memcpy(p, &random_code, n); }
 static esp_err_t write_error, read_error, commit_error, open_error;
 static unsigned writes, critical, lock_entries, interleave_at;
 static void (*interleave)(void);
@@ -62,14 +65,25 @@ static unsigned bank_index(const char *key)
 { assert(!strcmp(key, "access_a") || !strcmp(key, "access_b")); return !strcmp(key, "access_b"); }
 esp_err_t nvs_get_blob(nvs_handle_t n, const char *key, void *out, size_t *size)
 {
-    assert(n == 1 && !critical); unsigned i = bank_index(key);
+    assert(n == 1 && !critical);
     if (read_error) return read_error;
+    if (!strcmp(key, "web_code")) {
+        if (!code_size) return ESP_ERR_NVS_NOT_FOUND;
+        assert(*size >= code_size); memcpy(out, stored_code, code_size); *size = code_size; return ESP_OK;
+    }
+    unsigned i = bank_index(key);
     if (!sizes[i]) return ESP_ERR_NVS_NOT_FOUND;
     assert(*size >= sizes[i]); memcpy(out, banks[i], sizes[i]); *size = sizes[i]; return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t n, const char *key, const void *p, size_t size)
 {
-    assert(n == 1 && size == BANK_BYTES && !critical); ++writes;
+    assert(n == 1 && !critical); ++writes;
+    if (!strcmp(key, "web_code")) {
+        assert(size == sizeof(stored_code));
+        if (apply_write) { memcpy(stored_code, p, size); code_size = size; }
+        return write_error;
+    }
+    assert(size == BANK_BYTES);
     unsigned i = bank_index(key);
     if (apply_write) { memcpy(banks[i], p, size); sizes[i] = size; }
     if (during_write) { void (*run)(void) = during_write; during_write = NULL; run(); }
@@ -87,7 +101,7 @@ static void boot(void)
 }
 static void reset(void)
 {
-    memset(banks, 0, sizeof(banks)); memset(sizes, 0, sizeof(sizes));
+    memset(banks, 0, sizeof(banks)); memset(sizes, 0, sizeof(sizes)); code_size = 0; random_code = 12345677;
     write_error = read_error = commit_error = open_error = ESP_OK; writes = 0;
     trusted = (app_control_trust_snapshot_t){.known = true, .present = true, .revision = 9};
     memset(trusted.active_digest, 'a', 64); trusted.active_digest[64] = 0;
@@ -418,22 +432,22 @@ static void field(const char *json, const char *name, char *out, size_t size)
     const char *s = cj_string(d, cj_get(d, 0, name)); assert(s && strlen(s) < size);
     strcpy(out, s); free(d);
 }
-static void protocol_pairing_and_live_revocation(bool control_ap)
+static void protocol_pairing_and_live_revocation(bool control_ap, bool http)
 {
     reset(); random_value = revoked_sessions = input_revocations = dispatch_count = 0;
     const char *host = control_ap ? "m-0123456789abcdef01234567.test:8443" : "device.test";
-    const char *origin = control_ap ? "https://m-0123456789abcdef01234567.test:8443" : "https://device.test";
+    const char *origin = http ? "http://device.test" : control_ap ? "https://m-0123456789abcdef01234567.test:8443" : "https://device.test";
     clock_known = !control_ap;
     cp_callbacks_t callbacks = {.random = random_source, .principal = principal_source,
-        .input_authorized = input_authorized, .pairing = pairing, .available = available,
+        .input_authorized = input_authorized, .pairing = pairing, .pairing_code = pairing_code, .available = available,
         .dispatch = dispatch, .safety = safety};
     cp_context_t *context; void *memory = calloc(1, cp_context_size()); assert(memory);
-    assert(cp_initialize(memory, cp_context_size(), &callbacks, &context) == CP_OK);
+    assert(cp_initialize_policy(memory, cp_context_size(), &callbacks, http ? CP_POLICY_ENROLLED_HTTP : CP_POLICY_ENROLLED_TLS, &context) == CP_OK);
     assert(cp_http_configure(context, host, origin) == CP_OK);
     cp_device_state_t state = {.management_generation = 1, .input_epoch = 2, .transport_generation = 3,
         .ui_revision = 4, .state_sequence = 5, .allowance_generation = 1, .input_ready = true};
     strcpy(state.target_id, "test-target"); strcpy(state.mode, "mouse"); cp_set_device_state(context, &state, clock_ms);
-    cp_http_security_t security = {.tls = true, .host = host, .origin = origin};
+    cp_http_security_t security = {.tls = !http, .host = host, .origin = origin};
     cp_http_response_t *response = calloc(1, sizeof(*response)); assert(response);
     char client[33], secret[65], digest[65], body[2048];
     uint8_t bytes[32], id[16], hash[32]; memset(bytes, 0x34, 32); memset(id, 0x33, 16);
@@ -447,21 +461,44 @@ static void protocol_pairing_and_live_revocation(bool control_ap)
     security.host = "192.168.4.1";
     assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
     security.host = host;
-    security.tls = false;
+    security.tls = http;
     assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
-    security.tls = true;
-    assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_OK && response->status == 202);
-    assert(strstr(response->body, digest));
+    security.tls = !http;
+    if (http) {
+        assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
+        app_control_access_code_t code;
+        app_control_access_code_snapshot(&code);
+        assert(app_control_access_code_generate(code.revision) == CP_OK);
+        app_control_access_service(true);
+        app_control_access_code_snapshot(&code);
+        snprintf(body, sizeof(body), "{\"client_id\":\"%s\",\"credential\":\"%s\",\"label\":\"Browser\",\"code\":\"%s\",\"duration\":\"permanent\"}",
+                 client, secret, code.digits);
+        security.origin = "https://evil.test";
+        assert(cp_http(context, "POST", "/api/v1/pairing/code", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
+        security.origin = origin;
+        assert(cp_http(context, "POST", "/api/v1/pairing/code", &security, body, strlen(body), clock_ms, response) == CP_OK && response->status == 202);
+        assert(!strstr(response->body, code.digits) && !strstr(response->body, secret));
+    } else {
+        assert(cp_http(context, "POST", "/api/v1/pairing/requests", &security, body, strlen(body), clock_ms, response) == CP_OK && response->status == 202);
+        assert(strstr(response->body, digest));
+    }
     snprintf(body, sizeof(body), "{\"client_id\":\"%s\",\"credential\":\"%s\"}", client, secret);
     assert(cp_http(context, "POST", "/api/v1/pairing/status", &security, body, strlen(body), clock_ms, response) == CP_OK && strstr(response->body, "pending"));
     assert(cp_http(context, "POST", "/api/v1/sessions", &security, body, strlen(body), clock_ms, response) == CP_UNAUTHENTICATED);
-    apply(approval(APP_CONTROL_ACCESS_INPUT, APP_CONTROL_ACCESS_PERMANENT));
+    if (http) {
+        security.origin = NULL;
+        assert(cp_http(context, "POST", "/api/v1/sessions", &security, body, strlen(body), clock_ms, response) == CP_FORBIDDEN);
+        security.origin = origin;
+        app_control_access_service(true);
+    } else apply(approval(APP_CONTROL_ACCESS_INPUT, APP_CONTROL_ACCESS_PERMANENT));
     char cookie[256], old_cookie[256], csrf[33], session[33], prefix[17], boot_id[33];
     assert(cp_http(context, "GET", "/api/v1/login-challenge", &security, NULL, 0, clock_ms, response) == CP_OK);
+    assert((strstr(response->set_cookie, "; Secure") != NULL) == !http);
     strcpy(cookie, response->set_cookie); field(response->body, "csrf", csrf, sizeof(csrf));
     security.cookie = cookie; security.csrf = csrf;
     assert(cp_http(context, "POST", "/api/v1/sessions", &security, body, strlen(body), clock_ms, response) == CP_OK);
-    assert(strstr(response->body, "input.control") && !strstr(response->body, "config.write"));
+    assert(strstr(response->body, "input.control") && (strstr(response->body, "config.write") != NULL) == http);
+    assert(!strstr(response->body, "update.stage") && !strstr(response->body, "audio.capture"));
     strcpy(cookie, response->set_cookie); strcpy(old_cookie, cookie);
     field(response->body, "csrf", csrf, sizeof(csrf)); field(response->body, "session_id", session, sizeof(session));
     field(response->body, "request_prefix", prefix, sizeof(prefix)); field(response->body, "boot_id", boot_id, sizeof(boot_id));
@@ -489,14 +526,75 @@ static void protocol_pairing_and_live_revocation(bool control_ap)
     assert(cp_http(context, "GET", "/api/v1/state", &security, NULL, 0, clock_ms, response) == CP_UNAUTHENTICATED && revoked_sessions == 2);
     free(response); free(memory);
 }
+static void persistent_code_lifecycle(void)
+{
+    reset();
+    trusted.present = false; trusted.active_digest[0] = 0; native_count = 0; boot();
+    static const char identity_tag[] = "Mosaico local browser identity v1";
+    uint8_t identity_hash[32];
+    char stored_identity[65];
+    cp_sha256(identity_tag, sizeof(identity_tag) - 1, identity_hash);
+    hex(identity_hash, sizeof(identity_hash), stored_identity);
+    assert(!strcmp(access_state->trust_digest, stored_identity));
+    app_control_access_code_t code; app_control_access_code_snapshot(&code);
+    assert(code.known && !code.present);
+    assert(app_control_access_code_generate(code.revision) == CP_OK);
+    app_control_access_service(false); app_control_access_code_snapshot(&code);
+    assert(!code.present && code.error != ESP_OK && !writes);
+    assert(app_control_access_code_generate(code.revision) == CP_OK);
+    app_control_access_service(true); app_control_access_code_snapshot(&code);
+    assert(code.known && code.present && code_valid(code.digits));
+    char original[9]; memcpy(original, code.digits, sizeof(original)); boot();
+    app_control_access_code_snapshot(&code); assert(!strcmp(original, code.digits));
+    char client[33], credential[65], json[2048]; uint64_t request; size_t length;
+    memset(client, '3', 32); client[32] = 0; memset(credential, '4', 64); credential[64] = 0;
+    uint64_t manual;
+    assert(app_control_access_pair(client, credential, "Local review", &manual) == CP_OK);
+    assert(app_control_access_pair_code(client, credential, "Browser", original, "permanent", &request) == CP_BUSY);
+    assert(view().pending && view().pairing_request == manual);
+    clock_ms += APP_CONTROL_TRUST_WINDOW_MS;
+    for (unsigned i = 0; i < 5; ++i)
+        assert(app_control_access_pair_code(client, credential, "Browser", "00000000", "permanent", &request) == CP_UNAUTHENTICATED);
+    assert(app_control_access_pair_code(client, credential, "Browser", original, "permanent", &request) == CP_BUSY);
+    clock_ms += 60000;
+    assert(pairing_code(NULL, client, credential, "Browser", original, "permanent", json, sizeof(json), &length) == CP_OK);
+    assert(!strstr(json, original) && !strstr(json, credential));
+    assert(!view().pending);
+    assert(app_control_access_pair_status(client, credential, json, sizeof(json), &length) == CP_OK && strstr(json, "pending"));
+    /* Possession of the saved code authorizes enrollment without a local tap. */
+    app_control_access_service(false);
+    assert(app_control_access_pair_status(client, credential, json, sizeof(json), &length) == CP_OK && strstr(json, "approved"));
+    boot(); clock_known = false;
+    assert(app_control_access_pair_status(client, credential, json, sizeof(json), &length) == CP_OK && strstr(json, "approved"));
+    app_control_access_code_snapshot(&code);
+    assert(app_control_access_code_generate(code.revision) == CP_OK);
+    app_control_access_service(true); app_control_access_code_snapshot(&code);
+    assert(strcmp(code.digits, original));
+    assert(app_control_access_pair_code(client, credential, "Browser", original, "permanent", &request) == CP_UNAUTHENTICATED);
+    assert(app_control_access_pair_status(client, credential, json, sizeof(json), &length) == CP_OK && strstr(json, "approved"));
+    memset(client, '5', 32);
+    assert(app_control_access_pair_code(client, credential, "Second browser", code.digits, "6h", &request) == CP_OK);
+    app_control_access_service(false);
+    assert(view().receipt_error == CP_UNAVAILABLE && !view().pending);
+    assert(app_control_access_pair_status(client, credential, json, sizeof(json), &length) == CP_OK && strstr(json, "rejected"));
+    assert(app_control_access_pair_code(client, credential, "Second browser", code.digits, "permanent", &request) == CP_OK);
+    app_control_access_service(false); boot();
+    assert(app_control_access_pair_status(client, credential, json, sizeof(json), &length) == CP_OK && strstr(json, "approved"));
+    app_control_access_code_snapshot(&code); write_error = ESP_FAIL;
+    assert(app_control_access_code_generate(code.revision) == CP_OK);
+    app_control_access_service(true); app_control_access_code_snapshot(&code);
+    assert(!code.known && !code.present && code.error == ESP_FAIL);
+}
 int main(void)
 {
+    persistent_code_lifecycle();
     suspended_expiry_survives_failed_edit_but_not_explicit_renewal();
     finite_expiry_is_terminal_and_renewal_is_explicit(); expiry_write_failures_keep_this_boot_closed();
     concurrent_expiry_is_not_lost_during_storage();
     pairing_duration_and_storage(); races_expiry_and_faults(); runtime_update_and_capture();
-    protocol_pairing_and_live_revocation(false);
-    protocol_pairing_and_live_revocation(true);
+    protocol_pairing_and_live_revocation(false, false);
+    protocol_pairing_and_live_revocation(false, true);
+    protocol_pairing_and_live_revocation(true, false);
     heap_caps_free(access_state); access_state = NULL; assert(!test_heap_live && !critical);
     puts("PASS: production credential pairing, durable duration/revoke, coherent snapshots, native policy migration and runtime update/capture authority");
     return 0;

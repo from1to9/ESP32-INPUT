@@ -62,12 +62,13 @@ the screenshot is still taken on the Apple device.
 
 ### Control it from a browser, script or AI client
 
-Join Mosaico to Wi-Fi and open the HTTPS address in **Settings → Wi-Fi →
-Web/API**. Pair the browser, approve its access on Mosaico, check that the
-selected input target is your iPad or iPhone, then choose **Take control**.
+Join Mosaico to Wi-Fi and open the HTTP address in **Settings → Wi-Fi →
+Web/API**. Generate the code there and use it to authorize your browser.
+Check that the selected input target is your iPad or iPhone, then choose
+**Take control**.
 Use the browser touchpad and keyboard while watching the Apple device or
 the QuickTime preview. The [browser guide](browser-controller.md) covers
-certificate trust, pairing and input controls.
+access codes, saved authorization and input controls.
 
 Scripts and AI clients use the same input path through the HTTPS API or
 [MCP companion](automation.md#ai-control-over-mcp). Supply screen images to
@@ -154,8 +155,8 @@ and lock input. Hold it again to unlock with Motion off. Locked or cancelled
 actions require a fresh gesture.
 
 Use [Wi-Fi setup](wifi-provisioning.md) to join a station network.
-[Browser control](browser-controller.md) requires a trusted HTTPS identity and
-approval on the device. For a native client, follow the [enrollment
+[Browser control](browser-controller.md) uses the device access code for
+first-time authorization. For a native HTTPS client, follow the [enrollment
 procedure](../bridge/README.md#local-enrollment). Pairing a browser or client
 does not acquire an input lease. Try the [browser, HTTP API and AI control
 examples](automation.md) after enrollment.

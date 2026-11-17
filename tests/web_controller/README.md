@@ -14,7 +14,10 @@ The client tests additionally cover every asynchronous renewal/preflight stage,
 the original sample deadline and lost replies after actual submission. Dropping
 an unsubmitted sample does not consume a command sequence or revoke the lease.
 
-`run.py` uses a real Chromium browser and real loopback HTTPS. Static responses
+`run.py` uses a real Chromium browser and loopback HTTPS or authenticated
+HTTP with `--http`. The main HTTP case removes `crypto.subtle` from the
+test page because LAN HTTP pages do not have that secure-context API.
+Static responses
 come from production `app_control_web_serve`; dynamic requests use the actual
 `header`, `error_response` and `handle_request` functions extracted unchanged
 from `app_control_server.c`, then production `cp_http`, access manager,
@@ -28,8 +31,8 @@ route injects approval, local takeover, target replacement and loss of a reply
 after production admission. These fixture routes are absent from firmware.
 The test checks actual accepted HID bytes and down/neutral pairs, but does not
 claim physical radio/USB delivery, host focus or target application effects.
-Pairing uses the actual protected access manager and protocol; it never borrows
-a preloaded native principal or replaces protocol authorization with a mock.
+Code authorization uses the actual access manager and protocol with a
+fixture-generated device code and an independently generated browser identity.
 
 Install Playwright in an ignored local directory or provide an existing module
 and Chromium executable. For example, from the repository root:
@@ -64,3 +67,13 @@ pairing review. Wi-Fi, labels and BLE worker completions use host fixtures.
 The suite checks theme persistence, exact AP label set and clear, and
 writes six Chromium screenshots for desktop and iPhone/iPad-sized touch
 viewports.
+
+Use `--case motion-channel` to exercise Chromium through the local relay
+with the existing full state route. Add `--http` for an enrolled HTTP
+upstream. Add `--channel-direct` to connect directly to the device origin
+and use its CSP. Use `--motion-poll` to run the same 90-event drag with the
+legacy polling feature set. The default case negotiates a motion terminal
+reply and includes loss after a known admission.
+The fixture models 70 ms WebSocket round trips, delayed coordinator dispatch
+and a lost reply. It records continuing touch and mouse HID reports, button
+stability, renewal and stop behavior.

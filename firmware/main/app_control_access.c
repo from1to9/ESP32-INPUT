@@ -6,6 +6,7 @@
 #include "control_registry.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "nvs.h"
 #include <inttypes.h>
@@ -29,6 +30,10 @@ typedef struct {
     uint64_t revision, storage_generation, serial, pending_id, pending_until;
     access_record_t saved[CP_MAX_PRINCIPALS], candidate[CP_MAX_PRINCIPALS], proposal;
     unsigned count;
+    app_control_access_code_t code;
+    bool request_by_code;
+    uint64_t request_code_revision, code_rate_start;
+    unsigned code_failures;
     app_control_access_request_t request;
     uint64_t receipt;
     cp_result_state_t receipt_state;
@@ -118,11 +123,40 @@ static bool usable(const access_record_t *r, bool known, uint64_t wall)
     portEXIT_CRITICAL(&access_lock);
     return known && !expired && !r->suspended;
 }
+/* A device without optional TLS enrollment still owns a local browser store.
+ * Installing/replacing TLS trust retains the existing explicit identity reset. */
+static void local_identity(app_control_trust_snapshot_t *trust)
+{
+    if (trust->known && !trust->uncertain && !trust->present) {
+        // SHA-256 of "Mosaico local browser identity v1". Keep the persisted
+        // identity across upgrades without hashing a constant on hot reads.
+        static const char digest[] = "411b03ba9227cf4dceaef5a7c36196e76419c23b2baa60e3721d55ebd9a4cf63";
+        memcpy(trust->active_digest, digest, sizeof(digest));
+    }
+}
+static size_t trusted_principals(cp_principal_t out[CP_MAX_PRINCIPALS], char digest[65])
+{
+    size_t count = app_control_trust_principals(out, digest);
+    if (!digest[0]) {
+        app_control_trust_snapshot_t trust; app_control_trust_snapshot(&trust);
+        local_identity(&trust);
+        if (trust.known && !trust.uncertain && !trust.present)
+            memcpy(digest, trust.active_digest, 65);
+    }
+    return count;
+}
+static bool code_valid(const char *code)
+{
+    if (!code || strnlen(code, APP_CONTROL_CODE_DIGITS + 1U) != APP_CONTROL_CODE_DIGITS) return false;
+    for (unsigned i = 0; i < APP_CONTROL_CODE_DIGITS; ++i)
+        if (code[i] < '0' || code[i] > '9') return false;
+    return true;
+}
 static unsigned records_version(access_record_t out[CP_MAX_PRINCIPALS], uint64_t *revision, bool *coherent)
 {
     cp_principal_t legacy[CP_MAX_PRINCIPALS];
     char digest[65];
-    size_t n = app_control_trust_principals(legacy, digest);
+    size_t n = trusted_principals(legacy, digest);
     unsigned count = 0;
     for (size_t i = 0; i < n; ++i) {
         out[count] = (access_record_t){.principal = legacy[i], .legacy = true,
@@ -196,12 +230,13 @@ static bool unpack(uint8_t *bank, access_record_t *out, unsigned *count, uint64_
 }
 esp_err_t app_control_access_init(void)
 {
-    app_control_trust_snapshot_t trust; app_control_trust_snapshot(&trust);
+    app_control_trust_snapshot_t trust; app_control_trust_snapshot(&trust); local_identity(&trust);
     if (!access_state) access_state = heap_caps_aligned_calloc(_Alignof(access_t), 1, sizeof(access_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!access_state) access_state = heap_caps_aligned_calloc(_Alignof(access_t), 1, sizeof(access_t), MALLOC_CAP_8BIT);
     if (!access_state) return ESP_ERR_NO_MEM;
     portENTER_CRITICAL(&access_lock);
     uint64_t previous_revision = access_state->revision;
+    uint64_t code_revision = access_state->code.revision;
     struct { uint8_t id[16]; uint64_t revision; } expired[CP_MAX_PRINCIPALS];
     unsigned expired_count = 0;
     if (!strcmp(access_state->trust_digest, trust.active_digest))
@@ -215,7 +250,7 @@ esp_err_t app_control_access_init(void)
         access_state->queued = access_state->processing = false; zero(&access_state->request, sizeof(access_state->request));
     }
     portEXIT_CRITICAL(&access_lock);
-    if (!trust.known || !trust.present || trust.uncertain) {
+    if (!trust.known || !trust.active_digest[0] || trust.uncertain) {
         portENTER_CRITICAL(&access_lock); access_state->error = ESP_ERR_INVALID_STATE; portEXIT_CRITICAL(&access_lock);
         return ESP_ERR_INVALID_STATE;
     }
@@ -242,11 +277,26 @@ esp_err_t app_control_access_init(void)
         }
         nvs_close(nvs);
     }
+    app_control_access_code_t code = {.revision = code_revision + 1};
+    nvs_handle_t code_nvs;
+    code.error = nvs_open_from_partition("control", "ctrl_access", NVS_READWRITE, &code_nvs);
+    if (code.error == ESP_OK) {
+        size_t size = sizeof(code.digits);
+        code.error = nvs_get_blob(code_nvs, "web_code", code.digits, &size);
+        if (code.error == ESP_ERR_NVS_NOT_FOUND) { code.error = ESP_OK; code.digits[0] = 0; }
+        else if (code.error == ESP_OK && (size != sizeof(code.digits) || !code_valid(code.digits)))
+            code.error = ESP_ERR_INVALID_CRC;
+        nvs_close(code_nvs);
+    }
+    code.known = code.error == ESP_OK;
+    code.present = code.known && code.digits[0];
+    if (!code.known) zero(code.digits, sizeof(code.digits));
     if (error == ESP_OK && best_count) {
         unsigned count; uint64_t generation;
         if (!unpack(access_state->verify, access_state->candidate, &count, &generation)) error = ESP_ERR_INVALID_CRC;
     }
     portENTER_CRITICAL(&access_lock);
+    access_state->code = code;
     access_state->known = error == ESP_OK; access_state->uncertain = error != ESP_OK; access_state->error = error;
     if (error != ESP_OK) { portEXIT_CRITICAL(&access_lock); return error; }
     if (best_count) memcpy(access_state->saved, access_state->candidate, sizeof(access_state->saved));
@@ -321,7 +371,7 @@ void app_control_access_snapshot(app_control_access_snapshot_t *out)
     out->known = access_state->known && coherent && access_state->revision == revision; out->uncertain = access_state->uncertain; out->error = access_state->error;
     out->revision = access_state->revision; out->receipt_request = access_state->receipt;
     out->receipt_state = access_state->receipt_state; out->receipt_error = access_state->receipt_error;
-    if (access_state->pending_id && now < access_state->pending_until) {
+    if (!access_state->request_by_code && access_state->pending_id && now < access_state->pending_until) {
         out->pending = true; out->pairing_request = access_state->pending_id;
         out->pairing_remaining_ms = (uint32_t)(access_state->pending_until - now);
         describe(&access_state->proposal, &out->proposal, known, wall);
@@ -358,6 +408,7 @@ cp_error_t app_control_access_pair(const char *client, const char *digest, const
     } else if (access_state->serial == UINT64_MAX || access_state->revision == UINT64_MAX || access_state->storage_generation == UINT64_MAX) error = CP_UNAVAILABLE;
     else {
         access_state->proposal = proposal; access_state->pending_id = ++access_state->serial;
+        access_state->request_by_code = false;
         access_state->pending_until = now + APP_CONTROL_TRUST_WINDOW_MS; ++access_state->revision;
     }
     if (error == CP_OK) *request = access_state->pending_id;
@@ -375,10 +426,132 @@ cp_error_t app_control_access_submit(const app_control_access_request_t *r, uint
     else if (r->expected_revision != access_state->revision) error = CP_STALE;
     else if (access_state->serial == UINT64_MAX || access_state->revision == UINT64_MAX || access_state->storage_generation == UINT64_MAX) error = CP_UNAVAILABLE;
     else {
-        access_state->request = *r; access_state->queued = true; access_state->receipt = ++access_state->serial;
+        access_state->request = *r; access_state->request_by_code = false; access_state->queued = true; access_state->receipt = ++access_state->serial;
         access_state->receipt_state = CP_RESULT_ACCEPTED; access_state->receipt_error = CP_OK; *request = access_state->receipt;
     }
     portEXIT_CRITICAL(&access_lock); return error;
+}
+void app_control_access_code_snapshot(app_control_access_code_t *out)
+{
+    if (!out) return;
+    portENTER_CRITICAL(&access_lock);
+    *out = access_state ? access_state->code :
+        (app_control_access_code_t){.error = ESP_ERR_INVALID_STATE};
+    portEXIT_CRITICAL(&access_lock);
+}
+cp_error_t app_control_access_code_generate(uint64_t expected_revision)
+{
+    portENTER_CRITICAL(&access_lock);
+    cp_error_t error = CP_OK;
+    if (!access_state || !expected_revision || access_state->code.revision != expected_revision) error = CP_STALE;
+    else if (access_state->code.pending || access_state->queued || access_state->processing) error = CP_BUSY;
+    else if (expected_revision == UINT64_MAX) error = CP_UNAVAILABLE;
+    else access_state->code.pending = true;
+    portEXIT_CRITICAL(&access_lock);
+    return error;
+}
+static void generate_code(bool unlocked)
+{
+    portENTER_CRITICAL(&access_lock);
+    bool pending = access_state->code.pending;
+    portEXIT_CRITICAL(&access_lock);
+    if (!pending) return;
+    char digits[APP_CONTROL_CODE_DIGITS + 1U] = {0}, verify[sizeof(digits)] = {0};
+    esp_err_t error = unlocked ? ESP_OK : ESP_ERR_INVALID_STATE;
+    bool attempted = false;
+    if (error == ESP_OK) {
+        uint32_t random; esp_fill_random(&random, sizeof(random));
+        snprintf(digits, sizeof(digits), "%08" PRIu32, random % UINT32_C(100000000));
+        portENTER_CRITICAL(&access_lock);
+        bool unchanged = access_state->code.present && same(digits, access_state->code.digits, sizeof(digits));
+        portEXIT_CRITICAL(&access_lock);
+        if (unchanged) snprintf(digits, sizeof(digits), "%08" PRIu32,
+                                (random % UINT32_C(100000000) + 1U) % UINT32_C(100000000));
+        nvs_handle_t nvs;
+        error = nvs_open_from_partition("control", "ctrl_access", NVS_READWRITE, &nvs);
+        if (error == ESP_OK) {
+            attempted = true;
+            error = nvs_set_blob(nvs, "web_code", digits, sizeof(digits));
+            if (error == ESP_OK) error = nvs_commit(nvs);
+            size_t size = sizeof(verify);
+            if (error == ESP_OK) error = nvs_get_blob(nvs, "web_code", verify, &size);
+            if (error == ESP_OK && (size != sizeof(verify) || !same(digits, verify, sizeof(digits))))
+                error = ESP_ERR_INVALID_CRC;
+            nvs_close(nvs);
+        }
+    }
+    portENTER_CRITICAL(&access_lock);
+    access_state->code.error = error;
+    access_state->code.pending = false;
+    ++access_state->code.revision;
+    if (error == ESP_OK) {
+        memcpy(access_state->code.digits, digits, sizeof(digits));
+        access_state->code.known = access_state->code.present = true;
+        access_state->code_failures = 0;
+    } else if (attempted) {
+        access_state->code.known = access_state->code.present = false;
+        zero(access_state->code.digits, sizeof(access_state->code.digits));
+    }
+    portEXIT_CRITICAL(&access_lock);
+    zero(digits, sizeof(digits)); zero(verify, sizeof(verify));
+}
+cp_error_t app_control_access_pair_code(const char *client, const char *credential,
+                                        const char *label, const char *code,
+                                        const char *duration, uint64_t *request)
+{
+    access_record_t proposal = {.permissions = APP_CONTROL_ACCESS_INPUT | APP_CONTROL_ACCESS_MANAGE};
+    uint8_t secret[32];
+    if (!request || !unhex(client, proposal.principal.id, 16) || !label_valid(label) ||
+        !code_valid(code) || !duration || !unhex(credential, secret, sizeof(secret))) {
+        zero(secret, sizeof(secret)); return CP_INVALID;
+    }
+    cp_sha256(secret, sizeof(secret), proposal.principal.credential_sha256); zero(secret, sizeof(secret));
+    if (!strcmp(duration, "permanent")) proposal.duration = APP_CONTROL_ACCESS_PERMANENT;
+    else if (!strcmp(duration, "6h")) proposal.duration = APP_CONTROL_ACCESS_SIX_HOURS;
+    else if (!strcmp(duration, "24h")) proposal.duration = APP_CONTROL_ACCESS_DAY;
+    else return CP_INVALID;
+    snprintf(proposal.label, sizeof(proposal.label), "%s", label);
+    access_record_t list[CP_MAX_PRINCIPALS]; uint64_t revision; bool coherent;
+    unsigned count = records_version(list, &revision, &coherent), existing = count;
+    if (!coherent) return CP_STORAGE_UNCERTAIN;
+    for (unsigned i = 0; i < count; ++i) if (same(list[i].principal.id, proposal.principal.id, 16)) existing = i;
+    uint64_t now = ticks(); portENTER_CRITICAL(&access_lock);
+    cp_error_t error = CP_OK;
+    if (!access_state || !access_state->known || access_state->uncertain) error = CP_STORAGE_UNCERTAIN;
+    else if (!access_state->code.known || !access_state->code.present) error = CP_UNAVAILABLE;
+    else if (access_state->code.pending || access_state->queued || access_state->processing) error = CP_BUSY;
+    else if (access_state->pending_id && now < access_state->pending_until) error = CP_BUSY;
+    else if (revision != access_state->revision) error = CP_STALE;
+    else {
+        if (now - access_state->code_rate_start >= 60000U) {
+            access_state->code_rate_start = now; access_state->code_failures = 0;
+        }
+        if (access_state->code_failures >= 5) error = CP_BUSY;
+        else if (!same(code, access_state->code.digits, APP_CONTROL_CODE_DIGITS)) {
+            ++access_state->code_failures; error = CP_UNAUTHENTICATED;
+        } else if (access_state->serial == UINT64_MAX || revision == UINT64_MAX ||
+                   access_state->storage_generation == UINT64_MAX) error = CP_UNAVAILABLE;
+        else if (existing < count && (list[existing].principal.native_only ||
+                 !same(list[existing].principal.credential_sha256, proposal.principal.credential_sha256, 32))) error = CP_FORBIDDEN;
+        else if (existing == count && count == CP_MAX_PRINCIPALS) error = CP_BUSY;
+        else {
+            access_state->proposal = proposal;
+            access_state->pending_id = ++access_state->serial;
+            access_state->pending_until = now + APP_CONTROL_TRUST_WINDOW_MS;
+            access_state->request = (app_control_access_request_t){
+                .action = existing < count ? APP_CONTROL_ACCESS_EDIT : APP_CONTROL_ACCESS_APPROVE,
+                .expected_revision = revision, .pairing_request = access_state->pending_id,
+                .permissions = proposal.permissions, .duration = proposal.duration};
+            memcpy(access_state->request.client_id, proposal.principal.id, 16);
+            access_state->request_by_code = true;
+            access_state->request_code_revision = access_state->code.revision;
+            access_state->queued = true; access_state->receipt = access_state->pending_id;
+            access_state->receipt_state = CP_RESULT_ACCEPTED; access_state->receipt_error = CP_OK;
+            *request = access_state->receipt;
+        }
+    }
+    portEXIT_CRITICAL(&access_lock);
+    return error;
 }
 /* Single management owner; no caller holds access_lock during storage I/O. */
 static esp_err_t write_candidate(unsigned count, uint64_t generation, bool *attempted)
@@ -440,11 +613,14 @@ static void persist_expiry(void)
 void app_control_access_service(bool unlocked)
 {
     if (!access_state) { (void)app_control_access_init(); return; }
+    generate_code(unlocked);
     app_control_trust_snapshot_t trust; app_control_trust_snapshot(&trust);
     if (trust.present && trust.known && strcmp(trust.active_digest, access_state->trust_digest)) { (void)app_control_access_init(); return; }
     portENTER_CRITICAL(&access_lock);
     if (!access_state->queued) { portEXIT_CRITICAL(&access_lock); persist_expiry(); return; }
     app_control_access_request_t r = access_state->request;
+    bool by_code = access_state->request_by_code;
+    bool code_current = access_state->code.known && access_state->request_code_revision == access_state->code.revision;
     access_state->queued = false; access_state->processing = true;
     uint64_t generation = access_state->revision + 1;
     unsigned count = access_state->count;
@@ -454,7 +630,8 @@ void app_control_access_service(bool unlocked)
     portEXIT_CRITICAL(&access_lock);
     cp_error_t result = CP_OK;
     if (r.expected_revision + 1 != generation) result = CP_STALE;
-    if (!unlocked && (r.action == APP_CONTROL_ACCESS_APPROVE || r.action == APP_CONTROL_ACCESS_EDIT)) result = CP_LOCKED;
+    if (by_code && !code_current) result = CP_STALE;
+    if (!by_code && !unlocked && (r.action == APP_CONTROL_ACCESS_APPROVE || r.action == APP_CONTROL_ACCESS_EDIT)) result = CP_LOCKED;
     if ((r.action == APP_CONTROL_ACCESS_APPROVE || r.action == APP_CONTROL_ACCESS_REJECT) && !proposal) result = CP_STALE;
     if (result == CP_OK && r.action == APP_CONTROL_ACCESS_REJECT) {
         portENTER_CRITICAL(&access_lock); access_state->pending_id = 0; ++access_state->revision; portEXIT_CRITICAL(&access_lock);
@@ -499,6 +676,7 @@ void app_control_access_service(bool unlocked)
     portENTER_CRITICAL(&access_lock);
     access_state->processing = false; access_state->receipt_error = result;
     access_state->receipt_state = result == CP_OK ? CP_RESULT_APPLIED : CP_RESULT_FAILED;
+    if (by_code) access_state->pending_id = 0;
     zero(&access_state->request, sizeof(access_state->request));
     portEXIT_CRITICAL(&access_lock);
 }
@@ -529,18 +707,22 @@ cp_error_t app_control_access_pair_status(const char *client, const char *creden
         value = list[i]; found = true;
     }
     uint64_t wall = 0; bool clock = app_clock_wall_time(&wall);
-    if (found && value.suspended) return CP_BUSY;
+    bool suspended = found && value.suspended;
     if (found) status = !value.principal.enabled ? "rejected" : value.expired ? "expired" : value.duration != APP_CONTROL_ACCESS_PERMANENT && !clock ? "clock_unknown" :
         usable(&value, clock, wall) ? "approved" : "expired";
     uint64_t request = 0; bool proposal_match = false;
     portENTER_CRITICAL(&access_lock);
-    if (!found && access_state && access_state->known && same(id, access_state->proposal.principal.id, 16) &&
+    if (access_state && access_state->known &&
+        (!found || (access_state->request_by_code && (access_state->queued || access_state->processing))) &&
+        same(id, access_state->proposal.principal.id, 16) &&
         same(digest, access_state->proposal.principal.credential_sha256, 32)) {
         value = access_state->proposal; request = access_state->pending_id; proposal_match = true;
         status = request && ticks() < access_state->pending_until ? "pending" : "rejected";
     }
     portEXIT_CRITICAL(&access_lock);
-    if (!found && !proposal_match) return CP_UNAUTHENTICATED;
+    if ((suspended || !found) && !proposal_match) {
+        zero(digest, sizeof(digest)); return suspended ? CP_BUSY : CP_UNAUTHENTICATED;
+    }
     char fingerprint[65], expiry[32] = "null", permission_scopes[512]; hex(digest, 32, fingerprint); zero(digest, 32);
     if (value.expires) snprintf(expiry, sizeof(expiry), "\"%" PRIu64 "\"", value.expires);
     cp_scope_mask_t mask = value.principal.scopes;

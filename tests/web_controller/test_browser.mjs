@@ -15,13 +15,13 @@ async function reports(page) { return (await (await page.request.get(`${origin}/
 async function connect(page, first) {
   if (first) {
     await page.locator("#client-name").fill("Browser test");
+    await page.locator("#access-code").fill("12345678");
     await page.locator("#pair").click();
-    await waitText(page, "approval", "Waiting for approval");
-    await fixture(page, "approve");
-    await page.locator("#check").click();
   } else {
+    if ((await page.locator("#connection").textContent()) !== "Connected / idle") {
     if (!await page.locator("#pairing").evaluate(node => node.open)) await page.locator("#pair-title").click();
     await page.locator("#connect").click();
+    }
   }
   await waitText(page, "connection", "Connected / idle");
   assert.equal(await page.locator("#acquire").isEnabled(), true);
@@ -42,18 +42,25 @@ function observe(page) {
 }
 try {
   const context = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 1120, height: 900}, colorScheme: "light"});
+  const secure = origin.startsWith("https:");
+  if (!secure) {
+    // Chromium treats loopback as a secure context. Exercise the crypto API
+    // available to a normal LAN HTTP page without replacing getRandomValues.
+    await context.addInitScript(() => Object.defineProperty(crypto, "subtle", {value: undefined}));
+  }
   const page = await context.newPage(); observe(page);
   const response = await page.goto(origin);
   assert.match(response.headers()["content-security-policy"], /script-src 'self'/);
   assert(!response.headers()["content-security-policy"].includes("unsafe-inline"));
   assert.equal(response.headers()["cross-origin-resource-policy"], "same-origin");
+  if (!secure) assert.equal(await page.evaluate(() => typeof crypto.subtle), "undefined");
   await connect(page, true);
   const firstIdentity = await page.evaluate(() => JSON.parse(localStorage.getItem("mosaico.browser.identity.v1")).client_id);
   const cookies = await context.cookies();
-  const sessionCookie = cookies.find(cookie => cookie.name === "__Host-control");
-  assert(sessionCookie?.secure && sessionCookie.httpOnly && sessionCookie.sameSite === "Strict");
-  assert.equal(await page.evaluate(() => document.cookie.includes("__Host-control=")), false);
-  evidence.cases.push("browser-generated identity, actual pairing/access approval, secure HttpOnly cookie, CSRF login and explicit lease acquisition");
+  const sessionCookie = cookies.find(cookie => cookie.name === (secure ? "__Host-control" : "control-http"));
+  assert(sessionCookie && sessionCookie.secure === secure && sessionCookie.httpOnly && sessionCookie.sameSite === "Strict");
+  assert.equal(await page.evaluate(name => document.cookie.includes(`${name}=`), sessionCookie.name), false);
+  evidence.cases.push("browser-generated identity, device-code authorization, listener-specific HttpOnly cookie, CSRF login and explicit lease acquisition");
   assert.equal((await page.request.get(`${origin}/controller.js`, {headers: {Origin: "https://foreign.invalid"}})).status(), 403);
   assert.equal((await page.request.get(`${origin}/controller.js?extra=1`)).status(), 404);
   const noCsrf = await page.evaluate(async () => (await fetch("/api/v1/commands", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"})).status);
@@ -129,7 +136,8 @@ try {
   assert.equal(await page.locator("#keyboard-controls").evaluate(node => node.disabled), true);
   await page.locator("#disconnect").click(); await waitText(page, "connection", "Disconnected");
   await page.reload(); await waitText(page, "approval", "Access approved");
-  assert.equal(await page.locator("#connection").textContent(), "Disconnected");
+  await waitText(page, "connection", "Connected / idle");
+  assert(await page.locator("#mouse-controls").evaluate(node => node.disabled));
   evidence.cases.push("saved browser revisit remains idle, local takeover and replacement target terminate active control");
 
   const mobile = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 390, height: 844}, isMobile: true, hasTouch: true, deviceScaleFactor: 2, colorScheme: "dark"});
@@ -157,5 +165,5 @@ try {
   assert.deepEqual(errors, []);
   evidence.commands = commands;
   await writeFile(path.join(output, "browser-results.json"), JSON.stringify(evidence, null, 2) + "\n");
-  console.log(`PASS: ${evidence.cases.length} real Chromium HTTPS interaction groups; HID, local approval, trusted clock, NVS and SDK sockets are boundary substitutes`);
+  console.log(`PASS: ${evidence.cases.length} real Chromium ${secure ? "HTTPS" : "HTTP"} interaction groups; HID, local approval, trusted clock, NVS and SDK sockets are boundary substitutes`);
 } finally { await browser.close(); }

@@ -40,6 +40,9 @@ static esp_err_t store_error, commit_error, connect_error, http_error, mode_erro
 static esp_err_t set_blob_error, erase_error, http_stop_error, station_config_error;
 static unsigned commits, connects, stops, mode_calls, random_generation, destroyed_netifs, driver_deinits;
 static int mode;
+static wifi_ps_type_t power_mode;
+static esp_err_t power_read_error, power_write_error;
+static unsigned power_reads, power_writes, power_logs;
 static wifi_config_t station_config, ap_config;
 static char response[2048], response_status[64];
 static void (*created_task)(void *);
@@ -186,6 +189,22 @@ esp_err_t esp_wifi_set_config(int interface, wifi_config_t *config) {
 esp_err_t esp_wifi_set_mode(int value) {
     ++mode_calls; if (mode_error) return mode_error; mode = value; return ESP_OK;
 }
+void wifi_test_log(const char *tag, const char *format, ...) {
+    assert(!manager_lock_depth && !strcmp(tag, "app_wifi") && format);
+    ++power_logs;
+}
+esp_err_t esp_wifi_get_ps(wifi_ps_type_t *value) {
+    assert(!manager_lock_depth);
+    ++power_reads;
+    if (power_read_error == ESP_OK) *value = power_mode;
+    return power_read_error;
+}
+esp_err_t esp_wifi_set_ps(wifi_ps_type_t value) {
+    assert(!manager_lock_depth);
+    ++power_writes;
+    if (power_write_error == ESP_OK) power_mode = value;
+    return power_write_error;
+}
 esp_err_t esp_wifi_start(void) {
     radio_started = true;
     if (mode == WIFI_MODE_AP && dhcp_autostart) dhcp_status = ESP_NETIF_DHCP_STARTED;
@@ -314,6 +333,11 @@ static void reset(bool preserve) {
     dhcp_status = ESP_NETIF_DHCP_INIT;
     if (!preserve) control_ap_exists = false;
     memset(&s_network, 0, sizeof(s_network));
+    memset(&s_input_ps, 0, sizeof(s_input_ps));
+    s_input_lease_deadline = s_input_lease_network = 0;
+    power_mode = WIFI_PS_MAX_MODEM;
+    power_read_error = power_write_error = ESP_OK;
+    power_reads = power_writes = power_logs = 0;
     dns_clears = tcpip_calls = clock_ready_calls = 0;
     tcpip_owner = clock_ready = false; tcpip_error = ip_read_error = ESP_OK;
     tcpip_hook = ip_read_hook = NULL;
@@ -989,6 +1013,68 @@ static void test_selection_owner_domains(void) {
     assert(connects==1 && !s_pending.password[0]);
 }
 
+static void fail_station_attempt(uint16_t reason)
+{
+    linked = false;
+    wifi_event_sta_disconnected_t event = {.reason = reason};
+    wifi_event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &event);
+    service_step();
+    app_wifi_snapshot_t wifi = snapshot();
+    assert(wifi.state == APP_WIFI_BACKOFF && !wifi.lan_ready);
+    assert(wifi.connection_error == ESP_FAIL && wifi.disconnect_reason == reason);
+}
+
+static void test_boot_retries_saved_network_after_auth_failure(void)
+{
+    seed_network();
+    reset(true);
+    app_wifi_profiles_snapshot_t saved;
+    app_wifi_profiles_snapshot(&saved);
+    assert(saved.known && saved.count == 1 && saved.profiles[0].enabled);
+    assert(snapshot().configured && connects == 0);
+    ++clock_ms;
+    service_step();
+    assert(snapshot().state == APP_WIFI_CONNECTING && connects == 1);
+
+    const uint16_t reasons[] = {WIFI_REASON_AUTH_FAIL, WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT,
+        WIFI_REASON_HANDSHAKE_TIMEOUT};
+    const uint32_t delays[] = {1000, 2000, 4000, 8000, 16000, RETRY_MAX_MS, RETRY_MAX_MS};
+    for (unsigned i = 0; i < sizeof(delays) / sizeof(delays[0]); ++i) {
+        fail_station_attempt(reasons[i % (sizeof(reasons) / sizeof(reasons[0]))]);
+        assert(snapshot().retry_in_ms == delays[i]);
+        clock_ms += delays[i] - 1;
+        service_step();
+        assert(connects == i + 1 && !snapshot().setup_active);
+        ++clock_ms;
+        service_step();
+        assert(connects == i + 2 && snapshot().state == APP_WIFI_CONNECTING);
+    }
+
+    linked = true;
+    service_step();
+    app_wifi_snapshot_t wifi = snapshot();
+    assert(wifi.lan_ready && wifi.state == APP_WIFI_CONNECTED);
+    assert(wifi.connection_error == ESP_OK && wifi.disconnect_reason == 0 && wifi.retry_in_ms == 0);
+    fail_station_attempt(WIFI_REASON_AUTH_FAIL);
+    assert(snapshot().retry_in_ms == 1000);
+    const unsigned before_join = connects;
+    assert(app_wifi_profile_join(saved.profiles[0].id, saved.revision) == ESP_OK);
+    service_step();
+    assert(connects == before_join + 1 && snapshot().state == APP_WIFI_CONNECTING && commits == 0);
+
+    app_wifi_profile_save_t disabled = {.expected_revision = saved.revision, .keep_password = true};
+    memcpy(disabled.id, saved.profiles[0].id, sizeof(disabled.id));
+    memcpy(disabled.ssid, saved.profiles[0].ssid, sizeof(disabled.ssid));
+    assert(app_wifi_profile_save(&disabled) == ESP_OK);
+    service_step();
+    reset(true);
+    app_wifi_profiles_snapshot(&saved);
+    assert(saved.known && saved.count == 1 && !saved.profiles[0].enabled);
+    clock_ms += RETRY_MAX_MS;
+    service_step();
+    assert(!snapshot().configured && snapshot().state == APP_WIFI_IDLE && connects == 0);
+}
+
 static void test_multiple_profiles(void) {
     reset(false);
     app_wifi_profiles_snapshot_t view;app_wifi_profiles_snapshot(&view);
@@ -1065,6 +1151,60 @@ static void test_profile_radio_failure_preserves_durable_evidence(void) {
     station_config_error=ESP_OK;
 }
 static void lost_ip(void) { wifi_event(NULL, IP_EVENT, IP_EVENT_STA_LOST_IP, NULL); }
+static void test_remote_input_power_save(void)
+{
+    seed_network();
+    assert(snapshot().lan_ready && !power_reads && !power_writes);
+    app_wifi_set_remote_input_deadline(clock_ms + 900);
+    assert(!power_writes);
+    service_step();
+    assert(power_mode == WIFI_PS_NONE && power_reads == 2 && power_writes == 1);
+    app_wifi_set_remote_input_deadline(clock_ms + 1000);
+    service_step();
+    assert(power_reads == 2 && power_writes == 1);
+
+    app_wifi_set_remote_input_deadline(0);
+    power_write_error = ESP_FAIL;
+    service_step();
+    service_step();
+    assert(power_mode == WIFI_PS_NONE && power_writes == 3 && power_logs == 2);
+    power_write_error = ESP_OK;
+    service_step();
+    assert(power_mode == WIFI_PS_MAX_MODEM && power_writes == 4 && power_logs == 3);
+
+    app_wifi_set_remote_input_deadline(clock_ms + 900);
+    service_step();
+    clock_ms += 900;
+    service_step();
+    assert(power_mode == WIFI_PS_MAX_MODEM && power_writes == 6);
+
+    app_wifi_set_remote_input_deadline(0);
+    app_wifi_set_remote_input_deadline(clock_ms + 900);
+    service_step();
+    lost_ip();
+    service_step();
+    assert(snapshot().lan_ready && power_mode == WIFI_PS_MAX_MODEM && power_writes == 8);
+    app_wifi_set_remote_input_deadline(clock_ms + 1000);
+    service_step();
+    assert(power_writes == 8);
+
+    app_wifi_set_remote_input_deadline(0);
+    app_wifi_set_remote_input_deadline(clock_ms + 900);
+    power_read_error = ESP_FAIL;
+    service_step();
+    unsigned reads = power_reads;
+    power_read_error = ESP_OK;
+    service_step();
+    assert(power_reads == reads && power_writes == 8);
+    app_wifi_set_remote_input_deadline(0);
+    service_step();
+    app_wifi_set_remote_input_deadline(clock_ms + 900);
+    service_step();
+    assert(power_mode == WIFI_PS_NONE && power_writes == 9);
+    assert(app_wifi_select_control_ap(true, NULL) == ESP_OK);
+    service_step();
+    assert(power_mode == WIFI_PS_MAX_MODEM && power_writes == 10);
+}
 static void entry_is_closed(void) { assert(!snapshot().lan_ready && !clock_ready); }
 static void lose_after_entry_commit(void) { manager_unlock_hook = lost_ip; }
 static void disconnect_during_entry(void)
@@ -1314,12 +1454,12 @@ static void test_control_ap_driver_and_dhcp_recovery(void)
 int main(void) {
     test_setup_and_reconnect(); test_security_and_limits(); test_failures();
     test_cleanup_recovery(); test_storage_uncertainty(); test_unreadable_recovery();
-    test_profile_join_atomic_admission();
+    test_profile_join_atomic_admission(); test_boot_retries_saved_network_after_auth_failure();
     test_selection_owner_domains();
     test_device_station_provisioning(); test_scan_bounds_and_identity();
     test_scan_cancel_cleanup_and_pressure(); test_station_storage_and_scan_reconnect();
     test_scan_diagnostics_preserve_failed_generation();
-    test_network_entry_dns_barrier(); test_persistent_control_ap();
+    test_network_entry_dns_barrier(); test_remote_input_power_save(); test_persistent_control_ap();
     test_control_mode_storage_reconciliation(); test_control_mode_preserves_station_profile_uncertainty();
     test_control_ap_driver_and_dhcp_recovery();
     test_selected_editor_reservations();test_multiple_profiles();test_profile_radio_failure_preserves_durable_evidence();

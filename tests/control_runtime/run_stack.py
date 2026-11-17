@@ -22,8 +22,7 @@ def main():
     code+=section('static void publish(', 'static bool random_source(')
     code+=section('static bool principal_source(', 'static bool available(')
     code+=section('static const char *accepted_control_host(', '#include "app_control_server_media.inc"')
-    code+=section('static esp_err_t initialize(', 'esp_err_t app_control_server_start(')
-    code+=section('esp_err_t app_control_server_start(', 'esp_err_t app_control_server_stop(')
+    code+=section('static esp_err_t initialize(', 'esp_err_t app_control_server_publish_state(')
     code+=fixture.split('/* TESTS */')[1]
     compiler=os.environ.get('CC') or shutil.which('clang') or shutil.which('cc')
     with tempfile.TemporaryDirectory(prefix='control-stack-') as directory:

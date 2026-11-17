@@ -269,6 +269,18 @@ static cp_error_t pairing(void *unused, bool status, const char *client, const c
     if (n < 0 || (size_t)n >= capacity) return CP_TOO_LARGE;
     *length = (size_t)n; return CP_OK;
 }
+static cp_error_t pairing_code(void *unused, const char *client, const char *credential,
+    const char *label, const char *code, const char *duration, char *json, size_t capacity, size_t *length)
+{
+    (void)unused;
+    uint64_t request;
+    cp_error_t error = app_control_access_pair_code(client, credential, label, code, duration, &request);
+    if (error != CP_OK) return error;
+    int n = snprintf(json, capacity, "{\"state\":\"pending\",\"request_id\":\"%llu\"}",
+                     (unsigned long long)request);
+    if (n < 0 || (size_t)n >= capacity) return CP_TOO_LARGE;
+    *length = (size_t)n; return CP_OK;
+}
 static cp_error_t read_resource(void *unused, const cp_identity_t *who, const char *resource,
                                 char *json, size_t capacity, size_t *length)
 {
@@ -1155,12 +1167,13 @@ static void worker(void *unused)
                                 .read = read_resource,
                                 .principal = principal_source,
                                 .input_authorized = input_authorized,
-                                .pairing = pairing};
+                                .pairing = pairing, .pairing_code = pairing_code};
     (void)app_control_access_init();
     app_clock_config_t clock_config = {0};
     (void)app_clock_init(&clock_config);
     (void)app_update_init(NULL);
-    uint64_t next_start = 0;
+    uint64_t next_start = 0, next_http_start = 0;
+    char http_host[APP_WIFI_IP_CAPACITY] = {0};
     for (;;) {
         app_wifi_snapshot_t wifi;
         app_wifi_get_snapshot(&wifi);
@@ -1206,14 +1219,14 @@ static void worker(void *unused)
                 heap_caps_free(p);
             }
         }
-        app_control_server_snapshot_t server;
+        app_control_server_snapshot_t server, web;
         app_control_server_snapshot(&server);
+        app_control_server_http_snapshot(&web);
         bool network_ready = !wifi.control_switch &&
             (wifi.control_ap ? wifi.control_ap_ready : wifi.lan_ready);
-        app_wifi_set_backend_state(network_ready && server.state == APP_CONTROL_READY && server.tls,
-                                   server.state == APP_CONTROL_READY ? ESP_OK
-                                   : server.error != ESP_OK          ? server.error
-                                   : trust_view.error != ESP_OK      ? trust_view.error
+        app_wifi_set_backend_state(network_ready && web.state == APP_CONTROL_READY,
+                                   web.state == APP_CONTROL_READY ? ESP_OK
+                                   : web.error != ESP_OK          ? web.error
                                                                      : ESP_ERR_INVALID_STATE);
         portENTER_CRITICAL(&runtime_lock);
         bool approved = runtime->approve_pending;
@@ -1221,11 +1234,28 @@ static void worker(void *unused)
         bool state_known = runtime->state_known;
         cp_device_state_t state = runtime->state;
         portEXIT_CRITICAL(&runtime_lock);
-        app_control_access_service(state_known && !state.locked && !app_update_flash_busy());
+        if (!app_update_flash_busy()) app_control_access_service(state_known && !state.locked);
         if (wifi.control_switch) {
             next_start = 0;
-            if (server.state == APP_CONTROL_STOPPED || server.state == APP_CONTROL_ERROR)
+            if ((server.state == APP_CONTROL_STOPPED || server.state == APP_CONTROL_ERROR) &&
+                (web.state == APP_CONTROL_STOPPED || web.state == APP_CONTROL_ERROR))
                 app_wifi_control_listener_closed(wifi.control_switch);
+        }
+        const char *address = wifi.control_ap ? APP_WIFI_CONTROL_AP_IP : wifi.ip;
+        if (!network_ready || (http_host[0] && strcmp(http_host, address))) {
+            next_http_start = 0;
+            if (web.state == APP_CONTROL_READY || web.state == APP_CONTROL_STARTING)
+                (void)app_control_server_stop_http();
+            if (web.state == APP_CONTROL_STOPPED || web.state == APP_CONTROL_ERROR) http_host[0] = 0;
+        } else if ((web.state == APP_CONTROL_STOPPED || web.state == APP_CONTROL_ERROR) && now_ms() >= next_http_start) {
+            char origin[APP_WIFI_IP_CAPACITY + 8];
+            snprintf(origin, sizeof(origin), "http://%s", address);
+            app_control_server_config_t config = {.abi_version = APP_CONTROL_SERVER_ABI,
+                .interface_key = wifi.control_ap ? "WIFI_AP_DEF" : "WIFI_STA_DEF",
+                .allowed_host = address, .browser_origin = origin, .coordinator = callbacks};
+            esp_err_t started = app_control_server_start_http(&config);
+            if (started == ESP_OK) snprintf(http_host, sizeof(http_host), "%s", address);
+            next_http_start = now_ms() + 5000U;
         }
         if (trust_view.import_window || !network_ready) {
             if (server.state == APP_CONTROL_READY || server.state == APP_CONTROL_STARTING) {
@@ -1252,7 +1282,7 @@ static void worker(void *unused)
             error = app_control_trust_start_server(&callbacks, wifi.control_ap);
             next_start = now_ms() + 5000;
         }
-        if (state_known && server.state == APP_CONTROL_READY) {
+        if (state_known && (server.state == APP_CONTROL_READY || web.state == APP_CONTROL_READY)) {
             (void)app_control_server_publish_state(&state);
         }
         for (unsigned i = 0; i < INBOX_CAPACITY; ++i) {
@@ -1266,11 +1296,12 @@ static void worker(void *unused)
             wipe(runtime->token, sizeof(runtime->token));
         }
         app_control_server_snapshot(&server);
+        app_control_server_http_snapshot(&web);
         app_control_runtime_snapshot_t view = {.initialized = true,
                                                .commissioning_open = trust_view.import_window,
                                                .usb_import_active = runtime->importing,
                                                .trust = trust_view,
-                                               .server = server,
+                                               .server = server, .web = web,
                                                .error = error};
         app_clock_snapshot(&view.clock);
         portENTER_CRITICAL(&runtime_lock);

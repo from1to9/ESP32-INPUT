@@ -242,6 +242,9 @@ esp_err_t app_wifi_verify_storage(void);
  * cancels scans and drains already admitted work before flash may be reserved.
  * Read/status and release/stop remain usable. The active STA link stays up. */
 void app_wifi_set_maintenance(bool active);
+/* Copy the coordinator-owned active input lease deadline (zero when idle).
+ * Only the Wi-Fi worker may change the driver's power save mode. */
+void app_wifi_set_remote_input_deadline(uint64_t deadline_ms);
 /* Read-model observation from the actual control-runtime owner, not a client
  * declaration. It never changes radio or credential behavior. */
 void app_wifi_set_backend_state(bool available, esp_err_t error);

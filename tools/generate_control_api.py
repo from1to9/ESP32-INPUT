@@ -83,6 +83,12 @@ def generate():
     envelope={'v':{'const':1},'boot_id':{'type':'string','pattern':'^[0-9a-f]{32}$'},'session_id':{'type':'string','pattern':'^[0-9a-f]{32}$'},'request_id':{'type':'string','pattern':'^[0-9a-f]{32}$'},'seq':{'type':'integer','minimum':1,'maximum':4294967295},'deadline_ms':{'type':'string','format':'uint64'},'management_generation':{'type':['string','null'],'format':'uint64'},'resource_revision':{'type':['string','null'],'format':'uint64'},'epoch':{'type':['string','null'],'format':'uint64'},'transport_generation':{'type':['string','null'],'format':'uint64'},'target_id':{'type':['string','null'],'maxLength':64},'lease_id':{'type':['string','null'],'format':'id128'},'ui_revision':{'type':['string','null'],'format':'uint64'},'op':{'type':'string'},'args':{'type':'object'}}
     command={'$schema':'https://json-schema.org/draft/2020-12/schema','$id':'urn:esp32-input:command:v1','type':'object','additionalProperties':False,'properties':envelope,'required':['v','boot_id','session_id','request_id','seq','deadline_ms','op','args'],'oneOf':[{'properties':{'op':{'const':o['name']},'args':o['arguments']}} for o in data['operations']]}
     openapi={'openapi':'3.1.0','info':{'title':'ESP32 Input authenticated control','version':'1.0.0'},'servers':[{'url':'https://{device}','variables':{'device':{'default':'device.invalid'}}}],'security':[{'nativeSession':[]},{'browserSession':[]}],'paths':{'/api/v1/commands':{'post':{'operationId':'commands','requestBody':{'required':True,'content':{'application/json':{'schema':command}}},'responses':{'200':{'description':'Known terminal result or duplicate'},'202':{'description':'Accepted bounded work; not hardware completion'},'400':{'description':'Rejected schema or identity'},'401':{'description':'Unauthenticated'},'403':{'description':'Forbidden scope/origin/CSRF'},'409':{'description':'Stale or conflicting state'},'503':{'description':'Unavailable capability/resource'}}}}},'components':{'securitySchemes':{'nativeSession':{'type':'http','scheme':'bearer'},'browserSession':{'type':'apiKey','in':'cookie','name':'__Host-control'}}}}
+    openapi['servers'][0]['description']='Mosaico enrolled HTTPS API, WSS and browser controller'
+    openapi['servers'].append({'url':'http://{device}','description':'Mosaico authorized local browser controller on LAN or control hotspot. Native Bearer login and WSS require HTTPS.',
+                               'variables':{'device':{'default':'device.invalid'}}})
+    openapi['security'].append({'httpBrowserSession':[]})
+    openapi['components']['securitySchemes']['httpBrowserSession']={'type':'apiKey','in':'cookie','name':'control-http',
+         'description':'Local HTTP browser cookie with HttpOnly and SameSite=Strict. Requests that change state require exact Origin and the session CSRF token.'}
     for name in ['state','capabilities','operations','config','config/schema','jobs/{id}','requests/{id}','wifi/scans/{id}','wifi/profiles','bluetooth/peers','firmware/releases','audio/state','audio/capabilities','imu','firmware/policy','speech/state','recordings','capture/grants','clock','trust','sessions/current','firmware/state']:
         openapi['paths']['/api/v1/'+name]={'get':{'responses':{'200':{'description':'Scoped bounded resource; paginate metadata'},'401':{'description':'Unauthenticated'},'403':{'description':'Forbidden'},'503':{'description':'Provider unavailable'}}}}
         if '{id}' in name:openapi['paths']['/api/v1/'+name]['get']['parameters']=[{'name':'id','in':'path','required':True,'schema':{'type':'string','maxLength':64}}]
@@ -92,7 +98,7 @@ def generate():
             if operation['name']=='sensors.samples':
                 route['parameters']=[{'name':key,'in':'query','required':True,'schema':schema} for key,schema in operation['arguments']['properties'].items()]
             openapi['paths'][operation['resource']]={'get':route}
-    openapi['paths']['/api/v1/ws-ticket']={'post':{'description':'Browser cookie, exact Origin and X-CSRF-Token required. Empty JSON-content-type POST issues one random ticket, replacing the previous ticket for this session. Consume once before WSS upgrade within 10000 ms.','parameters':[{'name':'X-CSRF-Token','in':'header','required':True,'schema':{'type':'string','pattern':'^[0-9a-f]{32}$'}}],'responses':{'200':{'description':'Single-use ticket; never log or put in URL','content':{'application/json':{'schema':O({'ticket':{'type':'string','pattern':'^[0-9a-f]{64}$'},'expires_in_ms':{'const':10000}},['ticket','expires_in_ms'])}}},'401':{'description':'Session or CSRF rejected'},'503':{'description':'WSS unavailable'}}}}
+    openapi['paths']['/api/v1/ws-ticket']={'post':{'description':'HTTPS browser cookie, exact Origin and X-CSRF-Token required. Empty JSON-content-type POST issues one random ticket, replacing the previous ticket for this session. Consume once before WSS upgrade within 10000 ms.','security':[{'browserSession':[]}],'servers':[openapi['servers'][0]],'parameters':[{'name':'X-CSRF-Token','in':'header','required':True,'schema':{'type':'string','pattern':'^[0-9a-f]{32}$'}}],'responses':{'200':{'description':'Single-use ticket; never log or put in URL','content':{'application/json':{'schema':O({'ticket':{'type':'string','pattern':'^[0-9a-f]{64}$'},'expires_in_ms':{'const':10000}},['ticket','expires_in_ms'])}}},'401':{'description':'Session or CSRF rejected'},'503':{'description':'WSS unavailable'}}}}
     client_id={'type':'string','pattern':'^[0-9a-f]{32}$'}
     credential={'type':'string','pattern':'^[0-9a-f]{64}$'}
     pairing_status=O({'state':{'enum':['pending','approved','rejected','expired','clock_unknown']},
@@ -100,15 +106,25 @@ def generate():
                       'scopes':{'type':'array','items':{'enum':scopes}},'duration':{'enum':['6h','24h','permanent']},
                       'expires_unix_seconds':{'type':['string','null'],'format':'uint64'},'request_id':{'type':'string','format':'uint64'}},
                      ['state','client_id','fingerprint','permissions','scopes','duration','expires_unix_seconds','request_id'])
-    for route,properties,code,response_schema in [
-        ('requests',{'client_id':client_id,'credential_sha256':credential,'label':{'type':'string','minLength':1,'maxLength':32,'pattern':'^[ -~]+$'}},'202',
-         O({'state':{'const':'pending'},'request_id':{'type':'string','format':'uint64'},'fingerprint':credential},['state','request_id','fingerprint'])),
-        ('status',{'client_id':client_id,'credential':credential},'200',pairing_status)]:
+    label={'type':'string','minLength':1,'maxLength':32,'pattern':'^[ -~]+$'}
+    pending={'state':{'const':'pending'},'request_id':{'type':'string','format':'uint64'}}
+    for route,properties,code,response_schema,description in [
+        ('requests',{'client_id':client_id,'credential_sha256':credential,'label':label},'202',
+         O(dict(pending,fingerprint=credential),['state','request_id','fingerprint']),
+         'Same-origin HTTPS JSON. Submit a proposal for physical approval on Mosaico. A proposal expires after 120 seconds.'),
+        ('code',{'client_id':client_id,'credential':dict(credential,writeOnly=True),'label':label,
+                 'code':{'type':'string','pattern':'^[0-9]{8}$','writeOnly':True},
+                 'duration':{'enum':['6h','24h','permanent']}},'202',
+         O(pending,['state','request_id']),
+         'Same-origin Mosaico HTTP or HTTPS JSON. A current device access code admits a durable browser grant. Poll pairing status with the browser credential. This endpoint creates no session or input lease.'),
+        ('status',{'client_id':client_id,'credential':dict(credential,writeOnly=True)},'200',pairing_status,
+         'Same-origin Mosaico HTTP or HTTPS JSON. Read browser authorization status using that browser credential.')]:
         openapi['paths']['/api/v1/pairing/'+route]={'post':{'security':[],
-            'description':'Exact same-origin HTTPS JSON only. Proposals expire after 120 seconds and require physical device approval. Status proves this browser credential; wrong/unknown credentials are rejected. This endpoint never starts an input lease.',
+            'description':description,
             'requestBody':{'required':True,'content':{'application/json':{'schema':O(properties,list(properties))}}},
-            'responses':{code:{'description':'Pending proposal or credential-proved status','content':{'application/json':{'schema':response_schema}}},
-                         '400':{'description':'Invalid schema'},'401':{'description':'Credential not proved'},'403':{'description':'Origin or existing identity rejected'},'409':{'description':'Another proposal or local save is busy'},'503':{'description':'Trusted storage unavailable'}}}}
+            'responses':{code:{'description':'Pending authorization or credential-proved status','content':{'application/json':{'schema':response_schema}}},
+                         '400':{'description':'Invalid schema'},'401':{'description':'Code or browser credential rejected'},'403':{'description':'Origin or existing identity rejected'},'409':{'description':'Authorization state changed'},'429':{'description':'Access owner busy, capacity reached or attempts rate limited'},'503':{'description':'Trusted storage unavailable or uncertain'}}}}
+    openapi['paths']['/api/v1/pairing/requests']['post']['servers']=[openapi['servers'][0]]
     tools=[]
     context=O({k:v for k,v in envelope.items() if k in ['management_generation','resource_revision','epoch','transport_generation','target_id','ui_revision']})
     for o in data['operations']:
