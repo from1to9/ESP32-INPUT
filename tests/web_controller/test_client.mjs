@@ -39,25 +39,26 @@ function padFixture() {
   const controls = {disabled: false};
   const $ = name => name === "pad" ? pointer : controls;
   const start = source.indexOf('  $("pad").onpointerdown =');
-  const end = source.indexOf('  }, PAD_CHANNEL_BATCH_MS);', start) + '  }, PAD_CHANNEL_BATCH_MS);'.length;
+  const end = source.indexOf('\n  setInterval(() => {\n    if (!client.session', start);
   const stop = source.indexOf('  $("stop").onclick =');
   const stopEnd = source.indexOf('\n  for (const mode', stop);
   assert(start >= 0 && end > start);
   const constants = source.match(/^const PAD_.*;$/gm).join("\n");
-  let tick, queued;
-  const mount = new Function("$", "client", "act", "setInterval",
+  let sendTimer, queued;
+  const microtasks = [];
+  const mount = new Function("$", "client", "act", "setInterval", "queueMicrotask",
     `${constants}\nlet pad = null, movement = null, lastMovementAt = 0;
      ${source.slice(start, end)}\n${source.slice(stop, stopEnd)}
      return () => { pad = movement = null; };`);
   const clear = mount($, f.client, run => { queued = run(); }, (run, interval) => {
     assert.equal(interval, 30);
-    tick = run;
-  });
+    sendTimer = run;
+  }, run => microtasks.push(run));
   f.client.state.mode = "mouse";
   f.state.mode = "mouse";
   f.client.stateAt = 0;
   f.client.onchange = () => { if (!f.client.controlled) clear(); };
-  const motions = [];
+  const motions = [], sentAt = [];
   f.client.motionChannel = {
     motionTerminal: true,
     exchange: async command => {
@@ -66,6 +67,7 @@ function padFixture() {
         lease_active: true, lease_id: lease, lease_expires_ms: "4100"};
       assert.equal(command.op, "mouse.move_relative");
       motions.push(command);
+      sentAt.push(performance.now());
       return {state: "sent", error: "ok", next_seq, command_key: "12"};
     },
     close() {},
@@ -73,8 +75,9 @@ function padFixture() {
   const fire = (kind, x = 0, y = 0, id = 7) => pointer["onpointer" + kind]({
     clientX: x, clientY: y, pointerId: id, pointerType: "touch", preventDefault() {},
   });
-  return {...f, motions, fire, stop: () => { controls.onclick(); return queued; },
-    tick: () => { queued = undefined; tick(); return queued; }};
+  const run = action => { queued = undefined; action?.(); return queued; };
+  return {...f, motions, sentAt, fire, stop: () => { controls.onclick(); return queued; },
+    tick: () => run(sendTimer), release: () => run(microtasks.shift()), microtasks};
 }
 function holdState(f) {
   let entered, resume;
@@ -86,6 +89,22 @@ function holdState(f) {
     return request(path, options);
   };
   return {paused, resume};
+}
+function holdPadCommand(f, nowAtWrite = () => {}, failure = null) {
+  let submitted, finish;
+  const started = new Promise(resolve => { submitted = resolve; });
+  const proceed = new Promise(resolve => { finish = resolve; });
+  const exchange = f.client.motionChannel.exchange;
+  f.client.motionChannel.exchange = async command => {
+    f.client.motionChannel.exchange = exchange;
+    nowAtWrite();
+    const reply = exchange(command);
+    submitted();
+    await proceed;
+    if (failure) throw failure;
+    return reply;
+  };
+  return {started, finish};
 }
 for (let code = 32; code <= 126; ++code) assert.equal(validateText(String.fromCharCode(code)), String.fromCharCode(code));
 for (const text of ["", "x".repeat(33), "A\nB", "A\rB", "A\tB", "ok\u4e2d", "ok😀", "A\0B", "x\x7f"]) {
@@ -388,7 +407,7 @@ for (const lostReply of [false, true]) {
       sent(); await result;
       return response;
     };
-    now = 2060;
+    now = 2080;
     f.fire("move", 90, 8);
     const inFlight = f.tick();
     await sending;
@@ -482,6 +501,80 @@ for (const lostReply of [false, true]) {
   }
 }
 {
+  const realPerformance = globalThis.performance;
+  let now;
+  globalThis.performance = {now: () => now};
+  try {
+    for (const scenario of ["fresh", "empty", "expired", "wait", "renew", "stop", "new contact", "unknown", "zero", "legacy"]) {
+      now = 2000;
+      const f = padFixture();
+      f.client.stateAt = now;
+      if (scenario === "legacy") f.client.motionChannel.motionTerminal = false;
+      if (scenario === "stop") {
+        const fetcher = f.client.fetcher;
+        f.client.fetcher = (path, options) => options.method === "DELETE" ?
+          Promise.resolve({status: 200, json: async () => ({})}) : fetcher(path, options);
+      }
+      const held = holdPadCommand(f, () => { if (scenario === "wait") now += 8; },
+        scenario === "unknown" ? new Error("Unknown after socket write") : null);
+      f.fire("down");
+      if (scenario !== "renew") f.fire("move", 2, 1);
+      const first = scenario === "renew" ? f.client.run("control.renew") : f.tick();
+      await held.started;
+      now = scenario === "wait" ? 2015 : 2040;
+      if (scenario !== "empty") f.fire("move", 20, -3);
+      if (scenario === "zero") f.fire("move", 2, 1);
+      if (scenario === "expired") {
+        now = 2189;
+        f.fire("move", 42, 26);
+        now = 2190;
+      }
+      if (scenario === "new contact") {
+        f.fire("up");
+        f.fire("down", 10, 3, 8);
+        f.fire("move", 14, 9, 8);
+      }
+      if (scenario === "stop") await f.stop();
+      held.finish();
+      if (scenario === "unknown" || scenario === "stop") await assert.rejects(first);
+      else await first;
+      assert.equal(f.motions.length, scenario === "renew" ? 0 : 1, scenario + " sends nothing synchronously on release");
+      const queued = f.release();
+      if (["fresh", "new contact", "renew"].includes(scenario)) {
+        assert(queued, scenario + " submits on release before any timer tick");
+        await queued;
+        const args = scenario === "fresh" ? {dx: 18, dy: -4} :
+          scenario === "renew" ? {dx: 20, dy: -3} : {dx: 4, dy: 6};
+        assert.deepEqual(f.motions.at(-1).args, args);
+        assert.equal(f.motions.at(-1).seq, 2);
+      } else {
+        assert.equal(queued, undefined, scenario + " does not submit on release");
+      }
+      assert.equal(f.microtasks.length, 0);
+      if (scenario === "wait") {
+        now = 2037;
+        assert.equal(f.tick(), undefined, "29 ms after actual WS write is too early");
+        now = 2038;
+        await f.tick();
+        assert.deepEqual(f.sentAt, [2008, 2038], "timer submits at 30 ms from the actual write");
+        assert.deepEqual(f.motions[1].args, {dx: 18, dy: -4});
+      } else if (scenario === "expired") {
+        assert.equal(f.tick(), undefined, "the oldest sample expires inclusively on release");
+        f.fire("move", 47, 23);
+        await f.tick();
+        assert.deepEqual(f.motions[1].args, {dx: 5, dy: -3}, "expired deltas cannot leak into fresh input");
+      } else if (scenario === "legacy") {
+        await f.tick();
+        assert.deepEqual(f.motions[1].args, {dx: 18, dy: -4}, "legacy WS retains its timer-only send");
+      } else {
+        assert.equal(f.tick(), undefined, scenario + " leaves no motion to replay");
+      }
+    }
+  } finally {
+    globalThis.performance = realPerformance;
+  }
+}
+{
   const f = fixture();
   let finish;
   f.client.fetcher = () => new Promise(resolve => { finish = resolve; });
@@ -491,4 +584,4 @@ for (const lostReply of [false, true]) {
   await assert.rejects(reading, /session changed/);
   assert.equal(f.client.session, null, "late reads must never restore a closed session");
 }
-console.log("PASS: whole-text US ANSI validation, typed single-submit envelopes, cookie/CSRF options, retained progress, no replay after lost replies and target/owner/readiness invalidation");
+console.log("PASS: typed single-submit envelopes, authority invalidation, pad freshness and negotiated WS lane release");

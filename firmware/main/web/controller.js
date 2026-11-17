@@ -150,6 +150,8 @@ export class Controller {
     this.lastTotal = null;
     this.message = "Nothing sent.";
     this.onchange = () => {};
+    this.onInputLaneReleased = () => {};
+    this.lastPadSubmissionAt = -Infinity;
     this.generation = 0;
   }
   get foregroundBusy() { return this.busy && !this.renewing && !this.moving; }
@@ -330,8 +332,15 @@ export class Controller {
         if (!readSample) this.message = describeResult(admitted, total);
         this.changed();
       } : undefined;
-      const response = channel ? {json: await channel.exchange(envelope, moveAccepted)} :
-        await this.request("/api/v1/commands", "POST", envelope);
+      let response;
+      if (channel) {
+        const reply = channel.exchange(envelope, moveAccepted);
+        // exchange starts the socket write before returning its promise.
+        if (moveAccepted && sample) this.lastPadSubmissionAt = performance.now();
+        response = {json: await reply};
+      } else {
+        response = await this.request("/api/v1/commands", "POST", envelope);
+      }
       answer = response.json;
       const next = Number(answer.next_seq);
       if (!Number.isInteger(next) || (next !== seq && next !== seq + 1)) throw new Error("Missing sequence acknowledgement.");
@@ -408,7 +417,11 @@ export class Controller {
       if (generation === this.generation) this.halt(this.uncertain ? this.message : error.message);
       throw error;
     }
-    finally { this.busy = this.renewing = this.moving = false; this.changed(); }
+    finally {
+      this.busy = this.renewing = this.moving = false;
+      this.changed();
+      this.onInputLaneReleased();
+    }
   }
   async acquire() {
     if (!this.session || this.uncertain) throw new Error("Connect a fresh browser session first.");
@@ -1076,13 +1089,22 @@ function mount() {
     if (!moves[event.key] || event.repeat || $("mouse-controls").disabled) return;
     event.preventDefault(); const [dx, dy] = moves[event.key]; inputAction(() => client.run("mouse.move_relative", {dx, dy}));
   };
-  setInterval(() => {
+  function sendPadMovement() {
     if (!movement || !pad || !client.controlled || client.busy) return;
     const now = performance.now();
-    if (!client.motionChannel && now - lastMovementAt < 60) return;
-    lastMovementAt = now;
-    const contact = pad;
     const accumulate = client.motionChannel?.motionTerminal === true;
+    if (accumulate) {
+      if (now >= movement.at + PAD_SAMPLE_LIFETIME_MS) {
+        movement = null;
+        return;
+      }
+      if (now - client.lastPadSubmissionAt < PAD_CHANNEL_BATCH_MS ||
+          (!Math.trunc(movement.dx) && !Math.trunc(movement.dy))) return;
+    } else {
+      if (!client.motionChannel && now - lastMovementAt < 60) return;
+      lastMovementAt = now;
+    }
+    const contact = pad;
     // Keep one aggregate live across state reads and renewal. Legacy
     // transports keep their existing detached sample and replacement rule.
     const next = accumulate ? null : movement;
@@ -1100,7 +1122,11 @@ function mount() {
       if (consume && latest === movement) movement = null;
       return dx || dy ? {args: {dx, dy}, expiresAt} : null;
     }));
-  }, PAD_CHANNEL_BATCH_MS);
+  }
+  client.onInputLaneReleased = () => {
+    if (client.motionChannel?.motionTerminal && pad && movement) queueMicrotask(sendPadMovement);
+  };
+  setInterval(sendPadMovement, PAD_CHANNEL_BATCH_MS);
   setInterval(() => {
     if (!client.session || client.busy || document.hidden) return;
     act(async () => {

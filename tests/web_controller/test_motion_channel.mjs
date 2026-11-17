@@ -50,6 +50,10 @@ try {
       ["      if (consume && latest === movement) movement = null;",
         `      if (consume && latest !== next) ${observe}("superseded_before_submit", next);\n`],
     ];
+    const releaseExpiry = "      if (now >= movement.at + PAD_SAMPLE_LIFETIME_MS) {";
+    if (source.includes(releaseExpiry)) insertions.push([
+      releaseExpiry, `${releaseExpiry} ${observe}("expired_before_submit", movement);`,
+    ]);
     for (const [needle, injected] of insertions) {
       assert.equal(source.split(needle).length, 2);
       source = source.replace(needle, injected.endsWith("\n") ? injected + needle : injected);
