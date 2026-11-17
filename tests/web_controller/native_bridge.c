@@ -10,6 +10,7 @@
 #include "app_control_access.h"
 #include "control_json.h"
 #include "nvs.h"
+#include <time.h>
 
 typedef void *SemaphoreHandle_t;
 typedef struct {
@@ -33,6 +34,8 @@ static bool web_hold_next_move;
 static uint64_t web_hold_coordinator_until;
 static cp_identity_t web_channel_identity;
 static bool web_channel_open;
+static bool web_timed_reports;
+static uint64_t web_report_times[sizeof(trace) / sizeof(trace[0])];
 static uint64_t web_label_revision;
 static char web_label[49];
 static const char web_ap[] = "3333333333333333333333333333333333333333333333333333333333333333";
@@ -237,7 +240,14 @@ static void web_service(void)
     cp_tick(web_server.protocol, s_now_ms);
     if (s_now_ms < web_hold_coordinator_until) return;
     remote_control_service();
+    size_t first_report = trace_count;
     (void)hid_engine_step(&s_engine, send_report, &test_link.generation);
+    if (web_timed_reports && trace_count > first_report) {
+        struct timespec now;
+        assert(clock_gettime(CLOCK_REALTIME, &now) == 0);
+        uint64_t at_ms = (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+        for (size_t i = first_report; i < trace_count; ++i) web_report_times[i] = at_ms;
+    }
     sync_interaction(); remote_control_service();
     /* Match the production server worker: publish current owner/releases
      * before delivering its completion mailbox. */
@@ -331,7 +341,11 @@ static void web_fixture(httpd_req_t *r)
     for (size_t i = 0; i < trace_count; ++i) {
         used += (size_t)snprintf(r->response + used, sizeof(r->response) - used, "%s{\"id\":%u,\"bytes\":[", i ? "," : "", (unsigned)trace[i].id);
         for (size_t j = 0; j < trace[i].length; ++j) used += (size_t)snprintf(r->response + used, sizeof(r->response) - used, "%s%u", j ? "," : "", (unsigned)trace[i].bytes[j]);
-        used += (size_t)snprintf(r->response + used, sizeof(r->response) - used, "]}");
+        used += (size_t)snprintf(r->response + used, sizeof(r->response) - used, "]");
+        if (web_timed_reports)
+            used += (size_t)snprintf(r->response + used, sizeof(r->response) - used,
+                ",\"atMs\":%llu", (unsigned long long)web_report_times[i]);
+        used += (size_t)snprintf(r->response + used, sizeof(r->response) - used, "}");
     }
     used += (size_t)snprintf(r->response + used, sizeof(r->response) - used, "]}");
     r->response_length = used; strcpy(r->type, "application/json");
@@ -365,6 +379,7 @@ int main(int argc, char **argv)
     assert(cp_initialize_policy(storage, cp_context_size(), &callbacks, web_server.slot ? CP_POLICY_ENROLLED_HTTP : CP_POLICY_ENROLLED_TLS, &web_server.protocol) == CP_OK);
     assert(cp_http_configure(web_server.protocol, web_host, web_origin) == CP_OK);
     const bool test_channel = getenv("WEB_TEST_CHANNEL") != NULL;
+    web_timed_reports = test_channel;
     if (test_channel) cp_set_transport_capabilities(web_server.protocol, true, false);
     web_service();
     static char input[8192]; static cj_document_t document; static httpd_req_t request;

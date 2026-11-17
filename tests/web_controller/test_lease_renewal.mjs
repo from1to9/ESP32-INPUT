@@ -88,9 +88,11 @@ try {
       return {disabled: target.matches(":disabled"), opacity: getComputedStyle(target).opacity};
     }), snapshotSelectors), initial.style);
     assert.equal(await mouse.evaluate(node => document.activeElement === node), true);
-    await left.click({timeout: 600});
-    await keyboard.click({timeout: 600});
-    await waitText("result", "input is not queued for replay");
+    assert.equal(await left.getAttribute("aria-disabled"), "true");
+    assert.equal(await keyboard.getAttribute("aria-disabled"), "true");
+    await left.evaluate(button => button.click());
+    await keyboard.evaluate(button => button.click());
+    assert.equal(await page.locator("#result").textContent(), initial.lastAction);
     assert.deepEqual(commands, ["control.acquire", ...Array(4).fill("control.renew")]);
   } finally { releaseHold(); }
   await nextRenewal;
@@ -135,10 +137,10 @@ try {
   await writeFile(path.join(output, "lease-renewal.json"), JSON.stringify({
     browser: browser.version(), renewalResults, commands, droppedStatus,
     verified: ["Stable native disabled attributes, focus and live regions across three renewals",
-      "Stable computed opacity and immediate rejection of two clicks during an admitted renewal",
+      "Stable computed opacity and two inactive, unqueued presses during an admitted renewal",
       "No input command queued or replayed", "Lost reply and local takeover disable input"],
   }, null, 2) + "\n");
-  console.log("PASS: quiet lease renewals preserve controls; concurrent clicks are rejected and lease loss stops input");
+  console.log("PASS: quiet renewals preserve controls, busy presses have no effect, and lease loss stops input");
 } finally {
   await browser.close();
 }

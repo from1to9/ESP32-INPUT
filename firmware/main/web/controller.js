@@ -353,7 +353,7 @@ export class Controller {
     const generation = this.generation;
     this.busy = true;
     this.renewing = op === "control.renew";
-    this.moving = Boolean(readSample);
+    this.moving = op === "mouse.move_relative";
     if (!readSample && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
     this.changed();
     try {
@@ -855,6 +855,7 @@ function mount() {
     try { await fn(); }
     catch (value) { if (generation === client.generation && !client.uncertain) error(value); }
   };
+  const inputAction = fn => { if (!client.busy) return act(fn); };
   async function authorize(fn, revealError = true) {
     if (pairingBusy || client.closing) return;
     pairingBusy = true;
@@ -884,16 +885,24 @@ function mount() {
       !s.input_ready ? "Input not ready" : s.release_pending ? "Waiting for input releases" :
       !s.remote_allowed ? "Remote input is not allowed on Mosaico" : `${s.mode} · ready${client.controlled ? " · this browser owns control" : " · no control acquired here"}`;
     const active = client.controlled && !client.uncertain && s?.input_ready && !s.release_pending && !s.locked && s.remote_allowed;
-    // Renewal and continuous movement still own the command lane without
-    // interrupting the visual state of controls.
+    // Keep input controls steady during renewal and movement, and expose
+    // their temporary unavailability without disabling focus.
     const ready = active && !client.foregroundBusy;
+    const paintInputButton = button => {
+      button.disabled = !ready;
+      if (ready && client.busy) {
+        if (!button.hasAttribute("aria-disabled")) button.setAttribute("aria-disabled", "true");
+      } else {
+        button.removeAttribute("aria-disabled");
+      }
+    };
     $("mouse-controls").disabled = !active || s.mode !== "mouse";
     $("keyboard-controls").disabled = !active || s.mode !== "keyboard";
     $("mouse-controls").hidden = s?.mode === "keyboard";
     $("keyboard-controls").hidden = s?.mode !== "keyboard";
-    document.querySelectorAll("#mouse-controls button, #keyboard-controls button").forEach(button => { button.disabled = !ready; });
+    document.querySelectorAll("#mouse-controls button, #keyboard-controls button").forEach(paintInputButton);
     for (const mode of ["mouse", "keyboard"]) {
-      $(`${mode}-mode`).disabled = !ready;
+      paintInputButton($(`${mode}-mode`));
       $(`${mode}-mode`).setAttribute("aria-pressed", String(s?.mode === mode));
     }
     $("acquire").disabled = !inputPermission || client.busy || client.uncertain || client.controlled || !s?.input_ready || s.locked || s.release_pending || !s.remote_allowed;
@@ -974,25 +983,25 @@ function mount() {
     if (client.busy || client.uncertain) await client.disconnect();
     else { await client.run("control.release"); client.halt("Control released. Take control explicitly to send more input."); }
   });
-  for (const mode of ["mouse", "keyboard"]) $(`${mode}-mode`).onclick = () => act(() => client.run("mode.select", {mode}));
-  document.querySelectorAll("[data-click]").forEach(button => button.onclick = () => act(() => client.run("mouse.click", {button: button.dataset.click})));
+  for (const mode of ["mouse", "keyboard"]) $(`${mode}-mode`).onclick = () => inputAction(() => client.run("mode.select", {mode}));
+  document.querySelectorAll("[data-click]").forEach(button => button.onclick = () => inputAction(() => client.run("mouse.click", {button: button.dataset.click})));
   document.querySelectorAll("[data-move]").forEach(button => button.onclick = () => {
     const [dx, dy] = button.dataset.move.split(",").map(Number);
-    act(() => client.run("mouse.move_relative", {dx, dy}));
+    inputAction(() => client.run("mouse.move_relative", {dx, dy}));
   });
   for (const character of "abcdefghijklmnopqrstuvwxyz1234567890") {
     const button = document.createElement("button");
     button.textContent = character.toUpperCase();
     button.setAttribute("aria-label", `Type ${character}`);
-    button.onclick = () => act(() => client.run("keyboard.key_tap", {usage: /[a-z]/.test(character) ? character.charCodeAt(0) - 93 : character === "0" ? 39 : Number(character) + 29}));
+    button.onclick = () => inputAction(() => client.run("keyboard.key_tap", {usage: /[a-z]/.test(character) ? character.charCodeAt(0) - 93 : character === "0" ? 39 : Number(character) + 29}));
     $("letters").append(button);
   }
   for (const [label, usage] of [["Space", 44], ["Enter", 40], ["Backspace", 42], ["Tab", 43], ["Esc", 41], ["Delete", 76], ["Home", 74], ["End", 77], ["←", 80], ["↑", 82], ["↓", 81], ["→", 79]]) {
     const button = document.createElement("button"); button.textContent = label;
-    button.onclick = () => act(() => client.run("keyboard.key_tap", {usage}));
+    button.onclick = () => inputAction(() => client.run("keyboard.key_tap", {usage}));
     $("function-keys").append(button);
   }
-  $("send").onclick = () => act(() => client.text($("text").value));
+  $("send").onclick = () => inputAction(() => client.text($("text").value));
   $("text").oninput = () => { $("text-count").textContent = `${$("text").value.length} / 32 characters`; };
   $("result-check").onclick = () => { if (!client.busy) return act(() => client.checkResult()); };
   $("forget").onclick = () => act(async () => {
@@ -1020,7 +1029,7 @@ function mount() {
   $("pad").onkeydown = event => {
     const moves = {ArrowLeft: [-24, 0], ArrowRight: [24, 0], ArrowUp: [0, -24], ArrowDown: [0, 24]};
     if (!moves[event.key] || event.repeat || $("mouse-controls").disabled) return;
-    event.preventDefault(); const [dx, dy] = moves[event.key]; act(() => client.run("mouse.move_relative", {dx, dy}));
+    event.preventDefault(); const [dx, dy] = moves[event.key]; inputAction(() => client.run("mouse.move_relative", {dx, dy}));
   };
   setInterval(() => {
     if (!movement || !pad || !client.controlled || client.busy) return;

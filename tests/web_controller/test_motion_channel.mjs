@@ -10,6 +10,7 @@ const browser = await chromium.launch({headless: true,
   ...(process.env.WEB_BROWSER_EXECUTABLE ? {executablePath: process.env.WEB_BROWSER_EXECUTABLE} : {})});
 const evidence = {motionCommands: [], motionResults: [], renewals: [], httpCommands: [], httpStateReads: 0, movementReports: []};
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const atMs = () => Math.round(performance.timeOrigin + performance.now());
 
 try {
   const page = await browser.newPage({ignoreHTTPSErrors: true, viewport: {width: 1100, height: 920}, hasTouch: true});
@@ -19,6 +20,7 @@ try {
     ({id, text}) => document.getElementById(id).textContent.includes(text), {id, text});
   const fixture = action => page.request.post(`${device}/_fixture/${action}`);
   const reports = async () => (await (await page.request.get(`${device}/_fixture/reports`)).json()).reports;
+  const sentFrames = [];
   page.on("request", request => {
     const resource = new URL(request.url()).pathname;
     if (resource === "/api/v1/state") ++evidence.httpStateReads;
@@ -28,15 +30,16 @@ try {
     assert.equal(socket.url(), origin.replace(/^http/, "ws") + "/api/v1/channel");
     socket.on("framesent", ({payload}) => {
       const frame = JSON.parse(payload);
+      if (frame.op || frame.resource) sentFrames.push({op: frame.op, seq: frame.seq, resource: frame.resource, atMs: atMs()});
       if (frame.op === "mouse.move_relative") evidence.motionCommands.push({
-        seq: frame.seq, deadline: frame.deadline_ms, args: frame.args, atMs: Math.round(performance.now()),
+        seq: frame.seq, deadline: frame.deadline_ms, args: frame.args, atMs: atMs(),
       });
       if (frame.op === "control.renew") evidence.renewals.push(frame.seq);
     });
     socket.on("framereceived", ({payload}) => {
       if (typeof payload !== "string") return;
       const frame = JSON.parse(payload);
-      if (frame.state) evidence.motionResults.push({state: frame.state, error: frame.error, key: frame.command_key});
+      if (frame.state) evidence.motionResults.push({state: frame.state, error: frame.error, key: frame.command_key, atMs: atMs()});
     });
   });
   await page.goto(origin);
@@ -83,6 +86,14 @@ try {
   evidence.beforeEffectExpiry = {accepted: true, rejected: true, noHid: true, controlRetained: true};
 
   point.x = pad.x + 35;
+  const beforeTouch = atMs();
+  await page.evaluate(() => {
+    const samples = [];
+    const pad = document.getElementById("pad");
+    const record = event => samples.push({x: event.clientX, atMs: Math.round(performance.timeOrigin + performance.now())});
+    pad.addEventListener("pointermove", record, {capture: true, passive: true});
+    window.finishTouchTiming = () => { pad.removeEventListener("pointermove", record, true); return samples; };
+  });
   await touch("touchStart");
   for (let i = 0; i < 90; ++i) {
     point.x += 2;
@@ -94,6 +105,15 @@ try {
     }
   }
   await touch("touchEnd");
+  const afterTouch = atMs();
+  const samples = await page.evaluate(() => window.finishTouchTiming());
+  evidence.touchTiming = {
+    startedAtMs: beforeTouch, endedAtMs: afterTouch, samples,
+    sent: sentFrames.filter(frame => frame.atMs >= beforeTouch && frame.atMs <= afterTouch),
+    received: evidence.motionResults.filter(frame => frame.atMs >= beforeTouch && frame.atMs <= afterTouch),
+    hid: (await reports()).filter(report => report.id === 2 && report.atMs >= beforeTouch && report.atMs <= afterTouch &&
+      (report.bytes[1] || report.bytes[2])),
+  };
   const [earlier, later] = evidence.movementReports;
   assert(earlier >= 4 && later >= earlier + 4, JSON.stringify(evidence.movementReports));
   assert(evidence.motionCommands.length > 10);
@@ -115,7 +135,27 @@ try {
 
   const beforeDirection = evidence.motionCommands.length;
   const beforeDirectionResults = evidence.motionResults.length;
-  await page.getByRole("button", {name: "Move left"}).click();
+  const left = page.getByRole("button", {name: "Move left"});
+  await left.evaluate(button => {
+    button.addEventListener("click", () => {
+      const others = [document.querySelector('[aria-label="Move right"]'), document.getElementById("keyboard-mode"),
+        document.querySelector("[data-click=left]")];
+      const peek = control => ({disabled: control.disabled, ariaDisabled: control.getAttribute("aria-disabled"),
+        opacity: getComputedStyle(control).opacity});
+      const controls = [button, ...others].map(peek);
+      const pending = document.getElementById("result").textContent;
+      others.forEach(control => control.click());
+      document.getElementById("pad").dispatchEvent(new KeyboardEvent("keydown", {key: "ArrowRight"}));
+      window.directionObservation = {controls, pending, afterRepeat: document.getElementById("result").textContent,
+        stopDisabled: document.getElementById("stop").disabled};
+    }, {once: true});
+  });
+  await left.click();
+  evidence.directionPending = await page.evaluate(() => window.directionObservation);
+  assert.deepEqual(evidence.directionPending.controls,
+    Array.from({length: 4}, () => ({disabled: false, ariaDisabled: "true", opacity: "1"})));
+  assert.equal(evidence.directionPending.afterRepeat, evidence.directionPending.pending);
+  assert.equal(evidence.directionPending.stopDisabled, false);
   for (let i = 0; i < 100; ++i) {
     const result = evidence.motionResults.slice(beforeDirectionResults).find(item => item.state === "sent");
     if (evidence.motionCommands.length > beforeDirection && result) break;
@@ -123,9 +163,17 @@ try {
   }
   const direction = evidence.motionCommands.slice(beforeDirection).find(command => command.args.dx === -24);
   assert(direction && direction.args.dy === 0);
+  assert.equal(evidence.motionCommands.length, beforeDirection + 1);
   assert((await reports()).some(report => report.id === 2 && report.bytes[1] === 232 && !report.bytes[2]));
   assert(evidence.motionResults.slice(beforeDirectionResults).some(result => result.state === "sent" && result.error === "ok"));
   evidence.direction = {command: direction, hidDx: -24};
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Move right"]').hasAttribute("aria-disabled"));
+  const beforeArrow = evidence.motionCommands.length;
+  await page.locator("#pad").press("ArrowRight");
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Move right"]').hasAttribute("aria-disabled"));
+  assert.equal(evidence.motionCommands.length, beforeArrow + 1);
+  assert.deepEqual(evidence.motionCommands.at(-1).args, {dx: 24, dy: 0});
+  assert((await reports()).some(report => report.id === 2 && report.bytes[1] === 24 && !report.bytes[2]));
   assert(!evidence.httpCommands.includes("mouse.move_relative"));
   assert(!evidence.httpCommands.includes("control.renew") && evidence.renewals.length >= 2);
 

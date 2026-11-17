@@ -110,6 +110,9 @@ keeps its own deadline.
 If the enrolled HTTP or HTTPS listener offers the authenticated input
 channel, touchpad and direction buttons use it after **Take control**.
 Movement shares the existing command sequence with other button actions.
+While movement or renewal is in flight, input buttons keep their appearance
+and focus. Additional button presses during that interval are discarded.
+**Stop control** remains available.
 Lease renewal and device checks continue while the page is visible. A lost
 channel stops control and discards the pending contact. Reconnect if a result
 is unknown, then take control explicitly to resume.
