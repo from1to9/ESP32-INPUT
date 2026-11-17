@@ -12,6 +12,7 @@ const commands = [], renewalResults = [], errors = [];
 const snapshotSelectors = ["#mouse-mode", "#keyboard-mode", "#mouse-controls", "#keyboard-controls",
   "[data-click=left]", "#refresh", "#refresh-connections", "#result-check", "#scan"];
 const commandPath = `${origin}/api/v1/commands`;
+const statePath = `${origin}/api/v1/state?view=protocol`;
 
 try {
   const page = await browser.newPage({ignoreHTTPSErrors: true, viewport: {width: 1280, height: 1000}});
@@ -30,8 +31,24 @@ try {
   await page.locator("#access-code").fill("12345678");
   await page.locator("#pair").click();
   await waitText("connection", "Connected / idle");
+
+  // A poll sent while idle can arrive after the acquisition's own state
+  // fetch has already verified the new lease.
+  let observeOldState, deliverOldState;
+  const late = new Promise(resolve => { observeOldState = resolve; });
+  const deliver = new Promise(resolve => { deliverOldState = resolve; });
+  await page.route(statePath, async route => {
+    const response = await route.fetch();
+    observeOldState((await response.json()).protocol);
+    await deliver;
+    await route.fulfill({response, headers: {...response.headers(), "x-fixture-late-state": "true"}});
+  }, {times: 1});
+  assert.equal((await late).lease_active, undefined);
   await page.locator("#acquire").click();
   await waitText("connection", "Controlling");
+  const oldState = page.waitForResponse(reply => reply.headers()["x-fixture-late-state"] === "true");
+  deliverOldState();
+  await (await oldState).finished();
   await page.waitForFunction(() => !document.getElementById("refresh-connections").disabled);
   await mouse.focus();
 
@@ -123,6 +140,35 @@ try {
   await waitText("connection", "Connected / idle");
   await page.locator("#acquire").click();
   await waitText("connection", "Controlling");
+
+  // Two independent browser identities share one lease owner. The idle
+  // browser can read state and close its session without affecting it.
+  const ownerState = async () => (await (await page.request.get(statePath)).json()).protocol;
+  const owned = await ownerState();
+  assert.equal(owned.lease_active, true);
+  const mobile = await browser.newContext({ignoreHTTPSErrors: true, viewport: {width: 390, height: 844},
+    hasTouch: true, isMobile: true});
+  const second = await mobile.newPage();
+  second.setDefaultTimeout(8000);
+  await second.goto(origin);
+  await second.locator("#access-code").fill("12345678");
+  await second.locator("#pair").tap();
+  await second.waitForFunction(() => document.getElementById("connection").textContent === "Connected / idle");
+  const observerRead = await second.waitForResponse(reply => reply.url() === statePath && reply.status() === 200);
+  assert.equal((await observerRead.json()).protocol.lease_id, undefined);
+  await second.locator("#acquire").tap();
+  await second.waitForFunction(() => document.getElementById("result").textContent.includes("rejected: owner_busy"));
+  assert.equal(await second.locator("#connection").textContent(), "Connected / idle");
+  assert(await second.locator("#result").evaluate(node => Boolean(node.compareDocumentPosition(
+    document.getElementById("input-title")) & Node.DOCUMENT_POSITION_FOLLOWING)));
+  await second.locator("#disconnect").tap();
+  await second.waitForFunction(() => document.getElementById("result").textContent.includes("Browser session closed."));
+  await mobile.close();
+  const afterSecondBrowser = await ownerState();
+  assert.equal(afterSecondBrowser.lease_id, owned.lease_id);
+  assert.equal(afterSecondBrowser.lease_active, true);
+  assert.equal(await page.locator("#connection").textContent(), "Controlling");
+
   assert.equal((await page.request.post(`${origin}/_fixture/takeover`)).status(), 200);
   const atTakeover = [...commands];
   await waitText("connection", "Connected / idle");
@@ -138,9 +184,11 @@ try {
     browser: browser.version(), renewalResults, commands, droppedStatus,
     verified: ["Stable native disabled attributes, focus and live regions across three renewals",
       "Stable computed opacity and two inactive, unqueued presses during an admitted renewal",
+      "Delayed idle state cannot replace a verified lease",
+      "A second browser sees owner_busy near Take control and does not revoke the owner",
       "No input command queued or replayed", "Lost reply and local takeover disable input"],
   }, null, 2) + "\n");
-  console.log("PASS: quiet renewals preserve controls, busy presses have no effect, and lease loss stops input");
+  console.log("PASS: delayed idle reads and a competing browser preserve the owner, with no replay or unsafe renewal");
 } finally {
   await browser.close();
 }

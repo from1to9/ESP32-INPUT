@@ -41,6 +41,7 @@
       <div class="actions"><button id="acquire" class="primary" disabled>Take control</button><button id="stop" disabled>Stop control</button><button id="disconnect" class="quiet" disabled>Disconnect browser</button></div>
       <p class="hint">Control ends on local takeover, lock, a target change, or loss of connection. Take control again to resume.</p>
     </section>
+    <section aria-labelledby="result-title"><div class="section-head"><h2 id="result-title">Last action</h2><button id="result-check" class="quiet" disabled>Check result</button></div><p id="result" role="status" aria-live="polite">Nothing sent.</p><p class="hint">“Sent” means the HID transport accepted the key/button reports and releases. The target application's response is not observed. An unknown reply is never replayed automatically.</p></section>
     <section aria-labelledby="input-title">
       <h2 id="input-title">Mouse &amp; keyboard</h2>
       <div class="actions modes"><button id="mouse-mode" disabled>Mouse</button><button id="keyboard-mode" disabled>Keyboard</button></div>
@@ -59,7 +60,6 @@
         <p class="hint">Up to 32 printable US ANSI characters per send. The host needs a US keyboard layout. Unsupported characters, newlines and longer text are rejected as a whole. Enter is a separate key. Text stays here after sending.</p>
       </fieldset>
     </section>
-    <section aria-labelledby="result-title"><div class="section-head"><h2 id="result-title">Last action</h2><button id="result-check" class="quiet" disabled>Check result</button></div><p id="result" role="status" aria-live="polite">Nothing sent.</p><p class="hint">“Sent” means the HID transport accepted the key/button reports and releases. The target application's response is not observed. An unknown reply is never replayed automatically.</p></section>
       </div>
       <div class="column" id="connections">
         <p id="management-result" class="notice" role="status" aria-live="polite" hidden></p>
