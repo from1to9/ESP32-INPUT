@@ -30,6 +30,63 @@ function fixture() {
     result = value; status = code;
   }};
 }
+// Exercise the actual mounted pointer handlers and their one send timer with
+// a deterministic clock and a real Controller. Socket and state replies
+// stay independently controllable at the await boundaries.
+function padFixture() {
+  const f = fixture();
+  const pointer = {setPointerCapture() {}};
+  const controls = {disabled: false};
+  const $ = name => name === "pad" ? pointer : controls;
+  const start = source.indexOf('  $("pad").onpointerdown =');
+  const end = source.indexOf('  }, PAD_CHANNEL_BATCH_MS);', start) + '  }, PAD_CHANNEL_BATCH_MS);'.length;
+  const stop = source.indexOf('  $("stop").onclick =');
+  const stopEnd = source.indexOf('\n  for (const mode', stop);
+  assert(start >= 0 && end > start);
+  const constants = source.match(/^const PAD_.*;$/gm).join("\n");
+  let tick, queued;
+  const mount = new Function("$", "client", "act", "setInterval",
+    `${constants}\nlet pad = null, movement = null, lastMovementAt = 0;
+     ${source.slice(start, end)}\n${source.slice(stop, stopEnd)}
+     return () => { pad = movement = null; };`);
+  const clear = mount($, f.client, run => { queued = run(); }, (run, interval) => {
+    assert.equal(interval, 30);
+    tick = run;
+  });
+  f.client.state.mode = "mouse";
+  f.state.mode = "mouse";
+  f.client.stateAt = 0;
+  f.client.onchange = () => { if (!f.client.controlled) clear(); };
+  const motions = [];
+  f.client.motionChannel = {
+    motionTerminal: true,
+    exchange: async command => {
+      const next_seq = String(command.seq + 1);
+      if (command.op === "control.renew") return {state: "applied", error: "ok", next_seq, command_key: "11",
+        lease_active: true, lease_id: lease, lease_expires_ms: "4100"};
+      assert.equal(command.op, "mouse.move_relative");
+      motions.push(command);
+      return {state: "sent", error: "ok", next_seq, command_key: "12"};
+    },
+    close() {},
+  };
+  const fire = (kind, x = 0, y = 0, id = 7) => pointer["onpointer" + kind]({
+    clientX: x, clientY: y, pointerId: id, pointerType: "touch", preventDefault() {},
+  });
+  return {...f, motions, fire, stop: () => { controls.onclick(); return queued; },
+    tick: () => { queued = undefined; tick(); return queued; }};
+}
+function holdState(f) {
+  let entered, resume;
+  const paused = new Promise(resolve => { entered = resolve; });
+  const proceed = new Promise(resolve => { resume = resolve; });
+  const request = f.client.fetcher;
+  f.client.fetcher = async (path, options) => {
+    if (path === statePath) { entered(); await proceed; }
+    return request(path, options);
+  };
+  return {paused, resume};
+}
 for (let code = 32; code <= 126; ++code) assert.equal(validateText(String.fromCharCode(code)), String.fromCharCode(code));
 for (const text of ["", "x".repeat(33), "A\nB", "A\rB", "A\tB", "ok\u4e2d", "ok😀", "A\0B", "x\x7f"]) {
   const f = fixture();
@@ -299,6 +356,130 @@ for (const lostReply of [false, true]) {
     assert(f.client.uncertain && !f.client.controlled);
   } else { finish(); assert.equal((await moving).state, "sent"); }
   assert.equal(f.calls.filter(call => call.options.method === "POST").length, 1);
+}
+{
+  const realPerformance = globalThis.performance;
+  let now = 2000;
+  globalThis.performance = {now: () => now};
+  try {
+    const f = padFixture(), held = holdState(f);
+    f.fire("down");
+    f.fire("move", 10, 7);
+    now = 2010;
+    const first = f.tick();
+    await held.paused;
+    now = 2040;
+    f.fire("move", 80, -7);
+    now = 2050;
+    f.fire("move", 72, 4);
+    held.resume();
+    await first;
+    assert.deepEqual(f.motions[0].args, {dx: 72, dy: 4}, "preserve the whole fresh aggregate across a state read");
+    assert.equal(f.motions[0].deadline_ms, "200", "use the oldest sample's remaining freshness");
+    assert.equal(f.tick(), undefined);
+    assert.equal(f.motions.length, 1);
+
+    let sent, finish;
+    const sending = new Promise(resolve => { sent = resolve; });
+    const result = new Promise(resolve => { finish = resolve; });
+    const exchange = f.client.motionChannel.exchange;
+    f.client.motionChannel.exchange = async command => {
+      const response = await exchange(command);
+      sent(); await result;
+      return response;
+    };
+    now = 2060;
+    f.fire("move", 90, 8);
+    const inFlight = f.tick();
+    await sending;
+    now = 2110;
+    f.fire("move", 120, -3);
+    now = 2130;
+    f.fire("move", 109, 11);
+    finish();
+    await inFlight;
+    await f.tick();
+    assert.deepEqual(f.motions.slice(1).map(move => move.args), [{dx: 18, dy: 4}, {dx: 19, dy: 3}]);
+    assert.equal(f.tick(), undefined, "a submitted snapshot is detached exactly once");
+
+    for (const boundary of [2150, 2151]) {
+      now = 2000;
+      const f = padFixture(), held = holdState(f);
+      f.fire("down");
+      f.fire("move", 80, -30);
+      const waiting = f.tick();
+      await held.paused;
+      now = 2149;
+      f.fire("move", 85, -25);
+      now = boundary;
+      held.resume();
+      assert.equal(await waiting, null);
+      assert.deepEqual(f.motions, [], "new samples cannot renew an older aggregate at its deadline");
+      f.fire("move", 97, -38);
+      await f.tick();
+      assert.deepEqual(f.motions[0].args, {dx: 12, dy: -13});
+    }
+
+    now = 2000;
+    const renew = padFixture();
+    renew.state.lease_expires_ms = "1800";
+    let renewing, finishRenew;
+    const renewalStarted = new Promise(resolve => { renewing = resolve; });
+    const renewed = new Promise(resolve => { finishRenew = resolve; });
+    const normal = renew.client.motionChannel.exchange;
+    renew.client.motionChannel.exchange = async command => {
+      if (command.op === "control.renew") { renewing(); await renewed; }
+      return normal(command);
+    };
+    renew.fire("down");
+    renew.fire("move", 120, 90);
+    const awaitingRenew = renew.tick();
+    await renewalStarted;
+    now = 2150;
+    renew.fire("move", 300, -80);
+    now = 2160;
+    renew.fire("move", 280, -75);
+    finishRenew();
+    await awaitingRenew;
+    assert.deepEqual(renew.motions[0].args, {dx: 107, dy: -122},
+      "deadline equality starts fresh, preserving two-axis bounds and reversal");
+    assert.equal(renew.motions[0].seq, 2);
+    assert.equal(renew.motions[0].deadline_ms, "400");
+
+    for (const ending of ["up", "cancel", "takeover"]) {
+      now = 2000;
+      const f = padFixture(), held = holdState(f);
+      f.fire("down"); f.fire("move", 70, 90);
+      const waiting = f.tick();
+      await held.paused;
+      if (ending === "takeover") f.state.lease_active = false;
+      else {
+        f.fire(ending);
+        f.fire("down", 5, 3, 8); f.fire("move", 17, 19, 8);
+      }
+      held.resume();
+      assert.equal(await waiting, null);
+      assert.deepEqual(f.motions, []);
+      await f.tick();
+      assert.deepEqual(f.motions.map(move => move.args), ending === "takeover" ? [] : [{dx: 12, dy: 16}]);
+    }
+    now = 2000;
+    const stopped = padFixture(), waitingState = holdState(stopped);
+    const fetcher = stopped.client.fetcher;
+    stopped.client.fetcher = (path, options) => options.method === "DELETE" ?
+      Promise.resolve({status: 200, json: async () => ({})}) : fetcher(path, options);
+    stopped.fire("down"); stopped.fire("move", 26, -12);
+    const waitingMove = stopped.tick();
+    await waitingState.paused;
+    stopped.fire("move", 54, 18);
+    await stopped.stop();
+    waitingState.resume();
+    await assert.rejects(waitingMove, /session changed/i);
+    assert.equal(stopped.tick(), undefined);
+    assert.deepEqual(stopped.motions, []);
+  } finally {
+    globalThis.performance = realPerformance;
+  }
 }
 {
   const f = fixture();

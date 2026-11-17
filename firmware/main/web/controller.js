@@ -8,6 +8,7 @@ const DECIMAL = /^(0|[1-9][0-9]{0,19})$/;
 const IDENTITY_KEY = "mosaico.browser.identity.v1";
 const THEME_KEY = "mosaico.browser.theme.v1";
 const PAD_CHANNEL_BATCH_MS = 30;
+const PAD_SAMPLE_LIFETIME_MS = 150;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 const decimal = value => typeof value === "string" && DECIMAL.test(value) && BigInt(value) <= 18446744073709551615n;
@@ -1061,7 +1062,8 @@ function mount() {
     if (!pad || pad.id !== event.pointerId || $("mouse-controls").disabled) return;
     event.preventDefault();
     const now = performance.now();
-    const batch = client.motionChannel ? PAD_CHANNEL_BATCH_MS : 150;
+    const batch = client.motionChannel && !client.motionChannel.motionTerminal ?
+      PAD_CHANNEL_BATCH_MS : PAD_SAMPLE_LIFETIME_MS;
     if (!movement || now - movement.at >= batch) movement = {dx: 0, dy: 0, at: now, contact: pad};
     movement.dx = Math.max(-127, Math.min(127, movement.dx + event.clientX - pad.x));
     movement.dy = Math.max(-127, Math.min(127, movement.dy + event.clientY - pad.y));
@@ -1079,14 +1081,21 @@ function mount() {
     const now = performance.now();
     if (!client.motionChannel && now - lastMovementAt < 60) return;
     lastMovementAt = now;
-    const next = movement; movement = null;
+    const contact = pad;
+    const accumulate = client.motionChannel?.motionTerminal === true;
+    // Keep one aggregate live across state reads and renewal. Legacy
+    // transports keep their existing detached sample and replacement rule.
+    const next = accumulate ? null : movement;
+    if (!accumulate) movement = null;
     act(() => client.run("mouse.move_relative", {}, undefined, consume => {
-      if (pad !== next.contact) return null;
-      // Prefer the current contact's newer deltas after waiting for state.
-      // Keep each batch's own deadline and never carry an older batch forward.
-      const latest = movement?.contact === pad ? movement : next;
-      const expiresAt = latest.at + 150;
-      if (performance.now() >= expiresAt) return null;
+      if (pad !== contact) return null;
+      const latest = movement?.contact === contact ? movement : next;
+      if (!latest) return null;
+      const expiresAt = latest.at + PAD_SAMPLE_LIFETIME_MS;
+      if (performance.now() >= expiresAt) {
+        if (accumulate) movement = null;
+        return null;
+      }
       const dx = Math.trunc(latest.dx), dy = Math.trunc(latest.dy);
       if (consume && latest === movement) movement = null;
       return dx || dy ? {args: {dx, dy}, expiresAt} : null;

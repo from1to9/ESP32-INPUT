@@ -68,7 +68,7 @@ signed 127-unit report bounds, and discarded after 150 ms or contact/context
 loss. It is not queued for later replay.
 
 The original sample deadline and contact identity remain attached across state
-preflight and lease renewal, and are checked immediately before POST. An ended,
+preflight and lease renewal, and are checked immediately before submission. An ended,
 cancelled, replaced or expired sample is discarded without command submission;
 fresh movement from the current contact remains eligible. A request already
 submitted retains its actual result or uncertainty when the contact ends.
@@ -110,6 +110,11 @@ keeps its own deadline.
 If the enrolled HTTP or HTTPS listener offers the authenticated input
 channel, touchpad and direction buttons use it after **Take control**.
 Movement shares the existing command sequence with other button actions.
+On a channel that negotiates motion terminal replies, the touchpad combines
+unsent deltas from the same contact while it waits. A report can move farther
+than a single sample, within the same per-axis limits. The combined movement
+expires 150 ms after its oldest sample. When it expires, later samples start
+a new batch. Lifting the finger or stopping control discards unsent movement.
 While movement or renewal is in flight, input buttons keep their appearance
 and focus. Additional button presses during that interval are discarded.
 **Stop control** remains available.

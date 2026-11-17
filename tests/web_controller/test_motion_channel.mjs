@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
-import {writeFile} from "node:fs/promises";
+import {readFile, writeFile} from "node:fs/promises";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
 
@@ -12,6 +12,7 @@ const evidence = {motionCommands: [], motionResults: [], renewals: [], httpComma
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const atMs = () => Math.round(performance.timeOrigin + performance.now());
 const expectPush = process.env.WEB_EXPECT_MOTION_TERMINAL === "1";
+const referenceController = process.env.WEB_TEST_REFERENCE_CONTROLLER;
 
 try {
   const page = await browser.newPage({ignoreHTTPSErrors: true, viewport: {width: 1100, height: 920}, hasTouch: true});
@@ -26,17 +27,26 @@ try {
   // shipping controller never collects or exposes pointer samples.
   await page.route("**/controller.js", async route => {
     const response = await route.fetch();
-    let source = await response.text();
+    let source = referenceController ? await readFile(referenceController, "utf8") : await response.text();
+    if (referenceController) evidence.referenceController = referenceController;
     const observe = "globalThis.recordMotionDiscard?.";
+    const contact = source.includes("if (pad !== contact) return null;") ?
+      "if (pad !== contact) return null;" : "if (pad !== next.contact) return null;";
+    const expiry = source.includes("if (performance.now() >= expiresAt) {") ?
+      "if (performance.now() >= expiresAt) {" : "if (performance.now() >= expiresAt) return null;";
     const insertions = [
       ["    if (!movement || now - movement.at >= batch) movement =",
-        `    if (movement && now - movement.at >= batch) ${observe}("rollover", movement);\n`],
+        `    if (movement && now - movement.at >= batch) ${observe}(batch === 150 ? "expired_before_submit" : "rollover", movement);\n`],
+      ["    movement.dx = Math.max",
+        "    const rawX = movement.dx + event.clientX - pad.x, rawY = movement.dy + event.clientY - pad.y;\n"],
+      ["    pad.x = event.clientX;",
+        "    globalThis.recordMotionClip?.(rawX - movement.dx, rawY - movement.dy);\n"],
       ["  const endPad = event => { if (pad?.id === event.pointerId) { pad = null;",
         `  const endPad = event => { if (pad?.id === event.pointerId) { ${observe}("contact_end", movement); pad = null;`],
-      ["      if (pad !== next.contact) return null;",
-        `      if (pad !== next.contact) { ${observe}("contact_end", next); return null; }`],
-      ["      if (performance.now() >= expiresAt) return null;",
-        `      if (performance.now() >= expiresAt) { ${observe}("expired_before_submit", latest); return null; }`],
+      [`      ${contact}`,
+        `      ${contact.replace("return null;", `{ ${observe}("contact_end", next); return null; }`)}`],
+      [`      ${expiry}`,
+        `      if (performance.now() >= expiresAt) { ${observe}("expired_before_submit", latest);${expiry.endsWith("{") ? "" : " return null; }"}`],
       ["      if (consume && latest === movement) movement = null;",
         `      if (consume && latest !== next) ${observe}("superseded_before_submit", next);\n`],
     ];
@@ -65,7 +75,7 @@ try {
       if (typeof payload !== "string") return;
       const frame = JSON.parse(payload);
       if (frame.state) evidence.motionResults.push({state: frame.state, error: frame.error, key: frame.command_key,
-        pushed: frame.motion_terminal === true, atMs: atMs()});
+        nextSeq: frame.next_seq, pushed: frame.motion_terminal === true, atMs: atMs()});
     });
   });
   await page.goto(origin);
@@ -96,6 +106,18 @@ try {
     window.finishMotionObservation = () => { observer.disconnect(); return changes; };
   });
   const initialReads = evidence.httpStateReads;
+  async function waitForFreshRenewal() {
+    // An inline renewal can consume the sample's entire admission window.
+    const prior = evidence.renewals.at(-1) ?? 0;
+    for (let i = 0; i < 100; ++i) {
+      const applied = evidence.motionResults.some(reply => reply.state === "applied" &&
+        evidence.renewals.some(seq => seq > prior && Number(reply.nextSeq) === seq + 1));
+      if (applied) return;
+      await delay(25);
+    }
+    assert.fail("Expected a fresh lease before injecting a command fault");
+  }
+  await waitForFreshRenewal();
   assert.equal((await fixture("hold-motion")).status(), 200);
   await page.mouse.move(pad.x + 35, pad.y + 50);
   await page.mouse.down();
@@ -115,22 +137,26 @@ try {
   evidence.beforeEffectExpiry = {accepted: true, rejected: true, noHid: true, controlRetained: true};
 
   point.x = pad.x + 35;
+  const initialPoint = {x: point.x, y: point.y};
   const beforeTouch = atMs();
   await page.evaluate(() => {
-    const samples = [], discarded = [];
+    const samples = [], discarded = [], clipped = [];
     const counted = new WeakSet();
     const pad = document.getElementById("pad");
-    const record = event => samples.push({x: event.clientX, atMs: Math.round(performance.timeOrigin + performance.now())});
+    const record = event => samples.push({x: event.clientX, y: event.clientY,
+      atMs: Math.round(performance.timeOrigin + performance.now())});
     pad.addEventListener("pointermove", record, {capture: true, passive: true});
     window.recordMotionDiscard = (reason, sample) => {
       if (!sample || counted.has(sample)) return;
       counted.add(sample);
-      discarded.push({reason, dx: sample.dx, ageMs: Math.round(performance.now() - sample.at)});
+      discarded.push({reason, dx: sample.dx, dy: sample.dy, ageMs: Math.round(performance.now() - sample.at)});
     };
+    window.recordMotionClip = (dx, dy) => { if (dx || dy) clipped.push({dx, dy}); };
     window.finishTouchTiming = () => {
       pad.removeEventListener("pointermove", record, true);
       delete window.recordMotionDiscard;
-      return {samples, discarded};
+      delete window.recordMotionClip;
+      return {samples, discarded, clipped};
     };
   });
   await touch("touchStart");
@@ -145,9 +171,9 @@ try {
   }
   await touch("touchEnd");
   const afterTouch = atMs();
-  const {samples, discarded} = await page.evaluate(() => window.finishTouchTiming());
+  const {samples, discarded, clipped} = await page.evaluate(() => window.finishTouchTiming());
   evidence.touchTiming = {
-    startedAtMs: beforeTouch, endedAtMs: afterTouch, samples, discarded,
+    startedAtMs: beforeTouch, endedAtMs: afterTouch, initialPoint, samples, discarded, clipped,
     sent: sentFrames.filter(frame => frame.atMs >= beforeTouch && frame.atMs <= afterTouch),
     received: evidence.motionResults.filter(frame => frame.atMs >= beforeTouch && frame.atMs <= afterTouch),
     hid: (await reports()).filter(report => report.id === 2 && report.atMs >= beforeTouch && report.atMs <= afterTouch &&
@@ -216,6 +242,7 @@ try {
   assert(!evidence.httpCommands.includes("mouse.move_relative"));
   assert(!evidence.httpCommands.includes("control.renew") && evidence.renewals.length >= 2);
 
+  await waitForFreshRenewal();
   const sentBeforeLoss = evidence.motionCommands.length;
   const resultsBeforeLoss = evidence.motionResults.length;
   assert.equal((await fixture("drop-motion")).status(), 200);
@@ -227,11 +254,12 @@ try {
   point.x += 9;
   await touch("touchMove");
   await waitText("result", "Reply unknown");
-  const lost = evidence.motionResults.slice(resultsBeforeLoss).filter(reply => reply.state !== "applied");
   if (expectPush) {
+    const move = evidence.motionCommands[sentBeforeLoss];
+    const lost = evidence.motionResults.slice(resultsBeforeLoss).filter(reply => Number(reply.nextSeq) === move.seq + 1);
     const accepted = lost.at(-1);
-    assert.equal(accepted.state, "accepted");
-    assert.equal(await page.locator("#result-check").isEnabled(), true);
+    assert.equal(accepted?.state, "accepted");
+    await page.waitForFunction(() => !document.getElementById("result-check").disabled);
     assert(!sentFrames.some(frame => frame.resource === `/api/v1/requests/${accepted.key}`));
   }
   await touch("touchEnd");
