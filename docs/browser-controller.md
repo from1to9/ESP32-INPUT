@@ -113,8 +113,11 @@ Movement shares the existing command sequence with other button actions.
 On a channel that negotiates motion terminal replies, the touchpad combines
 unsent deltas from the same contact while it waits. A report can move farther
 than a single sample, within the same per-axis limits. The combined movement
-expires 150 ms after its oldest sample. When it expires, later samples start
-a new batch. Lifting the finger or stopping control discards unsent movement.
+expires when its oldest sample reaches 150 ms. When it expires, later samples
+start a new batch. Once the current command and its checks finish, the page
+tries to send fresh accumulated movement. These pad submissions are at
+least 30 ms apart. Lifting the finger or stopping control discards unsent
+movement.
 While movement or renewal is in flight, input buttons keep their appearance
 and focus. Additional button presses during that interval are discarded.
 **Stop control** remains available.
@@ -128,6 +131,9 @@ boot, authorization loss and lease loss stop the controller. Hiding/leaving the
 page or the browser's offline event stops production immediately and requests
 session closure; a missing close reply is not closure proof, and the device's
 short lease expires independently. Reconnection requires explicit acquisition.
+
+Pointer feedback depends on network latency and the selected HID link.
+Further tuning of continuous pad movement is deferred.
 
 ## HTTP boundary and validation
 
