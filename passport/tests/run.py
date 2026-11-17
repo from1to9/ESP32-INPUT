@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Run production Passport logic with substituted SDK/BSP boundaries."""
 from pathlib import Path
+import importlib.util
 import os
 import re
 import subprocess
 import tempfile
 import sys
+from unittest.mock import patch
 
 root = Path(__file__).resolve().parents[2]
 headers = (
@@ -120,8 +122,9 @@ for test in sys.argv[1:] or tests:
             driver.write_text('#include <stdlib.h>\n#pragma GCC diagnostic ignored "-Wsign-compare"\n'
                               f'#include "{codec / "device/es8311/es8311.c"}"\n')
             sources += [driver, codec / 'esp_codec_dev_if.c', codec / 'esp_codec_dev_vol.c']
-        if test == 'startup':
+        if test in ('startup', 'usb'):
             sources += [root / 'passport/main/passport_wifi_text.c']
+        if test == 'startup':
             sys.path.insert(0, str(root / 'tools'))
             from passport_button_patch import patch_source
             button_dir = root / 'passport/managed_components/espressif__button'
@@ -154,3 +157,33 @@ for test in sys.argv[1:] or tests:
             *defines, *map(str, sources), '-lm', '-o', str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True)
+        if test == 'usb':
+            spec = importlib.util.spec_from_file_location('passport_usb', root / 'tools/passport_usb.py')
+            usb = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(usb)
+
+            class CapturedPort:
+                def __init__(self, data):
+                    self.data = data
+
+                def read(self, size):
+                    chunk, self.data = self.data[:size], self.data[size:]
+                    return chunk
+
+                def write(self, data):
+                    return len(data)
+
+            port = CapturedPort(subprocess.check_output([str(binary), '--status-fixtures']))
+            client = usb.Client(port, timeout=0.1)
+            with patch.object(usb.secrets, 'randbits', return_value=88):
+                assert client.hello()['result'] == 'applied'
+            phases = []
+            for phase in range(5):
+                result = client.command('status')
+                assert result['result'] == 'applied' and len(result['data']) == 9
+                wifi = next(row for row in result['data'] if row['type'] == 'wifi')
+                phases.append(wifi['phase'])
+                assert wifi['sta_ip'] == ('192.0.2.10' if phase == 4 else '-')
+            assert phases == list(map(str, range(5)))
+            assert not port.data
+            print('PASS: production C status frames decoded by host Client in every Wi-Fi phase')

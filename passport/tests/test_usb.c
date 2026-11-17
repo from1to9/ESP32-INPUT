@@ -77,7 +77,6 @@ bool passport_ble_request(const passport_command_t *c) { ++ble_calls; ble_reques
 bool passport_wifi_request(const passport_wifi_command_t *c) { ++wifi_calls; wifi_request = *c; return queue_ok; }
 bool passport_wifi_submit_usb(const passport_wifi_submission_t *s) { ++join_calls; submitted = *s; return queue_ok; }
 void passport_wifi_ap_credentials(char ssid[32], char password[17]) { strcpy(ssid, "Passport-ABCD"); strcpy(password, "0123456789ABCDEF"); }
-const char *passport_wifi_phase_name(passport_wifi_phase_t p) { (void)p; return "associated"; }
 esp_err_t passport_ui_set_theme(passport_theme_t t) { assert(t <= PASSPORT_LIGHT); ++theme_calls; return theme_error; }
 passport_sound_state_t passport_sound_state(void) { return sound_state; }
 esp_err_t passport_sound_set(bool enabled) { sound_state.enabled = enabled; sound_state.output = PASSPORT_SOUND_STARTING; return 0; }
@@ -88,8 +87,6 @@ passport_name_result_t passport_names_result(passport_name_domain_t d, uint32_t 
 passport_name_result_t passport_names_submit(const passport_name_change_t *c, uint32_t *ticket) { name_change=*c; ++name_calls; *ticket=9; return PN_OK; }
 passport_name_result_t passport_names_lookup(const passport_name_key_t *key, char *label) { (void)key; strcpy(label,"Desk"); return PN_OK; }
 bool passport_names_text_valid(const char *label, size_t length) { return length > 0 && length <= 48 && !memchr(label,0,length); }
-passport_name_key_t passport_wifi_ap_name_key(const passport_wifi_row_t *row)
-{ passport_name_key_t key={.kind=PN_SCAN_AP}; memcpy(key.ap.ssid,row->ssid.bytes,row->ssid.length); key.ap.length=row->ssid.length; return key; }
 
 static void pump(void) { passport_usb_service(&observed_ble,&observed_wifi,PASSPORT_DARK,true,false); }
 static void send(uint32_t nonce, uint32_t id, const char *command)
@@ -189,8 +186,17 @@ static void largest_reads(void)
     send(boot,2,"status");assert(frames==10&&strstr(tx,"data ble_revision"));
     connected=false;passport_usb_feed(&parser,30,clock_ms,&(passport_usb_request_t){0});pump();assert(!parser.active);
 }
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--status-fixtures")) {
+        reset(); send(0, 88, "hello"); fwrite(tx, 1, tx_size, stdout);
+        for (unsigned phase = PW_OFFLINE; phase <= PW_ONLINE; ++phase) {
+            observed_wifi.phase = (passport_wifi_phase_t)phase;
+            if (phase == PW_ONLINE) strcpy(observed_wifi.sta_ip, "192.0.2.10");
+            send(boot, phase + 1, "status"); fwrite(tx, 1, tx_size, stdout);
+        }
+        return 0;
+    }
     pinned_vfs_boundary();protocol_boundaries();receipts_and_replay();secrets_settings_and_names();largest_reads();
     puts("PASS: USB framing/CRC/bounds, owner admission/final receipts, replay and boot guards, safety supersession, credential redaction, settings and labels");
 }

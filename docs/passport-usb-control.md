@@ -173,6 +173,9 @@ For name writes, `-` clears the alias. Label reads return `label=-` when absent;
 the supplied object revision is checked, while label revision governs writes.
 Security values are 0 open, 1 WPA2-compatible, 2 unsupported. Theme values are above.
 Sound output values are 0 OFF, 1 STARTING, 2 READY, 3 STOPPING, 4 UNAVAILABLE.
+The `status` Wi-Fi record uses numeric `phase` values: 0 offline, 1 switching
+network, 2 connecting, 3 associated without an IP address, 4 LAN IP assigned.
+Display labels remain separate from these space-free protocol tokens.
 Setup request states are 0 none, 1 waiting, 2 joining, 3 saved, 4 failed, 5 cancelled.
 BLE/input `applied` never proves receipt by the remote OS or behavior in Notes/another
 app. Read actual state after uncertainty; do not infer replay is safe.

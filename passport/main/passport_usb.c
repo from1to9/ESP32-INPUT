@@ -109,8 +109,8 @@ static void status(uint32_t id, const passport_ble_state_t *b, const passport_wi
     emit(id, "data", "ble_target", "selected=%s updating=%u handshake=%u window=%u network=%u controller=%s",
          *b->selected_id ? b->selected_id : "-", b->updating, b->handshake, b->window_seconds,
          b->network_active, *b->controller ? b->controller : "-");
-    emit(id, "data", "wifi", "initialized=%u storage=%u phase=%s ap=%u dhcp=%u client=%u lease=%u sta_ip=%s ap_ip=%s",
-         w->initialized, w->storage_known, passport_wifi_phase_name(w->phase), w->ap_started, w->dhcp_running,
+    emit(id, "data", "wifi", "initialized=%u storage=%u phase=%u ap=%u dhcp=%u client=%u lease=%u sta_ip=%s ap_ip=%s",
+         w->initialized, w->storage_known, (unsigned)w->phase, w->ap_started, w->dhcp_running,
          w->ap_client, w->ap_lease, *w->sta_ip ? w->sta_ip : "-", *w->ap_ip ? w->ap_ip : "-");
     emit(id, "data", "wifi_revision", "profiles=%u revision=%" PRIu32 " active=%" PRIu32 " scan=%" PRIu32 " rows=%u scanning=%u scan_known=%u truncated=%u",
          w->profile_count, w->revision, w->active_profile, w->scan_revision, w->scan_count, w->scanning, w->scan_known, w->scan_truncated);
