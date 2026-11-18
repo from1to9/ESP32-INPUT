@@ -311,6 +311,8 @@ semantics; agents targeting Apple hosts should send the explicit GUI modifier.
 
 Movement samples expire after 150 ms locally and use protocol deadlines of
 at most 200 ms. The touchpad groups deltas from one contact in 8 ms buckets.
+A contact that starts on the pad continues across the page with the same
+pointer ID until lift or cancellation, including after pointer capture loss.
 The browser combines signed deltas when the single command lane is free and
 at least 30 ms has elapsed since the previous movement POST. It keeps the
 oldest included delta's expiry. Recent same-boot state responses supply a

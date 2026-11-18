@@ -597,13 +597,19 @@ function mount() {
     if ($('mouse-controls').disabled || pad || (e.pointerType === 'mouse' && e.button !== 0)) return;
     e.preventDefault(); pad = point(e); movement = null; $('pad').setPointerCapture(e.pointerId);
   };
-  $('pad').onpointermove = e => move(e, pad);
   const endPad = e => {
     if (pad?.id !== e.pointerId) return;
     pad = movement = null;
     if (drag) act(finishDrag);
   };
-  $('pad').onpointerup = $('pad').onpointercancel = $('pad').onlostpointercapture = endPad;
+  // Capture loss can retarget a held pointer elsewhere in the page.
+  document.addEventListener('pointermove', e => {
+    if (pad?.id !== e.pointerId) return;
+    if (e.pointerType === 'mouse' && !(e.buttons & 1)) endPad(e);
+    else move(e, pad);
+  }, {capture:true, passive:false});
+  document.addEventListener('pointerup', endPad, true);
+  document.addEventListener('pointercancel', endPad, true);
   $('pad').onkeydown = e => {
     const directions = {ArrowLeft:[-24,0],ArrowRight:[24,0],ArrowUp:[0,-24],ArrowDown:[0,24]};
     if (!directions[e.key] || e.repeat || $('mouse-controls').disabled) return;

@@ -145,6 +145,47 @@ async function padTouch(context,page){
   return (type,dx=0,dy=0)=>cdp.send('Input.dispatchTouchEvent',{type,
     touchPoints:type==='touchEnd'?[]:[{x:x+dx,y:y+dy,id:1}]});
 }
+async function touchAcrossPadEdge(){
+  reset();touchTiming={trace:[],moves:[],firstAdmissionMs:5,stateReturnMs:0,inline:true};
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await open(context);await connect(page);await acquire(page);
+    const pad=page.locator('#pad');await pad.scrollIntoViewIfNeeded();
+    const box=await pad.boundingBox(),x=Math.round(box.x+box.width/2),y=Math.floor(box.y+box.height)-8;
+    await pad.evaluate(el=>{
+      el.addEventListener('pointerdown',e=>{window.padPointer=e.pointerId;});
+      window.outsideMoves=[];
+      document.addEventListener('pointermove',e=>{
+        if(!el.contains(e.target))window.outsideMoves.push(e.pointerId);
+      },true);
+    });
+    const cdp=await context.newCDPSession(page);
+    const touch=(type,dx=0,dy=0)=>cdp.send('Input.dispatchTouchEvent',{type,
+      touchPoints:['touchCancel','touchEnd'].includes(type)?[]:[{x:x+dx,y:y+dy,id:1}]});
+    const moveResponse=()=>page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON().op==='mouse.move_relative');
+    for(const end of ['touchEnd','touchCancel']){
+      await touch('touchStart');
+      await pad.evaluate(el=>{
+        if(!el.hasPointerCapture(window.padPointer))throw Error('Pad did not capture the contact');
+        el.releasePointerCapture(window.padPointer);
+      });
+      let posted=moveResponse();
+      await touch('touchMove',0,22);await posted;
+      posted=moveResponse();
+      await touch('touchMove',6,22);
+      assert.deepEqual((await posted).request().postDataJSON().args,{dx:6,dy:0});
+      assert(await page.evaluate(()=>window.outsideMoves.includes(window.padPointer)));
+      await touch(end);
+      await pause(180);
+    }
+    const count=commands.filter(c=>c.op==='mouse.move_relative').length;
+    await touch('touchStart',0,22);await touch('touchMove',4,22);
+    await touch('touchMove',4,-4);await touch('touchEnd');
+    await pause(180);
+    assert.equal(commands.filter(c=>c.op==='mouse.move_relative').length,count);
+    console.log('PASS trusted touch continues outside pad after capture loss, lift and cancel discard, outside start ignored');
+  }finally{await context.close();}
+}
 // Motion during neutral release cannot become part of a later fresh delta.
 async function touchAcrossRelease(){
   reset();state.mode='keyboard';afterMode=()=>{state.release_pending=true;};
@@ -265,6 +306,7 @@ if(process.argv.includes('--trajectory')){
     await trajectory('left 40',20,45,i=>-2*i);
   }finally{await browser.close();await new Promise(r=>server.close(r));}
 }else try{
+  await touchAcrossPadEdge();
   await touchAcrossRelease();
   await delayedTouch();
   if(!process.argv.includes('--behavior-only')) for(const [name,width,height,mobile] of [['desktop',1440,1060,false],['iphone',390,844,true],['ipad',1024,1366,true]])for(const theme of ['dark','light']){
