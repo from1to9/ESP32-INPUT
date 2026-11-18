@@ -514,14 +514,14 @@ renderer for the changed status, active-controller and Lock views.
 Open the numeric LAN or AP IP shown on Passport, then select **Connect
 browser** and **Take control**. Unlock on the device and pair the intended
 host from its Bluetooth settings first. The page works directly from the
-board and contains all its assets. Mouse, Keyboard and Connections have
-separate navigation; phone portrait uses one column, while desktop/tablet
-layouts provide a touchpad or keyboard beside host/result cards.
+board and contains all its assets. The Input page shows a touchpad and a US QWERTY keyboard together. Each
+action selects its device mode under the acquired lease and uses the observed
+target after neutral release. Connections opens the management lists.
 
 Mouse offers a relative touchpad, all three click buttons, scrolling and
 hold-to-drag. With touch, hold Drag with one finger and move another on the
-pad; with a mouse, hold Drag and move the pointer. Keyboard offers explicit
-keys, bounded US ANSI text and Ctrl/Command shortcuts. Choose Command for
+pad; with a mouse, hold Drag and move the pointer. Shift, Ctrl, Alt and Meta apply to one key tap. The keyboard also supports
+bounded US ANSI text and Ctrl/Command shortcuts. Choose Command for
 Mac/iPad/iPhone hosts. Text is never silently shortened, and a reported HID
 send does not prove the host application acted. **Stop** is always visible
 while connected. Loss of focus, page visibility, network, session or target

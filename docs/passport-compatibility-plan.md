@@ -383,8 +383,10 @@ same visual tokens as the device while respecting each target's capabilities:
 a clear connection/target header, prominent touchpad, keyboard and action
 areas, status and result feedback, and card-based Bluetooth/Wi-Fi lists.
 Desktop and iPad landscape use a spacious two-column control layout;
-phone portrait uses one column with visible Mouse, Keyboard and Connections
-navigation. Controls need at least 44 px touch targets and safe-area padding.
+phone portrait stacks the touchpad and QWERTY keyboard on the Input page.
+Connections has its own navigation entry. Use safe-area padding and touch
+targets of at least 44 × 44 px. On phones, dense keyboard rows share the
+available width equally with 44 px minimum key height.
 Provide dark and light palettes with system preference as the initial choice
 and an explicit, persistent browser override. The theme switch must work
 before a control session is established. Focus, pressed, disabled and pending

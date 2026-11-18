@@ -20,15 +20,14 @@ defines transitions, controls and safety boundaries. The
 
 Passport has a separate 240 × 320, three-button interface. It uses compact
 cards, an always visible UP/OK/DOWN footer, and focused controls in both
-palettes. The Web controller adapts to desktop and phone widths, with Mouse,
-Keyboard and Connections pages and its own Dark/Light/System choice.
+palettes. The Web controller adapts to desktop and phone widths, with a combined
+touchpad and QWERTY keyboard, a Connections page and its own Dark/Light/System choice.
 
 | Device Dark | Device Light | Phone Web Light |
 | :---: | :---: | :---: |
-| <img src="passport-device-dark.png" width="180" alt="Passport home in Dark theme"> | <img src="passport-device-light.png" width="180" alt="Passport home in Light theme"> | <img src="passport-web-phone-light.png" width="234" alt="Passport browser touchpad on a phone in Light theme"> |
+| <img src="passport-device-dark.png" width="180" alt="Passport home in Dark theme"> | <img src="passport-device-light.png" width="180" alt="Passport home in Light theme"> | <img src="passport-web-phone-light.png" width="234" alt="Passport browser touchpad and keyboard on a phone in Light theme"> |
 
-[Desktop Web Dark](passport-web-desktop-dark.png) shows the wide touchpad and
-host status layout. The device images are real LVGL software renders with
+[Desktop Web Dark](passport-web-desktop-dark.png) shows the touchpad and keyboard side by side. The device images are real LVGL software renders with
 synthetic host state. The Web images are Chromium captures with fixture data.
 They demonstrate layout and interaction checks, not a photograph of Passport
 or a Safari/physical phone compatibility result. See the

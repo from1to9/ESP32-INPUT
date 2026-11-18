@@ -297,8 +297,10 @@ and three controller assets. Registration failure stops the listener and
 keeps the existing explicit unavailable state.
 
 The browser uses the open bearer session and the common HTTP command/result
-flow. Tokens stay in memory. Mouse, Keyboard and Connections are separate
-views; theme selection works before login, follows the system by default,
+flow. Tokens stay in memory. Input shows the mouse and keyboard together.
+After explicit acquisition, a cross-mode action selects the device mode, checks
+the pinned target and lease, and waits for neutral release before posting input.
+Connections opens the management view. Theme selection works before login, follows the system by default,
 and stores only an explicit browser preference. It does not change native
 Appearance. Capability discovery disables unavailable controls. Ctrl/Command
 shortcuts send `keyboard.key_tap` with modifiers 1/8 and usage 6 (copy), 25
