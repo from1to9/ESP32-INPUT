@@ -102,6 +102,11 @@ without reducing the HTTP stack or buffer quotas. If that RTC allocation fails,
 HTTP startup reports its error; it does not fall back to consuming DMA-capable
 DRAM. General internal-heap totals include RTC memory, which is not DMA-capable,
 so those totals alone cannot establish Wi-Fi allocation headroom.
+The C3 profile also enables `FREERTOS_PLACE_FUNCTIONS_INTO_FLASH` for the
+SDK-selected task-context routines. The ISR placement option stays disabled.
+On the pinned C3 build this reduced `.iram0.text` by 13,164 bytes, leaving
+more internal SRAM for transmitting concurrent browser responses. Apply the
+task-context option explicitly when reusing an older configuration.
 Bluetooth reserves two controller activities for its single peripheral link
 and advertising, and twelve MSYS-2 packet blocks instead of the generic 24.
 `BT_NIMBLE_LOW_SPEED_MODE` moves host GAP/GATT/NPL routines to flash. The
