@@ -1214,16 +1214,16 @@ function mount() {
     // Keep input controls steady during renewal and movement, and expose
     // their temporary unavailability without disabling focus.
     const ready = active && !client.foregroundBusy;
-    const paintInputButton = button => {
-      if (button.disabled === ready) button.disabled = !ready;
-      if (ready && client.busy) {
+    const paintButton = (button, available) => {
+      if (button.disabled === available) button.disabled = !available;
+      if (available && client.busy) {
         if (!button.hasAttribute("aria-disabled")) button.setAttribute("aria-disabled", "true");
       } else {
         button.removeAttribute("aria-disabled");
       }
     };
     $("mouse-controls").disabled = $("keyboard-controls").disabled = !active;
-    inputButtons.forEach(paintInputButton);
+    for (const button of inputButtons) paintButton(button, ready);
     $("acquire").disabled = !inputPermission || client.busy || client.uncertain || client.controlled || !s?.input_ready || s.locked || s.release_pending || !s.remote_allowed;
     $("stop").disabled = !inputPermission || (client.managing && !client.controlled);
     $("disconnect").disabled = !client.session;
@@ -1231,7 +1231,9 @@ function mount() {
     $("connect").disabled = !identity || client.busy || client.closing || pairingBusy || Boolean(client.session);
     $("pair").disabled = pairingBusy || client.closing || Boolean(client.session);
     $("check").disabled = !identity || pairingBusy || client.closing || Boolean(client.session);
-    $("result-check").disabled = !client.canCheckResult || client.foregroundBusy;
+    // A fresh move has no result key until admission. Keep focus and appearance
+    // steady while the busy guard prevents checking the preceding move.
+    paintButton($("result-check"), !client.foregroundBusy && (client.canCheckResult || (ready && client.moving)));
     if ($("result").textContent !== client.message) $("result").textContent = client.message;
     if (!active) { pad = movement = null; resetModifiers(); }
     management.paint();
