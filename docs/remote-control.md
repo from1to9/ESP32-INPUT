@@ -72,7 +72,9 @@ device details and does not wait for the coordinator's device-detail read.
   session sequence and can advance past the command being reported.
   Admission records the queued command. `sent` reports acceptance by the
   HID transport. Each move keeps its own deadline and can expire while
-  waiting to execute or at the report submission boundary. An unknown or mismatched result stops the input
+  waiting to execute or at the report submission boundary. USB relative
+  moves stay pending until TinyUSB accepts the report or the device records
+  expiry, cancellation or submission refusal. An unknown or mismatched result stops the input
   channel and requires checking the target before resuming. Close the
   channel to stop in-flight input without waiting for its terminal replies.
   A full window rejects additional WebSocket data by closing the channel.

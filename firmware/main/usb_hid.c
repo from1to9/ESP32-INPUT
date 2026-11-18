@@ -36,6 +36,10 @@ static uint64_t s_report_generation;
 static uint64_t s_admitted_us;
 static uint64_t s_posted_us;
 static uint64_t s_retry_after_us;
+static struct {
+    uint64_t ticket, deadline_ms, lease_end_ms, at_ms;
+    usb_hid_movement_state_t state;
+} s_movement;
 static usb_dispatch_token_t s_token;
 static TaskHandle_t s_usb_worker;
 static esp_timer_handle_t s_usb_monitor;
@@ -56,6 +60,8 @@ static void clear_reports_locked(void)
 
 static void invalidate_locked(void)
 {
+    if (s_queued && s_movement.ticket && s_movement.state == USB_HID_MOVEMENT_PENDING)
+        s_movement.state = USB_HID_MOVEMENT_CANCELLED;
     s_queued = false;
     clear_reports_locked();
     if (s_usb.generation == UINT64_MAX) {
@@ -65,6 +71,28 @@ static void invalidate_locked(void)
     } else {
         ++s_usb.generation;
     }
+}
+
+static usb_hid_movement_state_t movement_deadline(uint64_t now_ms, uint64_t deadline_ms, uint64_t lease_end_ms)
+{
+    if (now_ms >= deadline_ms) return USB_HID_MOVEMENT_EXPIRED;
+    if (now_ms >= lease_end_ms) return USB_HID_MOVEMENT_CANCELLED;
+    return USB_HID_MOVEMENT_PENDING;
+}
+
+static void discard_queued_movement_locked(usb_hid_movement_state_t state, uint64_t now_ms)
+{
+    s_queued = false;
+    s_movement.state = state;
+    s_movement.at_ms = now_ms;
+    if (!s_endpoint_ready) s_sync_needed = true;
+}
+
+static void expire_queued_movement_locked(uint64_t now_ms)
+{
+    if (!s_queued || !s_movement.ticket || s_movement.state != USB_HID_MOVEMENT_PENDING) return;
+    usb_hid_movement_state_t state = movement_deadline(now_ms, s_movement.deadline_ms, s_movement.lease_end_ms);
+    if (state != USB_HID_MOVEMENT_PENDING) discard_queued_movement_locked(state, now_ms);
 }
 
 static void fault_locked(esp_err_t error)
@@ -86,6 +114,7 @@ static void monitor_deadlines(void *argument)
     const uint64_t now_us = (uint64_t)esp_timer_get_time();
     portENTER_CRITICAL(&s_usb_lock);
     if (s_usb.initialized && !s_usb.failed) {
+        expire_queued_movement_locked(now_us / 1000U);
         const bool report_expired = (s_queued || s_inflight || s_dispatching) &&
             (now_us < s_admitted_us || now_us - s_admitted_us >= USB_SLOT_TIMEOUT_US);
         const bool dispatch_expired = s_posted &&
@@ -121,18 +150,25 @@ static void usb_dispatch(void *argument)
             s_usb.suspended = suspended;
         }
         s_endpoint_ready = mounted && !suspended && tud_hid_n_ready(0);
-        s_sync_needed = false;
+        /* An expired or cancelled report may have been the last queued
+         * witness of endpoint backpressure. Refresh readiness even when
+         * there is no report left to retry. */
+        s_sync_needed = ready_locked() && !s_endpoint_ready;
         portEXIT_CRITICAL(&s_usb_lock);
         return;
     }
     if (!s_queued || s_report_generation != s_usb.generation || !ready_locked()) {
+        if (s_queued && s_movement.ticket && s_movement.state == USB_HID_MOVEMENT_PENDING)
+            s_movement.state = USB_HID_MOVEMENT_CANCELLED;
         s_queued = false;
         portEXIT_CRITICAL(&s_usb_lock);
         return;
     }
     if (!tud_hid_n_ready(0)) {
         s_endpoint_ready = false;
-        s_retry_after_us = (uint64_t)esp_timer_get_time() + USB_RETRY_US;
+        const uint64_t now_us = (uint64_t)esp_timer_get_time();
+        expire_queued_movement_locked(now_us / 1000U);
+        s_retry_after_us = now_us + USB_RETRY_US;
         portEXIT_CRITICAL(&s_usb_lock);
         return;
     }
@@ -145,13 +181,30 @@ static void usb_dispatch(void *argument)
     s_endpoint_ready = false;
     const uint8_t report_id = s_wire[0];
     const uint16_t length = (uint16_t)(s_wire_length - 1);
+    const bool timed = s_movement.ticket && s_movement.state == USB_HID_MOVEMENT_PENDING;
+    const uint64_t deadline_ms = s_movement.deadline_ms;
+    const uint64_t lease_end_ms = s_movement.lease_end_ms;
     portEXIT_CRITICAL(&s_usb_lock);
 
-    const bool accepted = tud_hid_n_report(0, report_id, s_wire + 1, length);
+    /* Check after the endpoint-ready gate and outside the USB lock, at the
+     * actual SDK call. A preempted defer must not spend stale movement. */
+    const uint64_t at_ms = timed ? (uint64_t)esp_timer_get_time() / 1000U : 0;
+    const usb_hid_movement_state_t cutoff = timed ? movement_deadline(at_ms, deadline_ms, lease_end_ms) :
+        USB_HID_MOVEMENT_PENDING;
+    const bool accepted = cutoff == USB_HID_MOVEMENT_PENDING && tud_hid_n_report(0, report_id, s_wire + 1, length);
 
     portENTER_CRITICAL(&s_usb_lock);
     s_dispatching = false;
-    if (accepted) {
+    if (timed) {
+        s_movement.state = cutoff != USB_HID_MOVEMENT_PENDING ? cutoff :
+            accepted ? USB_HID_MOVEMENT_SUBMITTED : USB_HID_MOVEMENT_REFUSED;
+        s_movement.at_ms = at_ms;
+    }
+    if (cutoff != USB_HID_MOVEMENT_PENDING) {
+        s_inflight = false;
+        s_endpoint_ready = ready_locked() && tud_hid_n_ready(0);
+        s_sync_needed = ready_locked() && !s_endpoint_ready;
+    } else if (accepted) {
         if (s_usb.submitted != UINT64_MAX) {
             ++s_usb.submitted;
         }
@@ -319,19 +372,22 @@ static bool report_valid(uint8_t id, const uint8_t *data, size_t length)
     return false;
 }
 
-bool usb_hid_send_generation(uint64_t generation, uint8_t id, const uint8_t *data, size_t length)
+static uint64_t admit_report(uint64_t generation, uint8_t id, const uint8_t *data, size_t length,
+    uint64_t deadline_ms, uint64_t lease_end_ms)
 {
     if (!report_valid(id, data, length)) {
-        return false;
+        return 0;
     }
     const uint64_t now_us = (uint64_t)esp_timer_get_time();
     portENTER_CRITICAL(&s_usb_lock);
     bool accepted = ready_locked() && s_endpoint_ready && generation == s_usb.generation &&
-        !s_queued && !s_inflight && !s_dispatching && !s_posted && !s_sync_needed;
+        !s_queued && !s_inflight && !s_dispatching && !s_posted && !s_sync_needed &&
+        (!deadline_ms || !s_movement.ticket);
     if (accepted && s_usb.accepted == UINT64_MAX) {
         fault_locked(ESP_ERR_INVALID_STATE);
         accepted = false;
     }
+    uint64_t ticket = 0;
     if (accepted) {
         s_wire[0] = id;
         memcpy(s_wire + 1, data, length);
@@ -340,13 +396,51 @@ bool usb_hid_send_generation(uint64_t generation, uint8_t id, const uint8_t *dat
         s_admitted_us = now_us;
         s_retry_after_us = 0;
         s_queued = true;
-        ++s_usb.accepted;
+        ticket = ++s_usb.accepted;
+        if (deadline_ms) {
+            s_movement.ticket = ticket;
+            s_movement.deadline_ms = deadline_ms;
+            s_movement.lease_end_ms = lease_end_ms;
+            s_movement.at_ms = 0;
+            s_movement.state = USB_HID_MOVEMENT_PENDING;
+        }
     }
     portEXIT_CRITICAL(&s_usb_lock);
     if (accepted) {
         xTaskNotifyGive(s_usb_worker);
     }
-    return accepted;
+    return ticket;
+}
+
+bool usb_hid_send_generation(uint64_t generation, uint8_t id, const uint8_t *data, size_t length)
+{
+    return admit_report(generation, id, data, length, 0, 0) != 0;
+}
+
+uint64_t usb_hid_send_movement(uint64_t generation, const uint8_t *data, size_t length,
+    uint64_t deadline_ms, uint64_t lease_end_ms)
+{
+    if (!deadline_ms || !lease_end_ms || !data || length != HID_ENGINE_MOUSE_REPORT_LENGTH || data[3])
+        return 0;
+    return admit_report(generation, HID_ENGINE_MOUSE_REPORT_ID, data, length, deadline_ms, lease_end_ms);
+}
+
+usb_hid_movement_state_t usb_hid_movement_result(uint64_t ticket, bool cancel, uint64_t *at_ms)
+{
+    portENTER_CRITICAL(&s_usb_lock);
+    usb_hid_movement_state_t state = USB_HID_MOVEMENT_UNKNOWN;
+    if (ticket && ticket == s_movement.ticket) {
+        if (cancel && s_queued && s_movement.state == USB_HID_MOVEMENT_PENDING) {
+            discard_queued_movement_locked(USB_HID_MOVEMENT_CANCELLED, 0);
+        }
+        state = s_movement.state;
+        if (state != USB_HID_MOVEMENT_PENDING) {
+            if (at_ms) *at_ms = s_movement.at_ms;
+            s_movement.ticket = 0;
+        }
+    }
+    portEXIT_CRITICAL(&s_usb_lock);
+    return state;
 }
 
 bool usb_hid_recover_generation(uint64_t generation)

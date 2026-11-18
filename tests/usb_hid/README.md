@@ -45,6 +45,12 @@ completion have separate lifetime counters. None establishes focus or an
 intended host application action. An accepted but cancelled/failed report must
 not be automatically replayed.
 
+Remote relative moves use a separate receipt for the same slot. The USB
+task checks the move and lease deadlines immediately before TinyUSB
+submission. The coordinator reports the SDK's answer against the original
+command. Reset or Stop can cancel an uncommitted report. Ordinary neutral
+reports still use the existing release and endpoint recovery path.
+
 A 3072-byte worker posts at most one deferred callback to the USB task. The
 pinned TinyUSB `usbd_defer_func()` can wait on its private queue, so only that
 worker uses it. The independent timer revokes HID after a 100 ms slot/deferred
