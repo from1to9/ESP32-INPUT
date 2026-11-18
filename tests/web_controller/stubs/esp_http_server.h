@@ -12,7 +12,8 @@ typedef struct {
     size_t content_len, received, response_length;
     web_header_t headers[12];
     unsigned header_count, response_header_count;
-    char response[65536], type[80];
+    /* The host fixture captures the complete embedded asset before writing JSON. */
+    char response[96 * 1024], type[80];
     struct { char name[64], value[512]; } response_headers[12];
 } httpd_req_t;
 size_t httpd_req_get_hdr_value_len(httpd_req_t *, const char *);
