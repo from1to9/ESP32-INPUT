@@ -1765,7 +1765,7 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
         out->status = 200;
         const unsigned maximum = effective_motion_window_max(c);
         const char *ordered = maximum > 1 && c->motion_window_ordered ? ",\"websocket_motion_ordered\":true" : "";
-        char window_max[36] = "";
+        char window_max[48] = "";
         if (maximum > 1) snprintf(window_max, sizeof(window_max), ",\"websocket_motion_window_max\":%u", maximum);
         if (c->policy == CP_POLICY_PASSPORT_OPEN_HTTP) {
             out->length = (size_t)snprintf(out->body, sizeof(out->body),
