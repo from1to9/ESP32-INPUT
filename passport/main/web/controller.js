@@ -576,16 +576,35 @@ function mount() {
   $('text').oninput = () => { $('text-count').textContent = `${$('text').value.length} / 32 characters`; };
   let lastPadPost = -Infinity;
   const point = e => ({id: e.pointerId, x: e.clientX, y: e.clientY});
+  function cancelOppositeFraction(bucket, axis, incoming) {
+    const fraction = bucket[axis] % 1;
+    if (fraction * incoming >= 0) return incoming;
+    const matched = Math.sign(incoming) * Math.min(Math.abs(incoming), Math.abs(fraction));
+    bucket[axis] += matched;
+    return incoming - matched;
+  }
   function move(e, contact) {
     if (!contact || contact.id !== e.pointerId) return;
     e.preventDefault();
-    const dx = e.clientX - contact.x, dy = e.clientY - contact.y;
+    let dx = e.clientX - contact.x, dy = e.clientY - contact.y;
     contact.x = e.clientX; contact.y = e.clientY;
     // Track the contact across neutral release without accumulating disabled motion.
     if ($('mouse-controls').disabled || client.state?.release_pending || (!dx && !dy)) return;
     if (movement?.contact !== contact) movement = {contact, samples: []};
     const samples = movement.samples, at = Math.min(e.timeStamp, performance.now());
     while (samples.length && at - samples[0].at >= PAD_LIFETIME_MS) samples.shift();
+    // Resolve opposing fractions at contact time, including while a POST is in flight.
+    for (let i = 0; i < samples.length && (dx || dy);) {
+      const prior = samples[i];
+      dx = cancelOppositeFraction(prior, 'dx', dx);
+      dy = cancelOppositeFraction(prior, 'dy', dy);
+      if (prior.dx || prior.dy) i++;
+      else samples.splice(i, 1);
+    }
+    if (!dx && !dy) {
+      if (!samples.length) movement = null;
+      return;
+    }
     let bucket = samples.at(-1);
     if (!bucket || at - bucket.at >= PAD_BUCKET_MS) {
       bucket = {at, dx:0, dy:0}; samples.push(bucket);

@@ -92,6 +92,7 @@ const server=http.createServer(async(req,res)=>{
           assert(performance.now()<Number(state.lease_expires_ms),'active input lease');
           await pause(35);
         }
+        if(timing.moveReply)await timing.moveReply;
         if(expired)send(receipt,400);
         else if(timing.inline)send(receipt);
         else send({...receipt,state:'accepted'},202);
@@ -192,6 +193,20 @@ async function fractionalTouch(){
   try{
     const page=await open(context);await connect(page);await acquire(page);
     const touch=await padTouch(context,page);
+    // Delaying an already-sent vertical move must not change horizontal rounding.
+    for(const holdReply of [false,true]){
+      const first=touchTiming.moves.length;
+      let release;
+      touchTiming.moveReply=holdReply ? new Promise(resolve=>{release=resolve;}) : null;
+      try{
+        await touch('touchStart');await touch('touchMove',0.5,1);await pause(85);
+        assert.equal(touchTiming.moves[first]?.state,'sent');
+        await touch('touchMove',0,1);await pause(85);await touch('touchMove',-0.5,1);
+      }finally{release?.();}
+      await pause(100);await touch('touchEnd');
+      assert.deepEqual(touchTiming.moves.slice(first).map(({dx,dy,state})=>({dx,dy,state})),
+        [{dx:0,dy:1,state:'sent'}]);
+    }
     for(const sign of [1,-1]){
       const first=commands.length;
       await touch('touchStart');
@@ -224,7 +239,7 @@ async function fractionalTouch(){
     const mixed=commands.slice(first).filter(c=>c.op==='mouse.move_relative');
     assert.equal(mixed.reduce((n,c)=>n+c.args.dx,0),2);
     assert.equal(mixed.reduce((n,c)=>n+c.args.dy,0),1);
-    console.log('PASS fractional touch: 48 half pixels each way deliver +24/-24, mixed axes, reversal, lift and original expiry');
+    console.log('PASS fractional touch: 48 half pixels each way deliver +24/-24, mixed axes, immediate/delayed reversal, lift and original expiry');
   }finally{await context.close();}
 }
 // Motion during neutral release cannot become part of a later fresh delta.
