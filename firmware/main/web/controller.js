@@ -11,6 +11,7 @@ const PAD_CHANNEL_BATCH_MS = 30;
 const PAD_SAMPLE_LIFETIME_MS = 150;
 const PAD_SAMPLE_BUCKET_MS = 8;
 const PAD_TIMING_RESERVE_MS = 12;
+const PAD_EXPIRY_TIMING_MS = 1500;
 const PAD_RENEW_RESERVE_MS = 900;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -333,8 +334,14 @@ export class Controller {
     // write and the device's check. Require that headroom at the next write
     // while keeping each bucket's original deadline.
     const timing = readSample && channel?.padTiming;
-    const lead = timing ? Number(timing.deviceAt - deviceTime(timing.sentAt)) + PAD_TIMING_RESERVE_MS : 0;
-    const headroom = Math.max(0, Math.min(PAD_SAMPLE_LIFETIME_MS - PAD_CHANNEL_BATCH_MS, lead));
+    const expired = readSample && channel?.padExpiryTiming;
+    const measuredLead = timing => timing ? Number(timing.deviceAt - deviceTime(timing.sentAt)) + PAD_TIMING_RESERVE_MS : 0;
+    // Repeated expiries indicate that admission timing alone misses too much
+    // queue time. Use the measured expiry briefly to select fresher movement.
+    const expiryLead = expired?.repeated && performance.now() - expired.sentAt < PAD_EXPIRY_TIMING_MS ?
+      measuredLead(expired) : 0;
+    const headroom = Math.max(0, Math.min(PAD_SAMPLE_LIFETIME_MS - PAD_CHANNEL_BATCH_MS,
+      Math.max(measuredLead(timing), expiryLead)));
     const sample = readSample?.(true, headroom);
     if (readSample && !sample) return null;
     const sentAt = performance.now();
@@ -417,8 +424,19 @@ export class Controller {
     if (relativeMove && confirmedCommand && answer.state === "rejected" && answer.error === "expired") {
       // This movement was definitively rejected before any effect. Read back
       // the lease so a simultaneous takeover or expiry still stops input.
+      if (sample && channel?.renewTerminal && answer.command_key === key && Number(answer.next_seq) === seq + 1) {
+        const stamp = /^(?:protocol|submit|dequeue|input) now=(\d+) deadline=(\d+)$/.exec(answer.reason || "");
+        if (stamp && stamp[2] === envelope.deadline_ms && decimal(stamp[1]) && BigInt(stamp[1]) >= BigInt(stamp[2])) {
+          const previous = channel.padExpiryTiming;
+          const repeated = Boolean(previous && sentAt - previous.sentAt < PAD_EXPIRY_TIMING_MS);
+          channel.padExpiryTiming = {sentAt, deviceAt: BigInt(stamp[1]), repeated};
+        }
+      }
       await this.refresh();
       return answer;
+    }
+    if (sample && answer.state === "sent" && answer.error === "ok" && channel?.padExpiryTiming?.repeated === false) {
+      channel.padExpiryTiming = null;
     }
     if (renewalRetry && op === "control.renew" && confirmedCommand &&
         answer.state === "rejected" && answer.error === "stale" &&

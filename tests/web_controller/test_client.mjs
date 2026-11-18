@@ -525,6 +525,42 @@ for (const lostReply of [false, true]) {
     assert.deepEqual(paced.motions[0].args, {dx: 6, dy: 5}, "headroom trims only the older bucket at equality");
     assert.equal(paced.motions[0].deadline_ms, "310", "admission timing cannot extend the newer bucket's deadline");
 
+    for (const receipt of ["matched", "different deadline", "future deadline", "isolated expiry"]) {
+      now = 2000;
+      const f = padFixture();
+      f.client.stateAt = now;
+      const channel = f.client.motionChannel;
+      const send = channel.exchange;
+      channel.exchange = async (command, admitted) => {
+        const result = await send(command);
+        if (command.seq > 2) return result;
+        const first = command.seq === 1;
+        admitted({command_key: "12", now_ms: first ? "140" : "310"});
+        now = first ? 2100 : 2260;
+        f.fire("move", first ? 14 : 30, 0);
+        now = first ? 2150 : 2310;
+        f.fire("move", first ? 20 : 36, 0);
+        now = first ? 2170 : 2330;
+        f.state.now_ms = first ? "270" : "430";
+        if (!first && receipt === "isolated expiry") return result;
+        const deadline = !first && receipt === "different deadline" ? "349" : command.deadline_ms;
+        const checked = first ? 250 : receipt === "future deadline" ? 330 : 400;
+        return {state: "rejected", error: "expired", command_key: "12", next_seq: command.seq + 1,
+          reason: `dequeue now=${checked} deadline=${deadline}`};
+      };
+      f.fire("down");
+      f.fire("move", 4, 0);
+      assert.equal((await f.tick()).error, "expired");
+      await f.release();
+      await f.release();
+      const newerOnly = receipt === "matched";
+      assert.deepEqual(f.motions.map(move => [move.seq, move.args.dx, move.deadline_ms]),
+        [[1, 4, "250"], [2, 16, "350"], [3, newerOnly ? 6 : 16, newerOnly ? "560" : "510"]], receipt);
+      assert.deepEqual(f.calls.map(call => call.path), Array(receipt === "isolated expiry" ? 1 : 2).fill(statePath),
+        "each expiry still reads the lease before more input");
+      assert(f.client.controlled);
+    }
+
     now = 2000;
     const renew = padFixture();
     renew.state.lease_expires_ms = "900";
