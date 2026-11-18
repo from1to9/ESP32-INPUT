@@ -132,7 +132,11 @@ channel stops control and discards the pending contact. Reconnect if a result
 is unknown, then take control explicitly to resume.
 
 The active input lease is at most three seconds and is explicitly renewed
-while the visible page controls input. Local takeover, lock, changed target,
+while the visible page controls input. If a renewal is definitively rejected
+as stale, the page checks the same lease and current input authority before
+issuing at most one new renewal. Last action names the operation on a stale
+command failure. If a state read ends control, it lists the differences
+actually observed; an inactive lease alone does not establish why it ended. Local takeover, lock, changed target,
 boot, authorization loss and lease loss stop the controller. Hiding/leaving the
 page or the browser's offline event stops production immediately and requests
 session closure; a missing close reply is not closure proof, and the device's

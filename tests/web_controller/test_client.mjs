@@ -151,6 +151,51 @@ for (const change of [s => { s.target_id = "usb:18"; }, s => { s.epoch = "9"; },
   assert(!f.client.controlled);
   assert.equal(f.calls.filter(call => call.options.method === "POST").length, 0);
 }
+{
+  const f = fixture();
+  f.state.lease_active = false;
+  const observed = await f.client.refresh(false, true);
+  assert.equal(observed.lease_active, false);
+  assert(!f.client.controlled, "a current active Refresh still observes real loss of authority");
+  assert.match(f.client.message, /Control ended/);
+  assert(f.calls.every(call => call.options.method === "GET"));
+}
+{
+  const f = fixture();
+  Object.assign(f.state, {lease_active: false, input_ready: false, transport_generation: "18"});
+  await assert.rejects(f.client.run("control.renew"), /Control ended: input not ready; transport generation changed; lease no longer active/);
+  assert.equal(f.calls.filter(c => c.options.method === "POST").length, 0);
+}
+for (const outcome of ["same lease", "lease lost", "repeated stale", "no key", "cancelled"]) {
+  const f = fixture();
+  const request = f.client.fetcher;
+  const sent = [];
+  f.client.fetcher = async (url, options) => {
+    if (options.method !== "POST") return request(url, options);
+    const command = JSON.parse(options.body);
+    sent.push(command);
+    if (sent.length === 1 && outcome === "lease lost") f.state.lease_active = false;
+    if (sent.length === 1) f.state.state_sequence = "2";
+    const succeeded = sent.length === 2 && outcome === "same lease";
+    if (succeeded) f.state.lease_expires_ms = "4100";
+    return {status: succeeded ? 200 : 400, json: async () => ({
+      command_key: outcome === "no key" ? null : String(10 + command.seq), next_seq: command.seq + 1,
+      state: succeeded ? "applied" : outcome === "cancelled" ? "cancelled" : "rejected", error: succeeded ? "ok" : "stale",
+    })};
+  };
+  if (outcome === "same lease") {
+    assert.equal((await f.client.run("control.renew")).state, "applied");
+    assert(f.client.controlled);
+    assert.equal(f.client.state.lease_expires_ms, "4100");
+  } else {
+    await assert.rejects(f.client.run("control.renew"));
+    assert(!f.client.controlled);
+    if (outcome === "repeated stale") assert.match(f.client.message, /control\.renew.*rejected: stale/);
+  }
+  const retry = outcome === "same lease" || outcome === "repeated stale";
+  assert.deepEqual(sent.map(command => [command.op, command.seq, command.args.state_sequence, command.lease_id]),
+    [["control.renew", 1, "1", lease], ...(retry ? [["control.renew", 2, "2", lease]] : [])], outcome);
+}
 for (const interrupted of ["lost lease", "unchanged mode", "unknown reply"]) {
   const f = fixture();
   f.state.mode = f.client.state.mode = "mouse";

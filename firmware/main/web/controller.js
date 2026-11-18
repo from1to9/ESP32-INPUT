@@ -240,13 +240,14 @@ export class Controller {
     this.message = s.scopes.includes("input.control") ? "Browser connected. Take control to send input." : "Browser connected with device access.";
     this.changed();
   }
-  async refresh(allowEpochChange = false, idleOnly = false) {
+  async refresh(allowEpochChange = false, passive = false) {
     if (!this.session) throw new Error("Connect this browser first.");
     const session = this.session;
     const before = this.state;
-    // An idle read can finish after an input command has established a
-    // newer state or lease. Only the command's own checks may stop it then.
-    const superseded = () => idleOnly && (this.busy || this.controlled || this.state !== before);
+    const controlled = this.controlled;
+    // Passive reads can overlap acquisition or a mode change. The command
+    // owns state validation during the transition and after it updates state.
+    const superseded = () => passive && (this.busy || this.state !== before || this.controlled !== controlled);
     let response;
     try {
       for (const delay of [0, 20, 40, 80]) {
@@ -280,18 +281,26 @@ export class Controller {
     }
     this.state = s;
     this.stateAt = performance.now();
-    if (this.controlled && (!s.lease_active || s.lease_id !== this.pin.lease_id ||
-        s.target_id !== this.pin.target_id || s.transport_generation !== this.pin.transport_generation ||
-        (!allowEpochChange && s.epoch !== this.pin.epoch) || s.locked || !s.remote_allowed || !s.input_ready)) {
-      this.halt("Control ended: local takeover, target/readiness change or lease expiry. Take control again only after checking Mosaico.");
+    if (this.controlled) {
+      const differences = [];
+      if (s.locked) differences.push("device locked");
+      if (!s.remote_allowed) differences.push("remote input not allowed");
+      if (!s.input_ready) differences.push("input not ready");
+      if (s.target_id !== this.pin.target_id) differences.push("target changed");
+      if (s.transport_generation !== this.pin.transport_generation) differences.push("transport generation changed");
+      if (!allowEpochChange && s.epoch !== this.pin.epoch) differences.push("input epoch changed");
+      if (!s.lease_active) differences.push("lease no longer active");
+      else if (s.lease_id !== this.pin.lease_id) differences.push("lease ID changed");
+      if (differences.length) this.halt(`Control ended: ${differences.join("; ")}. Check Mosaico before taking control again.`);
+      else if (allowEpochChange) this.pin.epoch = s.epoch;
     }
-    if (this.controlled && allowEpochChange) this.pin.epoch = s.epoch;
     this.changed();
     return s;
   }
-  async send(op, args, total, readSample) {
+  async send(op, args, total, readSample, renewalRetry = true) {
     // A discarded local sample has no protocol result or sequence consumption.
     if (readSample && !readSample()) return null;
+    const heldAtStart = this.controlled;
     const observe = op !== "control.renew";
     const relativeMove = op === "mouse.move_relative";
     const channel = relativeMove || op === "control.renew" ? this.motionChannel : null;
@@ -303,7 +312,9 @@ export class Controller {
     const deviceTime = at => BigInt(s.now_ms) + (channel ? BigInt(Math.floor(at - this.stateAt)) : 0n);
     if (acquireChannel && this.motionChannel !== acquireChannel) throw new Error("Input channel closed before acquisition.");
     if (readSample && !readSample()) return null;
-    if (op !== "control.acquire" && op !== "control.release" && !this.controlled) throw new Error("Take control again before sending input.");
+    if (op !== "control.acquire" && op !== "control.release" && !this.controlled) {
+      throw new Error(heldAtStart ? this.message : "Take control again before sending input.");
+    }
     if (this.uncertain) throw new Error("A reply is unknown. Reconnect explicitly; no command will be replayed.");
     if (!["control.acquire", "control.release", "control.renew"].includes(op)) {
       if (!decimal(s.lease_expires_ms)) throw new Error("Input lease deadline is unavailable.");
@@ -343,7 +354,7 @@ export class Controller {
     // After POST starts, contact end does not change its result or uncertainty.
     if (sample && performance.now() >= sample.expiresAt) return null;
     const generation = this.generation;
-    let answer, confirmedMove = false;
+    let answer, confirmedCommand = false;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
@@ -374,8 +385,7 @@ export class Controller {
       if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
       this.session.next_seq = next;
       key = decimal(answer.command_key) ? answer.command_key : null;
-      confirmedMove = relativeMove && Boolean(channel || [202, 400].includes(response.status)) &&
-        key !== null && next === seq + 1;
+      confirmedCommand = Boolean(channel || [202, 400].includes(response.status)) && key !== null && next === seq + 1;
       if (observe) { this.last = answer; this.lastKey = key; }
       const until = performance.now() + 2200;
       let delay = channel ? 0 : 100;
@@ -404,14 +414,21 @@ export class Controller {
       throw error;
     }
     if (observe) this.message = describeResult(answer, total);
-    if (confirmedMove && answer.state === "rejected" && answer.error === "expired") {
+    if (relativeMove && confirmedCommand && answer.state === "rejected" && answer.error === "expired") {
       // This movement was definitively rejected before any effect. Read back
       // the lease so a simultaneous takeover or expiry still stops input.
       await this.refresh();
       return answer;
     }
+    if (renewalRetry && op === "control.renew" && confirmedCommand &&
+        answer.state === "rejected" && answer.error === "stale" &&
+        answer.command_key === key && Number(answer.next_seq) === seq + 1) {
+      // A verified rejection has no renewal effect. Retry once with a fresh
+      // authority read and a new sequence, using the same already held lease.
+      return this.send(op, args, total, readSample, false);
+    }
     if (answer.error !== "ok" || !["applied", "sent", "completed"].includes(answer.state)) {
-      this.halt(describeResult(answer, total));
+      this.halt((answer.error === "stale" ? op + " — " : "") + describeResult(answer, total));
       throw new Error(this.message);
     }
     if (channel && op === "control.renew") {
@@ -1124,7 +1141,7 @@ function mount() {
   $("check").onclick = () => authorize(status);
   $("connect").onclick = () => authorize(status);
   $("acquire").onclick = () => act(() => client.acquire());
-  $("refresh").onclick = () => { if (!client.busy) return act(() => client.refresh(false, !client.controlled)); };
+  $("refresh").onclick = () => { if (!client.busy) return act(() => client.refresh(false, true)); };
   $("disconnect").onclick = () => act(() => client.disconnect());
   $("stop").onclick = () => act(async () => {
     pad = movement = null;
