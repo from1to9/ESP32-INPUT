@@ -276,10 +276,15 @@ typedef struct {
 } cp_http_response_t;
 cp_error_t cp_transport_frame(cp_context_t *, const cp_identity_t *, const char *frame,
                               size_t length, uint64_t now_ms, cp_http_response_t *);
-/* Optional state owned by one enrolled browser channel. The key is returned
- * only for a newly accepted relative move on an opted-in channel. */
+typedef enum {
+    CP_TERMINAL_DISABLED,
+    CP_TERMINAL_MOVE,
+    CP_TERMINAL_MOVE_AND_RENEW,
+} cp_terminal_mode_t;
+/* Optional enrolled browser channel state. A key is returned only for a newly
+ * accepted relative move or, with the extended opt-in, lease renewal. */
 typedef struct {
-    bool enabled;
+    cp_terminal_mode_t mode;
     uint64_t accepted_key;
 } cp_motion_terminal_t;
 cp_error_t cp_transport_frame_motion(cp_context_t *, const cp_identity_t *, const char *frame,

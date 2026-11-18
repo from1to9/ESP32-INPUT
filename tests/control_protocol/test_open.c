@@ -83,7 +83,9 @@ int main(void)
     assert(request("POST","/api/v1/open-session","{\"policy\":\"tls\"}",&sec)==CP_INVALID);
     assert(request("GET","/api/v1/login-challenge",NULL,&sec)==CP_FORBIDDEN);
     open_session(true); sec=security(true);
+    cp_set_motion_terminal_available(context, true);
     assert(request("GET","/api/v1/capabilities",NULL,&sec)==CP_OK && strstr(response.body,"open_network"));
+    assert(!strstr(response.body,"websocket_motion_terminal") && !strstr(response.body,"websocket_renew_terminal"));
     assert(request("GET","/api/v1/config",NULL,&sec)==CP_FORBIDDEN);
     assert(request("GET","/api/v1/state",NULL,&sec)==CP_OK);
     assert(command("ui.close",1,true)==CP_FORBIDDEN && !dispatched);
@@ -97,6 +99,11 @@ int main(void)
     cp_identity_t channel; sec.authorization=NULL;sec.csrf=NULL;
     assert(cp_transport_upgrade(context,&sec,ticket,now,&channel)==CP_OK && channel.browser);
     cp_identity_t duplicate;assert(cp_transport_upgrade(context,&sec,ticket,now,&duplicate)==CP_UNAUTHENTICATED);
+    const char renewal_opt_in[] = "{\"v\":1,\"type\":\"renew_terminal\"}";
+    cp_motion_terminal_t motion = {0};
+    assert(cp_transport_frame_motion(context, &channel, renewal_opt_in, strlen(renewal_opt_in), now,
+                                     &response, &motion) == CP_INVALID);
+    assert(motion.mode == CP_TERMINAL_DISABLED && !motion.accepted_key);
     const char forbidden_read[] = "{\"v\":1,\"resource\":\"/api/v1/config\"}";
     assert(cp_transport_frame(context,&channel,forbidden_read,strlen(forbidden_read),now,&response)==CP_FORBIDDEN);
     assert(cp_transport_close(context,&channel,now)==CP_OK);

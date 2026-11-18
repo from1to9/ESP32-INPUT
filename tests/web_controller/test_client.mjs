@@ -61,6 +61,7 @@ function padFixture() {
   const motions = [], sentAt = [];
   f.client.motionChannel = {
     motionTerminal: true,
+    renewTerminal: true,
     exchange: async command => {
       const next_seq = String(command.seq + 1);
       if (command.op === "control.renew") return {state: "applied", error: "ok", next_seq, command_key: "11",
@@ -239,7 +240,13 @@ for (const terminal of [
     statePath, "/api/v1/commands", "/api/v1/requests/12", ...(recoverable ? [statePath] : []),
   ]);
 }
-for (const outcome of ["matched", "wrong key", "duplicate admission", "lost terminal", "inline terminal", "early terminal"]) {
+for (const [operation, outcome] of [
+  ...["matched", "wrong key", "duplicate admission", "lost terminal", "inline terminal", "early terminal"]
+    .map(outcome => ["mouse.move_relative", outcome]),
+  ...["matched", "wrong key", "lost terminal"].map(outcome => ["control.renew", outcome]),
+]) {
+  const renewing = operation === "control.renew";
+  const negotiation = renewing ? "renew_terminal" : "motion_terminal";
   const {client, calls} = fixture();
   const OriginalSocket = globalThis.WebSocket;
   const messages = [];
@@ -257,12 +264,13 @@ for (const outcome of ["matched", "wrong key", "duplicate admission", "lost term
       messages.push(input);
       queueMicrotask(() => {
         const reply = value => this.onmessage?.({data: JSON.stringify(value)});
-        if (input.type === "motion_terminal") {
-          reply({motion_terminal: true});
+        if (input.type === negotiation) {
+          reply({motion_terminal: true, ...(renewing ? {renew_terminal: true} : {})});
           return;
         }
-        const admission = {command_key: "12", next_seq: 2, state: "accepted", error: "ok"};
-        const terminal = {...admission, motion_terminal: true, state: "sent"};
+        const admission = {command_key: "12", next_seq: 2, state: "accepted", error: "ok", now_ms: "123"};
+        const terminal = {...admission, motion_terminal: true, ...(renewing ?
+          {state: "applied", lease_id: lease, lease_active: true, lease_expires_ms: "4100"} : {state: "sent"})};
         if (outcome === "inline terminal") {
           reply({command_key: "12", next_seq: 2, state: "sent", error: "ok"});
           return;
@@ -287,14 +295,15 @@ for (const outcome of ["matched", "wrong key", "duplicate admission", "lost term
     client.stateAt = performance.now();
     const request = client.request.bind(client);
     client.request = async (path, ...args) => {
-      if (path === "/api/v1/capabilities") return {status: 200, json: {websocket: true, websocket_motion_terminal: true}};
+      if (path === "/api/v1/capabilities") return {status: 200, json: {websocket: true, websocket_motion_terminal: true, websocket_renew_terminal: renewing}};
       if (path === "/api/v1/ws-ticket") return {status: 200, json: {ticket: "0".repeat(64)}};
       return request(path, ...args);
     };
     await client.openMotionChannel(client.generation);
-    const move = client.run("mouse.move_relative", {dx: 8, dy: 3});
+    client.lastKey = "11";
+    const move = client.run(operation, renewing ? {} : {dx: 8, dy: 3});
     const success = outcome === "matched" || outcome === "inline terminal";
-    if (success) assert.equal((await move).state, "sent");
+    if (success) assert.equal((await move).state, renewing ? "applied" : "sent");
     else {
       await assert.rejects(move, /reply unavailable/);
       assert.match(client.message, /Reply unknown/);
@@ -302,8 +311,9 @@ for (const outcome of ["matched", "wrong key", "duplicate admission", "lost term
     }
     assert.equal(client.uncertain, !success);
     assert.equal(client.controlled, success);
-    assert.equal(client.lastKey, outcome === "early terminal" ? null : "12");
-    assert.deepEqual(messages.map(item => item.op || item.type), ["motion_terminal", "mouse.move_relative"]);
+    assert.equal(client.lastKey, renewing ? "11" : outcome === "early terminal" ? null : "12");
+    if (renewing) assert.equal(client.state.lease_expires_ms, success ? "4100" : "3100");
+    assert.deepEqual(messages.map(item => item.op || item.type), [negotiation, operation]);
     assert(!calls.some(call => call.path.startsWith("/api/v1/commands") || call.path.startsWith("/api/v1/requests/")));
   } finally {
     client.motionChannel?.close();
@@ -447,16 +457,32 @@ for (const lostReply of [false, true]) {
       f.fire("move", 85, -25);
       now = boundary;
       held.resume();
-      assert.equal(await waiting, null);
-      assert.deepEqual(f.motions, [], "new samples cannot renew an older aggregate at its deadline");
+      assert.equal((await waiting).state, "sent");
+      assert.deepEqual(f.motions[0].args, {dx: 5, dy: 5},
+        "fresh deltas survive without extending the expired bucket's deadline");
+      assert.equal(f.motions[0].deadline_ms, String(399 - (boundary - 2000)));
       f.fire("move", 97, -38);
+      now += 30;
       await f.tick();
-      assert.deepEqual(f.motions[0].args, {dx: 12, dy: -13});
+      assert.deepEqual(f.motions[1].args, {dx: 12, dy: -13});
     }
 
     now = 2000;
+    const paced = padFixture();
+    paced.client.stateAt = now;
+    paced.client.motionChannel.padTiming = {sentAt: now, deviceAt: 136n};
+    paced.fire("down");
+    paced.fire("move", 4, 8);
+    now = 2060;
+    paced.fire("move", 10, 13);
+    now = 2102;
+    await paced.tick();
+    assert.deepEqual(paced.motions[0].args, {dx: 6, dy: 5}, "headroom trims only the older bucket at equality");
+    assert.equal(paced.motions[0].deadline_ms, "310", "admission timing cannot extend the newer bucket's deadline");
+
+    now = 2000;
     const renew = padFixture();
-    renew.state.lease_expires_ms = "1800";
+    renew.state.lease_expires_ms = "900";
     let renewing, finishRenew;
     const renewalStarted = new Promise(resolve => { renewing = resolve; });
     const renewed = new Promise(resolve => { finishRenew = resolve; });
@@ -475,8 +501,8 @@ for (const lostReply of [false, true]) {
     renew.fire("move", 280, -75);
     finishRenew();
     await awaitingRenew;
-    assert.deepEqual(renew.motions[0].args, {dx: 107, dy: -122},
-      "deadline equality starts fresh, preserving two-axis bounds and reversal");
+    assert.deepEqual(renew.motions[0].args, {dx: 127, dy: -127},
+      "deadline equality retains fresh net reversal within the two-axis bounds");
     assert.equal(renew.motions[0].seq, 2);
     assert.equal(renew.motions[0].deadline_ms, "400");
 
@@ -555,11 +581,11 @@ for (const lostReply of [false, true]) {
       else await first;
       assert.equal(f.motions.length, scenario === "renew" ? 0 : 1, scenario + " sends nothing synchronously on release");
       const queued = f.release();
-      if (["fresh", "new contact", "renew"].includes(scenario)) {
+      if (["fresh", "expired", "new contact", "renew"].includes(scenario)) {
         assert(queued, scenario + " submits on release before any timer tick");
         await queued;
         const args = scenario === "fresh" ? {dx: 18, dy: -4} :
-          scenario === "renew" ? {dx: 20, dy: -3} : {dx: 4, dy: 6};
+          scenario === "expired" ? {dx: 22, dy: 29} : scenario === "renew" ? {dx: 20, dy: -3} : {dx: 4, dy: 6};
         assert.deepEqual(f.motions.at(-1).args, args);
         assert.equal(f.motions.at(-1).seq, 2);
       } else {
@@ -576,8 +602,9 @@ for (const lostReply of [false, true]) {
       } else if (scenario === "expired") {
         assert.equal(f.tick(), undefined, "the oldest sample expires inclusively on release");
         f.fire("move", 47, 23);
+        now += 30;
         await f.tick();
-        assert.deepEqual(f.motions[1].args, {dx: 5, dy: -3}, "expired deltas cannot leak into fresh input");
+        assert.deepEqual(f.motions[2].args, {dx: 5, dy: -3}, "expired deltas cannot leak into fresh input");
       } else if (scenario === "legacy") {
         await f.tick();
         assert.deepEqual(f.motions[1].args, {dx: 18, dy: -4}, "legacy WS retains its timer-only send");

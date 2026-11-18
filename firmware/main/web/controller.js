@@ -9,6 +9,9 @@ const IDENTITY_KEY = "mosaico.browser.identity.v1";
 const THEME_KEY = "mosaico.browser.theme.v1";
 const PAD_CHANNEL_BATCH_MS = 30;
 const PAD_SAMPLE_LIFETIME_MS = 150;
+const PAD_SAMPLE_BUCKET_MS = 8;
+const PAD_TIMING_RESERVE_MS = 12;
+const PAD_RENEW_RESERVE_MS = 900;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 const decimal = value => typeof value === "string" && DECIMAL.test(value) && BigInt(value) <= 18446744073709551615n;
@@ -74,6 +77,7 @@ class MotionChannel {
     this.socket = socket;
     this.pending = null;
     this.motionTerminal = false;
+    this.renewTerminal = false;
     socket.onmessage = event => {
       const pending = this.pending;
       if (!pending || pending.done) { this.close(); return; }
@@ -109,7 +113,8 @@ class MotionChannel {
     let timeout;
     try {
       return await new Promise((resolve, reject) => {
-        this.pending = {resolve, reject, sequence: payload.seq, negotiating: payload.type === "motion_terminal",
+        this.pending = {resolve, reject, sequence: payload.seq,
+          negotiating: payload.type === "motion_terminal" || payload.type === "renew_terminal",
           accepted: onAccepted && (answer => {
             clearTimeout(timeout);
             timeout = setTimeout(() => this.close(), 2200);
@@ -180,9 +185,13 @@ export class Controller {
     });
     try {
       if (capabilities.json.websocket_motion_terminal === true) {
-        const selected = await channel.exchange({v: 1, type: "motion_terminal"});
-        if (selected.motion_terminal !== true) throw new Error("Device input channel negotiation failed.");
+        const renewTerminal = capabilities.json.websocket_renew_terminal === true;
+        const selected = await channel.exchange({v: 1, type: renewTerminal ? "renew_terminal" : "motion_terminal"});
+        if (selected.motion_terminal !== true || (renewTerminal && selected.renew_terminal !== true)) {
+          throw new Error("Device input channel negotiation failed.");
+        }
         channel.motionTerminal = true;
+        channel.renewTerminal = renewTerminal;
       }
     } catch (error) {
       channel.close();
@@ -300,7 +309,8 @@ export class Controller {
       if (!decimal(s.lease_expires_ms)) throw new Error("Input lease deadline is unavailable.");
       /* Busy input must not starve the timer that normally renews this already
        * explicit lease. Renew before a new action, never reacquire or replay. */
-      if (BigInt(s.lease_expires_ms) - deviceTime(performance.now()) < 1800n) {
+      const renewalReserve = readSample && channel?.renewTerminal ? BigInt(PAD_RENEW_RESERVE_MS) : 1800n;
+      if (BigInt(s.lease_expires_ms) - deviceTime(performance.now()) < renewalReserve) {
         await this.send("control.renew", {});
         s = this.state; // Successful renewal already refreshed state.
         if (!this.controlled) throw new Error("Input control ended before the new action.");
@@ -308,7 +318,13 @@ export class Controller {
     }
     const seq = this.session.next_seq;
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
-    const sample = readSample?.(true);
+    // A recent admission measures the gap between our clock estimate at
+    // write and the device's check. Require that headroom at the next write
+    // while keeping each bucket's original deadline.
+    const timing = readSample && channel?.padTiming;
+    const lead = timing ? Number(timing.deviceAt - deviceTime(timing.sentAt)) + PAD_TIMING_RESERVE_MS : 0;
+    const headroom = Math.max(0, Math.min(PAD_SAMPLE_LIFETIME_MS - PAD_CHANNEL_BATCH_MS, lead));
+    const sample = readSample?.(true, headroom);
     if (readSample && !sample) return null;
     const sentAt = performance.now();
     const lifetime = sample ? Math.min(200, Math.floor(sample.expiresAt - sentAt)) :
@@ -331,19 +347,23 @@ export class Controller {
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
-      const moveAccepted = channel?.motionTerminal && relativeMove ? admitted => {
+      const pushedTerminal = relativeMove ? channel?.motionTerminal : op === "control.renew" && channel?.renewTerminal;
+      const accepted = pushedTerminal ? admitted => {
         if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
         this.session.next_seq = seq + 1;
-        this.lastKey = admitted.command_key;
-        this.last = admitted;
-        if (!readSample) this.message = describeResult(admitted, total);
-        this.changed();
+        if (decimal(admitted.now_ms)) channel.padTiming = {sentAt, deviceAt: BigInt(admitted.now_ms)};
+        if (observe) {
+          this.lastKey = admitted.command_key;
+          this.last = admitted;
+          if (!readSample) this.message = describeResult(admitted, total);
+          this.changed();
+        }
       } : undefined;
       let response;
       if (channel) {
-        const reply = channel.exchange(envelope, moveAccepted);
+        const reply = channel.exchange(envelope, accepted);
         // exchange starts the socket write before returning its promise.
-        if (moveAccepted && sample) this.lastPadSubmissionAt = performance.now();
+        if (pushedTerminal && sample) this.lastPadSubmissionAt = performance.now();
         response = {json: await reply};
       } else {
         response = await this.request("/api/v1/commands", "POST", envelope);
@@ -1134,13 +1154,30 @@ function mount() {
   $("pad").onpointerdown = event => {
     if ($("mouse-controls").disabled || (event.pointerType === "mouse" && event.button !== 0) || pad) return;
     event.preventDefault(); $("pad").setPointerCapture(event.pointerId);
-    pad = {id: event.pointerId, x: event.clientX, y: event.clientY}; movement = null;
+    pad = {id: event.pointerId, x: event.clientX, y: event.clientY, samples: []}; movement = null;
   };
   $("pad").onpointermove = event => {
     if (!pad || pad.id !== event.pointerId || $("mouse-controls").disabled) return;
     event.preventDefault();
     const now = performance.now();
-    const batch = client.motionChannel && !client.motionChannel.motionTerminal ?
+    if (client.motionChannel?.motionTerminal) {
+      trimPadSamples(pad.samples, now);
+      const dx = Math.round(event.clientX) - Math.round(pad.x);
+      const dy = Math.round(event.clientY) - Math.round(pad.y);
+      pad.x = event.clientX; pad.y = event.clientY;
+      if (!dx && !dy) return;
+      // The first delta supplies the bucket's deadline. Short buckets bound
+      // storage while allowing later movement to outlive the oldest bucket.
+      const bucketMs = client.motionChannel.renewTerminal ? PAD_SAMPLE_BUCKET_MS : PAD_SAMPLE_LIFETIME_MS;
+      let bucket = pad.samples[pad.samples.length - 1];
+      if (!bucket || now - bucket.at >= bucketMs) {
+        bucket = {at: now, dx: 0, dy: 0};
+        pad.samples.push(bucket);
+      }
+      bucket.dx += dx; bucket.dy += dy;
+      return;
+    }
+    const batch = client.motionChannel ?
       PAD_CHANNEL_BATCH_MS : PAD_SAMPLE_LIFETIME_MS;
     if (!movement || now - movement.at >= batch) movement = {dx: 0, dy: 0, at: now, contact: pad};
     movement.dx = Math.max(-127, Math.min(127, movement.dx + event.clientX - pad.x));
@@ -1154,42 +1191,46 @@ function mount() {
     if (!moves[event.key] || event.repeat || $("mouse-controls").disabled) return;
     event.preventDefault(); const [dx, dy] = moves[event.key]; inputAction(() => client.input("mouse.move_relative", {dx, dy}));
   };
+  function trimPadSamples(samples, now, headroom = 0) {
+    while (samples.length && now + headroom >= samples[0].at + PAD_SAMPLE_LIFETIME_MS) samples.shift();
+  }
+  function readPadSample(contact, consume = false, headroom = 0) {
+    if (pad !== contact) return null;
+    const {samples} = contact;
+    trimPadSamples(samples, performance.now(), headroom);
+    if (!samples.length) return null;
+    let dx = 0, dy = 0;
+    for (const sample of samples) { dx += sample.dx; dy += sample.dy; }
+    if (!dx && !dy) return null;
+    const expiresAt = samples[0].at + PAD_SAMPLE_LIFETIME_MS;
+    if (consume) samples.length = 0;
+    return {args: {dx: Math.max(-127, Math.min(127, dx)), dy: Math.max(-127, Math.min(127, dy))}, expiresAt};
+  }
   function sendPadMovement() {
-    if (!movement || !pad || !client.controlled || client.busy) return;
+    if (!pad || !client.controlled || client.busy) return;
     const now = performance.now();
-    const accumulate = client.motionChannel?.motionTerminal === true;
-    if (accumulate) {
-      if (now >= movement.at + PAD_SAMPLE_LIFETIME_MS) {
-        movement = null;
-        return;
-      }
-      if (now - client.lastPadSubmissionAt < PAD_CHANNEL_BATCH_MS ||
-          (!Math.trunc(movement.dx) && !Math.trunc(movement.dy))) return;
-    } else {
-      if (!client.motionChannel && now - lastMovementAt < 60) return;
-      lastMovementAt = now;
-    }
     const contact = pad;
-    // Keep one aggregate live across state reads and renewal. Legacy
-    // transports keep their existing detached sample and replacement rule.
-    const next = accumulate ? null : movement;
-    if (!accumulate) movement = null;
+    if (client.motionChannel?.motionTerminal) {
+      if (now - client.lastPadSubmissionAt < PAD_CHANNEL_BATCH_MS || !readPadSample(contact)) return;
+      act(() => client.input("mouse.move_relative", {}, undefined, (consume, headroom) => readPadSample(contact, consume, headroom)));
+      return;
+    }
+    if (!movement || (!client.motionChannel && now - lastMovementAt < 60)) return;
+    lastMovementAt = now;
+    const next = movement;
+    movement = null;
     act(() => client.input("mouse.move_relative", {}, undefined, consume => {
       if (pad !== contact) return null;
       const latest = movement?.contact === contact ? movement : next;
-      if (!latest) return null;
       const expiresAt = latest.at + PAD_SAMPLE_LIFETIME_MS;
-      if (performance.now() >= expiresAt) {
-        if (accumulate) movement = null;
-        return null;
-      }
+      if (performance.now() >= expiresAt) return null;
       const dx = Math.trunc(latest.dx), dy = Math.trunc(latest.dy);
       if (consume && latest === movement) movement = null;
       return dx || dy ? {args: {dx, dy}, expiresAt} : null;
     }));
   }
   client.onInputLaneReleased = () => {
-    if (client.motionChannel?.motionTerminal && pad && movement) queueMicrotask(sendPadMovement);
+    if (client.motionChannel?.motionTerminal && pad?.samples.length) queueMicrotask(sendPadMovement);
   };
   setInterval(sendPadMovement, PAD_CHANNEL_BATCH_MS);
   setInterval(() => {

@@ -115,13 +115,15 @@ If the enrolled HTTP or HTTPS listener offers the authenticated input
 channel, touchpad and direction buttons use it after **Take control**.
 Movement shares the existing command sequence with other button actions.
 On a channel that negotiates motion terminal replies, the touchpad combines
-unsent deltas from the same contact while it waits. A report can move farther
-than a single sample, within the same per-axis limits. The combined movement
-expires when its oldest sample reaches 150 ms. When it expires, later samples
-start a new batch. Once the current command and its checks finish, the page
-tries to send fresh accumulated movement. These pad submissions are at
-least 30 ms apart. Lifting the finger or stopping control discards unsent
-movement.
+fresh unsent deltas from the current contact, within the per-axis report
+limits. When the channel also supplies device admission timing, older deltas
+expire independently after at most 150 ms. The browser uses the previous
+admission and a small allowance for device dispatch to skip deltas that are
+unlikely to arrive in time. The command deadline comes from the oldest
+included delta. Each command waits for its terminal result, and pad submissions are
+at least 30 ms apart. Opted-in channels also push the result of lease renewal
+so the pad need not wait for a separate result read. Lifting the finger or
+stopping control discards unsent movement.
 While movement or renewal is in flight, input buttons keep their appearance
 and focus. Additional button presses during that interval are discarded.
 **Stop** remains available.
@@ -137,7 +139,6 @@ session closure; a missing close reply is not closure proof, and the device's
 short lease expires independently. Reconnection requires explicit acquisition.
 
 Pointer feedback depends on network latency and the selected HID link.
-Further tuning of continuous pad movement is deferred.
 
 ## HTTP boundary and validation
 
