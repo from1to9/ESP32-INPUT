@@ -34,8 +34,12 @@ HTTP 200 headers for the home page and timed out after 12 seconds with zero
 of 8,670 body bytes. The stylesheet also closed before its body arrived.
 In a separate capture, a 704-byte health response completed in 0.19 seconds.
 During the subsequent home-page request the server reported send errno 11
-and a handler failure while the client timed out waiting for headers. The
-cause of the send stall remains open. These observations do not establish sustained Web
+and a handler failure while the client timed out waiting for headers.
+In `a2f6178`, the health handler, HTTP interface check and BLE owner each
+replaced a 1,424-byte scan/profile snapshot with 48 bytes of link state.
+Matched C3 builds measured 4,128 bytes less static DRAM. The effect on
+page delivery has not been tested on hardware, and the cause of the send
+stall remains open. These observations do not establish sustained Web
 reliability, physical display rendering, every BLE/USB input path, Safari
 behavior, speaker output or long-run radio coexistence. The
 community release gate and remaining hardware cases are listed in the
@@ -96,7 +100,9 @@ and [storage boundary](interaction.md#status-connectivity-and-display) for what 
   same-boot OTA health confirmation. The served HTTPS page and JavaScript
   matched the candidate. An authorized client read state and configuration
   and received an authenticated WebSocket heartbeat. The check sent no HID
-  input. A physical iPhone Safari swipe on this version remains unverified.
+  input. In a subsequent physical iPhone test, the operator reported that
+  swiping moved the pointer but motion still felt jumpy. Individual movement
+  receipts and the cause of the uneven motion were not established by that test.
 - **Bluetooth memory pressure.** The controller policy removes the internal
   DMA dependency for allocations explicitly eligible for PSRAM. Real PSRAM
   exhaustion or a full MSYS pool can still trigger the SDK assertion. Dynamic

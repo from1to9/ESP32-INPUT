@@ -52,7 +52,7 @@ static bool link_ready;
 static bool pairing_failed;
 static uint32_t peer_security_revision;
 static bool names_reconciled, bond_ids_known;
-static passport_wifi_state_t network;
+static passport_wifi_link_t network;
 static passport_control_observation_t control_state;
 static struct {
     uint64_t key, deadline;
@@ -742,7 +742,7 @@ static void service(struct ble_npl_event *event)
     hid_engine_observe_transport(&engine, now, false);
     if (lease_end && now >= lease_end) { hid_engine_cancel(&engine); lease_end = 0; }
     state.ready = transport_ready && !engine.state.release_pending && !engine.state.locked && !transition;
-    passport_wifi_snapshot(&network);
+    passport_wifi_link_snapshot(&network);
     control_state=(passport_control_observation_t){.transport_generation=state.generation,
         .network_generation=network.transport_generation,.local_busy=lease_end>now,.transition=transition};
     snprintf(control_state.target,sizeof(control_state.target),"%s",state.current);

@@ -82,8 +82,8 @@ static esp_err_t health_get(httpd_req_t *request)
     const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     // HTTP server serializes handlers on its task. This response contains no credentials.
     static char body[1536];
-    static passport_wifi_state_t wifi;
-    passport_wifi_snapshot(&wifi);
+    static passport_wifi_link_t wifi;
+    passport_wifi_link_snapshot(&wifi);
     snprintf(body, sizeof(body),
              "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
              "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
