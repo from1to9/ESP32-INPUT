@@ -147,8 +147,20 @@ and [storage boundary](interaction.md#status-connectivity-and-display) for what 
   ended 72 units to the right. The reported net movements were +126 and +99.
   In a separate test the candidate tracked 29 moves outside the pad after
   losing pointer capture. The finger lifted outside, all 12 submitted moves
-  reached the HID transport, and Stop completed the neutral release. The
-  candidate's behavior on a physical iPhone remains unverified.
+  reached the HID transport, and Stop completed the neutral release.
+
+  After `b861a98` was installed and confirmed by OTA, desktop Chromium
+  loaded the matching page from the board. It tracked 29 moves outside the
+  pad after losing capture. All ten submitted movements reached the HID
+  transport, including seven submitted after crossing the boundary. The
+  outside lift ended the contact with no further movement commands. Stop
+  closed that session with HTTP 200. On the separate 360-point stroke, 55
+  moves reached the transport and nine expired. The delivered path was 477
+  units with net +141. Terminal receipt intervals had a median of 103 ms,
+  a 95th percentile of 458 ms and a maximum of 690 ms. The same lease
+  survived three renewals, and Stop completed the neutral release. This run
+  did not reproduce the preview's gain in delivered travel. Pointer feel on
+  a physical iPhone running this revision remains unverified.
 - **Bluetooth memory pressure.** The controller policy removes the internal
   DMA dependency for allocations explicitly eligible for PSRAM. Real PSRAM
   exhaustion or a full MSYS pool can still trigger the SDK assertion. Dynamic
