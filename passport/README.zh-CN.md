@@ -1,8 +1,14 @@
 # Passport 随身键鼠
 
-把 Passport 配对到电脑或平板，就能用机身三个按键移动光标、点击和发送常用按键。打开 Passport 自带的网页，手机也能当触控板，用屏幕键盘打字。鼠标和按键都会发往与 Passport 蓝牙配对的主机。
+**把 Passport 接到 MCP，就能让 AI 用鼠标和键盘操作蓝牙配对的电脑或平板。** AI 助手通过你在电脑上配置的 MCP 服务调用 Passport 的局域网 API，配对主机收到普通蓝牙键鼠输入。你也可以用机身三个按键操作，或打开 Passport 自带的网页，把手机当作触控板和键盘。
 
 [下载 Passport v0.1.0](https://github.com/from1to9/ESP32-INPUT/releases/tag/passport-v0.1.0) · [English guide](README.md)
+
+### 用 MCP 让 AI 操作配对主机
+
+例如，先在配对的电脑上打开演示文稿，再对 AI 说：“确认当前控制的是这台演示电脑，按一次右方向键，然后释放控制。”也可以让它在你已选中的文本框输入一小段英文。
+
+接入时，在运行 AI 客户端的电脑上配置一个适配 Passport 的 MCP 服务。让服务按顺序打开 Passport 会话、读取目标和就绪状态、取得控制权，再调用 `mouse.move_relative`、`mouse.click` 或 `keyboard.key_tap` 等操作。读到该指令的终态回执后释放控制并关闭会话。`sent` 表示 Passport 已把报告交给蓝牙传输层；要让 AI 看见屏幕变化，还需单独提供屏幕观察。仓库自带的 MCP companion 面向 Mosaico；Passport 适配器应使用自己的开放会话接口。[Passport API 接入顺序](API.md#direct-http-and-websocket-input)
 
 | 首页 | 方向鼠标 | 快捷键 |
 | :---: | :---: | :---: |

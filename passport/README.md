@@ -2,6 +2,15 @@
 
 [Chinese user guide](README.zh-CN.md) · [Download v0.1.0 for Passport](https://github.com/from1to9/ESP32-INPUT/releases/tag/passport-v0.1.0)
 
+**Use Passport as a mouse and keyboard for an AI assistant.** A local MCP
+adapter can call the [Passport LAN API](API.md#direct-http-and-websocket-input)
+to control the paired Bluetooth host. For example, open a presentation on
+that host and ask the assistant to check the selected target, tap Right once,
+and release control. The adapter opens a Passport session, checks readiness,
+acquires control, sends the named action and waits for its keyed result.
+Screen observation needs a separate source. The bundled MCP companion targets
+Mosaico; a Passport adapter uses the open-session API documented here.
+
 | Device controls | Desktop browser |
 | :---: | :---: |
 | <img src="../docs/ui/passport-mouse-dark.png" width="180" alt="On-device directional mouse"> | <img src="../docs/ui/passport-web-desktop-dark.png" width="600" alt="Dark desktop touchpad and keyboard"> |

@@ -29,6 +29,10 @@ host-rendered LVGL and browser fixtures.
 
 [Passport user guide · zh-CN](passport/README.zh-CN.md)
 
+An AI assistant can control a paired computer or tablet through an MCP
+adapter for Passport's LAN API. It can move the mouse, click and send keys.
+The [Passport guide](passport/README.md) walks through an AI slide-advance example.
+
 | On-device mouse | Browser touchpad and keyboard |
 | :---: | :---: |
 | <img src="docs/ui/passport-mouse-dark.png" width="180" alt="Passport directional mouse with the right arrow selected"> | <img src="docs/ui/passport-web-desktop-dark.png" width="590" alt="Desktop Web controller showing the touchpad and keyboard in Dark mode"> |
