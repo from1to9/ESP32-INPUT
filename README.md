@@ -27,6 +27,12 @@ host-rendered LVGL and browser fixtures.
 
 ## FoloToy AI Passport
 
+[Passport user guide · zh-CN](passport/README.zh-CN.md)
+
+| On-device mouse | Browser touchpad and keyboard |
+| :---: | :---: |
+| <img src="docs/ui/passport-mouse-dark.png" width="180" alt="Passport directional mouse with the right arrow selected"> | <img src="docs/ui/passport-web-desktop-dark.png" width="590" alt="Desktop Web controller showing the touchpad and keyboard in Dark mode"> |
+
 Passport uses its 240 × 320 screen and three buttons for a directional mouse,
 click, Esc, Enter, Tab, Backspace, arrow keys, connection management, and
 Lock. The local Bluetooth page lists saved hosts and supports pairing,

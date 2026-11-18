@@ -23,12 +23,15 @@ cards, an always visible UP/OK/DOWN footer, and focused controls in both
 palettes. The Web controller adapts to desktop and phone widths, with a combined
 touchpad and QWERTY keyboard, a Connections page and its own Dark/Light/System choice.
 
-| Device Dark | Device Light | Phone Web Light |
+| Home | Directional mouse | Quick keys |
 | :---: | :---: | :---: |
-| <img src="passport-device-dark.png" width="180" alt="Passport home in Dark theme"> | <img src="passport-device-light.png" width="180" alt="Passport home in Light theme"> | <img src="passport-web-phone-light.png" width="234" alt="Passport browser touchpad and keyboard on a phone in Light theme"> |
+| <img src="passport-device-dark.png" width="190" alt="Passport home in Dark theme"> | <img src="passport-mouse-dark.png" width="190" alt="Mouse direction, click and Back"> | <img src="passport-keys-light.png" width="190" alt="Quick keys in Light theme"> |
 
-[Desktop Web Dark](passport-web-desktop-dark.png) shows the touchpad and keyboard side by side. The device images are real LVGL software renders with
-synthetic host state. The Web images are Chromium captures with fixture data.
-They demonstrate layout and interaction checks, not a photograph of Passport
-or a Safari/physical phone compatibility result. See the
-[Passport guide](../../passport/README.md) for controls and validation limits.
+| Desktop Web · Dark | Phone Web · Dark |
+| :---: | :---: |
+| <img src="passport-web-desktop-dark.png" width="580" alt="Touchpad and keyboard side by side in a desktop browser"> | <img src="passport-web-phone-dark.png" width="220" alt="Touchpad above the keyboard in a phone browser"> |
+
+The device screens come from the production LVGL renderer. The Web screens
+were captured in Chromium. Both use synthetic host data. The [Light home
+screen](passport-device-light.png) shows the second on-device palette.
+See the [Passport guide](../../passport/README.md) for controls and validation.

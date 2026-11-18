@@ -26,7 +26,7 @@ for name in sorted(set(filter(None, names))):
         if line.rstrip() != line:
             errors.append(f"{name}:{number}: trailing whitespace")
         # Guard the prior mixed-language regression; this is not a language detector.
-        if re.search(r"[\u3400-\u9fff]", line):
+        if not name.endswith(".zh-CN.md") and re.search(r"[\u3400-\u9fff]", line):
             errors.append(f"{name}:{number}: CJK prose in English-only first-party content")
     if path.suffix == ".md":
         prose = re.sub(r"```.*?```", "", text, flags=re.S)

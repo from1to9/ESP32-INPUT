@@ -1,5 +1,13 @@
 # Passport ESP32-C3 firmware
 
+[Chinese user guide](README.zh-CN.md) · [Download v0.1.0 for Passport](https://github.com/from1to9/ESP32-INPUT/releases/tag/passport-v0.1.0)
+
+| Device controls | Desktop browser |
+| :---: | :---: |
+| <img src="../docs/ui/passport-mouse-dark.png" width="180" alt="On-device directional mouse"> | <img src="../docs/ui/passport-web-desktop-dark.png" width="600" alt="Dark desktop touchpad and keyboard"> |
+
+See the [device and browser gallery](../docs/ui/README.md#passport-device-and-web-ui) for the quick keys and phone layout.
+
 This independent ESP-IDF project implements the local BLE HID and Wi-Fi owner batches
 and local HTTP provisioning and direct HTTP/WS input of the [Passport compatibility plan](../docs/passport-compatibility-plan.md).
 It combines the FoloToy 240 × 320 display, three ADC buttons, BLE keyboard

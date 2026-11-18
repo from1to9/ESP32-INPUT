@@ -4,7 +4,7 @@ These standards govern first-party engineering work; functional behavior is defi
 
 ## 1. Language and source ownership
 
-All first-party comments, identifiers, documentation, UI strings, diagnostics, tests, commit messages, issue text and review descriptions use English. Conversation may use the user's preferred language. Future localization must be an explicit, isolated resource layer rather than mixed-language source.
+First-party comments, identifiers, documentation, UI strings, diagnostics, tests, commit messages, issue text and review descriptions use English. Keep explicitly translated Chinese guides in separate `*.zh-CN.md` files with a link to the English guide.
 
 Third-party submodules, license texts and required attribution retain their original content and are excluded from first-party language enforcement. External names, URLs and standards identifiers remain exact. Do not translate upstream source to satisfy a local style rule.
 
