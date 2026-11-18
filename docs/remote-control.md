@@ -60,11 +60,18 @@ device details and does not wait for the coordinator's device-detail read.
   relative movement and `control.renew`. The reply is
   `{"motion_terminal":true,"renew_terminal":true}`. The admission reply
   includes `now_ms` as a decimal string in the device's monotonic time.
-  When Mosaico advertises `websocket_motion_window`, an enrolled browser can
-  send `{"v":1,"type":"motion_window"}`. The reply adds `"motion_window":2`
-  to the two terminal flags. A second fresh relative move can be written
-  after the preceding move's matching admission, with at most two relative
-  moves awaiting terminal results. Wait for all pending terminals before
+  When the listener advertises `websocket_motion_window`, a browser on its
+  ticket-bound WebSocket can send
+  `{"v":1,"type":"motion_window","motion_window":2}`. The advertised
+  `websocket_motion_window_max` is the device's maximum. An omitted width
+  requests two. The reply includes the exact selected integer width. Invalid
+  or unsupported requests are rejected. A maximum of one uses the legacy
+  channel. In a normal window, send further fresh relative moves only after
+  all outstanding moves have matching admissions. The negotiated width caps
+  the number awaiting terminal results. A device that also advertises
+  `websocket_motion_ordered` can explicitly select `"motion_ordered":true`
+  in the request and reply. That selection permits filling the window on its
+  ordered channel before the individual admissions arrive. Wait for all pending terminals before
   sending renewal, other commands or resource reads on the channel.
   Replies for recorded commands in this mode carry `command_seq` for the
   original sequence and `command_key` for the individual result. Match both for a pushed

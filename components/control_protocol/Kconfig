@@ -1,0 +1,13 @@
+menu "Control protocol"
+    config CONTROL_MOTION_WINDOW_MAX
+        int "Maximum negotiated browser motion commands"
+        range 1 4
+        default 3 if IDF_TARGET_ESP32S31
+        default 2 if IDF_TARGET_ESP32C3
+        default 1
+        help
+            Maximum number of outstanding relative movement commands on a
+            negotiated browser WebSocket. A maximum of one preserves the
+            target's legacy channel without advertising the motion window.
+            The adapter's active-request capacity must support the selected maximum.
+endmenu

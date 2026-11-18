@@ -5,6 +5,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define CP_MOTION_WINDOW_WIRE_MAX 4U
+#ifndef CP_MOTION_WINDOW_CONFIG_MAX
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#define CP_MOTION_WINDOW_CONFIG_MAX CONFIG_CONTROL_MOTION_WINDOW_MAX
+#else
+#define CP_MOTION_WINDOW_CONFIG_MAX CP_MOTION_WINDOW_WIRE_MAX
+#endif
+#endif
+#if CP_MOTION_WINDOW_CONFIG_MAX < 1 || CP_MOTION_WINDOW_CONFIG_MAX > CP_MOTION_WINDOW_WIRE_MAX
+#error "The control motion window must be between 1 and 4 commands"
+#endif
+
 #define CP_API_VERSION 1U
 #define CP_MAX_FRAME_BYTES 2048U
 #define CP_MAX_ARGS_BYTES 1280U
@@ -78,6 +91,7 @@ typedef struct {
     uint8_t session_id[CP_ID_BYTES];
     cp_scope_mask_t scopes;
     bool browser;
+    bool browser_ws; /* Set only after a browser upgrade consumes its ticket. */
 } cp_identity_t;
 
 /* Immutable bounded dispatch payload. Arguments have already passed the shared
@@ -240,6 +254,12 @@ cp_error_t cp_revoke_principal(cp_context_t *, const uint8_t id[CP_ID_BYTES], ui
 void cp_set_transport_capabilities(cp_context_t *, bool websocket, bool binary_download);
 void cp_set_motion_terminal_available(cp_context_t *, bool available);
 void cp_set_motion_window_available(cp_context_t *, bool available);
+/* Enable only on adapters that bind upgraded browser sockets to their
+ * live session and can deliver all negotiated terminal replies. */
+void cp_set_motion_window_max(cp_context_t *, unsigned maximum);
+/* Opt in only when the Passport adapter preserves per-connection ordering
+ * through owner dispatch, HID submission and reply publication. */
+void cp_set_motion_window_ordered(cp_context_t *, bool available);
 
 typedef struct {
     bool tls;
@@ -289,6 +309,8 @@ typedef enum {
  * accepted relative move or, with the extended opt-in, lease renewal. */
 typedef struct {
     cp_terminal_mode_t mode;
+    unsigned width; /* Persist with mode for this connection. */
+    bool ordered;
     bool motion_only;
     uint64_t accepted_key;
     bool accepted_relative;
@@ -300,6 +322,10 @@ cp_error_t cp_transport_frame_motion(cp_context_t *, const cp_identity_t *, cons
  * A NULL response checks readiness. CP_OK includes terminal action failures. */
 cp_error_t cp_transport_motion_result(cp_context_t *, const cp_identity_t *, uint64_t key,
                                       uint64_t now_ms, cp_http_response_t *);
+/* Same authenticated lookup, for replacing the initial admission in the
+ * same owner tick. An inline terminal has no pushed-terminal marker. */
+cp_error_t cp_transport_motion_inline_result(cp_context_t *, const cp_identity_t *, uint64_t key,
+                                             uint64_t now_ms, cp_http_response_t *);
 cp_error_t cp_http_configure(cp_context_t *, const char *host, const char *browser_origin);
 cp_error_t cp_http(cp_context_t *, const char *method, const char *resource,
                    const cp_http_security_t *, const char *body, size_t body_length,

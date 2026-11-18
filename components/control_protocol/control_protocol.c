@@ -55,7 +55,8 @@ struct cp_context {
     uint64_t blocked_allowance, login_window;
     unsigned failed_logins;
     bool clock_failed, state_known, websocket_available, binary_download_available, motion_terminal_available;
-    bool motion_window_available;
+    unsigned motion_window_max;
+    bool motion_window_ordered;
     char host[129], origin[193];
     cj_document_t document;
     char canonical[CJ_CAPACITY + 1U];
@@ -1709,6 +1710,12 @@ cp_sensor_resource_t cp_sensor_resource(const char *p)
         return CP_SENSOR_RESOURCE_SAMPLES;
     return CP_SENSOR_RESOURCE_INVALID;
 }
+static unsigned effective_motion_window_max(const cp_context_t *c)
+{
+    return c->websocket_available && c->motion_window_max >= 2 &&
+        (c->motion_terminal_available || c->policy == CP_POLICY_PASSPORT_OPEN_HTTP) ? c->motion_window_max : 1U;
+}
+
 static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *resource,
                                cp_http_response_t *out)
 {
@@ -1756,13 +1763,18 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
     }
     if (strcmp(resource, "/api/v1/capabilities") == 0) {
         out->status = 200;
+        const unsigned maximum = effective_motion_window_max(c);
+        const char *ordered = maximum > 1 && c->motion_window_ordered ? ",\"websocket_motion_ordered\":true" : "";
+        char window_max[36] = "";
+        if (maximum > 1) snprintf(window_max, sizeof(window_max), ",\"websocket_motion_window_max\":%u", maximum);
         if (c->policy == CP_POLICY_PASSPORT_OPEN_HTTP) {
             out->length = (size_t)snprintf(out->body, sizeof(out->body),
                 "{\"api_version\":1,\"catalog_sha256\":\"%s\",\"access_policy\":\"open_network\","
                 "\"enrollment\":\"none\",\"command_bytes\":%u,\"args_bytes\":%u,\"authenticated_clients\":%u,"
-                "\"results\":%u,\"websocket\":%s,\"binary_download\":false,\"operations\":%u}",
+                "\"results\":%u,\"websocket\":%s,\"binary_download\":false,\"operations\":%u%s%s%s}",
                 cp_catalog_sha256(), CP_MAX_FRAME_BYTES, CP_MAX_ARGS_BYTES, CP_MAX_SESSIONS,
-                CP_MAX_RESULTS, c->websocket_available ? "true" : "false", (unsigned)cp_operation_count());
+                CP_MAX_RESULTS, c->websocket_available ? "true" : "false", (unsigned)cp_operation_count(),
+                maximum > 1 ? ",\"websocket_motion_window\":true" : "", window_max, ordered);
             return CP_OK;
         }
         out->length = (size_t)snprintf(
@@ -1770,14 +1782,14 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
             "{\"api_version\":1,\"catalog_sha256\":\"%s\",\"command_bytes\":%u,"
             "\"args_bytes\":%u,\"authenticated_clients\":%u,\"principals\":%u,"
             "\"results\":%u,\"websocket\":%s,\"websocket_motion_terminal\":%s,\"websocket_renew_terminal\":%s,"
-            "\"websocket_motion_window\":%s,"
+            "\"websocket_motion_window\":%s%s,"
             "\"binary_download\":%s,\"enrollment\":\"protected_"
             "local_"
             "import\",\"operations\":%u,\"configuration_fields\":%u}",
             cp_catalog_sha256(), CP_MAX_FRAME_BYTES, CP_MAX_ARGS_BYTES, CP_MAX_SESSIONS,
             CP_MAX_PRINCIPALS, CP_MAX_RESULTS, c->websocket_available ? "true" : "false",
             c->motion_terminal_available ? "true" : "false", c->motion_terminal_available ? "true" : "false",
-            c->motion_terminal_available && c->motion_window_available ? "true" : "false",
+            maximum > 1 ? "true" : "false", window_max,
             c->binary_download_available ? "true" : "false", (unsigned)cp_operation_count(),
             (unsigned)cp_config_count());
         return CP_OK;
@@ -2225,7 +2237,11 @@ void cp_set_transport_capabilities(cp_context_t *c, bool ws, bool binary)
     if (c) {
         c->websocket_available = ws;
         c->binary_download_available = binary;
-        if (!ws) c->motion_terminal_available = false;
+        if (!ws) {
+            c->motion_terminal_available = false;
+            c->motion_window_max = 1;
+            c->motion_window_ordered = false;
+        }
     }
 }
 void cp_set_motion_terminal_available(cp_context_t *c, bool available)
@@ -2235,7 +2251,19 @@ void cp_set_motion_terminal_available(cp_context_t *c, bool available)
 }
 void cp_set_motion_window_available(cp_context_t *c, bool available)
 {
-    if (c) c->motion_window_available = available && c->motion_terminal_available;
+    if (c) cp_set_motion_window_max(c, available && c->motion_terminal_available ? 2U : 1U);
+}
+void cp_set_motion_window_max(cp_context_t *c, unsigned maximum)
+{
+    if (!c) return;
+    c->motion_window_max = c->websocket_available && maximum >= 1 &&
+        maximum <= CP_MOTION_WINDOW_CONFIG_MAX && maximum <= CP_MAX_ACTIVE_REQUESTS ? maximum : 1;
+    if (c->motion_window_max < 2) c->motion_window_ordered = false;
+}
+void cp_set_motion_window_ordered(cp_context_t *c, bool available)
+{
+    if (c) c->motion_window_ordered = available && c->policy == CP_POLICY_PASSPORT_OPEN_HTTP &&
+        effective_motion_window_max(c) > 1;
 }
 static int find_transport_session(cp_context_t *c, const cp_identity_t *who)
 {
@@ -2261,32 +2289,55 @@ static int transport_session(cp_context_t *c, const cp_identity_t *who, uint64_t
     if (session >= 0) c->sessions[session].last_seen = c->now;
     return session;
 }
-static bool motion_terminal_allowed(const cp_context_t *c, const cp_identity_t *who)
+static bool motion_browser(const cp_identity_t *who)
 {
     const cp_scope_mask_t scopes = CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL;
-    return c->motion_terminal_available && who->browser && (who->scopes & scopes) == scopes;
+    return who->browser && (who->scopes & scopes) == scopes;
 }
-cp_error_t cp_transport_motion_result(cp_context_t *c, const cp_identity_t *who, uint64_t key,
-                                      uint64_t now, cp_http_response_t *out)
+
+static bool motion_window_allowed(const cp_context_t *c, const cp_identity_t *who)
+{
+    return effective_motion_window_max(c) > 1 && motion_browser(who) &&
+        (c->policy != CP_POLICY_PASSPORT_OPEN_HTTP || who->browser_ws);
+}
+
+static cp_error_t transport_motion_result(cp_context_t *c, const cp_identity_t *who, uint64_t key,
+                                          uint64_t now, cp_http_response_t *out, bool pushed)
 {
     if (!c || !who || !key) return CP_INVALID;
     cp_tick(c, now);
-    if (c->clock_failed || !motion_terminal_allowed(c, who)) return CP_UNAUTHENTICATED;
+    const bool legacy = c->motion_terminal_available && motion_browser(who);
+    if (c->clock_failed || (!legacy && !motion_window_allowed(c, who))) return CP_UNAUTHENTICATED;
     int session = find_transport_session(c, who);
     if (session < 0) return CP_UNAUTHENTICATED;
     record_t *r = find_key(c, key);
     if (!r || r->session != (unsigned)session || r->session_generation != c->sessions[session].generation ||
+        (!legacy && !r->window_sequence) ||
         (r->operation != CP_OP_MOUSE_MOVE_RELATIVE && r->operation != CP_OP_CONTROL_RENEW)) return CP_RESULT_UNKNOWN;
     if (r->active) return CP_BUSY;
     if (out) {
         memset(out, 0, sizeof(*out));
         (void)result_response(c, (unsigned)session, r, out);
         if (!out->length || (out->status != 200 && out->status != 400)) return CP_INTERNAL;
-        size_t used = out->length - 1U;
-        if (!append(out->body, sizeof(out->body), &used, ",\"motion_terminal\":true}")) return CP_INTERNAL;
-        out->length = used;
+        if (pushed) {
+            size_t used = out->length - 1U;
+            if (!append(out->body, sizeof(out->body), &used, ",\"motion_terminal\":true}")) return CP_INTERNAL;
+            out->length = used;
+        }
     }
     return CP_OK;
+}
+
+cp_error_t cp_transport_motion_result(cp_context_t *c, const cp_identity_t *who, uint64_t key,
+                                      uint64_t now, cp_http_response_t *out)
+{
+    return transport_motion_result(c, who, key, now, out, true);
+}
+
+cp_error_t cp_transport_motion_inline_result(cp_context_t *c, const cp_identity_t *who, uint64_t key,
+                                             uint64_t now, cp_http_response_t *out)
+{
+    return transport_motion_result(c, who, key, now, out, false);
 }
 cp_error_t cp_transport_authenticate(cp_context_t *c, const cp_http_security_t *security,
                                      bool mutation, uint64_t now, cp_identity_t *out)
@@ -2334,7 +2385,7 @@ cp_error_t cp_transport_upgrade(cp_context_t *c, const cp_http_security_t *secur
             if (s->used && s->browser && s->ws_ticket_until > c->now &&
                 equal(s->ws_ticket_hash, digest, sizeof(digest))) {
                 wipe(s->ws_ticket_hash, sizeof(s->ws_ticket_hash)); s->ws_ticket_until = 0;
-                s->last_seen = c->now; *out = identity(c, i); result = CP_OK; break;
+                s->last_seen = c->now; *out = identity(c, i); out->browser_ws = true; result = CP_OK; break;
             }
         }
         wipe(digest, sizeof(digest)); return result;
@@ -2375,6 +2426,7 @@ cp_error_t cp_transport_upgrade(cp_context_t *c, const cp_http_security_t *secur
             equal(s->ws_ticket_hash, digest, sizeof(digest))) {
             wipe(s->ws_ticket_hash, sizeof(s->ws_ticket_hash));
             s->ws_ticket_until = 0;
+            out->browser_ws = true;
             error = CP_OK;
             break;
         }
@@ -2405,14 +2457,16 @@ cp_error_t cp_transport_frame_motion(cp_context_t *c, const cp_identity_t *who, 
     if (session < 0) {
         return failure(out, CP_UNAUTHENTICATED);
     }
-    const bool motion_allowed = motion && motion_terminal_allowed(c, who);
+    const bool legacy = motion && c->motion_terminal_available && motion_browser(who);
+    const bool window = motion && motion_window_allowed(c, who);
+    const bool motion_allowed = motion && (motion->mode == CP_TERMINAL_MOVE_WINDOW ? window : legacy);
     cp_error_t error = CP_INVALID;
     if (!frame || length > CP_MAX_FRAME_BYTES) {
         error = CP_TOO_LARGE;
     } else if (cj_parse(&c->document, frame, length) && c->document.nodes[0].type == CJ_OBJECT) {
         uint16_t op = cj_get(&c->document, 0, "op");
         const char *name = cj_string(&c->document, op);
-        if (motion && motion->motion_only && (!motion_allowed || motion->mode != CP_TERMINAL_MOVE_WINDOW ||
+        if (motion && motion->motion_only && (!window || motion->mode != CP_TERMINAL_MOVE_WINDOW ||
             !name || strcmp(name, "mouse.move_relative"))) {
             error = CP_BUSY;
         } else if (op != CJ_NONE) {
@@ -2436,23 +2490,41 @@ cp_error_t cp_transport_frame_motion(cp_context_t *c, const cp_identity_t *who, 
             int64_t version = 0;
             const char *kind = cj_string(&c->document, cj_get(&c->document, 0, "type"));
             const char *resource = cj_string(&c->document, cj_get(&c->document, 0, "resource"));
-            if (count == 2 && cj_integer(&c->document, cj_get(&c->document, 0, "v"), &version) &&
-                version == 1) {
+            const bool v1 = cj_integer(&c->document, cj_get(&c->document, 0, "v"), &version) && version == 1;
+            if (v1 && kind && !strcmp(kind, "motion_window")) {
+                const uint16_t width_arg = cj_get(&c->document, 0, "motion_window");
+                const uint16_t order_arg = cj_get(&c->document, 0, "motion_ordered");
+                const bool ordered = order_arg != CJ_NONE;
+                int64_t width = 2;
+                if (count == 2U + (width_arg != CJ_NONE) + ordered &&
+                    (width_arg == CJ_NONE || cj_integer(&c->document, width_arg, &width)) &&
+                    (!ordered || (c->document.nodes[order_arg].type == CJ_BOOL &&
+                                  c->document.nodes[order_arg].value.boolean)) &&
+                    width >= 2 && width <= CP_MOTION_WINDOW_WIRE_MAX) {
+                    error = CP_UNAVAILABLE;
+                    if (window && width <= effective_motion_window_max(c) && (!ordered || c->motion_window_ordered)) {
+                        motion->mode = CP_TERMINAL_MOVE_WINDOW;
+                        motion->width = (unsigned)width;
+                        motion->ordered = ordered;
+                        out->length = (size_t)snprintf(out->body, sizeof(out->body),
+                           "{\"motion_terminal\":true,\"renew_terminal\":true,\"motion_window\":%u%s}",
+                           motion->width, ordered ? ",\"motion_ordered\":true" : "");
+                        out->status = 200;
+                        error = CP_OK;
+                    }
+                }
+            } else if (count == 2 && v1) {
                 if (kind && !strcmp(kind, "heartbeat")) {
                     out->status = 200;
                     out->length =
                         (size_t)snprintf(out->body, sizeof(out->body),
                                          "{\"authenticated\":true,\"media_idle_limit_ms\":5000}");
                     error = CP_OK;
-                } else if (kind && motion_allowed && c->motion_window_available && !strcmp(kind, "motion_window")) {
-                    motion->mode = CP_TERMINAL_MOVE_WINDOW;
-                    strcpy(out->body, "{\"motion_terminal\":true,\"renew_terminal\":true,\"motion_window\":2}");
-                    out->length = strlen(out->body);
-                    out->status = 200;
-                    error = CP_OK;
-                } else if (kind && motion_allowed &&
+                } else if (kind && legacy &&
                            (!strcmp(kind, "motion_terminal") || !strcmp(kind, "renew_terminal"))) {
                     motion->mode = !strcmp(kind, "renew_terminal") ? CP_TERMINAL_MOVE_AND_RENEW : CP_TERMINAL_MOVE;
+                    motion->width = 0;
+                    motion->ordered = false;
                     strcpy(out->body, motion->mode == CP_TERMINAL_MOVE_AND_RENEW ?
                            "{\"motion_terminal\":true,\"renew_terminal\":true}" : "{\"motion_terminal\":true}");
                     out->length = strlen(out->body);

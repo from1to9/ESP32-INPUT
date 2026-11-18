@@ -104,6 +104,38 @@ int main(void)
     assert(cp_transport_frame_motion(context, &channel, renewal_opt_in, strlen(renewal_opt_in), now,
                                      &response, &motion) == CP_INVALID);
     assert(motion.mode == CP_TERMINAL_DISABLED && !motion.accepted_key);
+    const char window_opt_in[] = "{\"v\":1,\"type\":\"motion_window\",\"motion_window\":2}";
+    const char ordered_opt_in[] = "{\"v\":1,\"type\":\"motion_window\",\"motion_window\":2,\"motion_ordered\":true}";
+    assert(cp_transport_frame_motion(context, &channel, window_opt_in, strlen(window_opt_in), now,
+                                     &response, &motion) == CP_UNAVAILABLE);
+    cp_set_motion_window_max(context, 2);
+    sec = security(true);
+    assert(request("GET", "/api/v1/capabilities", NULL, &sec) == CP_OK);
+    assert(strstr(response.body, "\"websocket_motion_window\":true") &&
+           strstr(response.body, "\"websocket_motion_window_max\":2") &&
+           !strstr(response.body, "websocket_motion_ordered"));
+    cp_identity_t http_browser;
+    assert(cp_transport_authenticate(context, &sec, false, now, &http_browser) == CP_OK);
+    assert(http_browser.browser && !http_browser.browser_ws && channel.browser_ws);
+    assert(cp_transport_frame_motion(context, &http_browser, window_opt_in, strlen(window_opt_in), now,
+                                     &response, &motion) == CP_UNAVAILABLE);
+    assert(cp_transport_frame_motion(context, &channel, ordered_opt_in, strlen(ordered_opt_in), now,
+                                     &response, &motion) == CP_UNAVAILABLE);
+    assert(cp_transport_frame_motion(context, &channel, window_opt_in, strlen(window_opt_in), now,
+                                     &response, &motion) == CP_OK && motion.width == 2 && !motion.ordered);
+    cp_set_motion_window_ordered(context, true);
+    assert(request("GET", "/api/v1/capabilities", NULL, &sec) == CP_OK &&
+           strstr(response.body, "\"websocket_motion_ordered\":true"));
+    assert(cp_transport_frame_motion(context, &channel, ordered_opt_in, strlen(ordered_opt_in), now,
+                                     &response, &motion) == CP_OK && motion.width == 2 && motion.ordered);
+    assert(strstr(response.body, "\"motion_ordered\":true"));
+    assert(cp_transport_frame_motion(context, &channel, renewal_opt_in, strlen(renewal_opt_in), now,
+                                     &response, &motion) == CP_INVALID);
+    cp_set_motion_window_max(context, 1);
+    assert(request("GET", "/api/v1/capabilities", NULL, &sec) == CP_OK);
+    assert(!strstr(response.body, "websocket_motion_window") && !strstr(response.body, "websocket_motion_ordered"));
+    assert(cp_transport_frame_motion(context, &channel, ordered_opt_in, strlen(ordered_opt_in), now,
+                                     &response, &motion) == CP_UNAVAILABLE);
     const char forbidden_read[] = "{\"v\":1,\"resource\":\"/api/v1/config\"}";
     assert(cp_transport_frame(context,&channel,forbidden_read,strlen(forbidden_read),now,&response)==CP_FORBIDDEN);
     assert(cp_transport_close(context,&channel,now)==CP_OK);
@@ -111,6 +143,10 @@ int main(void)
     char first_auth[80];strcpy(first_auth,auth);
     open_session(false); sec=security(false);
     assert(cp_transport_upgrade(context,&sec,NULL,now,&channel)==CP_OK && !channel.browser);
+    cp_set_motion_window_max(context, 2);
+    motion = (cp_motion_terminal_t){0};
+    assert(cp_transport_frame_motion(context, &channel, window_opt_in, strlen(window_opt_in), now,
+                                     &response, &motion) == CP_UNAVAILABLE);
     sec.authorization=NULL;
     assert(request("POST","/api/v1/open-session","{}",&sec)==CP_BUSY); // No eviction.
     sec=security(true);sec.authorization=first_auth;
