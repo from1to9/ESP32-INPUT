@@ -12,6 +12,7 @@ const PAD_SAMPLE_LIFETIME_MS = 150;
 const PAD_SAMPLE_BUCKET_MS = 8;
 const PAD_TIMING_RESERVE_MS = 12;
 const PAD_EXPIRY_TIMING_MS = 1500;
+const PAD_CLOCK_WINDOW_MS = 2500;
 const PAD_RENEW_RESERVE_MS = 900;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -241,6 +242,14 @@ export class Controller {
     this.message = s.scopes.includes("input.control") ? "Browser connected. Take control to send input." : "Browser connected with device access.";
     this.changed();
   }
+  rememberPadClock(channel, deviceAt, receivedAt) {
+    const previous = channel.padClock;
+    // Keep the strongest recent lower bound, or start again once it ages out.
+    if (!previous || receivedAt - previous.at >= PAD_CLOCK_WINDOW_MS ||
+        deviceAt - previous.deviceAt >= BigInt(Math.ceil(receivedAt - previous.at))) {
+      channel.padClock = {at: receivedAt, deviceAt};
+    }
+  }
   async refresh(allowEpochChange = false, passive = false) {
     if (!this.session) throw new Error("Connect this browser first.");
     const session = this.session;
@@ -282,6 +291,7 @@ export class Controller {
     }
     this.state = s;
     this.stateAt = performance.now();
+    if (this.motionChannel?.renewTerminal) this.rememberPadClock(this.motionChannel, BigInt(s.now_ms), this.stateAt);
     if (this.controlled) {
       const differences = [];
       if (s.locked) differences.push("device locked");
@@ -335,7 +345,13 @@ export class Controller {
     // while keeping each bucket's original deadline.
     const timing = readSample && channel?.padTiming;
     const expired = readSample && channel?.padExpiryTiming;
-    const measuredLead = timing => timing ? Number(timing.deviceAt - deviceTime(timing.sentAt)) + PAD_TIMING_RESERVE_MS : 0;
+    const anchor = readSample && channel?.padClock;
+    const motionTime = anchor && performance.now() - anchor.at < PAD_CLOCK_WINDOW_MS ? at => {
+      const lower = anchor.deviceAt + BigInt(Math.floor(at - anchor.at)) - 2n;
+      const current = deviceTime(at);
+      return lower > current ? lower : current;
+    } : deviceTime;
+    const measuredLead = timing => timing ? Number(timing.deviceAt - motionTime(timing.sentAt)) + PAD_TIMING_RESERVE_MS : 0;
     // Repeated expiries indicate that admission timing alone misses too much
     // queue time. Use the measured expiry briefly to select fresher movement.
     const expiryLead = expired?.repeated && performance.now() - expired.sentAt < PAD_EXPIRY_TIMING_MS ?
@@ -351,7 +367,7 @@ export class Controller {
     const envelope = {
       v: 1, boot_id: this.session.boot_id, session_id: this.session.session_id,
       request_id: this.session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
-      deadline_ms: (deviceTime(sentAt) + BigInt(lifetime)).toString(),
+      deadline_ms: ((sample ? motionTime(sentAt) : deviceTime(sentAt)) + BigInt(lifetime)).toString(),
       epoch: s.epoch, transport_generation: s.transport_generation, target_id: s.target_id,
       ui_revision: s.ui_revision, op,
       args: op === "control.acquire" || op === "control.renew" ? {...args, state_sequence: s.state_sequence} : sample?.args ?? args,
@@ -369,7 +385,11 @@ export class Controller {
       const accepted = pushedTerminal ? admitted => {
         if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
         this.session.next_seq = seq + 1;
-        if (decimal(admitted.now_ms)) channel.padTiming = {sentAt, deviceAt: BigInt(admitted.now_ms)};
+        if (decimal(admitted.now_ms)) {
+          const deviceAt = BigInt(admitted.now_ms);
+          channel.padTiming = {sentAt, deviceAt};
+          if (channel.renewTerminal) this.rememberPadClock(channel, deviceAt, performance.now());
+        }
         if (observe) {
           this.lastKey = admitted.command_key;
           this.last = admitted;

@@ -119,11 +119,12 @@ fresh unsent deltas from the current contact, within the per-axis report
 limits. When the channel also supplies device admission timing, older deltas
 expire independently after at most 150 ms. The browser uses the previous
 admission and a small allowance for device dispatch to skip deltas that are
-unlikely to arrive in time. After consecutive matching device expiries,
-a recent device check also informs this selection when queueing takes
-longer than admission. The command
-deadline comes from the oldest included delta. Each command waits for its terminal result, and pad submissions are
-at least 30 ms apart. Opted-in channels also push the result of lease renewal
+unlikely to arrive in time. Within the same channel, a recent device clock
+reading can preserve a better conservative time estimate across a slow reply.
+After consecutive matching device expiries, a recent device check also
+informs this selection when queueing takes longer than admission. The command
+deadline comes from the oldest included delta. Each command waits for its
+terminal result, and pad submissions are at least 30 ms apart. Opted-in channels also push the result of lease renewal
 so the pad need not wait for a separate result read. Lifting the finger or
 stopping control discards unsent movement.
 While movement or renewal is in flight, input buttons keep their appearance

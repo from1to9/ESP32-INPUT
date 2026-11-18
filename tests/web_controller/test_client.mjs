@@ -535,6 +535,7 @@ for (const lostReply of [false, true]) {
         const result = await send(command);
         if (command.seq > 2) return result;
         const first = command.seq === 1;
+        now += 40;
         admitted({command_key: "12", now_ms: first ? "140" : "310"});
         now = first ? 2100 : 2260;
         f.fire("move", first ? 14 : 30, 0);
@@ -560,6 +561,38 @@ for (const lostReply of [false, true]) {
         "each expiry still reads the lease before more input");
       assert(f.client.controlled);
     }
+
+    now = 2000;
+    const clock = padFixture();
+    clock.state.now_ms = "1000";
+    clock.state.lease_expires_ms = "3900";
+    await clock.client.refresh();
+    const fetch = clock.client.fetcher;
+    clock.client.fetcher = (url, options) => {
+      now = 2110;
+      return fetch(url, options);
+    };
+    now = 2010;
+    clock.state.now_ms = "1010";
+    await clock.client.refresh();
+    clock.client.motionChannel.padTiming = {sentAt: 2090, deviceAt: 1095n};
+    let headroom;
+    const send = expiresAt => clock.client.run("mouse.move_relative", {}, undefined, (consume, budget) => {
+      if (consume) headroom = budget;
+      return {args: {dx: 5, dy: 0}, expiresAt};
+    });
+    await send(2180);
+    assert.equal(headroom, 19, "the stronger same-channel clock also corrects the admission budget");
+    assert.equal(clock.motions[0].deadline_ms, "1178", "the slow snapshot cannot displace a recent conservative bound");
+    assert.equal(clock.motions[0].lease_id, lease);
+
+    now = 4500;
+    clock.client.fetcher = fetch;
+    clock.state.now_ms = "3400";
+    clock.state.lease_expires_ms = "7000";
+    await clock.client.refresh();
+    await send(4600);
+    assert.equal(clock.motions[1].deadline_ms, "3500", "an aged anchor cannot extend the newer estimate");
 
     now = 2000;
     const renew = padFixture();
