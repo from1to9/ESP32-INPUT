@@ -160,6 +160,12 @@ for (const change of [s => { s.target_id = "usb:18"; }, s => { s.epoch = "9"; },
   assert.match(f.client.message, /Control ended/);
   assert(f.calls.every(call => call.options.method === "GET"));
 }
+{
+  const f = fixture();
+  Object.assign(f.state, {lease_active: false, input_ready: false, transport_generation: "18"});
+  await assert.rejects(f.client.run("control.renew"), /Control ended: input not ready; transport generation changed; lease no longer active/);
+  assert.equal(f.calls.filter(c => c.options.method === "POST").length, 0);
+}
 for (const outcome of ["same lease", "lease lost", "repeated stale", "no key", "cancelled"]) {
   const f = fixture();
   const request = f.client.fetcher;
@@ -184,6 +190,7 @@ for (const outcome of ["same lease", "lease lost", "repeated stale", "no key", "
   } else {
     await assert.rejects(f.client.run("control.renew"));
     assert(!f.client.controlled);
+    if (outcome === "repeated stale") assert.match(f.client.message, /control\.renew.*rejected: stale/);
   }
   const retry = outcome === "same lease" || outcome === "repeated stale";
   assert.deepEqual(sent.map(command => [command.op, command.seq, command.args.state_sequence, command.lease_id]),

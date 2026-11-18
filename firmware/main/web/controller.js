@@ -281,18 +281,26 @@ export class Controller {
     }
     this.state = s;
     this.stateAt = performance.now();
-    if (this.controlled && (!s.lease_active || s.lease_id !== this.pin.lease_id ||
-        s.target_id !== this.pin.target_id || s.transport_generation !== this.pin.transport_generation ||
-        (!allowEpochChange && s.epoch !== this.pin.epoch) || s.locked || !s.remote_allowed || !s.input_ready)) {
-      this.halt("Control ended: local takeover, target/readiness change or lease expiry. Take control again only after checking Mosaico.");
+    if (this.controlled) {
+      const differences = [];
+      if (s.locked) differences.push("device locked");
+      if (!s.remote_allowed) differences.push("remote input not allowed");
+      if (!s.input_ready) differences.push("input not ready");
+      if (s.target_id !== this.pin.target_id) differences.push("target changed");
+      if (s.transport_generation !== this.pin.transport_generation) differences.push("transport generation changed");
+      if (!allowEpochChange && s.epoch !== this.pin.epoch) differences.push("input epoch changed");
+      if (!s.lease_active) differences.push("lease no longer active");
+      else if (s.lease_id !== this.pin.lease_id) differences.push("lease ID changed");
+      if (differences.length) this.halt(`Control ended: ${differences.join("; ")}. Check Mosaico before taking control again.`);
+      else if (allowEpochChange) this.pin.epoch = s.epoch;
     }
-    if (this.controlled && allowEpochChange) this.pin.epoch = s.epoch;
     this.changed();
     return s;
   }
   async send(op, args, total, readSample, renewalRetry = true) {
     // A discarded local sample has no protocol result or sequence consumption.
     if (readSample && !readSample()) return null;
+    const heldAtStart = this.controlled;
     const observe = op !== "control.renew";
     const relativeMove = op === "mouse.move_relative";
     const channel = relativeMove || op === "control.renew" ? this.motionChannel : null;
@@ -304,7 +312,9 @@ export class Controller {
     const deviceTime = at => BigInt(s.now_ms) + (channel ? BigInt(Math.floor(at - this.stateAt)) : 0n);
     if (acquireChannel && this.motionChannel !== acquireChannel) throw new Error("Input channel closed before acquisition.");
     if (readSample && !readSample()) return null;
-    if (op !== "control.acquire" && op !== "control.release" && !this.controlled) throw new Error("Take control again before sending input.");
+    if (op !== "control.acquire" && op !== "control.release" && !this.controlled) {
+      throw new Error(heldAtStart ? this.message : "Take control again before sending input.");
+    }
     if (this.uncertain) throw new Error("A reply is unknown. Reconnect explicitly; no command will be replayed.");
     if (!["control.acquire", "control.release", "control.renew"].includes(op)) {
       if (!decimal(s.lease_expires_ms)) throw new Error("Input lease deadline is unavailable.");
@@ -418,7 +428,7 @@ export class Controller {
       return this.send(op, args, total, readSample, false);
     }
     if (answer.error !== "ok" || !["applied", "sent", "completed"].includes(answer.state)) {
-      this.halt(describeResult(answer, total));
+      this.halt((answer.error === "stale" ? op + " — " : "") + describeResult(answer, total));
       throw new Error(this.message);
     }
     if (channel && op === "control.renew") {
