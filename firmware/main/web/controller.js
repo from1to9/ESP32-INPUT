@@ -290,7 +290,7 @@ export class Controller {
     this.changed();
     return s;
   }
-  async send(op, args, total, readSample) {
+  async send(op, args, total, readSample, renewalRetry = true) {
     // A discarded local sample has no protocol result or sequence consumption.
     if (readSample && !readSample()) return null;
     const observe = op !== "control.renew";
@@ -344,7 +344,7 @@ export class Controller {
     // After POST starts, contact end does not change its result or uncertainty.
     if (sample && performance.now() >= sample.expiresAt) return null;
     const generation = this.generation;
-    let answer, confirmedMove = false;
+    let answer, confirmedCommand = false;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
@@ -375,8 +375,7 @@ export class Controller {
       if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
       this.session.next_seq = next;
       key = decimal(answer.command_key) ? answer.command_key : null;
-      confirmedMove = relativeMove && Boolean(channel || [202, 400].includes(response.status)) &&
-        key !== null && next === seq + 1;
+      confirmedCommand = Boolean(channel || [202, 400].includes(response.status)) && key !== null && next === seq + 1;
       if (observe) { this.last = answer; this.lastKey = key; }
       const until = performance.now() + 2200;
       let delay = channel ? 0 : 100;
@@ -405,11 +404,18 @@ export class Controller {
       throw error;
     }
     if (observe) this.message = describeResult(answer, total);
-    if (confirmedMove && answer.state === "rejected" && answer.error === "expired") {
+    if (relativeMove && confirmedCommand && answer.state === "rejected" && answer.error === "expired") {
       // This movement was definitively rejected before any effect. Read back
       // the lease so a simultaneous takeover or expiry still stops input.
       await this.refresh();
       return answer;
+    }
+    if (renewalRetry && op === "control.renew" && confirmedCommand &&
+        answer.state === "rejected" && answer.error === "stale" &&
+        answer.command_key === key && Number(answer.next_seq) === seq + 1) {
+      // A verified rejection has no renewal effect. Retry once with a fresh
+      // authority read and a new sequence, using the same already held lease.
+      return this.send(op, args, total, readSample, false);
     }
     if (answer.error !== "ok" || !["applied", "sent", "completed"].includes(answer.state)) {
       this.halt(describeResult(answer, total));
