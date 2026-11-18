@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Both controllers use the same receipt matcher on their authenticated WebSocket.
+const MAX_MOTION_WINDOW = 5;
+
 export function motionWindowRequest(capabilities, preferred, allowOrdered = false) {
   if (capabilities.websocket_motion_window !== true || preferred === 1) return null;
   const maximum = capabilities.websocket_motion_window_max;
-  if (maximum !== undefined && (!Number.isInteger(maximum) || maximum < 2 || maximum > 4)) {
+  if (maximum !== undefined && (!Number.isInteger(maximum) || maximum < 2 || maximum > MAX_MOTION_WINDOW)) {
     throw new Error("Invalid device motion window.");
   }
   const width = preferred ?? maximum ?? 2;
-  if (!Number.isInteger(width) || width < 2 || width > 4) throw new Error("Invalid motion window.");
+  if (!Number.isInteger(width) || width < 2 || width > MAX_MOTION_WINDOW) throw new Error("Invalid motion window.");
   const request = {v: 1, type: "motion_window"};
   // Older listeners accept only the original two-field negotiation frame.
   if (maximum !== undefined) request.motion_window = Math.min(width, maximum);

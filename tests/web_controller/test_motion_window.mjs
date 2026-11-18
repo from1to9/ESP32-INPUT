@@ -9,7 +9,8 @@ assert.deepEqual(motionWindowRequest(legacy), frame);
 assert.equal(motionWindowRequest({}, 3), null);
 assert.equal(motionWindowRequest(legacy, 1), null);
 assert.throws(() => motionWindowRequest({...legacy, websocket_motion_window_max: 0}));
-for (const width of [2, 3, 4]) {
+assert.throws(() => motionWindowRequest({...legacy, websocket_motion_window_max: 6}));
+for (const width of [2, 3, 4, 5]) {
   const capabilities = {...legacy, websocket_motion_window_max: width};
   assert.deepEqual(motionWindowRequest(capabilities), {...frame, motion_window: width});
 }

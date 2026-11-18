@@ -65,6 +65,10 @@ def main():
                 ("external",["-DCONFIG_SPIRAM=1","-DCONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=1"]),
                 ("internal-no-psram",["-DCONFIG_SPIRAM=0","-DCONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=0"]),
                 ("internal-no-external-stack",["-DCONFIG_SPIRAM=1","-DCONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=0"])]
+            if name == "server":
+                external_flags = modes[0][1]
+                modes = [(mode, [*defines, "-DCP_MOTION_WINDOW_CONFIG_MAX=3"]) for mode, defines in modes]
+                modes.append(("external-width-5", [*external_flags, "-DCP_MOTION_WINDOW_CONFIG_MAX=5"]))
             for mode,defines in modes:
                 binary = temporary / ("test_" + name + "_" + mode)
                 command = [compiler, "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror",
@@ -80,8 +84,6 @@ def main():
                            str(ROOT / "components/control_protocol/control_registry.c"),
                            *([str(ROOT / "components/control_protocol/control_protocol.c")] if name in ("access", "server") else []), "-lm", "-o", str(binary)]
                 command += defines
-                if name == "server":
-                    command.append("-DCP_MOTION_WINDOW_CONFIG_MAX=3")
                 subprocess.run(command, check=True)
                 subprocess.run([str(binary)], check=True)
     if not selected or selected=="work":

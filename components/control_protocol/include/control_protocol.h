@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CP_MOTION_WINDOW_WIRE_MAX 4U
+#define CP_MOTION_WINDOW_WIRE_MAX 5U
 #ifndef CP_MOTION_WINDOW_CONFIG_MAX
 #ifdef ESP_PLATFORM
 #include "sdkconfig.h"
@@ -15,7 +15,7 @@
 #endif
 #endif
 #if CP_MOTION_WINDOW_CONFIG_MAX < 1 || CP_MOTION_WINDOW_CONFIG_MAX > CP_MOTION_WINDOW_WIRE_MAX
-#error "The control motion window must be between 1 and 4 commands"
+#error "The control motion window must be between 1 and 5 commands"
 #endif
 
 #define CP_API_VERSION 1U

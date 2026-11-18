@@ -369,8 +369,8 @@ for (const [operation, outcome] of [
     globalThis.WebSocket = OriginalSocket;
   }
 }
-for (const fault of ["older terminal missing", "both terminals missing", "instant rejection key collision", "three moves"]) {
-  const three = fault === "three moves";
+for (const scenario of ["older terminal missing", "both terminals missing", "instant rejection key collision", 3, 5]) {
+  const width = typeof scenario === "number" ? scenario : 2;
   const {client} = fixture();
   const Socket = globalThis.WebSocket;
   let socket;
@@ -389,7 +389,7 @@ for (const fault of ["older terminal missing", "both terminals missing", "instan
       const item = JSON.parse(serialized);
       sent.push(item);
       if (item.type === "motion_window") queueMicrotask(() => this.reply({
-        motion_terminal: true, renew_terminal: true, motion_window: three ? 3 : 2,
+        motion_terminal: true, renew_terminal: true, motion_window: width,
       }));
     }
     reply(reply) { this.onmessage?.({data: JSON.stringify(reply)}); }
@@ -408,17 +408,17 @@ for (const fault of ["older terminal missing", "both terminals missing", "instan
     client.request = async (path, method = "GET") => {
       if (path === "/api/v1/capabilities") return {status: 200, json: {websocket: true,
         websocket_motion_terminal: true, websocket_renew_terminal: true, websocket_motion_window: true,
-        ...(three && {websocket_motion_window_max: 3})}};
+        ...(width > 2 && {websocket_motion_window_max: width})}};
       if (path === "/api/v1/ws-ticket") return {status: 200, json: {ticket: "0".repeat(64)}};
       assert.equal(method, "GET");
       reads.push(path);
       if (path.endsWith("/101")) return {status: 400, json: {command_key: "101",
-        command_seq: fault === "both terminals missing" ? 11 : 10, state: "cancelled", error: "stale"}};
+        command_seq: scenario === "both terminals missing" ? 11 : 10, state: "cancelled", error: "stale"}};
       assert.equal(path, "/api/v1/requests/102");
       return {status: 200, json: {command_key: "102", command_seq: 11, state: "sent", error: "ok"}};
     };
     await client.openMotionChannel(client.generation);
-    assert.deepEqual(sent[0], {v: 1, type: "motion_window", ...(three && {motion_window: 3})});
+    assert.deepEqual(sent[0], {v: 1, type: "motion_window", ...(width > 2 && {motion_window: width})});
     const move = dx => client.run("mouse.move_relative", {}, undefined, movementSample({dx, dy: 0}, 120));
     const accepted = (seq, key) => ({command_seq: seq, next_seq: seq + 1, command_key: key,
       state: "accepted", error: "ok", now_ms: "100"});
@@ -427,46 +427,51 @@ for (const fault of ["older terminal missing", "both terminals missing", "instan
     socket.reply(accepted(10, "101"));
     const second = move(-30).catch(error => error);
     assert.equal(sent.at(-1).seq, 11);
-    if (three) {
-      assert(!client.canContinuePad());
-      socket.reply(accepted(11, "102"));
-      const third = move(15);
-      assert.equal(sent.at(-1).seq, 12);
-      socket.reply(accepted(12, "103"));
+    if (width > 2) {
+      const moves = [first, second];
+      const sequences = Array.from({length: width}, (_, i) => 10 + i);
+      const keyFor = seq => String(seq + 91);
+      for (const seq of sequences.slice(1)) {
+        if (seq > 11) moves.push(move(15));
+        assert.equal(sent.at(-1).seq, seq);
+        assert(!client.canContinuePad(), "each write must wait for its own admission");
+        socket.reply(accepted(seq, keyFor(seq)));
+      }
       assert(!client.canContinuePad());
       await assert.rejects(client.run("control.renew"), /Wait for the current action/);
       await assert.rejects(move(2), /Wait for the current action/);
-      for (const [seq, key] of [[12, "103"], [10, "101"], [11, "102"]]) {
-        socket.reply({...accepted(seq, key), next_seq: 13, state: "sent", motion_terminal: true});
+      const next = 10 + width;
+      for (const seq of [...sequences].reverse()) {
+        socket.reply({...accepted(seq, keyFor(seq)), next_seq: next, state: "sent", motion_terminal: true});
       }
-      assert.deepEqual((await Promise.all([first, second, third])).map(r => r.command_seq), [10, 11, 12]);
-      assert.equal(client.lastKey, "103");
-      assert.equal(client.session.next_seq, 13);
+      assert.deepEqual((await Promise.all(moves)).map(r => r.command_seq), sequences);
+      assert.equal(client.lastKey, keyFor(next - 1));
+      assert.equal(client.session.next_seq, next);
       assert(!client.busy && !client.uncertain);
       continue;
     }
-    if (fault === "instant rejection key collision") {
+    if (scenario === "instant rejection key collision") {
       socket.reply({...accepted(11, "101"), state: "rejected", error: "expired"});
       assert.equal(socket.readyState, 3, "a first reply cannot claim another outstanding sequence's key");
     } else {
       socket.reply(accepted(11, "102"));
-      if (fault === "older terminal missing") {
+      if (scenario === "older terminal missing") {
         socket.reply({...accepted(11, "102"), state: "sent", motion_terminal: true});
         assert.equal((await second).state, "sent");
       }
       socket.close();
     }
     assert.match((await first).message, /reply unavailable/);
-    if (fault !== "older terminal missing") assert.match((await second).message, /reply unavailable/);
+    if (scenario !== "older terminal missing") assert.match((await second).message, /reply unavailable/);
     assert(client.uncertain && !client.controlled && client.canCheckResult);
     assert.match(client.message, /Reply unknown/);
     await client.checkResult();
     assert.deepEqual(reads, ["/api/v1/requests/101",
-      ...(fault === "both terminals missing" ? ["/api/v1/requests/102"] : [])]);
-    assert.match(client.message, fault === "both terminals missing" ? /Move 10: Outcome unknown/ : /Move 10: cancelled: stale/);
-    if (fault === "older terminal missing") assert.doesNotMatch(client.message, /Move 11/);
-    if (fault === "instant rejection key collision") assert.match(client.message, /Move 11: Outcome unknown/);
-    if (fault === "both terminals missing") assert.match(client.message, /Move 11: Sent to the HID transport/);
+      ...(scenario === "both terminals missing" ? ["/api/v1/requests/102"] : [])]);
+    assert.match(client.message, scenario === "both terminals missing" ? /Move 10: Outcome unknown/ : /Move 10: cancelled: stale/);
+    if (scenario === "older terminal missing") assert.doesNotMatch(client.message, /Move 11/);
+    if (scenario === "instant rejection key collision") assert.match(client.message, /Move 11: Outcome unknown/);
+    if (scenario === "both terminals missing") assert.match(client.message, /Move 11: Sent to the HID transport/);
     assert(client.uncertain);
     assert.deepEqual(sent.filter(item => item.seq).map(item => item.seq), [10, 11]);
   } finally {

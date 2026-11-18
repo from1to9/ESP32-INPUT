@@ -1,6 +1,7 @@
 menu "Control protocol"
     config CONTROL_MOTION_WINDOW_MAX
         int "Maximum negotiated browser motion commands"
+        range 1 5 if IDF_TARGET_ESP32S31
         range 1 4
         default 3 if IDF_TARGET_ESP32S31
         default 2 if IDF_TARGET_ESP32C3

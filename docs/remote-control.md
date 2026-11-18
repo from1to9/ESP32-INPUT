@@ -63,9 +63,12 @@ device details and does not wait for the coordinator's device-detail read.
   When the listener advertises `websocket_motion_window`, a browser on its
   ticket-bound WebSocket can send
   `{"v":1,"type":"motion_window","motion_window":2}`. The advertised
-  `websocket_motion_window_max` is the device's maximum. An omitted width
-  requests two. The reply includes the exact selected integer width. Invalid
-  or unsupported requests are rejected. A maximum of one uses the legacy
+  `websocket_motion_window_max` is the device's maximum. The wire protocol
+  accepts requested widths from 2 to 5, up to the advertised maximum.
+  On Mosaico S31, `CONFIG_CONTROL_MOTION_WINDOW_MAX` ranges from 1 to 5
+  and defaults to 3. An omitted request width selects two.
+  The reply includes the exact selected integer width. Invalid or unsupported
+  requests are rejected. A configured maximum of one uses the legacy
   channel. In a normal window, send further fresh relative moves only after
   all outstanding moves have matching admissions. The negotiated width caps
   the number awaiting terminal results. A device that also advertises
