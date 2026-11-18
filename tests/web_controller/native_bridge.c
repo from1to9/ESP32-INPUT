@@ -243,7 +243,7 @@ static void web_service(void)
     if (s_now_ms < web_hold_coordinator_until) return;
     remote_control_service();
     size_t first_report = trace_count;
-    (void)hid_engine_step(&s_engine, send_report, &test_link.generation);
+    (void)hid_engine_step_with_submit(&s_engine, send_report, &test_link.generation);
     if (web_timed_reports && trace_count > first_report) {
         struct timespec now;
         assert(clock_gettime(CLOCK_REALTIME, &now) == 0);

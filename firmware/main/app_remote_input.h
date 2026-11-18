@@ -98,6 +98,10 @@ void app_remote_input_service(app_remote_input_t *, uint64_t now_ms);
  * storage; rejection lets the engine cancel and run its reserved neutral barrier.
  * The authority provider may latch expiry in RAM. Never gate the neutral barrier. */
 bool app_remote_input_report_authorized(const app_remote_input_t *, uint64_t now_ms);
+/* Called at the transport boundary for ordinary mouse reports while the
+ * engine still owns its queue head. These functions only update the receipt. */
+bool app_remote_input_expire_movement_report(app_remote_input_t *, uint64_t now_ms);
+void app_remote_input_record_movement_submission(app_remote_input_t *, bool accepted);
 bool app_remote_input_motion_blocked(const app_remote_input_t *);
 /* Process ONE existing, properly mapped board sample. Returns true when
  * consumed, including calibration/reference tracking with output suppressed.

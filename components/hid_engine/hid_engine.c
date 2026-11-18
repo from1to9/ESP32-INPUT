@@ -401,10 +401,25 @@ static hid_engine_step_result_t send_failed(hid_engine_t *engine)
     return HID_ENGINE_STEP_SEND_FAILED;
 }
 
-hid_engine_step_result_t hid_engine_step(hid_engine_t *engine,
-    hid_engine_send_fn send, void *context)
+static hid_engine_report_result_t try_report(hid_engine_send_fn send, hid_engine_submit_fn submit,
+    void *context, uint8_t id, const uint8_t *data, size_t length)
 {
-    if (!engine->state.connected || !engine->ready || engine->congested || !send)
+    if (submit) return submit(context, id, data, length);
+    return send(context, id, data, length) ? HID_ENGINE_REPORT_ACCEPTED : HID_ENGINE_REPORT_REJECTED;
+}
+
+static void pop_head(hid_engine_t *engine)
+{
+    engine->queue[engine->head] = (hid_engine_action_t){0};
+    engine->head = (engine->head + 1U) % HID_ENGINE_QUEUE_CAPACITY;
+    --engine->count;
+    refresh_motion_age(engine);
+}
+
+static hid_engine_step_result_t step_report(hid_engine_t *engine, hid_engine_send_fn send,
+    hid_engine_submit_fn submit, void *context)
+{
+    if (!engine->state.connected || !engine->ready || engine->congested || (!send && !submit))
         return HID_ENGINE_STEP_BLOCKED;
     static const uint8_t zero[HID_ENGINE_KEYBOARD_REPORT_LENGTH] = {0};
     if (engine->state.release_pending) {
@@ -412,7 +427,8 @@ hid_engine_step_result_t hid_engine_step(hid_engine_t *engine,
             HID_ENGINE_KEYBOARD_REPORT_ID : HID_ENGINE_MOUSE_REPORT_ID;
         const size_t length = engine->release_stage == 0 ?
             HID_ENGINE_KEYBOARD_REPORT_LENGTH : HID_ENGINE_MOUSE_REPORT_LENGTH;
-        if (!send(context, report_id, zero, length)) return send_failed(engine);
+        if (try_report(send, submit, context, report_id, zero, length) != HID_ENGINE_REPORT_ACCEPTED)
+            return send_failed(engine);
         if (engine->release_stage == 0) {
             engine->release_stage = 1;
         } else {
@@ -447,8 +463,14 @@ hid_engine_step_result_t hid_engine_step(hid_engine_t *engine,
         }
         data = mouse;
     }
-    if (!send(context, action->report_id, data, action->length))
-        return send_failed(engine);
+    const hid_engine_report_result_t outcome = try_report(send, submit, context, action->report_id,
+                                                            data, action->length);
+    if (outcome == HID_ENGINE_REPORT_EXPIRED && action->report_id == HID_ENGINE_MOUSE_REPORT_ID &&
+        !action->needs_release && !action->sets_mouse_buttons && !action->buffered_motion && !action->data[3]) {
+        pop_head(engine);
+        return HID_ENGINE_STEP_BLOCKED;
+    }
+    if (outcome != HID_ENGINE_REPORT_ACCEPTED) return send_failed(engine);
     if (action->buffered_motion) {
         action->remaining_x = (int16_t)(action->remaining_x - (int8_t)mouse[1]);
         action->remaining_y = (int16_t)(action->remaining_y - (int8_t)mouse[2]);
@@ -466,10 +488,18 @@ hid_engine_step_result_t hid_engine_step(hid_engine_t *engine,
     if (action->needs_release && !action->release_next) {
         action->release_next = true;
     } else {
-        *action = (hid_engine_action_t){0};
-        engine->head = (engine->head + 1) % HID_ENGINE_QUEUE_CAPACITY;
-        --engine->count;
-        refresh_motion_age(engine);
+        pop_head(engine);
     }
     return HID_ENGINE_STEP_SENT;
+}
+
+hid_engine_step_result_t hid_engine_step(hid_engine_t *engine, hid_engine_send_fn send, void *context)
+{
+    return step_report(engine, send, NULL, context);
+}
+
+hid_engine_step_result_t hid_engine_step_with_submit(hid_engine_t *engine, hid_engine_submit_fn submit,
+                                                    void *context)
+{
+    return step_report(engine, NULL, submit, context);
 }

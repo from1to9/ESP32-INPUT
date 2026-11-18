@@ -992,7 +992,7 @@ static hid_engine_step_result_t step(void)
     const size_t before = trace_count;
     input_link_t active = input_link_snapshot(&test_link);
     const hid_engine_step_result_t result =
-        hid_engine_step(&s_engine, send_report, &active.generation);
+        hid_engine_step_with_submit(&s_engine, send_report, &active.generation);
     assert(trace_count - before <= 1);
     return result;
 }
@@ -3715,7 +3715,7 @@ static void transport_replaced_generation_and_refused_release_cannot_replay(void
         else ++test_link.generation;
         static const uint8_t zero[8] = {0};
         uint64_t obsolete = old_snapshot.generation;
-        assert(!send_report(&obsolete, 1, zero, 8));
+        assert(send_report(&obsolete, 1, zero, 8) == HID_ENGINE_REPORT_REJECTED);
         assert(trace_count == 1);
         const input_link_t replacement = input_link_snapshot(&test_link);
         observe_input_link(&replacement, &test_previous_link);
@@ -6287,6 +6287,73 @@ static void review_last_remote_report_authority(void)
     remote_control_service(); release_barrier(); assert(!s_engine.mouse_buttons && !s_engine.count);
 }
 
+static void window_movement_checks_deadline_at_transport_submission(void)
+{
+    for (unsigned transport = APP_INPUT_BLUETOOTH; transport <= APP_INPUT_USB; ++transport)
+    for (unsigned scenario = 0; scenario < 4; ++scenario) {
+        transport_setup(INPUT_MOUSE, (app_input_transport_t)transport);
+        remote_acquire_current_host();
+        cp_command_t first = remote_test_command(CP_OP_MOUSE_MOVE_RELATIVE, 2, "{\"dx\":18,\"dy\":0}");
+        cp_command_t second = remote_test_command(CP_OP_MOUSE_MOVE_RELATIVE, 3, "{\"dx\":-30,\"dy\":0}");
+        first.identity.browser = second.identity.browser = true;
+        first.motion_window = second.motion_window = true;
+        second.deadline_ms = s_now_ms + 20;
+        cp_result_t result;
+        assert(app_command_bridge_submit(s_command_bridge, &first, &result) == CP_OK);
+        remote_control_service();
+        assert(app_command_bridge_submit(s_command_bridge, &second, &result) == CP_OK);
+        remote_control_service();
+        assert(s_engine.count == 1 && test_control_result.command_key == first.command_key);
+        const uint8_t positive[] = {0, 18, 0, 0};
+        expect_report(HID_ENGINE_MOUSE_REPORT_ID, positive, sizeof positive);
+        app_remote_input_service(s_remote_input, s_now_ms);
+        assert(test_control_result.command_key == first.command_key && test_control_result.state == CP_RESULT_SENT);
+
+        s_now_ms = second.deadline_ms - 1;
+        remote_control_service();
+        assert(s_engine.count == 1 && test_control_result.command_key == second.command_key &&
+               test_control_result.state == CP_RESULT_ACCEPTED);
+        const bool sdk_refuses = scenario == 3;
+        test_send_failure = test_usb_send_failure = sdk_refuses;
+        test_clock_override = true;
+        test_clock_ms = scenario == 0 || sdk_refuses ? second.deadline_ms - 1 : second.deadline_ms + scenario - 1;
+        const size_t reports = trace_count;
+        const unsigned attempts = test_ble_send_attempts + test_usb_send_attempts;
+        const uint64_t epoch = s_engine.state.epoch;
+        if (scenario == 0) {
+            const uint8_t negative[] = {0, (uint8_t)-30, 0, 0};
+            expect_report(HID_ENGINE_MOUSE_REPORT_ID, negative, sizeof negative);
+        } else if (sdk_refuses) assert(step() == HID_ENGINE_STEP_SEND_FAILED);
+        else assert(step() == HID_ENGINE_STEP_BLOCKED);
+        assert(test_ble_send_attempts + test_usb_send_attempts == attempts + (scenario == 0 || sdk_refuses));
+        assert(trace_count == reports + (scenario == 0));
+        assert(!s_engine.count);
+        test_send_failure = test_usb_send_failure = false;
+        test_clock_override = false;
+        s_now_ms = second.deadline_ms + 1;
+        if (sdk_refuses) {
+            assert(s_engine.state.release_pending && s_engine.send_failures == 1);
+            remote_control_service();
+            release_barrier();
+            remote_control_service();
+            assert(test_control_result.state == CP_RESULT_FAILED && test_control_result.error == CP_UNAVAILABLE);
+            assert(!strcmp(test_control_result.reason, "transport_rejected_report"));
+        } else {
+            remote_control_service();
+            assert(s_engine.state.epoch == epoch && !s_engine.state.release_pending && !s_engine.send_failures);
+            if (scenario == 0) assert(test_control_result.state == CP_RESULT_SENT && test_control_result.error == CP_OK);
+            else {
+                assert(test_control_result.state == CP_RESULT_REJECTED && test_control_result.error == CP_EXPIRED);
+                assert(!strncmp(test_control_result.reason, "send now=", sizeof("send now=") - 1U));
+            }
+            app_command_bridge_safety(s_command_bridge, CP_SAFETY_CLIENT_STOP, &second.identity);
+            remote_control_service();
+            release_barrier();
+        }
+        assert(test_control_result.command_key == second.command_key);
+    }
+}
+
 static void review_legacy_recovery(void)
 {
     for (unsigned fault = 0; fault < 8; ++fault) {
@@ -6879,6 +6946,7 @@ int main(int argc, char **argv)
     RUN(remote_device_routes_and_state_survive_missing_media);
     RUN(review_legacy_recovery);
     RUN(review_last_remote_report_authority);
+    RUN(window_movement_checks_deadline_at_transport_submission);
     RUN(remote_commands_share_actual_hid_queue_and_physical_takeover);
     RUN(remote_imu_uses_the_single_board_sample_and_hid_queue);
     RUN(remote_recenter_uses_shared_owner_and_duplicate_does_not_realign);

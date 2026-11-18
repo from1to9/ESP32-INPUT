@@ -5,9 +5,12 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include "server_test_sdk.h"
 #include "control_json.h"
 #include "../../firmware/main/app_control_server.h"
+#include "../../firmware/main/app_control_motion_window.h"
 #include "../../firmware/main/app_remote_media_runtime_port.h"
 #include "../../firmware/main/app_network_task.h"
 #include "weak_heap.h"
@@ -43,8 +46,7 @@ typedef struct server {
         int fd;
         uint64_t generation;
         cp_identity_t identity;
-        uint64_t motion_key;
-        bool motion_ready;
+        control_motion_window_t motion;
     } channels[CP_MAX_SESSIONS];
     char body[CP_MAX_FRAME_BYTES + 1];
     cp_http_response_t response;
@@ -122,8 +124,13 @@ static esp_err_t error_response(httpd_req_t *r, const char *status, const char *
 }
 #include "server_host_fixture.inc"
 static int mock_shutdown(int fd, int how);
+static int mock_setsockopt(int fd, int level, int name, const void *value, socklen_t length);
 #define shutdown mock_shutdown
+#define setsockopt mock_setsockopt
+#define ESP_LOGW(tag, ...) ((void)(tag))
 #include "../../firmware/main/app_control_server_media.inc"
+#undef ESP_LOGW
+#undef setsockopt
 #undef shutdown
 
 static server_t server;
@@ -156,6 +163,12 @@ static int mock_shutdown(int fd, int how)
 {
     assert(http_owner && fd == ws_request.fd && how == SHUT_RDWR);
     ++ws_shutdowns;
+    return 0;
+}
+static int mock_setsockopt(int fd, int level, int name, const void *value, socklen_t length)
+{
+    assert(fd == ws_request.fd && level == IPPROTO_TCP && name == TCP_NODELAY);
+    assert(length == sizeof(int) && *(const int *)value == 1);
     return 0;
 }
 void test_enter(void) { ++critical; }
@@ -847,7 +860,8 @@ static void test_motion_terminal_delivery(void)
     cp_set_motion_terminal_available(server.protocol, true);
     open_browser_channel();
     assert(receive_text("{\"v\":1,\"type\":\"motion_terminal\"}") == ESP_OK);
-    assert(!((channel_t *)ws_request.sess_ctx)->motion_terminal && !strstr(ws_text, "\"motion_terminal\":true"));
+    assert(((channel_t *)ws_request.sess_ctx)->terminal_mode == CP_TERMINAL_DISABLED &&
+           !strstr(ws_text, "\"motion_terminal\":true"));
     enum { LEGACY, SYNCHRONOUS, NORMAL, TAKEOVER, REPLACED, STOPPING, REVOKED, SEND_LOST };
     for (unsigned scenario = LEGACY; scenario <= SEND_LOST; ++scenario) {
         setup_server_transport(true, true, CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL);
@@ -867,7 +881,7 @@ static void test_motion_terminal_delivery(void)
         assert(strstr(ws_text, sync_move ? "\"state\":\"sent\"" : "\"state\":\"accepted\""));
         assert(!strstr(ws_text, "motion_terminal") && !queued_count);
         if (scenario == SYNCHRONOUS) {
-            assert(!server.channels[slot].motion_key);
+            assert(!control_motion_find(&server.channels[slot].motion, key));
             continue;
         }
         if (scenario == TAKEOVER) cp_physical_override(server.protocol, false, clock_ms);
@@ -877,10 +891,10 @@ static void test_motion_terminal_delivery(void)
         motion_terminal_recorded(&server, &completion, recorded);
         if (scenario == LEGACY) {
             queue_motion_terminal(&server);
-            assert(!queued_count && !server.channels[slot].motion_key);
+            assert(!queued_count && !control_motion_find(&server.channels[slot].motion, key));
             continue;
         }
-        assert(server.channels[slot].motion_key == key);
+        assert(control_motion_find(&server.channels[slot].motion, key));
         unsigned sent = ws_text_sends;
         assert(receive_text(body) == ESP_FAIL && ws_text_sends == sent);
         reject_queue = true;
@@ -892,7 +906,7 @@ static void test_motion_terminal_delivery(void)
         if (scenario == NORMAL) {
             sem_available = false;
             drain();
-            assert(ws_text_sends == sent && server.channels[slot].motion_key == key);
+            assert(ws_text_sends == sent && control_motion_find(&server.channels[slot].motion, key));
             sem_available = true;
             queue_motion_terminal(&server);
         } else if (scenario == REPLACED) {
@@ -922,6 +936,57 @@ static void test_motion_terminal_delivery(void)
         }
     }
 }
+static void test_motion_window_delivers_each_record(void)
+{
+    setup_server_transport(true, true, CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL);
+    cp_set_motion_terminal_available(server.protocol, true);
+    cp_set_motion_window_available(server.protocol, true);
+    open_browser_channel();
+    const unsigned slot = ((channel_t *)ws_request.sess_ctx)->slot;
+    assert(receive_text("{\"v\":1,\"type\":\"motion_window\"}") == ESP_OK);
+    assert(strstr(ws_text, "\"motion_window\":2"));
+    char lease[33], body[1500];
+    apply_acquire(&browser_client, lease);
+    completion_t motions[CONTROL_MOTION_WINDOW_SIZE] = {0};
+    unsigned sequences[CONTROL_MOTION_WINDOW_SIZE];
+    for (unsigned i = 0; i < CONTROL_MOTION_WINDOW_SIZE; ++i) {
+        format_client_command(&browser_client, "mouse.move_relative", "{\"dx\":1,\"dy\":0}",
+                              lease, body, sizeof(body));
+        sequences[i] = browser_client.sequence;
+        assert(receive_text(body) == ESP_OK && strstr(ws_text, "\"state\":\"accepted\""));
+        assert(dispatched.motion_window);
+        motions[i] = (completion_t){.key = dispatched.command_key,
+            .result = {.state = CP_RESULT_SENT, .uncertain_index = -1}};
+        assert(control_motion_find(&server.channels[slot].motion, motions[i].key));
+    }
+    unsigned sent = ws_text_sends, dispatched_before = dispatch_calls;
+    assert(receive_text(body) == ESP_FAIL && ws_text_sends == sent && dispatch_calls == dispatched_before);
+    cp_http_security_t security = {.host = "device.test", .origin = "http://device.test", .cookie = cookie, .csrf = csrf};
+    cp_http_response_t reply;
+    assert(cp_http(server.protocol, "POST", "/api/v1/commands", &security, body, strlen(body), clock_ms, &reply) == CP_OK);
+    assert(reply.status == 202 && dispatch_calls == dispatched_before);
+
+    for (unsigned i = CONTROL_MOTION_WINDOW_SIZE; i-- > 0;) {
+        const completion_t *completion = &motions[i];
+        cp_error_t recorded = cp_complete(server.protocol, completion->key, &completion->result, clock_ms);
+        assert(recorded == CP_OK);
+        motion_terminal_recorded(&server, completion, recorded);
+        queue_motion_terminal(&server);
+        assert(queued_count == 1);
+    }
+    for (unsigned i = CONTROL_MOTION_WINDOW_SIZE; i-- > 0;) {
+        char sequence[40], key[48];
+        snprintf(sequence, sizeof(sequence), "\"command_seq\":%u", sequences[i]);
+        snprintf(key, sizeof(key), "\"command_key\":\"%llu\"", (unsigned long long)motions[i].key);
+        drain();
+        assert(ws_text_sends == ++sent && strstr(ws_text, sequence) && strstr(ws_text, key) &&
+               strstr(ws_text, "\"motion_terminal\":true"));
+        assert(!control_motion_find(&server.channels[slot].motion, motions[i].key));
+        queue_motion_terminal(&server);
+    }
+    assert(!queued_count && !ws_shutdowns);
+}
+
 static void test_channel_loss_revokes_exact_logical_owner(void)
 {
     setup_server(false);
@@ -1161,6 +1226,7 @@ int main(void)
     test_auth_before_upgrade();
     test_enrolled_http_upgrade();
     test_motion_terminal_delivery();
+    test_motion_window_delivers_each_record();
     test_channel_loss_revokes_exact_logical_owner();
     test_capture_queue_and_owner_thread_send();
     test_channel_media_binding_and_send_failures();

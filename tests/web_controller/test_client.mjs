@@ -369,6 +369,90 @@ for (const [operation, outcome] of [
     globalThis.WebSocket = OriginalSocket;
   }
 }
+for (const fault of ["older terminal missing", "both terminals missing", "instant rejection key collision"]) {
+  const {client} = fixture();
+  const Socket = globalThis.WebSocket;
+  let socket;
+  const sent = [], reads = [];
+  class WindowSocket extends EventTarget {
+    static OPEN = 1;
+    readyState = WindowSocket.OPEN;
+    bufferedAmount = 0;
+    protocol = "esp32-control-v1";
+    constructor() {
+      super();
+      socket = this;
+      queueMicrotask(() => this.dispatchEvent(new Event("open")));
+    }
+    send(serialized) {
+      const item = JSON.parse(serialized);
+      sent.push(item);
+      if (item.type === "motion_window") queueMicrotask(() => this.reply({
+        motion_terminal: true, renew_terminal: true, motion_window: 2,
+      }));
+    }
+    reply(reply) { this.onmessage?.({data: JSON.stringify(reply)}); }
+    close() {
+      if (this.readyState !== WindowSocket.OPEN) return;
+      this.readyState = 3;
+      queueMicrotask(() => this.onclose?.());
+    }
+  }
+  globalThis.WebSocket = WindowSocket;
+  try {
+    client.motionURL = "ws://device.test/api/v1/channel";
+    client.session.next_seq = 10;
+    client.state.mode = "mouse";
+    client.stateAt = performance.now();
+    client.request = async (path, method = "GET") => {
+      if (path === "/api/v1/capabilities") return {status: 200, json: {websocket: true,
+        websocket_motion_terminal: true, websocket_renew_terminal: true, websocket_motion_window: true}};
+      if (path === "/api/v1/ws-ticket") return {status: 200, json: {ticket: "0".repeat(64)}};
+      assert.equal(method, "GET");
+      reads.push(path);
+      if (path.endsWith("/101")) return {status: 400, json: {command_key: "101",
+        command_seq: fault === "both terminals missing" ? 11 : 10, state: "cancelled", error: "stale"}};
+      assert.equal(path, "/api/v1/requests/102");
+      return {status: 200, json: {command_key: "102", command_seq: 11, state: "sent", error: "ok"}};
+    };
+    await client.openMotionChannel(client.generation);
+    const move = dx => client.run("mouse.move_relative", {}, undefined, movementSample({dx, dy: 0}, 120));
+    const accepted = (seq, key) => ({command_seq: seq, next_seq: seq + 1, command_key: key,
+      state: "accepted", error: "ok", now_ms: "100"});
+    const first = move(18).catch(error => error);
+    assert.equal(sent.at(-1).seq, 10);
+    socket.reply(accepted(10, "101"));
+    const second = move(-30).catch(error => error);
+    assert.equal(sent.at(-1).seq, 11);
+    if (fault === "instant rejection key collision") {
+      socket.reply({...accepted(11, "101"), state: "rejected", error: "expired"});
+      assert.equal(socket.readyState, 3, "a first reply cannot claim another outstanding sequence's key");
+    } else {
+      socket.reply(accepted(11, "102"));
+      if (fault === "older terminal missing") {
+        socket.reply({...accepted(11, "102"), state: "sent", motion_terminal: true});
+        assert.equal((await second).state, "sent");
+      }
+      socket.close();
+    }
+    assert.match((await first).message, /reply unavailable/);
+    if (fault !== "older terminal missing") assert.match((await second).message, /reply unavailable/);
+    assert(client.uncertain && !client.controlled && client.canCheckResult);
+    assert.match(client.message, /Reply unknown/);
+    await client.checkResult();
+    assert.deepEqual(reads, ["/api/v1/requests/101",
+      ...(fault === "both terminals missing" ? ["/api/v1/requests/102"] : [])]);
+    assert.match(client.message, fault === "both terminals missing" ? /Move 10: Outcome unknown/ : /Move 10: cancelled: stale/);
+    if (fault === "older terminal missing") assert.doesNotMatch(client.message, /Move 11/);
+    if (fault === "instant rejection key collision") assert.match(client.message, /Move 11: Outcome unknown/);
+    if (fault === "both terminals missing") assert.match(client.message, /Move 11: Sent to the HID transport/);
+    assert(client.uncertain);
+    assert.deepEqual(sent.filter(item => item.seq).map(item => item.seq), [10, 11]);
+  } finally {
+    client.motionChannel?.close();
+    globalThis.WebSocket = Socket;
+  }
+}
 {
   const f = fixture(); f.state.now_ms = "2500";
   await f.client.run("keyboard.key_tap", {usage: 4});

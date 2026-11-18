@@ -26,6 +26,13 @@ extern const size_t hid_engine_report_descriptor_length;
 
 typedef bool (*hid_engine_send_fn)(void *context, uint8_t report_id,
                                   const uint8_t *data, size_t length);
+typedef enum {
+    HID_ENGINE_REPORT_REJECTED,
+    HID_ENGINE_REPORT_ACCEPTED,
+    HID_ENGINE_REPORT_EXPIRED,
+} hid_engine_report_result_t;
+typedef hid_engine_report_result_t (*hid_engine_submit_fn)(void *context, uint8_t report_id,
+                                                           const uint8_t *data, size_t length);
 typedef void (*hid_engine_cancel_fn)(void);
 
 typedef enum {
@@ -193,3 +200,8 @@ hid_engine_enqueue_result_t hid_engine_enqueue_text(hid_engine_t *engine,
  * supplies no clock or delay. Congestion returns BLOCKED without calling send. */
 hid_engine_step_result_t hid_engine_step(hid_engine_t *engine,
     hid_engine_send_fn send, void *context);
+/* An expired ordinary report was never submitted. Discard its action without
+ * spending transport retries. Recovery and mandatory paired releases always
+ * require an accepted submission. */
+hid_engine_step_result_t hid_engine_step_with_submit(hid_engine_t *engine,
+    hid_engine_submit_fn submit, void *context);

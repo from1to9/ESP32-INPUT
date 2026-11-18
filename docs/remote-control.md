@@ -72,9 +72,13 @@ device details and does not wait for the coordinator's device-detail read.
   session sequence and can advance past the command being reported.
   Admission records the queued command. `sent` reports acceptance by the
   HID transport. Each move keeps its own deadline and can expire while
-  waiting to execute. An unknown or mismatched result stops the input
+  waiting to execute or at the report submission boundary. An unknown or mismatched result stops the input
   channel and requires checking the target before resuming. Close the
   channel to stop in-flight input without waiting for its terminal replies.
+  A full window rejects additional WebSocket data by closing the channel.
+  The original authenticated HTTP session can read results by key or
+  recover a recorded result using an exact request retry. The browser uses
+  readback for known outstanding keys and never resends unknown input.
   HTTP, other operations, and channels without opt-in use the usual result reads.
   Read status and job resources separately. A session can remain valid
   after its input lease ends.

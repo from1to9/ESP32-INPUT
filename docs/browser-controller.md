@@ -140,7 +140,9 @@ and focus. Additional button presses during that interval are discarded.
 **Stop** remains available.
 Lease renewal and device checks continue while the page is visible. A lost
 channel stops control and discards the pending contact. Reconnect if a result
-is unknown, then take control explicitly to resume.
+is unknown, then take control explicitly to resume. While the original
+session is available, **Check result** lists each move pending when the
+channel closed. A move without a matching recorded reply remains unknown.
 
 The active input lease is at most three seconds and is explicitly renewed
 while the visible page controls input. If a renewal is definitively rejected

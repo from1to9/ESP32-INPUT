@@ -127,9 +127,9 @@ class MotionChannel {
       if (!move || !decimal(reply.command_key) || this.moves.size > 2 ||
           !Number.isInteger(next) || next < seq + 1 || next > this.newestMove + 1 ||
           typeof reply.error !== "string") throw new Error();
+      if (!move.key && [...this.moves.values()].some(other => other.key === reply.command_key)) throw new Error();
       if (!move.key && reply.state === "accepted") {
-        if (reply.error !== "ok" || reply.motion_terminal || next !== seq + 1 ||
-            [...this.moves.values()].some(other => other.key === reply.command_key)) throw new Error();
+        if (reply.error !== "ok" || reply.motion_terminal || next !== seq + 1) throw new Error();
         move.key = reply.command_key;
         clearTimeout(move.timer);
         move.timer = setTimeout(() => this.close(), 2200);
@@ -181,6 +181,7 @@ class MotionChannel {
   }
   close() {
     this.pending?.reject(new Error("Input channel reply unavailable."));
+    if (this.moves.size) this.unresolvedMoves = [...this.moves].map(([seq, move]) => ({seq, key: move.key}));
     for (const move of this.moves.values()) {
       clearTimeout(move.timer);
       move.reject(new Error("Input channel reply unavailable."));
@@ -209,6 +210,7 @@ export class Controller {
     this.last = null;
     this.lastKey = null;
     this.lastTotal = null;
+    this.movementReadback = null;
     this.message = "Nothing sent.";
     this.onchange = () => {};
     this.onInputLaneReleased = () => {};
@@ -218,6 +220,9 @@ export class Controller {
     this.generation = 0;
   }
   get foregroundBusy() { return this.busy && !this.renewing && !this.moving; }
+  get canCheckResult() {
+    return Boolean(this.session && (this.lastKey || this.movementReadback?.session === this.session));
+  }
   changed() { this.onchange(); }
   halt(message) {
     this.controlled = false;
@@ -225,6 +230,9 @@ export class Controller {
     const channel = this.motionChannel;
     this.motionChannel = null;
     channel?.close();
+    if (this.session && channel?.unresolvedMoves?.length) {
+      this.movementReadback = {session: this.session, moves: channel.unresolvedMoves};
+    }
     if (message) this.message = message;
     this.changed();
   }
@@ -296,6 +304,7 @@ export class Controller {
     }
     this.session = {...s, next_seq: Number(s.next_seq)};
     this.lastKey = null;
+    this.movementReadback = null;
     ++this.generation;
     this.uncertain = false;
     await this.refresh();
@@ -441,7 +450,7 @@ export class Controller {
     if (sample && performance.now() >= sample.expiresAt) return null;
     const generation = this.generation;
     let answer, confirmedCommand = false;
-    const latest = () => observe && (!window || seq >= window.newestMove);
+    const latest = () => observe && (!window || (!this.uncertain && seq >= window.newestMove));
     if (latest()) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
@@ -513,7 +522,7 @@ export class Controller {
       // the lease so a simultaneous takeover or expiry still stops input.
       if (sample && channel?.renewTerminal && answer.command_key === key &&
           (window ? answer.command_seq === seq : Number(answer.next_seq) === seq + 1)) {
-        const stamp = /^(?:protocol|submit|dequeue|input) now=(\d+) deadline=(\d+)$/.exec(answer.reason || "");
+        const stamp = /^(?:protocol|submit|dequeue|input|send) now=(\d+) deadline=(\d+)$/.exec(answer.reason || "");
         if (stamp && stamp[2] === envelope.deadline_ms && decimal(stamp[1]) && BigInt(stamp[1]) >= BigInt(stamp[2])) {
           const previous = channel.padExpiryTiming;
           const repeated = Boolean(previous && sentAt - previous.sentAt < PAD_EXPIRY_TIMING_MS);
@@ -672,6 +681,27 @@ export class Controller {
   }
   async text(value) { validateText(value); return this.input("keyboard.text.enqueue", {text: value}, value.length); }
   async checkResult() {
+    const readback = this.movementReadback;
+    if (this.session && readback?.session === this.session) {
+      const messages = await Promise.all(readback.moves.map(async move => {
+        if (move.key && !TERMINAL.has(move.result?.state)) {
+          try {
+            const response = await this.request(`/api/v1/requests/${move.key}`);
+            const result = response.json;
+            if ([200, 202, 400].includes(response.status) && result.command_key === move.key &&
+                result.command_seq === move.seq && (ACTIVE.has(result.state) || TERMINAL.has(result.state)) &&
+                typeof result.error === "string") {
+              move.result = result;
+            } else move.result = null;
+          } catch { move.result = null; }
+        }
+        return `Move ${move.seq}: ${move.result ? describeResult(move.result) : "Outcome unknown."}`;
+      }));
+      if (this.session !== readback.session || this.movementReadback !== readback) return;
+      this.message = messages.join(" ");
+      this.changed();
+      return;
+    }
     if (!this.lastKey || !this.session) throw new Error("No known command key is available. The unknown action cannot be inferred from current target state.");
     const response = await this.request(`/api/v1/requests/${this.lastKey}`);
     if (![200, 202, 400].includes(response.status) || !response.json.state) throw new Error("Result no longer available; outcome remains unknown.");
@@ -1201,7 +1231,7 @@ function mount() {
     $("connect").disabled = !identity || client.busy || client.closing || pairingBusy || Boolean(client.session);
     $("pair").disabled = pairingBusy || client.closing || Boolean(client.session);
     $("check").disabled = !identity || pairingBusy || client.closing || Boolean(client.session);
-    $("result-check").disabled = !client.lastKey || !client.session || client.foregroundBusy;
+    $("result-check").disabled = !client.canCheckResult || client.foregroundBusy;
     if ($("result").textContent !== client.message) $("result").textContent = client.message;
     if (!active) { pad = movement = null; resetModifiers(); }
     management.paint();
