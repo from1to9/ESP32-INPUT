@@ -54,6 +54,20 @@ and selection of the saved peer restored the encrypted keyboard and mouse
 subscriptions. With BLE ready, the same browser checks passed, two opposing
 pointer moves returned terminal HID transport receipts, and Stop completed
 the neutral release. The saved connection was ready at the end of that boot.
+
+On the same board, a Chromium touch gesture on `b3694476` returned the page
+to idle 0.32 seconds after acquisition. The first move was rejected as
+expired, and two subsequent device reads still showed the original lease.
+On `68c79e0d`, Chromium loaded the controller script from the installed
+firmware. After one acquisition, two short opposing swipes and a sustained
+swipe produced 11 terminal movement sends and eight expired rejections.
+Control remained active across the rejections and 11 successful renewals.
+Both arrow key taps and both wheel directions reached the BLE transport.
+Both mode changes applied, and Stop completed the neutral release. The saved
+BLE target remained connected and input-ready afterward. Expired samples
+still reduced delivered motion. Cursor travel and touch feel on the paired
+host were unobserved.
+
 These bounded observations do not establish sustained Web
 reliability, physical display rendering, every BLE/USB input path, Safari
 behavior, speaker output or long-run radio coexistence. The
