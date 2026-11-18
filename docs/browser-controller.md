@@ -12,7 +12,7 @@ The enrolled HTTPS listener can also serve the controller.
    the code for future authorization requests.
 2. Join the same LAN or the displayed control hotspot and open the HTTP
    address in a browser. The page opens before sign-in. Name the browser,
-   enter the code and choose **Authorize this browser**. Long-term access is
+   enter the code and choose **Authorize**. Long-term access is
    selected by default and lasts until revoked. The six-hour and 24-hour
    choices require trusted device time.
 3. After Mosaico saves the grant, the browser signs in with its own random
@@ -75,9 +75,13 @@ submitted retains its actual result or uncertainty when the contact ends.
 The pad also accepts arrow keys while focused; a key repeat does not generate a
 stored movement sequence.
 
-Keyboard provides individual letter/number taps and Space, Enter, Backspace,
-Tab, Esc, Delete, Home, End and arrow keys. Letter buttons send lowercase;
-composed text preserves case. The host must use the supported US ANSI physical
+The touchpad and US QWERTY keyboard share one page. After **Take control**, a
+click, drag or key tap selects the required device mode when necessary. Input
+follows only after that change is confirmed on the same lease. Stop, loss of
+control or an unknown reply prevents the pending action from continuing.
+Shift, Ctrl, Alt and Meta apply to the next key tap only. Open **Symbols &
+navigation** for punctuation, Tab, Esc, Delete, Home, End and arrows. Composed
+text preserves case. The host must use the supported US ANSI physical
 layout. Composed text is limited to **1–32 printable ASCII characters** per
 explicit Send. The entire input is checked before any command: unsupported
 characters, line breaks and longer strings are rejected without truncation,
@@ -120,7 +124,7 @@ least 30 ms apart. Lifting the finger or stopping control discards unsent
 movement.
 While movement or renewal is in flight, input buttons keep their appearance
 and focus. Additional button presses during that interval are discarded.
-**Stop control** remains available.
+**Stop** remains available.
 Lease renewal and device checks continue while the page is visible. A lost
 channel stops control and discards the pending contact. Reconnect if a result
 is unknown, then take control explicitly to resume.

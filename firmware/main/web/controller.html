@@ -11,7 +11,7 @@
 <body>
   <main>
     <header class="masthead">
-      <div><p class="product">Mosaico</p><h1>Control console</h1></div>
+      <div><p class="product">Mosaico</p><h1>Remote control</h1></div>
       <div class="toolbar">
         <p id="connection" class="connection" role="status" data-state="offline">Disconnected</p>
         <label class="theme-control" for="theme"><span>Theme</span><select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
@@ -19,7 +19,7 @@
     </header>
     <details id="pairing" open>
       <summary id="pair-title">Connect this browser</summary>
-      <p>Enter the 8-digit access code from Settings → Wi-Fi → Web/API on Mosaico. The code stays valid until you replace it. Access is separate from taking control of the mouse and keyboard.</p>
+      <p>Find your code in Settings → Wi-Fi → Web/API.</p>
       <label for="client-name">Browser name</label>
       <input id="client-name" maxlength="32" value="My browser" autocomplete="off">
       <label for="access-code">Access code</label>
@@ -27,8 +27,8 @@
       <label for="access-duration">Browser authorization</label>
       <select id="access-duration"><option value="permanent">Long term · until revoked</option><option value="24h">24 hours</option><option value="6h">6 hours</option></select>
       <p class="fingerprint" id="fingerprint">No browser identity yet</p>
-      <div class="actions"><button id="pair">Authorize this browser</button><button id="check">Check approval</button><button id="connect">Connect saved browser</button></div>
-      <p id="approval" role="status">Long-term authorization reconnects this browser without touching Mosaico. Revoke browsers in its controller list.</p>
+      <div class="actions"><button id="pair">Authorize</button><button id="check">Check status</button><button id="connect">Connect</button></div>
+      <p id="approval" role="status"></p>
     </details>
     <nav class="jump-links" aria-label="Console sections">
       <a href="#target-title">Input</a><a href="#bluetooth-title">Bluetooth</a><a href="#wifi-title">Wi-Fi</a><a href="#labels-title">Labels</a>
@@ -38,26 +38,27 @@
     <section aria-labelledby="target-title">
       <div class="section-head"><h2 id="target-title">Input target</h2><button id="refresh" class="quiet">Refresh</button></div>
       <p id="target" class="target">Unavailable</p><p id="readiness">Connect to read the actual input state.</p>
-      <div class="actions"><button id="acquire" class="primary" disabled>Take control</button><button id="stop" disabled>Stop control</button><button id="disconnect" class="quiet" disabled>Disconnect browser</button></div>
-      <p class="hint">Control ends on local takeover, lock, a target change, or loss of connection. Take control again to resume.</p>
+      <div class="actions"><button id="acquire" class="primary" disabled>Take control</button><button id="stop" disabled>Stop</button><button id="disconnect" class="quiet" disabled>Disconnect</button></div>
+
+      <div class="last-action">
+        <div class="section-head"><h2 id="result-title">Last action</h2><button id="result-check" class="quiet" disabled>Check result</button></div>
+        <p id="result" role="status" aria-live="polite">Nothing sent.</p>
+      </div>
     </section>
-    <section aria-labelledby="result-title"><div class="section-head"><h2 id="result-title">Last action</h2><button id="result-check" class="quiet" disabled>Check result</button></div><p id="result" role="status" aria-live="polite">Nothing sent.</p><p class="hint">“Sent” means the HID transport accepted the key/button reports and releases. The target application's response is not observed. An unknown reply is never replayed automatically.</p></section>
     <section aria-labelledby="input-title">
       <h2 id="input-title">Mouse &amp; keyboard</h2>
-      <div class="actions modes"><button id="mouse-mode" disabled>Mouse</button><button id="keyboard-mode" disabled>Keyboard</button></div>
       <fieldset id="mouse-controls" disabled>
         <legend>Mouse</legend>
-        <div id="pad" tabindex="0" role="group" aria-label="Touchpad: drag a finger or mouse to move the target pointer"><span>Drag to move</span><small>Touch or mouse · relative movement</small><i aria-hidden="true">+</i></div>
-        <div class="mouse-row"><button data-click="left">Left click</button><div class="directions" aria-label="Pointer directions"><button data-move="0,-24" aria-label="Move up">↑</button><button data-move="-24,0" aria-label="Move left">←</button><button data-move="0,24" aria-label="Move down">↓</button><button data-move="24,0" aria-label="Move right">→</button></div><button data-click="right">Right click</button></div>
+        <div id="pad" tabindex="0" role="group" aria-label="Touchpad: drag a finger or mouse to move the target pointer"><span>Drag to move</span></div>
+        <div class="mouse-row"><button data-click="left" aria-label="Left click">Left</button><div class="directions" aria-label="Pointer directions"><button data-move="-24,0" aria-label="Move left">←</button><button data-move="0,-24" aria-label="Move up">↑</button><button data-move="0,24" aria-label="Move down">↓</button><button data-move="24,0" aria-label="Move right">→</button></div><button data-click="right" aria-label="Right click">Right</button></div>
       </fieldset>
       <fieldset id="keyboard-controls" disabled>
         <legend>Keyboard</legend>
-        <div id="letters" class="letters" aria-label="On-screen keyboard"></div>
-        <div id="function-keys" class="function-keys" aria-label="Function keys"></div>
+        <div id="keys" aria-label="US keyboard"></div>
+        <details class="extra-keys"><summary>Symbols &amp; navigation</summary><div id="extra-keys"></div></details>
         <label for="text">Compose text</label>
-        <textarea id="text" rows="3" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="Type text here, then press Send text"></textarea>
+        <textarea id="text" rows="1" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="US keyboard · up to 32 characters"></textarea>
         <div class="section-head"><span id="text-count" class="hint">0 / 32 characters</span><button id="send" class="primary">Send text</button></div>
-        <p class="hint">Up to 32 printable US ANSI characters per send. The host needs a US keyboard layout. Unsupported characters, newlines and longer text are rejected as a whole. Enter is a separate key. Text stays here after sending.</p>
       </fieldset>
     </section>
       </div>
@@ -93,7 +94,7 @@
         <div class="actions"><button type="submit" class="primary" id="editor-save">Save</button><button type="button" id="editor-cancel">Cancel</button></div>
       </form>
     </dialog>
-    <footer><p>Use the address shown in Mosaico’s Web/API settings over Wi-Fi or the control hotspot.</p><button id="forget" class="quiet">Forget identity in this browser</button></footer>
+    <footer><button id="forget" class="quiet">Forget identity in this browser</button></footer>
   </main>
 </body>
 </html>

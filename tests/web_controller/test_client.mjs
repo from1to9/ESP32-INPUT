@@ -41,8 +41,8 @@ function padFixture() {
   const start = source.indexOf('  $("pad").onpointerdown =');
   const end = source.indexOf('\n  setInterval(() => {\n    if (!client.session', start);
   const stop = source.indexOf('  $("stop").onclick =');
-  const stopEnd = source.indexOf('\n  for (const mode', stop);
-  assert(start >= 0 && end > start);
+  const stopEnd = source.indexOf('\n  document.querySelectorAll("[data-click]")', stop);
+  assert(start >= 0 && end > start && stop >= 0 && stopEnd > stop);
   const constants = source.match(/^const PAD_.*;$/gm).join("\n");
   let sendTimer, queued;
   const microtasks = [];
@@ -149,6 +149,21 @@ for (const change of [s => { s.target_id = "usb:18"; }, s => { s.epoch = "9"; },
   await assert.rejects(f.client.run("keyboard.key_tap", {usage: 4}));
   assert(!f.client.controlled);
   assert.equal(f.calls.filter(call => call.options.method === "POST").length, 0);
+}
+for (const interrupted of ["lost lease", "unchanged mode", "unknown reply"]) {
+  const f = fixture();
+  f.state.mode = f.client.state.mode = "mouse";
+  const fetch = f.client.fetcher;
+  f.client.fetcher = (path, options) => {
+    if (options.method === "POST") {
+      if (interrupted === "lost lease") { f.state.mode = "keyboard"; f.state.lease_active = false; }
+      if (interrupted === "unknown reply") f.fail();
+    }
+    return fetch(path, options);
+  };
+  await assert.rejects(f.client.input("keyboard.key_tap", {usage: 4}));
+  assert(!f.client.controlled);
+  assert.deepEqual(f.calls.filter(c => c.options.method === "POST").map(c => JSON.parse(c.options.body).op), ["mode.select"]);
 }
 for (const leaseLost of [false, true]) {
   const f = fixture();

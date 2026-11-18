@@ -41,10 +41,10 @@ try {
   assert.equal((await detail.json()).error, "busy");
   await page.locator("#acquire").click();
   await waitText("connection", "Controlling");
-  for (const mode of ["keyboard", "mouse"]) {
-    await page.locator(`#${mode}-mode`).click();
+  for (const [label, mode] of [["Type a", "keyboard"], ["Left click", "mouse"]]) {
+    await page.getByRole("button", {name: label, exact: true}).click();
+    await waitText("result", "Sent to the HID transport");
     await waitText("readiness", `${mode} · ready`);
-    assert.equal(await page.locator(`#${mode}-mode`).getAttribute("aria-pressed"), "true");
   }
   await fixture("reset-trace");
 
@@ -162,8 +162,6 @@ try {
   evidence.mouseReports = mouse;
 
   await afterRenewal();
-  await page.locator("#keyboard-mode").click();
-  await waitText("readiness", "keyboard · ready");
   await sent("Type a", "keyboard.key_tap");
   await page.locator("#text").fill("Q");
   await sent("Send text", "keyboard.text.enqueue");

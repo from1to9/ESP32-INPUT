@@ -9,7 +9,7 @@ const origin = process.env.WEB_ORIGIN, output = process.env.WEB_OUTPUT;
 const browser = await chromium.launch({headless: true,
   ...(process.env.WEB_BROWSER_EXECUTABLE ? {executablePath: process.env.WEB_BROWSER_EXECUTABLE} : {})});
 const commands = [], renewalResults = [], errors = [];
-const snapshotSelectors = ["#mouse-mode", "#keyboard-mode", "#mouse-controls", "#keyboard-controls",
+const snapshotSelectors = ['[aria-label="Move up"]', '[aria-label="Type a"]', "#mouse-controls", "#keyboard-controls",
   "[data-click=left]", "#refresh", "#refresh-connections", "#result-check", "#scan"];
 const commandPath = `${origin}/api/v1/commands`;
 const statePath = `${origin}/api/v1/state?view=protocol`;
@@ -23,8 +23,8 @@ try {
   });
   const waitText = (id, text) => page.waitForFunction(
     ({id, text}) => document.getElementById(id).textContent.includes(text), {id, text});
-  const mouse = page.locator("#mouse-mode");
-  const keyboard = page.locator("#keyboard-mode");
+  const mouse = page.locator('[aria-label="Move up"]');
+  const keyboard = page.locator('[aria-label="Type a"]');
   const left = page.getByRole("button", {name: "Left click", exact: true});
 
   await page.goto(origin);

@@ -87,8 +87,18 @@ try {
   assert(trace.filter(report => report.id === 2 && report.bytes[1] > 0).length >= 3, "continuous mouse drag must survive multiple replies");
   evidence.cases.push("direction buttons, left/right down-and-neutral pairs and continuous real mouse pointer events reach the production HID engine");
 
-  await page.locator("#keyboard-mode").click(); await waitText(page, "readiness", "keyboard");
+  assert(await page.locator("#mouse-controls").isVisible() && await page.locator("#keyboard-controls").isVisible());
   await page.getByRole("button", {name: "Type a", exact: true}).click(); await waitText(page, "result", "Sent to the HID transport");
+  await waitText(page, "readiness", "keyboard");
+  const shift = page.getByRole("button", {name: "Shift", exact: true});
+  await shift.click();
+  assert.equal(await shift.getAttribute("aria-pressed"), "true");
+  const shiftedPost = page.waitForRequest(req => req.url().endsWith("/api/v1/commands") &&
+    req.postDataJSON().op === "keyboard.key_tap" && req.postDataJSON().args.modifiers === 2);
+  await page.getByRole("button", {name: "Type A", exact: true}).click();
+  await shiftedPost;
+  await waitText(page, "result", "Sent to the HID transport");
+  assert((await reports(page)).some(r => r.id === 1 && r.bytes[0] === 2 && r.bytes[2] === 4));
   await page.getByRole("button", {name: "Enter", exact: true}).click(); await waitText(page, "result", "Sent to the HID transport");
   await page.locator("#text").fill("Hello!"); await page.locator("#send").click(); await waitText(page, "result", "6 / 6 key pairs complete");
   assert.equal(await page.locator("#text").inputValue(), "Hello!", "the composed text remains inspectable");
@@ -144,7 +154,6 @@ try {
   const phone = await mobile.newPage(); observe(phone); await phone.goto(origin);
   await connect(phone, true);
   assert.notEqual(await phone.evaluate(() => JSON.parse(localStorage.getItem("mosaico.browser.identity.v1")).client_id), firstIdentity);
-  await phone.locator("#mouse-mode").click(); await waitText(phone, "readiness", "mouse");
   await fixture(phone, "reset-trace");
   await phone.locator("#pad").scrollIntoViewIfNeeded();
   const pad = await phone.locator("#pad").boundingBox();
@@ -157,9 +166,20 @@ try {
   assert(trace.filter(report => report.id === 2 && report.bytes[1] > 0).length >= 2, "real browser touch pointer events must move repeatedly");
   assert.equal(await phone.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await phone.screenshot({path: path.join(output, "mobile-mouse.png"), fullPage: true});
-  await phone.locator("#keyboard-mode").click(); await waitText(phone, "readiness", "keyboard");
   await phone.getByRole("button", {name: "Type z", exact: true}).tap(); await waitText(phone, "result", "Sent to the HID transport");
   await phone.screenshot({path: path.join(output, "mobile-keyboard.png"), fullPage: true});
+  for (const width of [375, 390, 768, 1024, 1440]) {
+    await phone.setViewportSize({width, height: width < 500 ? 844 : 1000});
+    const metrics = await phone.evaluate(() => {
+      const row = selector => Array.from(document.querySelectorAll(selector), b => Math.round(b.getBoundingClientRect().top));
+      return {overflow: document.documentElement.scrollWidth > innerWidth,
+        qwerty: row("#keys .key-row:nth-child(2) button"), actions: row("#acquire, #stop, #disconnect"),
+        mouse: row(".mouse-row button")};
+    });
+    assert(!metrics.overflow);
+    for (const group of [metrics.qwerty, metrics.actions, metrics.mouse]) assert.equal(new Set(group).size, 1);
+    await phone.locator('section[aria-labelledby="input-title"]').screenshot({path: path.join(output, `controls-${width}.png`)});
+  }
   await phone.locator("#disconnect").click();
   evidence.cases.push("independent same-name mobile browser pairing, real CDP touch sequence, on-screen key tap, dark 390px layout without horizontal overflow");
   assert.deepEqual(errors, []);

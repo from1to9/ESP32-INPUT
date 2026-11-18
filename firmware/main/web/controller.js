@@ -408,7 +408,11 @@ export class Controller {
     this.changed();
     return answer;
   }
-  async run(op, args = {}, total, readSample) {
+  input(op, args, total, readSample) {
+    const mode = op.startsWith("mouse.") ? "mouse" : "keyboard";
+    return this.run(op, args, total, readSample, mode);
+  }
+  async run(op, args = {}, total, readSample, mode = null) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     const generation = this.generation;
     this.busy = true;
@@ -418,6 +422,13 @@ export class Controller {
     this.changed();
     try {
       if (op === "control.acquire" && this.motionURL && !this.motionChannel) await this.openMotionChannel(generation);
+      if (mode && this.controlled && this.state?.mode !== mode) {
+        if (readSample && !readSample()) return null;
+        await this.send("mode.select", {mode});
+        if (this.generation !== generation || !this.controlled || this.state?.mode !== mode) {
+          throw new Error("Input mode or control changed before the action.");
+        }
+      }
       return await this.send(op, args, total, readSample);
     }
     catch (error) {
@@ -498,7 +509,7 @@ export class Controller {
       this.changed();
     }
   }
-  async text(value) { validateText(value); return this.run("keyboard.text.enqueue", {text: value}, value.length); }
+  async text(value) { validateText(value); return this.input("keyboard.text.enqueue", {text: value}, value.length); }
   async checkResult() {
     if (!this.lastKey || !this.session) throw new Error("No known command key is available. The unknown action cannot be inferred from current target state.");
     const response = await this.request(`/api/v1/requests/${this.lastKey}`);
@@ -904,6 +915,66 @@ function mountManagement(client, $, clearInput) {
   };
 }
 
+// Modifiers apply to one explicit key tap. No host key is held between taps.
+function mountKeyboard(keys, extra, available, sendKey) {
+  let modifiers = 0;
+  const toggles = [], printable = [];
+  function update() {
+    for (const [button, mask] of toggles) button.setAttribute("aria-pressed", String(Boolean(modifiers & mask)));
+    for (const [button, plain, shifted] of printable) {
+      const value = modifiers & 2 ? shifted : plain;
+      button.textContent = value.toUpperCase();
+      button.setAttribute("aria-label", `Type ${value}`);
+    }
+  }
+  const row = (parent, style = "") => {
+    const el = document.createElement("div");
+    el.className = "key-row " + style; parent.append(el); return el;
+  };
+  function button(parent, label, css, action) {
+    const el = document.createElement("button");
+    el.textContent = label; el.className = css;
+    el.onclick = () => { if (available()) action(); };
+    parent.append(el); return el;
+  }
+  function tap(usage) {
+    const mask = modifiers;
+    modifiers = 0; update(); sendKey(usage, mask);
+  }
+  function modifier(parent, label, mask, css = "") {
+    toggles.push([button(parent, label, "special " + css, () => { modifiers ^= mask; update(); }), mask]);
+  }
+  function characters(parent, plain, shifted, firstUsage, alphabet = false) {
+    Array.from(plain).forEach((ch, i) => {
+      const usage = alphabet ? ch.charCodeAt(0) - 93 : firstUsage + i;
+      printable.push([button(parent, ch, "", () => tap(usage)), ch, shifted[i]]);
+    });
+  }
+  const special = (parent, label, usage, css = "") => button(parent, label, "special " + css, () => tap(usage));
+  characters(row(keys), "1234567890", "!@#$%^&*()", 30);
+  for (const [letters, css] of [["qwertyuiop", ""], ["asdfghjkl", "home"]]) {
+    characters(row(keys, css), letters, letters.toUpperCase(), 0, true);
+  }
+  const lower = row(keys);
+  modifier(lower, "Shift", 2, "wide");
+  characters(lower, "zxcvbnm", "ZXCVBNM", 0, true);
+  special(lower, "⌫", 42, "wide").setAttribute("aria-label", "Backspace");
+  const bottom = row(keys);
+  modifier(bottom, "Ctrl", 1); modifier(bottom, "Alt", 4); modifier(bottom, "Meta", 8);
+  special(bottom, "Space", 44, "space"); special(bottom, "Enter", 40, "wide");
+  const symbols = row(extra);
+  characters(symbols, "-=[]", "_+{}", 45);
+  characters(symbols, "\\", "|", 49);
+  characters(symbols, ";'`,./", ':"~<>?', 51);
+  for (const list of [[["Tab",43],["Esc",41],["Delete",76],["Home",74],["End",77]],
+                      [["←",80],["↑",82],["↓",81],["→",79]]]) {
+    const line = row(extra);
+    for (const [label, usage] of list) special(line, label, usage);
+  }
+  update();
+  return () => { if (modifiers) { modifiers = 0; update(); } };
+}
+
 function mount() {
   const $ = id => document.getElementById(id);
   const motionURL = ["https:", "http:"].includes(location.protocol) ?
@@ -944,8 +1015,8 @@ function mount() {
     if ($("connection").textContent !== connection) $("connection").textContent = connection;
     $("connection").dataset.state = client.controlled ? "controlling" : client.session && s ? "online" : "offline";
     $("target").textContent = s ? `${s.target_id.startsWith("usb:") ? "USB" : s.target_id.startsWith("bluetooth:") ? "Bluetooth" : "Input"} · ${s.target_id || "unavailable"}` : "Unavailable";
-    $("readiness").textContent = !s ? "Connect to read the actual input state." : !inputPermission ?
-      "This browser does not have keyboard or mouse permission." : s.locked ? "Device locked" :
+    $("readiness").textContent = !s ? "Connect to view target." : !inputPermission ?
+      "Keyboard and mouse permission required." : s.locked ? "Device locked" :
       !s.input_ready ? "Input not ready" : s.release_pending ? "Waiting for input releases" :
       !s.remote_allowed ? "Remote input is not allowed on Mosaico" : `${s.mode} · ready${client.controlled ? " · this browser owns control" : " · no control acquired here"}`;
     const active = client.controlled && !client.uncertain && s?.input_ready && !s.release_pending && !s.locked && s.remote_allowed;
@@ -953,22 +1024,15 @@ function mount() {
     // their temporary unavailability without disabling focus.
     const ready = active && !client.foregroundBusy;
     const paintInputButton = button => {
-      button.disabled = !ready;
+      if (button.disabled === ready) button.disabled = !ready;
       if (ready && client.busy) {
         if (!button.hasAttribute("aria-disabled")) button.setAttribute("aria-disabled", "true");
       } else {
         button.removeAttribute("aria-disabled");
       }
     };
-    $("mouse-controls").disabled = !active || s.mode !== "mouse";
-    $("keyboard-controls").disabled = !active || s.mode !== "keyboard";
-    $("mouse-controls").hidden = s?.mode === "keyboard";
-    $("keyboard-controls").hidden = s?.mode !== "keyboard";
-    document.querySelectorAll("#mouse-controls button, #keyboard-controls button").forEach(paintInputButton);
-    for (const mode of ["mouse", "keyboard"]) {
-      paintInputButton($(`${mode}-mode`));
-      $(`${mode}-mode`).setAttribute("aria-pressed", String(s?.mode === mode));
-    }
+    $("mouse-controls").disabled = $("keyboard-controls").disabled = !active;
+    inputButtons.forEach(paintInputButton);
     $("acquire").disabled = !inputPermission || client.busy || client.uncertain || client.controlled || !s?.input_ready || s.locked || s.release_pending || !s.remote_allowed;
     $("stop").disabled = !inputPermission || (client.managing && !client.controlled);
     $("disconnect").disabled = !client.session;
@@ -978,7 +1042,7 @@ function mount() {
     $("check").disabled = !identity || pairingBusy || client.closing || Boolean(client.session);
     $("result-check").disabled = !client.lastKey || !client.session || client.foregroundBusy;
     if ($("result").textContent !== client.message) $("result").textContent = client.message;
-    if (!active || s.mode !== "mouse") { pad = null; movement = null; }
+    if (!active) { pad = movement = null; resetModifiers(); }
     management.paint();
   }
   client.onchange = paint;
@@ -1007,7 +1071,7 @@ function mount() {
         await client.login(identity);
       } catch {
         throw new Error(client.session ? "Browser access approved. Device state unavailable. Try Refresh." :
-          "Browser access approved. Could not connect. Try Connect saved browser.");
+          "Browser access approved. Could not connect. Try Connect.");
       }
       $("pair-title").textContent = "Browser access · approved";
       $("pairing").open = false;
@@ -1047,25 +1111,19 @@ function mount() {
     if (client.busy || client.uncertain) await client.disconnect();
     else { await client.run("control.release"); client.halt("Control released. Take control explicitly to send more input."); }
   });
-  for (const mode of ["mouse", "keyboard"]) $(`${mode}-mode`).onclick = () => inputAction(() => client.run("mode.select", {mode}));
-  document.querySelectorAll("[data-click]").forEach(button => button.onclick = () => inputAction(() => client.run("mouse.click", {button: button.dataset.click})));
+  document.querySelectorAll("[data-click]").forEach(button => button.onclick = () => inputAction(() => client.input("mouse.click", {button: button.dataset.click})));
   document.querySelectorAll("[data-move]").forEach(button => button.onclick = () => {
     const [dx, dy] = button.dataset.move.split(",").map(Number);
-    inputAction(() => client.run("mouse.move_relative", {dx, dy}));
+    inputAction(() => client.input("mouse.move_relative", {dx, dy}));
   });
-  for (const character of "abcdefghijklmnopqrstuvwxyz1234567890") {
-    const button = document.createElement("button");
-    button.textContent = character.toUpperCase();
-    button.setAttribute("aria-label", `Type ${character}`);
-    button.onclick = () => inputAction(() => client.run("keyboard.key_tap", {usage: /[a-z]/.test(character) ? character.charCodeAt(0) - 93 : character === "0" ? 39 : Number(character) + 29}));
-    $("letters").append(button);
-  }
-  for (const [label, usage] of [["Space", 44], ["Enter", 40], ["Backspace", 42], ["Tab", 43], ["Esc", 41], ["Delete", 76], ["Home", 74], ["End", 77], ["←", 80], ["↑", 82], ["↓", 81], ["→", 79]]) {
-    const button = document.createElement("button"); button.textContent = label;
-    button.onclick = () => inputAction(() => client.run("keyboard.key_tap", {usage}));
-    $("function-keys").append(button);
-  }
-  $("send").onclick = () => inputAction(() => client.text($("text").value));
+  const resetModifiers = mountKeyboard($("keys"), $("extra-keys"),
+    () => !client.busy && !$("keyboard-controls").disabled,
+    (usage, modifiers) => inputAction(() => {
+      pad = movement = null;
+      return client.input("keyboard.key_tap", {usage, modifiers});
+    }));
+  const inputButtons = document.querySelectorAll("#mouse-controls button, #keyboard-controls button");
+  $("send").onclick = () => inputAction(() => { pad = movement = null; return client.text($("text").value); });
   $("text").oninput = () => { $("text-count").textContent = `${$("text").value.length} / 32 characters`; };
   $("result-check").onclick = () => { if (!client.busy) return act(() => client.checkResult()); };
   $("forget").onclick = () => act(async () => {
@@ -1094,7 +1152,7 @@ function mount() {
   $("pad").onkeydown = event => {
     const moves = {ArrowLeft: [-24, 0], ArrowRight: [24, 0], ArrowUp: [0, -24], ArrowDown: [0, 24]};
     if (!moves[event.key] || event.repeat || $("mouse-controls").disabled) return;
-    event.preventDefault(); const [dx, dy] = moves[event.key]; inputAction(() => client.run("mouse.move_relative", {dx, dy}));
+    event.preventDefault(); const [dx, dy] = moves[event.key]; inputAction(() => client.input("mouse.move_relative", {dx, dy}));
   };
   function sendPadMovement() {
     if (!movement || !pad || !client.controlled || client.busy) return;
@@ -1116,7 +1174,7 @@ function mount() {
     // transports keep their existing detached sample and replacement rule.
     const next = accumulate ? null : movement;
     if (!accumulate) movement = null;
-    act(() => client.run("mouse.move_relative", {}, undefined, consume => {
+    act(() => client.input("mouse.move_relative", {}, undefined, consume => {
       if (pad !== contact) return null;
       const latest = movement?.contact === contact ? movement : next;
       if (!latest) return null;

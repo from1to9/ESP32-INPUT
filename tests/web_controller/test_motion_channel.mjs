@@ -104,7 +104,7 @@ try {
         if ((record.oldValue !== null) !== record.target.hasAttribute("disabled")) changes.push(record.target.id || record.target.dataset.click);
       }
     });
-    for (const selector of ["#mouse-mode", "#keyboard-mode", "[data-click=left]", "[data-click=right]"]) {
+    for (const selector of ['[aria-label="Move up"]', '[aria-label="Type a"]', "[data-click=left]", "[data-click=right]"]) {
       observer.observe(document.querySelector(selector), {attributes: true, attributeOldValue: true, attributeFilter: ["disabled"]});
     }
     window.finishMotionObservation = () => { observer.disconnect(); return changes; };
@@ -207,7 +207,7 @@ try {
   const left = page.getByRole("button", {name: "Move left"});
   await left.evaluate(button => {
     button.addEventListener("click", () => {
-      const others = [document.querySelector('[aria-label="Move right"]'), document.getElementById("keyboard-mode"),
+      const others = [document.querySelector('[aria-label="Move right"]'), document.querySelector('[aria-label="Type a"]'),
         document.querySelector("[data-click=left]")];
       const peek = control => ({disabled: control.disabled, ariaDisabled: control.getAttribute("aria-disabled"),
         opacity: getComputedStyle(control).opacity});
@@ -268,7 +268,7 @@ try {
   }
   await touch("touchEnd");
   assert.equal(await page.locator("#connection").textContent(), "Connected / idle");
-  assert(await page.locator("#mouse-mode").isDisabled());
+  assert(await page.locator('[aria-label="Move up"]').isDisabled());
   await delay(1000);
   assert.equal(evidence.motionCommands.length, sentBeforeLoss + 1);
   assert(!evidence.httpCommands.includes("mouse.move_relative"));
