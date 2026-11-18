@@ -68,6 +68,33 @@ BLE target remained connected and input-ready afterward. Expired samples
 still reduced delivered motion. Cursor travel and touch feel on the paired
 host were unobserved.
 
+On `0f725f53`, the Passport returned successful relative movements in the
+original HTTP response once the HID transport had accepted the report. On a
+360-point Chromium touch stroke lasting 8.31 seconds, the input travelled
+1,080 horizontal units and ended 72 units to the right. The board returned
+26 direct `sent` receipts totalling 234 units of travel and net +186.
+Seventeen moves expired. The same lease survived five renewals, and Stop
+completed the neutral release. A diagnostic image with STA modem sleep
+disabled delivered 192 units and net +72 on one run of the same stroke.
+Short right and left strokes delivered more movement on that image. These
+mixed results did not justify changing the default Wi-Fi power policy.
+
+With the normal image, a touch beginning inside the pad continued after
+Chromium released pointer capture. The browser observed 30 moves targeting
+elements outside the pad and a lift outside. Four moves submitted more than
+one sample lifetime after crossing the edge reached the HID transport.
+
+On `b1a1442f`, the installed page also delivered movement from half-pixel
+touch increments. In a browser fixture, 48 increments in each direction
+produced the full +24 and −24 units. A delayed reply to an earlier move did
+not change how opposing fractions cancelled. On the physical Passport,
+Chromium delivered all 48 pointer events per direction to the page. Eight
+rightward moves reached the BLE transport for +8 units. Four leftward moves
+reached it for −5 units and two expired. Stop completed the neutral release,
+the browser session closed, and the saved BLE connection remained ready.
+The remaining loss of travel under network timing and pointer feel on the
+receiving device remain open.
+
 These bounded observations do not establish sustained Web
 reliability, physical display rendering, every BLE/USB input path, Safari
 behavior, speaker output or long-run radio coexistence. The
