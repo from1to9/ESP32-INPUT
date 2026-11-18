@@ -160,6 +160,11 @@ static bool hid_busy(const app_remote_input_t *m)
     return false;
 }
 
+bool app_remote_input_motion_blocked(const app_remote_input_t *m)
+{
+    return m && (hid_busy(m) || m->port.engine->count);
+}
+
 static cp_error_t enqueue_error(hid_engine_enqueue_result_t r)
 {
     switch (r) {

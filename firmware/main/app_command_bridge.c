@@ -318,9 +318,14 @@ void app_command_bridge_service(app_command_bridge_t *b)
         b->result_pending = false;
     }
     bool have = false;
+    const bool motion_blocked = b->port.motion_blocked && b->port.motion_blocked(b->port.user);
+    const uint64_t now = motion_blocked ? b->port.now_ms(b->port.user) : 0;
     b->port.lock(b->port.user);
     /* A later ordinary command must not overtake an earlier pending release. */
-    if (b->count && next_priority(b) < 0) {
+    const queued_command_t *head = &b->commands[b->head];
+    const bool defer = motion_blocked && head->command.motion_window && !head->cancelled &&
+        now < head->command.deadline_ms;
+    if (b->count && !defer && next_priority(b) < 0) {
         b->flight = b->commands[b->head]; wipe(&b->commands[b->head], sizeof(b->flight));
         b->head = (uint8_t)((b->head + 1U) % APP_COMMAND_CAPACITY); --b->count;
         b->admitting = have = true;

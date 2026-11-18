@@ -396,8 +396,7 @@ static void websocket_closed(channel_t *c)
     c->closed = true;
     if (current) {
         c->server->channels[c->slot].used = false;
-        c->server->channels[c->slot].motion_key = 0;
-        c->server->channels[c->slot].motion_ready = false;
+        c->server->channels[c->slot].motion = (control_motion_window_t){0};
     }
     portEXIT_CRITICAL(&s_lock);
     if (current) {
@@ -546,14 +545,16 @@ static esp_err_t websocket_data(httpd_req_t *request)
         return ESP_FAIL;
     }
     server_t *s = channel->server;
+    cp_motion_terminal_t motion = {.mode = channel->terminal_mode};
     portENTER_CRITICAL(&s_lock);
-    bool blocked = channel->closed || s->stop_requested || s->channels[channel->slot].motion_key;
+    bool blocked = channel->closed || s->stop_requested ||
+        !control_motion_prepare(&s->channels[channel->slot].motion, &motion);
     portEXIT_CRITICAL(&s_lock);
     if (blocked) return ESP_FAIL;
     httpd_ws_frame_t frame = {0};
     esp_err_t e = httpd_ws_recv_frame(request, &frame, 0);
     if (e != ESP_OK || !frame.final || frame.len > CP_MAX_FRAME_BYTES ||
-        (frame.type != HTTPD_WS_TYPE_TEXT && (s->slot || frame.type != HTTPD_WS_TYPE_BINARY))) {
+        (frame.type != HTTPD_WS_TYPE_TEXT && (motion.motion_only || s->slot || frame.type != HTTPD_WS_TYPE_BINARY))) {
         return ESP_FAIL;
     }
     frame.payload = (uint8_t *)s->body;
@@ -568,8 +569,8 @@ static esp_err_t websocket_data(httpd_req_t *request)
     drain_channel_closures(s);
     cp_error_t error;
     bool enable_low_latency = false;
+    bool tracked = true;
     if (frame.type == HTTPD_WS_TYPE_TEXT) {
-        cp_motion_terminal_t motion = {.mode = channel->terminal_mode};
         error = cp_transport_frame_motion(s->protocol, &channel->identity, s->body, frame.len,
                                           now_ms(), &s->response, &motion);
         enable_low_latency = channel->terminal_mode == CP_TERMINAL_DISABLED && motion.mode != CP_TERMINAL_DISABLED;
@@ -578,7 +579,7 @@ static esp_err_t websocket_data(httpd_req_t *request)
             // Mark before the admission frame is written. Queued terminal work
             // can only run on this same HTTP owner after this handler returns.
             portENTER_CRITICAL(&s_lock);
-            s->channels[channel->slot].motion_key = motion.accepted_key;
+            tracked = control_motion_track(&s->channels[channel->slot].motion, &motion);
             portEXIT_CRITICAL(&s_lock);
         }
     } else {
@@ -587,7 +588,7 @@ static esp_err_t websocket_data(httpd_req_t *request)
     }
     cache_sessions(s);
     xSemaphoreGive(s->mutex);
-    if (error == CP_UNAUTHENTICATED) {
+    if (error == CP_UNAUTHENTICATED || !tracked) {
         clear(s->body, sizeof(s->body));
         clear(&s->response, sizeof(s->response));
         return ESP_FAIL;
@@ -638,8 +639,8 @@ static void motion_terminal_recorded(server_t *s, const completion_t *completion
         completion->result.state == CP_RESULT_CLEANUP_PENDING) return;
     portENTER_CRITICAL(&s_lock);
     for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i) {
-        if (s->channels[i].used && s->channels[i].motion_key == completion->key)
-            s->channels[i].motion_ready = true;
+        control_motion_slot_t *slot = control_motion_find(&s->channels[i].motion, completion->key);
+        if (s->channels[i].used && slot) slot->ready = true;
     }
     portEXIT_CRITICAL(&s_lock);
 }
@@ -651,8 +652,9 @@ static void send_motion_terminal(void *argument)
     unsigned slot = s->motion_work.slot;
     uint64_t generation = s->motion_work.generation, key = s->motion_work.key;
     int fd = s->motion_work.fd;
+    control_motion_slot_t *movement = control_motion_find(&s->channels[slot].motion, key);
     bool current = !s->stop_requested && s->channels[slot].used &&
-        s->channels[slot].generation == generation && s->channels[slot].motion_key == key;
+        s->channels[slot].generation == generation && movement && movement->ready;
     portEXIT_CRITICAL(&s_lock);
     channel_t *channel = current ? httpd_sess_get_ctx(s->listener, fd) : NULL;
     if (channel && !channel->closed && channel->server == s && channel->slot == slot &&
@@ -660,8 +662,7 @@ static void send_motion_terminal(void *argument)
         drain_channel_closures(s);
         cp_error_t result = cp_transport_motion_result(s->protocol, &channel->identity, key, now_ms(), &s->response);
         portENTER_CRITICAL(&s_lock);
-        s->channels[slot].motion_key = 0;
-        s->channels[slot].motion_ready = false;
+        *movement = (control_motion_slot_t){0};
         bool stopping = s->stop_requested;
         portEXIT_CRITICAL(&s_lock);
         xSemaphoreGive(s->mutex);
@@ -688,14 +689,19 @@ static void queue_motion_terminal(server_t *s)
     portENTER_CRITICAL(&s_lock);
     if (!s->stop_requested && !s->motion_work.queued) {
         for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i) {
-            if (s->channels[i].used && s->channels[i].motion_ready) {
-                s->motion_work.queued = queue = true;
-                s->motion_work.slot = i;
-                s->motion_work.generation = s->channels[i].generation;
-                s->motion_work.key = s->channels[i].motion_key;
-                s->motion_work.fd = s->channels[i].fd;
-                break;
+            if (!s->channels[i].used) continue;
+            for (unsigned j = 0; j < CONTROL_MOTION_WINDOW_SIZE; ++j) {
+                const control_motion_slot_t *slot = &s->channels[i].motion.slots[j];
+                if (slot->ready) {
+                    s->motion_work.queued = queue = true;
+                    s->motion_work.slot = i;
+                    s->motion_work.generation = s->channels[i].generation;
+                    s->motion_work.key = slot->key;
+                    s->motion_work.fd = s->channels[i].fd;
+                    break;
+                }
             }
+            if (queue) break;
         }
     }
     portEXIT_CRITICAL(&s_lock);

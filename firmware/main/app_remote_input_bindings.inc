@@ -201,6 +201,11 @@ static cp_error_t remote_delegate(void *context, const cp_command_t *command, cp
 static void command_lock(void *context) { (void)context; portENTER_CRITICAL(&s_command_lock); }
 static void command_unlock(void *context) { (void)context; portEXIT_CRITICAL(&s_command_lock); }
 static uint64_t command_clock(void *context) { (void)context; return (uint64_t)esp_timer_get_time() / 1000U; }
+static bool command_motion_blocked(void *context)
+{
+    (void)context;
+    return app_remote_input_motion_blocked(s_remote_input);
+}
 static bool command_available(void *context, cp_operation_id_t operation, char reason[CP_REASON_CAPACITY])
 {
     (void)context;
@@ -369,7 +374,8 @@ static void remote_control_init(bool usb_available)
         .delegate_available = remote_delegate_available, .delegate = remote_delegate};
     app_command_bridge_port_t bridge_port = {.lock = command_lock, .unlock = command_unlock,
         .now_ms = command_clock, .available = command_available, .execute = command_execute,
-        .safety = command_safety, .read = command_read, .complete = remote_complete};
+        .safety = command_safety, .read = command_read, .complete = remote_complete,
+        .motion_blocked = command_motion_blocked};
     if (!input || !bridge || app_remote_input_init(input, app_remote_input_bytes(), &input_port, &s_remote_input) != CP_OK ||
         app_command_bridge_init(bridge, app_command_bridge_bytes(), &bridge_port, &s_command_bridge) != CP_OK) {
         heap_caps_free(input); heap_caps_free(bridge); s_remote_input = NULL; s_command_bridge = NULL; return;

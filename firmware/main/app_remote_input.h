@@ -98,6 +98,7 @@ void app_remote_input_service(app_remote_input_t *, uint64_t now_ms);
  * storage; rejection lets the engine cancel and run its reserved neutral barrier.
  * The authority provider may latch expiry in RAM. Never gate the neutral barrier. */
 bool app_remote_input_report_authorized(const app_remote_input_t *, uint64_t now_ms);
+bool app_remote_input_motion_blocked(const app_remote_input_t *);
 /* Process ONE existing, properly mapped board sample. Returns true when
  * consumed, including calibration/reference tracking with output suppressed.
  * Local ownership uses the native source; an active DEVICE_IMU Mouse lease or

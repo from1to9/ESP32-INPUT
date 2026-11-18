@@ -22,6 +22,7 @@ typedef struct {
     cp_safety_fn safety;
     cp_read_fn read;
     bool (*complete)(void *, const cp_result_t *);
+    bool (*motion_blocked)(void *);
 } app_command_bridge_port_t;
 size_t app_command_bridge_bytes(void);
 /* Caller storage must satisfy both this alignment and the byte requirement. */

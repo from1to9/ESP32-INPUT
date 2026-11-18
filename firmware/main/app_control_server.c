@@ -20,6 +20,7 @@
 #include "app_control_dns.h"
 #include "app_network_task.h"
 #include "app_control_web.h"
+#include "app_control_motion_window.h"
 #include "app_wifi.h"
 
 #define CERT_BYTES 2048U
@@ -74,8 +75,7 @@ struct server {
         int fd;
         uint64_t generation;
         cp_identity_t identity;
-        uint64_t motion_key;
-        bool motion_ready;
+        control_motion_window_t motion;
     } channels[CP_MAX_SESSIONS];
 };
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -543,6 +543,7 @@ static esp_err_t initialize(server_t *s)
 #endif
     cp_set_transport_capabilities(s->protocol, websocket, error == ESP_OK);
     cp_set_motion_terminal_available(s->protocol, websocket);
+    cp_set_motion_window_available(s->protocol, websocket);
     portENTER_CRITICAL(&s_lock);
     s_snapshots[s->slot].websocket_available = websocket;
     portEXIT_CRITICAL(&s_lock);
