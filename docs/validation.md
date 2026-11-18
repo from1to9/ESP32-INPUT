@@ -37,9 +37,24 @@ During the subsequent home-page request the server reported send errno 11
 and a handler failure while the client timed out waiting for headers.
 In `a2f6178`, the health handler, HTTP interface check and BLE owner each
 replaced a 1,424-byte scan/profile snapshot with 48 bytes of link state.
-Matched C3 builds measured 4,128 bytes less static DRAM. The effect on
-page delivery has not been tested on hardware, and the cause of the send
-stall remains open. These observations do not establish sustained Web
+Matched C3 builds measured 4,128 bytes less static DRAM, but a cold browser
+load still stalled on that image. During a browser stall on an instrumented
+build, full-size TCP segments repeatedly returned `ESP_ERR_NO_MEM` from the
+Wi-Fi transmit call. The driver's transmit-buffer heap-failure count rose
+while its quota-failure count stayed at zero.
+
+The subsequent C3 configuration moved selected task-context FreeRTOS
+functions into flash, freeing 13,164 bytes of instruction SRAM on the measured
+build. On the physical Passport running `b3694476`, a desktop Chromium
+session loaded the home page, stylesheet and script byte-for-byte and opened
+a control session. Two independent Chromium contexts also fetched all three
+assets concurrently, and a desktop refresh returned all three again. In a
+separate boot, USB reported the device locked and disconnected. USB unlock
+and selection of the saved peer restored the encrypted keyboard and mouse
+subscriptions. With BLE ready, the same browser checks passed, two opposing
+pointer moves returned terminal HID transport receipts, and Stop completed
+the neutral release. The saved connection was ready at the end of that boot.
+These bounded observations do not establish sustained Web
 reliability, physical display rendering, every BLE/USB input path, Safari
 behavior, speaker output or long-run radio coexistence. The
 community release gate and remaining hardware cases are listed in the
@@ -103,6 +118,10 @@ and [storage boundary](interaction.md#status-connectivity-and-display) for what 
   input. In a subsequent physical iPhone test, the operator reported that
   swiping moved the pointer but motion still felt jumpy. Individual movement
   receipts and the cause of the uneven motion were not established by that test.
+  Follow-up image `4e80279` passed on-device OTA health confirmation, served
+  the matching HTML, CSS and JavaScript over HTTPS, and negotiated the renewal
+  terminal extension on an authenticated WebSocket. Physical iPhone motion
+  smoothness on that revision awaits a swipe observation.
 - **Bluetooth memory pressure.** The controller policy removes the internal
   DMA dependency for allocations explicitly eligible for PSRAM. Real PSRAM
   exhaustion or a full MSYS pool can still trigger the SDK assertion. Dynamic
