@@ -8,8 +8,14 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include "app_build_identity.h"
+#include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+
+#ifndef PASSPORT_ARCHIVE_COMMIT
+#define PASSPORT_ARCHIVE_COMMIT "unknown"
+#endif
 
 typedef enum { HOME, BLUETOOTH, HOST, CONFIRM_FORGET, PAIR_WINDOW, MOUSE, KEYS, STATUS, LOCK_SCREEN, CONNECTIONS, WIFI, APPEARANCE, WIFI_LIST, WIFI_SAVED, WIFI_ACTION, WIFI_CONFIRM, WIFI_AP, WIFI_DETAILS, WIFI_JOIN_QR, WIFI_URL_QR, WIFI_PENDING, SOUND, HOST_IDENTITY, WIFI_IDENTITY } page_t;
 static page_t page = HOME;
@@ -136,6 +142,7 @@ static unsigned entries(void)
 {
     switch (page) {
     case HOME: return 4;
+    case STATUS: return 2;
     case CONNECTIONS: return 5;
     case APPEARANCE: return 3;
     case SOUND: return 4;
@@ -716,8 +723,16 @@ static void build_view(const char *http)
         break;
     case WIFI_DETAILS:
     case STATUS:
+        if (page == STATUS && focus == 1) {
+            identity_page("About Passport  2/2");
+            const char *version = esp_app_get_description()->version;
+            snprintf(view.body, sizeof(view.body), "Developer\n%s\n\nFirmware version\n%.32s\n\nGit commit\n%.8s",
+                     APP_BUILD_DEVELOPER, version[0] ? version : "unknown",
+                     APP_BUILD_GIT_KNOWN ? APP_BUILD_GIT_COMMIT : PASSPORT_ARCHIVE_COMMIT);
+            break;
+        }
         view.layout = VIEW_DETAILS; view.count = 0;
-        snprintf(view.title, sizeof(view.title), "%s", page == STATUS ? "Device status" : "AP details");
+        snprintf(view.title, sizeof(view.title), "%s", page == STATUS ? "Device status  1/2" : "AP details");
         if (page == WIFI_DETAILS) {
             passport_wifi_ap_credentials(ap_ssid, ap_password);
             snprintf(view.body, sizeof(view.body), "SSID: %s\nPassword: %s\nAP IP: %s\nDHCP server: %s\nClient lease: %s\nhttp://%s/%s", ap_ssid, ap_password, wifi.ap_started ? wifi.ap_ip : "unavailable", wifi.dhcp_running ? "running" : "unavailable", wifi.ap_lease ? wifi.ap_client_ip : "not observed", wifi.ap_ip, wifi.provisioning_available ? "setup" : "health");

@@ -307,6 +307,19 @@ static void test_cold_home_navigation(void)
     event(PASSPORT_OK, PASSPORT_PRESS);
     event(PASSPORT_OK, PASSPORT_RELEASE);
     assert(page == STATUS && request_count == 1 && requests[0].kind == PASSPORT_CANCEL);
+    event(PASSPORT_DOWN, PASSPORT_PRESS);
+    event(PASSPORT_DOWN, PASSPORT_RELEASE);
+    render_ui("");
+    assert(page == STATUS && focus == 1 && strstr(view.body, APP_BUILD_DEVELOPER));
+    assert(strstr(view.body, esp_app_get_description()->version));
+    event(PASSPORT_UP, PASSPORT_PRESS);
+    event(PASSPORT_UP, PASSPORT_RELEASE);
+    render_ui("");
+    assert(page == STATUS && focus == 0 && strstr(view.body, "Network control"));
+    time_ms += 1000;
+    event(PASSPORT_OK, PASSPORT_PRESS);
+    event(PASSPORT_OK, PASSPORT_RELEASE);
+    assert(page == HOME);
 }
 
 static void test_home_readiness(void)

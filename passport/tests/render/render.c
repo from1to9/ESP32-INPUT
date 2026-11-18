@@ -53,6 +53,15 @@ passport_sound_state_t passport_sound_state(void) { return sound_state; }
 esp_err_t passport_sound_set(bool enabled) { (void)enabled; return ESP_OK; }
 bool passport_sound_cue(passport_cue_t cue) { (void)cue; return false; }
 
+// Screens render from snapshots. Entering the live USB service loop is a fixture error.
+void passport_usb_init(void) { assert(false); }
+void passport_usb_service(const passport_ble_state_t *b, const passport_wifi_state_t *w,
+                          passport_theme_t t, bool known, bool busy)
+{
+    (void)b; (void)w; (void)t; (void)known; (void)busy;
+    assert(false);
+}
+
 void passport_wifi_snapshot(passport_wifi_state_t *out) { (void)out; }
 bool passport_wifi_request(const passport_wifi_command_t *c) { (void)c; return true; }
 void passport_wifi_ap_credentials(char ssid[32], char password[17]) { snprintf(ssid,32,"Passport-ABCD"); snprintf(password,17,"1234567890ABCDEF"); }
@@ -221,7 +230,7 @@ int main(int argc, char **argv)
             {"home",HOME,0}, {"mouse",MOUSE,3}, {"keys",KEYS,3},
             {"connections",CONNECTIONS,2}, {"bluetooth",BLUETOOTH,1},
             {"bluetooth-scroll",BLUETOOTH,3}, {"host",HOST,2},
-            {"forget",CONFIRM_FORGET,0}, {"wifi",WIFI,0}, {"status",STATUS,0},
+            {"forget",CONFIRM_FORGET,0}, {"wifi",WIFI,0}, {"status",STATUS,0}, {"about",STATUS,1},
             {"appearance",APPEARANCE,palette},
             {"wifi-scan",WIFI_LIST,2}, {"wifi-saved",WIFI_SAVED,0}, {"wifi-actions",WIFI_ACTION,2},
             {"wifi-confirm",WIFI_CONFIRM,0}, {"wifi-pending",WIFI_PENDING,0}, {"wifi-ap",WIFI_AP,2},
@@ -231,6 +240,13 @@ int main(int argc, char **argv)
         for (unsigned i = 0; i < sizeof(cases)/sizeof(cases[0]); ++i) {
             page = cases[i].page; focus = cases[i].focus;
             wifi.phase = page >= WIFI_AP ? PW_OFFLINE : PW_ONLINE; capture(cases[i].name, count);
+            if (page == STATUS && focus == 1) {
+                char revision[24];
+                snprintf(revision, sizeof(revision), "Git commit\n%.8s", APP_BUILD_GIT_KNOWN ? APP_BUILD_GIT_COMMIT : PASSPORT_ARCHIVE_COMMIT);
+                assert(strstr(view.body, revision));
+                assert_label_fits(view.title);
+                assert_label_fits(view.body);
+            }
             if (page == WIFI_LIST) {
                 assert_scan_row("Studio profile", "Studio LAN", "WPA2 / -42 dBm / saved");
                 assert_scan_row("Exact AP", "Guest network", "Open / -66 dBm");
@@ -242,7 +258,7 @@ int main(int argc, char **argv)
         sound_state = (passport_sound_state_t){.preference_known = true};
         capture("sound-off", count);
         focus = 2;
-        sound_state = (passport_sound_state_t){PASSPORT_SOUND_READY, true, true};
+        sound_state = (passport_sound_state_t){.output = PASSPORT_SOUND_READY, .enabled = true, .preference_known = true};
         capture("sound-on", count);
         sound_state.output = PASSPORT_SOUND_UNAVAILABLE;
         capture("sound-unavailable", count);

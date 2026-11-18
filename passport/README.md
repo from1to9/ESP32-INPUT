@@ -148,6 +148,12 @@ After a manual or safety lock, release the buttons, then hold OK to unlock.
 UP/DOWN clicks change focus and an OK click selects it. Home opens Mouse,
 Keys, Connections, or Status. Connections contains Bluetooth, Wi-Fi, Sound,
 and Appearance. Hold DOWN from any page to lock and request release.
+On Status, use UP or DOWN to switch between live device status and About
+Passport. About shows the public developer name, the running firmware version
+and the first eight characters of the build's Git commit. OK returns to the
+menu that opened Status. Builds from a source archive display `unknown` when
+the revision is unavailable. A packager with the verified full source commit
+can pass `-DPASSPORT_ARCHIVE_COMMIT=<40-hex-commit>` to the ESP-IDF build.
 Mouse and Keys remain visible but disabled until the BLE owner reports output
 ready, including its bond, encryption, subscription and release conditions.
 The host may restore encryption and subscriptions before delivering its CONNECT

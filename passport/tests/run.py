@@ -9,6 +9,8 @@ import tempfile
 import sys
 from unittest.mock import patch
 
+from build_info import prepare_ui_build_info
+
 root = Path(__file__).resolve().parents[2]
 headers = (
     'bootloader_random.h esp_check.h esp_event.h esp_heap_caps.h esp_http_server.h '
@@ -127,6 +129,7 @@ for test in sys.argv[1:] or tests:
         if test in ('startup', 'usb'):
             sources += [root / 'passport/main/passport_wifi_text.c']
         if test == 'startup':
+            prepare_ui_build_info(root, work)
             sys.path.insert(0, str(root / 'tools'))
             from passport_button_patch import patch_source
             button_dir = root / 'passport/managed_components/espressif__button'

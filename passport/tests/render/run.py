@@ -11,6 +11,8 @@ import sys
 
 source = Path(__file__).resolve().parent
 root = source.parents[2]
+sys.path.insert(0, str(source.parent))
+from build_info import prepare_ui_build_info
 parser = argparse.ArgumentParser()
 parser.add_argument('--output', type=Path, default=root / '.agent/local/passport-wifi/render')
 parser.add_argument('--setup-only', action='store_true', help='Render only the enabled setup window, details, URL QR and confirmation')
@@ -26,6 +28,7 @@ for name in ('esp_err.h esp_heap_caps.h esp_log.h bsp_button.h bsp_display.h bsp
     path = headers / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('#include "platform.h"\n')
+prepare_ui_build_info(root, headers)
 cmake = shutil.which('cmake') or str(root / '.tools/passport-espressif/tools/cmake/3.30.2/CMake.app/Contents/bin/cmake')
 ninja = shutil.which('ninja') or str(root / '.tools/passport-espressif/tools/ninja/1.12.1/ninja')
 (out / 'CMakeLists.txt').write_text(f'''cmake_minimum_required(VERSION 3.16)
