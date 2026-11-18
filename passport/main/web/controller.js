@@ -136,9 +136,9 @@ export class Controller {
     }
     if (superseded()) return null;
     if (this.session !== session) throw new Error("Browser session changed while reading state.");
-    return this.observeState(response.json.protocol, expectedEpoch, response.started, response.status);
+    return this.observeState(response.json.protocol, expectedEpoch, response.started, {status:response.status});
   }
-  observeState(s, expectedEpoch, started, status) {
+  observeState(s, expectedEpoch, started, {status, inline = false}) {
     if ((status !== undefined && status !== 200) || !s || s.boot_id !== this.session.boot_id ||
         !["now_ms", "epoch", "transport_generation", "state_sequence", "ui_revision"].every(k => decimal(s[k])) ||
         typeof s.target_id !== "string" || !["mouse", "keyboard", "audio"].includes(s.mode) ||
@@ -150,19 +150,39 @@ export class Controller {
       this.halt("Device state unavailable, permission lost or boot changed. Reconnect explicitly; previous input will not resume.");
       throw new Error(this.message);
     }
-    this.state = s;
-    this.stateAt = performance.now();
-    this.clockSamples = this.clockSamples.filter(a => a.boot === s.boot_id && this.stateAt - a.at < CLOCK_WINDOW_MS).slice(-7);
-    this.clockSamples.push({boot:s.boot_id, at:this.stateAt, time:BigInt(s.now_ms), rtt:this.stateAt-started});
-    if (this.controlled && (s.lease_active !== true || s.lease_id !== this.pin.lease_id ||
+    const at = performance.now();
+    const lostPin = this.controlled && (s.lease_active !== true || s.lease_id !== this.pin.lease_id ||
         !decimal(s.lease_expires_ms) || BigInt(s.lease_expires_ms) <= BigInt(s.now_ms) ||
         s.target_id !== this.pin.target_id || s.transport_generation !== this.pin.transport_generation ||
-        s.epoch !== expectedEpoch || s.locked || !s.remote_allowed || !s.input_ready)) {
+        s.epoch !== expectedEpoch || s.locked || !s.remote_allowed || !s.input_ready);
+    if (inline && this.controlled && !lostPin && !s.release_pending) {
+      // A positive snapshot may have aged on the return path. Re-read the pin
+      // before installing it if it can no longer establish a fresh lease.
+      if (at - started >= STATE_INTERVAL_MS ||
+          this.deviceTiming(s.boot_id, at, BigInt(s.now_ms)).clock >= BigInt(s.lease_expires_ms)) return null;
+    }
+    this.state = s;
+    this.stateAt = at; // Device clock lower bound is anchored at receipt.
+    this.stateReuseUntil = (inline ? started : at) + STATE_INTERVAL_MS;
+    this.clockSamples = this.clockSamples.filter(a => a.boot === s.boot_id && at - a.at < CLOCK_WINDOW_MS).slice(-7);
+    this.clockSamples.push({boot:s.boot_id, at, time:BigInt(s.now_ms), rtt:at-started});
+    if (lostPin) {
       this.halt("Control ended: local takeover, target/readiness change or lease expiry. Take control again only after checking Passport.");
     }
     if (this.controlled) this.pin.epoch = s.epoch;
     this.changed();
     return s;
+  }
+  deviceTiming(boot, now, clock) {
+    let roundTrip = Infinity;
+    for (const anchor of this.clockSamples) {
+      const age = now - anchor.at;
+      if (anchor.boot !== boot || age >= CLOCK_WINDOW_MS) continue;
+      const lower = anchor.time + BigInt(Math.floor(age)) - 2n;
+      if (lower > clock) clock = lower;
+      roundTrip = Math.min(roundTrip, anchor.rtt);
+    }
+    return {clock, roundTrip};
   }
   async send(op, args, total, gesture) {
     if (!this.operations.get(op)) throw new Error("This operation is unavailable on Passport.");
@@ -172,7 +192,7 @@ export class Controller {
     const sampledMove = op === "mouse.move_relative" && gesture?.takeSample;
     // Each POST is gated by the device against the pinned lease and target.
     // Read state periodically during motion and always after an expired sample.
-    let s = sampledMove && this.controlled && this.state && performance.now() - this.stateAt < STATE_INTERVAL_MS
+    let s = sampledMove && this.controlled && this.state && performance.now() < this.stateReuseUntil
       ? this.state : await this.refresh();
     const deviceTime = at => BigInt(s.now_ms) + BigInt(Math.floor(at - this.stateAt));
     if (!currentGesture(gesture)) return null;
@@ -210,17 +230,9 @@ export class Controller {
     const now = performance.now();
     let clock = deviceTime(now), sample = null;
     if (sampledMove) {
-      // Device time at state generation is a lower bound at browser receipt.
-      // A slower reply must not move a recent, better lower bound backwards.
-      let travel = Infinity;
-      for (const anchor of this.clockSamples) {
-        const age = now - anchor.at;
-        if (age >= CLOCK_WINDOW_MS) continue;
-        const lower = anchor.time + BigInt(Math.floor(age)) - 2n;
-        if (lower > clock) clock = lower;
-        travel = Math.min(travel, anchor.rtt);
-      }
-      sample = gesture.takeSample(now, travel);
+      const timing = this.deviceTiming(s.boot_id, now, clock);
+      clock = timing.clock;
+      sample = gesture.takeSample(now, timing.roundTrip);
     }
     if (sampledMove && !sample) return null;
     const expiresAt = sample?.expiresAt ?? gesture?.expiresAt;
@@ -289,9 +301,8 @@ export class Controller {
     if (expiredSample) {
       // Expiry is checked before the device checks the lease. Verify the
       // original pin before the command lane can accept fresh input.
-      const confirmed = expirySnapshot
-        ? this.observeState(answer.protocol, s.epoch, expirySnapshot.started)
-        : await this.refresh(s.epoch);
+      const attached = expirySnapshot && this.observeState(answer.protocol, s.epoch, expirySnapshot.started, {inline:true});
+      const confirmed = attached ?? await this.refresh(s.epoch);
       if (this.controlled && confirmed.release_pending) this.halt("Control ended while Passport was releasing input.");
       return answer;
     }

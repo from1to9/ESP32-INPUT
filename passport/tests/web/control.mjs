@@ -566,6 +566,55 @@ if(process.argv.includes('--trajectory')){
   assert.equal(await p.locator('#pair-open').isDisabled(),true);assert.equal(commands.length,afterUnknown);
   await ctx.close();assert.deepEqual(errors,[]);
   const {Controller,describeResult}=await import('data:text/javascript;base64,'+assets.get('js').toString('base64'));
+  // A snapshot is generated between POST start and response parsing. Exercise
+  // delayed replies with independent browser and device clocks, without sleeping.
+  const realNow=Object.getOwnPropertyDescriptor(performance,'now');
+  let browserTime=0;
+  Object.defineProperty(performance,'now',{configurable:true,value:()=>browserTime});
+  try{
+    for(const scenario of ['late reply','window boundary','stronger anchor','remaining reuse']){
+      reset();browserTime=0;
+      let posts=0,reads=0;
+      const expiry={'late reply':3100,'window boundary':10000,'stronger anchor':3108,'remaining reuse':10000};
+      const replyMs={'late reply':2125,'window boundary':900,'stronger anchor':400,'remaining reuse':800};
+      const s={...state,lease_active:true,remote_owner:true,now_ms:'1000',lease_expires_ms:String(expiry[scenario])};
+      const c=new Controller(async(url,options)=>{
+        if(url==='/api/v1/state'){
+          reads++;
+          let protocol={...s};
+          if(scenario==='stronger anchor' && reads===2){
+            protocol.now_ms='1005';browserTime=1705;
+          }else if(posts)protocol={...s,now_ms:String(1000+browserTime),lease_active:false};
+          return new Response(JSON.stringify({protocol}));
+        }
+        assert.equal(url,'/api/v1/commands');
+        const input=JSON.parse(options.body);
+        assert.equal(input.op,'mouse.move_relative');posts++;
+        const atDevice=scenario==='stronger anchor'?2800:1165;
+        browserTime+=replyMs[scenario];
+        return new Response(JSON.stringify({state:'rejected',error:'expired',next_seq:input.seq+1,
+          command_key:'2',protocol:{...s,now_ms:String(atDevice)}}),{status:400});
+      });
+      c.session={...session};c.operations.set('mouse.move_relative',true);
+      c.pin={lease_id:s.lease_id,target_id:s.target_id,epoch:s.epoch,transport_generation:s.transport_generation};c.controlled=true;
+      await c.refresh();browserTime=5;
+      if(scenario==='stronger anchor'){await c.refresh();browserTime+=5;}
+      const sample={current:()=>true,takeSample:()=>({args:{dx:1,dy:0},expiresAt:browserTime+150})};
+      const before=reads;
+      await c.run('mouse.move_relative',{},undefined,sample);
+      if(scenario==='remaining reuse'){
+        assert(c.controlled && reads===before);
+        assert.equal(c.stateAt,805);assert.equal(c.clockSamples.at(-1).time,1165n);
+        browserTime=906;
+      }else assert(!c.controlled && reads===before+1,scenario);
+      await assert.rejects(c.run('mouse.move_relative',{},undefined,sample));
+      assert(!c.controlled && posts===1,scenario);
+    }
+  }finally{
+    if(realNow)Object.defineProperty(performance,'now',realNow);
+    else delete performance.now;
+  }
+  console.log('PASS expired snapshot freshness: late POST, stronger clock anchor and remaining cache window');
   // A direct terminal reply and a polled terminal reply must be tied to the
   // submission; an invalid successful-looking reply stops the single lane.
   for(const bad of ['key','sequence','status','polled key']){

@@ -326,8 +326,10 @@ The command key, sequence and rejection keep their normal meanings. Exact
 retries and result lookups return the retained command result alone. The
 browser validates the receipt and checks the snapshot's boot, lease, target,
 epoch, permission, readiness and release state before accepting fresh input.
-If the snapshot is absent it reads state separately. Invalid state stops
-input. The expired displacement is discarded. One browser command runs at a time, with no action replay.
+The snapshot's 900 ms reuse window starts at POST submission. A missing
+snapshot, a reply outside that window, or a recent same-boot clock lower
+bound at or beyond an otherwise active lease's expiry requires a separate
+state read. Invalid state stops input. The expired displacement is discarded. One browser command runs at a time, with no action replay.
 Drag holds use a 1500 ms device deadman refreshed while the contact remains
 active. Release ends the drag; cancellation while a command is in flight,
 Stop during busy/unknown work, blur, page hide and offline close the session
