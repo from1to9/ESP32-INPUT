@@ -9,7 +9,7 @@ const THEME_KEY = "passport.browser.theme.v1";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 const decimal = value => typeof value === "string" && DECIMAL.test(value) && BigInt(value) <= 18446744073709551615n;
-const currentPadSample = sample => !sample || (sample.current() && performance.now() < sample.expiresAt);
+const currentGesture = gesture => !gesture || (gesture.current() && performance.now() < (gesture.expiresAt ?? Infinity));
 
 export function validateText(text) {
   if (typeof text !== "string" || !text.length || text.length > 32) {
@@ -142,13 +142,13 @@ export class Controller {
     this.changed();
     return s;
   }
-  async send(op, args, total, sample) {
+  async send(op, args, total, gesture) {
     if (!this.operations.get(op)) throw new Error("This operation is unavailable on Passport.");
-    // A discarded local sample has no protocol result or sequence consumption.
-    if (!currentPadSample(sample)) return null;
+    // A discarded local gesture has no protocol result or sequence consumption.
+    if (!currentGesture(gesture)) return null;
     const observe = op !== "control.renew";
     let s = await this.refresh();
-    if (!currentPadSample(sample)) return null;
+    if (!currentGesture(gesture)) return null;
     if (op !== "control.acquire" && op !== "control.release" && !this.controlled) throw new Error("Take control again before sending input.");
     if (this.uncertain) throw new Error("A reply is unknown. Reconnect explicitly; no command will be replayed.");
     if (!["control.acquire", "control.release", "control.renew"].includes(op)) {
@@ -165,10 +165,10 @@ export class Controller {
     const mode = op.startsWith("mouse.") ? "mouse" : op.startsWith("keyboard.") ? "keyboard" : null;
     if (mode && s.mode !== mode) {
       const pin = this.pin;
-      await this.send("mode.select", {mode}, undefined, sample);
+      await this.send("mode.select", {mode}, undefined, gesture);
       s = this.state;
       for (const delay of [20, 40, 80, 160]) {
-        if (!currentPadSample(sample)) return null;
+        if (!currentGesture(gesture)) return null;
         if (!this.controlled || this.pin !== pin || s.mode !== mode) throw new Error("Input mode or control changed.");
         if (!s.release_pending) break;
         await sleep(delay);
@@ -179,9 +179,9 @@ export class Controller {
     if (mode && s.release_pending) throw new Error("Waiting for Passport to release input.");
     const seq = this.session.next_seq;
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
-    const lifetime = sample ? Math.min(200, Math.floor(sample.expiresAt - performance.now())) :
+    const lifetime = gesture?.expiresAt !== undefined ? Math.min(200, Math.floor(gesture.expiresAt - performance.now())) :
       ["mouse.move_relative", "mouse.scroll"].includes(op) ? 200 : 1500;
-    if (sample && (!sample.current() || lifetime <= 0)) return null;
+    if (gesture && (!gesture.current() || lifetime <= 0)) return null;
     const envelope = {
       v: 1, boot_id: this.session.boot_id, session_id: this.session.session_id,
       request_id: this.session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
@@ -193,12 +193,13 @@ export class Controller {
     };
     // Nothing asynchronous may intervene between this check and request/fetch.
     // Once POST starts, retain its real result/uncertainty even if contact ends.
-    if (!currentPadSample(sample)) return null;
+    if (!currentGesture(gesture)) return null;
     const generation = this.generation;
     let answer;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
+      gesture?.posting?.(op);
       const response = await this.request("/api/v1/commands", "POST", envelope);
       answer = response.json;
       const next = Number(answer.next_seq);
@@ -235,13 +236,13 @@ export class Controller {
     this.changed();
     return answer;
   }
-  async run(op, args = {}, total, sample) {
+  async run(op, args = {}, total, gesture) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     this.busy = true;
     this.renewing = op === "control.renew";
-    if (!sample && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
+    if (!gesture && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
     this.changed();
-    try { return await this.send(op, args, total, sample); }
+    try { return await this.send(op, args, total, gesture); }
     catch (error) { this.halt(this.uncertain ? this.message : error.message); throw error; }
     finally { this.busy = this.renewing = false; this.changed(); }
   }
@@ -432,12 +433,14 @@ function mount() {
     $('acquire').hidden = !client.session || client.controlled;
     $('acquire').disabled = !can('control.acquire') || !s?.input_ready || s.release_pending;
     $('stop').disabled = !client.session; $('disconnect').hidden = !client.session; $('disconnect').disabled = client.closing;
-    $('mouse-controls').disabled = !active;
+    // Preserve keyboard focus on an initiating hold while the mode change releases old reports.
+    const preparingDrag = drag && !drag.submitted && client.controlled && s?.release_pending;
+    $('mouse-controls').disabled = !active && !preparingDrag;
     $('keyboard-controls').disabled = !active;
     // Renewal still owns the command lane; only foreground work or actual
     // control loss changes input availability in the page.
     document.querySelectorAll('[data-op]').forEach(button => { button.disabled = !active || client.foregroundBusy || !client.operations.get(button.dataset.op); });
-    $('drag').disabled = !active || !client.operations.get('mouse.drag.begin');
+    $('drag').disabled = (!active && !preparingDrag) || !client.operations.get('mouse.drag.begin');
     $('send').disabled = !active || client.foregroundBusy || !client.operations.get('keyboard.text.enqueue');
     if ($('result').textContent !== client.message) $('result').textContent = client.message;
     $('result-check').disabled = !client.session || !client.lastKey || client.foregroundBusy;
@@ -489,6 +492,7 @@ function mount() {
     button.dataset.op = 'mouse.scroll'; button.onclick = () => act(() => client.run('mouse.scroll', {wheel: Number(button.dataset.wheel)}));
   }
   async function keyboard(action) {
+    if (client.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     const pin = client.pin;
     if (drag) await finishDrag();
     else { pad = movement = null; }
@@ -544,8 +548,11 @@ function mount() {
     if (client.busy || drag || $('mouse-controls').disabled) return;
     drag = contact;
     try {
-      await client.run('mouse.drag.begin', {button:'left',deadman_ms:1500});
-      if (drag !== contact) { await stop(); return; }
+      await client.run('mouse.drag.begin', {button:'left',deadman_ms:1500}, undefined, {
+        current: () => drag === contact,
+        posting: op => { if (op === 'mouse.drag.begin') contact.submitted = true; },
+      });
+      if (drag !== contact) return;
       dragAt = performance.now(); $('drag').setAttribute('aria-pressed','true'); $('pad').dataset.drag = 'true';
     } catch (error) { clear(); throw error; }
   }
@@ -555,15 +562,24 @@ function mount() {
   };
   $('drag').onpointermove = e => move(e, drag);
   async function finishDrag() {
+    const submitted = drag?.submitted;
     clear();
-    if (!client.session) return;
+    if (!submitted || !client.session) return;
     if (client.busy || client.uncertain) await client.disconnect();
     else if (client.controlled) await client.run('mouse.drag.end',{button:'left'});
   }
   const endDrag = e => { if (drag?.id === e.pointerId) act(finishDrag); };
   $('drag').onpointerup = $('drag').onpointercancel = $('drag').onlostpointercapture = endDrag;
-  $('drag').onkeydown = e => { if ([' ', 'Enter'].includes(e.key) && !e.repeat) { e.preventDefault(); act(() => beginDrag({id:'key'})); } };
-  $('drag').onkeyup = e => { if ([' ', 'Enter'].includes(e.key) && drag?.id === 'key') { e.preventDefault(); act(finishDrag); } };
+  const keyId = e => e.code || e.key;
+  $('drag').onkeydown = e => {
+    if (![' ', 'Enter'].includes(e.key) || e.repeat) return;
+    e.preventDefault(); act(() => beginDrag({key:keyId(e)}));
+  };
+  window.addEventListener('keyup', e => {
+    if (drag?.key !== keyId(e)) return;
+    e.preventDefault(); act(finishDrag);
+  }, true);
+  $('drag').onblur = () => { if (drag?.key) act(finishDrag); };
   setInterval(() => {
     if (!client.controlled || client.busy || document.hidden) return;
     if (drag && performance.now() - dragAt >= 400) {

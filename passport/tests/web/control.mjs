@@ -14,11 +14,11 @@ const assets=new Map(await Promise.all(['html','css','js'].map(async ext=>[ext,a
 const catalog=JSON.parse(await readFile(path.join(root,'api/control-v1.json'))).operations;
 const supported=new Set(['control.acquire','control.renew','control.release','mouse.move_relative','mouse.click','mouse.scroll','mouse.drag.begin','mouse.drag.refresh','mouse.drag.end','keyboard.text.enqueue','keyboard.key_tap','keyboard.shortcut','mode.select','input.release_all','input.cancel','bluetooth.pairing.open','bluetooth.pairing.close','bluetooth.pairing.cancel_handshake','bluetooth.target.request','bluetooth.disconnect','wifi.scan.start','wifi.scan.cancel','display_name.list','display_name.set','display_name.clear']);
 const session={session_token:'a'.repeat(64),session_id:'b'.repeat(32),boot_id:'c'.repeat(32),request_prefix:'d'.repeat(16),csrf:'e'.repeat(32),next_seq:1,scopes:['view','input.control','connections.manage','wifi.configure']};
-let afterMode;
+let afterMode, beginReply;
 let state,commands,results,seq,closed,delayState,delayRenew,failSession,failRenew,failCommand,label,locked,pendingManagement;
 const host='10:20:30:40:50:60/0', bond='01'.padEnd(32,'0'), ap='12'.repeat(32);
 const hx=s=>Buffer.from(s).toString('hex');
-function reset(){afterMode=null;state={boot_id:session.boot_id,now_ms:'10000',epoch:'2',transport_generation:'3',state_sequence:'5',ui_revision:'2',management_generation:'1',target_id:host,mode:'mouse',locked:false,release_pending:false,input_ready:true,remote_allowed:true,remote_owner:false,lease_active:false,lease_id:'f'.repeat(32),lease_expires_ms:'13000'};commands=[];results=new Map();seq=1;closed=0;delayState=delayRenew=0;failSession=failRenew=failCommand=false;label='Studio laptop';locked=false;pendingManagement=false;}
+function reset(){afterMode=beginReply=null;state={boot_id:session.boot_id,now_ms:'10000',epoch:'2',transport_generation:'3',state_sequence:'5',ui_revision:'2',management_generation:'1',target_id:host,mode:'mouse',locked:false,release_pending:false,input_ready:true,remote_allowed:true,remote_owner:false,lease_active:false,lease_id:'f'.repeat(32),lease_expires_ms:'13000'};commands=[];results=new Map();seq=1;closed=0;delayState=delayRenew=0;failSession=failRenew=failCommand=false;label='Studio laptop';locked=false;pendingManagement=false;}
 reset();
 const server=http.createServer(async(req,res)=>{
   res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
@@ -62,7 +62,9 @@ const server=http.createServer(async(req,res)=>{
       if(c.op==='mouse.move_relative'||c.op==='mouse.scroll')assert(BigInt(c.deadline_ms)-BigInt(state.now_ms)<=250n);
       if(c.op==='display_name.set'){label=c.args.label;reason='label_write_confirmed';}
       if(c.op==='display_name.clear'){label='';reason='label_write_confirmed';}
-      const r={state:pendingManagement&&c.op==='bluetooth.pairing.open'?'accepted':'applied',error:'ok',reason,command_key:String(seq),next_seq:seq,uncertain_index:-1};results.set(String(seq),r);send(r);return;
+      const r={state:pendingManagement&&c.op==='bluetooth.pairing.open'?'accepted':'applied',error:'ok',reason,command_key:String(seq),next_seq:seq,uncertain_index:-1};results.set(String(seq),r);
+      if(c.op==='mouse.drag.begin'&&beginReply)await beginReply;
+      send(r);return;
     }
     if(url.pathname.startsWith('/api/v1/requests/')){send(results.get(url.pathname.split('/').at(-1))||{state:'failed',error:'result_unknown'});return;}
     if(url.pathname==='/api/v1/bluetooth/peers'){send({known:true,revision:'7',generation:'3',connected:true,ready:true,pairing:false,handshake:false,window_seconds:0,message:'Connected and ready',peers:[{id:bond,original:host,label,label_known:true,labelable:true,current:true},{id:'02'.padEnd(32,'0'),original:'10:20:30:40:50:61/0',label:'Studio laptop',label_known:true,labelable:true,current:false}]});return;}
@@ -84,7 +86,7 @@ async function bounded(p) {
   const issues=await p.evaluate(()=>{
     const found=[];
     if(document.documentElement.scrollWidth>innerWidth) found.push('page overflow');
-    for(const n of document.querySelectorAll('button,select,input,summary')) {
+    for(const n of document.querySelectorAll('button,select,input,summary,a[href]')) {
       const r=n.getBoundingClientRect();
       if(!r.width||!r.height||n.closest('details:not([open])') && n.tagName!=='SUMMARY')continue;
       const dense=n.closest('.key-row') && innerWidth<=760;
@@ -125,6 +127,63 @@ try{
     if(failure==='response')assert.match(await page.locator('#result').textContent(),/unknown/i);
     await context.close();
   }
+  // A physical hold is tied to its initiating key, including during mode preparation.
+  reset();state.mode='keyboard';
+  const holdContext=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true});
+  const heldPage=await open(holdContext);await connect(heldPage);await acquire(heldPage);
+  afterMode=()=>{state.release_pending=true;};
+  const hold=heldPage.locator('#drag');
+  await hold.focus();await heldPage.keyboard.down('Space');
+  await heldPage.waitForFunction(()=>document.getElementById('keyboard-controls').disabled);
+  await heldPage.keyboard.up('Space');state.release_pending=false;
+  await heldPage.waitForFunction(()=>!document.getElementById('send').disabled);
+  await heldPage.waitForTimeout(480);
+  assert(!commands.some(c=>c.op.startsWith('mouse.drag.')));assert.equal(closed,0);
+  // Tab transfers focus while the initiating key remains down.
+  await hold.focus();await heldPage.keyboard.down('Space');
+  await heldPage.waitForFunction(()=>document.getElementById('drag').getAttribute('aria-pressed')==='true');
+  await heldPage.keyboard.press('Enter');
+  assert.equal(await hold.getAttribute('aria-pressed'),'true');
+  await heldPage.keyboard.press('Tab');await heldPage.keyboard.up('Space');
+  await heldPage.waitForFunction(()=>document.getElementById('drag').getAttribute('aria-pressed')==='false');
+  await heldPage.waitForTimeout(650);
+  assert.deepEqual(commands.filter(c=>c.op.startsWith('mouse.drag.')).map(c=>c.op),['mouse.drag.begin','mouse.drag.end']);
+  // Check the stop control and the scrolled editing control are both reachable.
+  for(const selector of ['#text','[data-shortcut=paste]']){
+    const field=heldPage.locator(selector);
+    await field.evaluate(el=>el.scrollIntoView({block:'center'}));
+    const reachable=await heldPage.evaluate(sel=>['#stop',sel].every(id=>{
+      const n=document.querySelector(id),r=n.getBoundingClientRect();
+      return r.top>=0 && r.bottom<=innerHeight && n.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));
+    }),selector);
+    assert(reachable,selector);
+  }
+  await heldPage.screenshot({path:path.join(out,'iphone-stop-scrolled.png')});
+  await hold.scrollIntoViewIfNeeded();const bounds=await hold.boundingBox();
+  await heldPage.mouse.move(bounds.x+bounds.width/2,bounds.y+bounds.height/2);await heldPage.mouse.down();
+  await heldPage.waitForFunction(()=>document.getElementById('drag').getAttribute('aria-pressed')==='true');
+  delayRenew=450;
+  const renewedHold=heldPage.waitForResponse(r=>r.url().endsWith('/commands')&&r.request().postDataJSON()?.op==='control.renew');
+  await heldPage.waitForRequest(r=>r.url().endsWith('/commands')&&r.postDataJSON()?.op==='control.renew');
+  const during=commands.length;
+  await heldPage.getByRole('button',{name:'Enter',exact:true}).press('Enter');
+  assert.match(await heldPage.locator('#result').textContent(),/Wait for the current action/);
+  assert.equal(await hold.getAttribute('aria-pressed'),'true');assert.equal(closed,0);
+  await renewedHold;delayRenew=0;
+  assert(!commands.slice(during).some(c=>['mode.select','keyboard.key_tap','mouse.drag.end'].includes(c.op)));
+  await heldPage.mouse.up();await holdContext.close();
+  // A release after the begin POST but before its reply must close the session.
+  reset();const pendingContext=await browser.newContext();const pendingPage=await open(pendingContext);
+  await connect(pendingPage);await acquire(pendingPage);
+  let reply;beginReply=new Promise(resolve=>{reply=resolve;});
+  const beginPost=pendingPage.waitForRequest(r=>r.url().endsWith('/commands')&&r.postDataJSON()?.op==='mouse.drag.begin');
+  await pendingPage.locator('#drag').focus();await pendingPage.keyboard.down('Enter');await beginPost;
+  const sessionClose=pendingPage.waitForResponse(r=>r.request().method()==='DELETE');
+  await pendingPage.keyboard.up('Enter');await sessionClose;reply();
+  await pendingPage.waitForTimeout(450);
+  assert.equal(closed,1);
+  assert.deepEqual(commands.filter(c=>c.op.startsWith('mouse.drag.')).map(c=>c.op),['mouse.drag.begin']);
+  await pendingContext.close();
   // A slow renewal must retain the command lane without flashing controls.
   reset();const renewalContext=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
   const renewalPage=await open(renewalContext);await connect(renewalPage);await acquire(renewalPage);
