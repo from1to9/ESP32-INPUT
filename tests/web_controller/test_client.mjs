@@ -151,6 +151,15 @@ for (const change of [s => { s.target_id = "usb:18"; }, s => { s.epoch = "9"; },
   assert(!f.client.controlled);
   assert.equal(f.calls.filter(call => call.options.method === "POST").length, 0);
 }
+{
+  const f = fixture();
+  f.state.lease_active = false;
+  const observed = await f.client.refresh(false, true);
+  assert.equal(observed.lease_active, false);
+  assert(!f.client.controlled, "a current active Refresh still observes real loss of authority");
+  assert.match(f.client.message, /Control ended/);
+  assert(f.calls.every(call => call.options.method === "GET"));
+}
 for (const interrupted of ["lost lease", "unchanged mode", "unknown reply"]) {
   const f = fixture();
   f.state.mode = f.client.state.mode = "mouse";

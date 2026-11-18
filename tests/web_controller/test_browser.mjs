@@ -88,8 +88,38 @@ try {
   evidence.cases.push("direction buttons, left/right down-and-neutral pairs and continuous real mouse pointer events reach the production HID engine");
 
   assert(await page.locator("#mouse-controls").isVisible() && await page.locator("#keyboard-controls").isVisible());
-  await page.getByRole("button", {name: "Type a", exact: true}).click(); await waitText(page, "result", "Sent to the HID transport");
-  await waitText(page, "readiness", "keyboard");
+  // Delay a real, same-session manual Refresh while the next input switches
+  // modes. A read of the previous epoch cannot revoke the verified new one.
+  const statePath = `${origin}/api/v1/state?view=protocol`;
+  let sampled, releaseRead;
+  const oldState = new Promise(resolve => { sampled = resolve; });
+  const release = new Promise(resolve => { releaseRead = resolve; });
+  await page.route(statePath, async route => {
+    const reply = await route.fetch();
+    sampled((await reply.json()).protocol);
+    await release;
+    await route.fulfill({response: reply, headers: {...reply.headers(), "x-fixture-delayed-refresh": "true"}});
+  }, {times: 1});
+  await page.locator("#refresh").evaluate(button => button.click());
+  const previous = await oldState;
+  assert.equal(previous.mode, "mouse");
+  assert.equal(previous.lease_active, true);
+  const delayedReply = page.waitForResponse(reply => reply.headers()["x-fixture-delayed-refresh"] === "true");
+  try {
+    await page.getByRole("button", {name: "Type a", exact: true}).click();
+    await waitText(page, "result", "Sent to the HID transport");
+    await waitText(page, "readiness", "keyboard");
+    const current = (await (await page.request.get(statePath)).json()).protocol;
+    assert.equal(current.lease_id, previous.lease_id);
+    assert.notEqual(current.epoch, previous.epoch);
+  } finally {
+    releaseRead();
+  }
+  await (await delayedReply).finished();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.locator("#connection").textContent(), "Controlling");
+  assert.match(await page.locator("#readiness").textContent(), /keyboard/);
+  evidence.cases.push("delayed active refresh cannot revoke the same lease after an intentional mode transition");
   const shift = page.getByRole("button", {name: "Shift", exact: true});
   await shift.click();
   assert.equal(await shift.getAttribute("aria-pressed"), "true");

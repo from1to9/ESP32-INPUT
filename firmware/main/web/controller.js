@@ -240,13 +240,14 @@ export class Controller {
     this.message = s.scopes.includes("input.control") ? "Browser connected. Take control to send input." : "Browser connected with device access.";
     this.changed();
   }
-  async refresh(allowEpochChange = false, idleOnly = false) {
+  async refresh(allowEpochChange = false, passive = false) {
     if (!this.session) throw new Error("Connect this browser first.");
     const session = this.session;
     const before = this.state;
-    // An idle read can finish after an input command has established a
-    // newer state or lease. Only the command's own checks may stop it then.
-    const superseded = () => idleOnly && (this.busy || this.controlled || this.state !== before);
+    const controlled = this.controlled;
+    // Passive reads can overlap acquisition or a mode change. The command
+    // owns state validation during the transition and after it updates state.
+    const superseded = () => passive && (this.busy || this.state !== before || this.controlled !== controlled);
     let response;
     try {
       for (const delay of [0, 20, 40, 80]) {
@@ -1124,7 +1125,7 @@ function mount() {
   $("check").onclick = () => authorize(status);
   $("connect").onclick = () => authorize(status);
   $("acquire").onclick = () => act(() => client.acquire());
-  $("refresh").onclick = () => { if (!client.busy) return act(() => client.refresh(false, !client.controlled)); };
+  $("refresh").onclick = () => { if (!client.busy) return act(() => client.refresh(false, true)); };
   $("disconnect").onclick = () => act(() => client.disconnect());
   $("stop").onclick = () => act(async () => {
     pad = movement = null;
