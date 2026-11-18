@@ -9,7 +9,7 @@ const THEME_KEY = "passport.browser.theme.v1";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 const decimal = value => typeof value === "string" && DECIMAL.test(value) && BigInt(value) <= 18446744073709551615n;
-const currentPadSample = sample => !sample || (sample.current() && performance.now() < sample.expiresAt);
+const currentGesture = gesture => !gesture || (gesture.current() && performance.now() < (gesture.expiresAt ?? Infinity));
 
 export function validateText(text) {
   if (typeof text !== "string" || !text.length || text.length > 32) {
@@ -104,7 +104,7 @@ export class Controller {
     } catch (error) { await this.disconnect(); throw error; }
     finally { this.busy = false; this.changed(); }
   }
-  async refresh(allowEpochChange = false) {
+  async refresh(expectedEpoch = this.pin?.epoch) {
     if (!this.session) throw new Error("Connect this browser first.");
     const session = this.session;
     let response;
@@ -135,20 +135,20 @@ export class Controller {
     this.state = s;
     if (this.controlled && (!s.lease_active || s.lease_id !== this.pin.lease_id ||
         s.target_id !== this.pin.target_id || s.transport_generation !== this.pin.transport_generation ||
-        (!allowEpochChange && s.epoch !== this.pin.epoch) || s.locked || !s.remote_allowed || !s.input_ready)) {
+        s.epoch !== expectedEpoch || s.locked || !s.remote_allowed || !s.input_ready)) {
       this.halt("Control ended: local takeover, target/readiness change or lease expiry. Take control again only after checking Passport.");
     }
-    if (this.controlled && allowEpochChange) this.pin.epoch = s.epoch;
+    if (this.controlled) this.pin.epoch = s.epoch;
     this.changed();
     return s;
   }
-  async send(op, args, total, sample) {
+  async send(op, args, total, gesture) {
     if (!this.operations.get(op)) throw new Error("This operation is unavailable on Passport.");
-    // A discarded local sample has no protocol result or sequence consumption.
-    if (!currentPadSample(sample)) return null;
+    // A discarded local gesture has no protocol result or sequence consumption.
+    if (!currentGesture(gesture)) return null;
     const observe = op !== "control.renew";
     let s = await this.refresh();
-    if (!currentPadSample(sample)) return null;
+    if (!currentGesture(gesture)) return null;
     if (op !== "control.acquire" && op !== "control.release" && !this.controlled) throw new Error("Take control again before sending input.");
     if (this.uncertain) throw new Error("A reply is unknown. Reconnect explicitly; no command will be replayed.");
     if (!["control.acquire", "control.release", "control.renew"].includes(op)) {
@@ -161,11 +161,27 @@ export class Controller {
         if (!this.controlled) throw new Error("Input control ended before the new action.");
       }
     }
+    // Keep mode selection and the initiating input in the same command lane.
+    const mode = op.startsWith("mouse.") ? "mouse" : op.startsWith("keyboard.") ? "keyboard" : null;
+    if (mode && s.mode !== mode) {
+      const pin = this.pin;
+      await this.send("mode.select", {mode}, undefined, gesture);
+      s = this.state;
+      for (const delay of [20, 40, 80, 160]) {
+        if (!currentGesture(gesture)) return null;
+        if (!this.controlled || this.pin !== pin || s.mode !== mode) throw new Error("Input mode or control changed.");
+        if (!s.release_pending) break;
+        await sleep(delay);
+        s = await this.refresh();
+      }
+      if (!this.controlled || this.pin !== pin || s.mode !== mode) throw new Error("Input mode or control changed.");
+    }
+    if (mode && s.release_pending) throw new Error("Waiting for Passport to release input.");
     const seq = this.session.next_seq;
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
-    const lifetime = sample ? Math.min(200, Math.floor(sample.expiresAt - performance.now())) :
+    const lifetime = gesture?.expiresAt !== undefined ? Math.min(200, Math.floor(gesture.expiresAt - performance.now())) :
       ["mouse.move_relative", "mouse.scroll"].includes(op) ? 200 : 1500;
-    if (sample && (!sample.current() || lifetime <= 0)) return null;
+    if (gesture && (!gesture.current() || lifetime <= 0)) return null;
     const envelope = {
       v: 1, boot_id: this.session.boot_id, session_id: this.session.session_id,
       request_id: this.session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
@@ -177,12 +193,13 @@ export class Controller {
     };
     // Nothing asynchronous may intervene between this check and request/fetch.
     // Once POST starts, retain its real result/uncertainty even if contact ends.
-    if (!currentPadSample(sample)) return null;
+    if (!currentGesture(gesture)) return null;
     const generation = this.generation;
     let answer;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
+      gesture?.posting?.(op);
       const response = await this.request("/api/v1/commands", "POST", envelope);
       answer = response.json;
       const next = Number(answer.next_seq);
@@ -207,22 +224,25 @@ export class Controller {
       this.halt(`${describeResult(null)} ${error.message}`);
       throw error;
     }
-    if (observe) this.message = describeResult(answer, total);
+    if (observe) this.message = op === "mode.select" && answer.state === "applied" ?
+      `Passport selected ${args.mode} mode.` : describeResult(answer, total);
     if (answer.error !== "ok" || !["applied", "sent", "completed"].includes(answer.state)) {
       this.halt(describeResult(answer, total));
       throw new Error(this.message);
     }
-    await this.refresh(op === "mode.select");
+    const expectedEpoch = op === "mode.select" && args.mode !== s.mode ?
+      String(BigInt(s.epoch) + 1n) : this.pin?.epoch;
+    await this.refresh(expectedEpoch);
     this.changed();
     return answer;
   }
-  async run(op, args = {}, total, sample) {
+  async run(op, args = {}, total, gesture) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     this.busy = true;
     this.renewing = op === "control.renew";
-    if (!sample && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
+    if (!gesture && !this.renewing) this.message = op === "control.acquire" ? "Requesting control…" : "Sending input…";
     this.changed();
-    try { return await this.send(op, args, total, sample); }
+    try { return await this.send(op, args, total, gesture); }
     catch (error) { this.halt(this.uncertain ? this.message : error.message); throw error; }
     finally { this.busy = this.renewing = false; this.changed(); }
   }
@@ -334,10 +354,70 @@ function themeControl(select) {
   };
   media.addEventListener('change', apply); apply();
 }
+// Modifiers apply to one explicit key tap. No host key is held between taps.
+function mountKeyboard(keys, extra, available, sendKey) {
+  let modifiers = 0;
+  const toggles = [], printable = [];
+  function update() {
+    for (const [button, mask] of toggles) button.setAttribute("aria-pressed", String(Boolean(modifiers & mask)));
+    for (const [button, plain, shifted] of printable) {
+      const value = modifiers & 2 ? shifted : plain;
+      button.textContent = value.toUpperCase();
+      button.setAttribute("aria-label", `Type ${value}`);
+    }
+  }
+  const row = (parent, style = "") => {
+    const el = document.createElement("div");
+    el.className = "key-row " + style; parent.append(el); return el;
+  };
+  function button(parent, label, css, action) {
+    const el = document.createElement("button");
+    el.textContent = label; el.className = css; el.dataset.op = "keyboard.key_tap";
+    el.onclick = () => { if (available()) action(); };
+    parent.append(el); return el;
+  }
+  function tap(usage) {
+    const mask = modifiers;
+    modifiers = 0; update(); sendKey(usage, mask);
+  }
+  function modifier(parent, label, mask, css = "") {
+    toggles.push([button(parent, label, "special " + css, () => { modifiers ^= mask; update(); }), mask]);
+  }
+  function characters(parent, plain, shifted, firstUsage, alphabet = false) {
+    Array.from(plain).forEach((ch, i) => {
+      const usage = alphabet ? ch.charCodeAt(0) - 93 : firstUsage + i;
+      printable.push([button(parent, ch, "", () => tap(usage)), ch, shifted[i]]);
+    });
+  }
+  const special = (parent, label, usage, css = "") => button(parent, label, "special " + css, () => tap(usage));
+  characters(row(keys), "1234567890", "!@#$%^&*()", 30);
+  for (const [letters, css] of [["qwertyuiop", ""], ["asdfghjkl", "home"]]) {
+    characters(row(keys, css), letters, letters.toUpperCase(), 0, true);
+  }
+  const lower = row(keys);
+  modifier(lower, "Shift", 2, "wide");
+  characters(lower, "zxcvbnm", "ZXCVBNM", 0, true);
+  special(lower, "⌫", 42, "wide").setAttribute("aria-label", "Backspace");
+  const bottom = row(keys);
+  modifier(bottom, "Ctrl", 1); modifier(bottom, "Alt", 4); modifier(bottom, "Meta", 8);
+  special(bottom, "Space", 44, "space"); special(bottom, "Enter", 40, "wide");
+  const symbols = row(extra);
+  characters(symbols, "-=[]", "_+{}", 45);
+  characters(symbols, "\\", "|", 49);
+  characters(symbols, ";'`,./", ':"~<>?', 51);
+  for (const list of [[["Tab",43],["Esc",41],["Delete",76],["Home",74],["End",77]],
+                      [["←",80],["↑",82],["↓",81],["→",79]]]) {
+    const line = row(extra);
+    for (const [label, usage] of list) special(line, label, usage);
+  }
+  update();
+  return () => { if (modifiers) { modifiers = 0; update(); } };
+}
+
 function mount() {
   const $ = id => document.getElementById(id), client = new Controller();
   themeControl($('theme'));
-  let section = 'mouse', pad = null, drag = null, movement = null, dragAt = 0, loading = false;
+  let section = 'input', pad = null, drag = null, movement = null, dragAt = 0, loading = false;
   let lists = {}, editing = null;
   const note = text => { $('management-result').textContent = text; };
   const clear = () => { pad = drag = movement = null; $('drag').setAttribute('aria-pressed', 'false'); $('pad').dataset.drag = 'false'; };
@@ -353,12 +433,14 @@ function mount() {
     $('acquire').hidden = !client.session || client.controlled;
     $('acquire').disabled = !can('control.acquire') || !s?.input_ready || s.release_pending;
     $('stop').disabled = !client.session; $('disconnect').hidden = !client.session; $('disconnect').disabled = client.closing;
-    $('mouse-controls').disabled = !active || s.mode !== 'mouse';
-    $('keyboard-controls').disabled = !active || s.mode !== 'keyboard';
+    // Preserve keyboard focus on an initiating hold while the mode change releases old reports.
+    const preparingDrag = drag && !drag.submitted && client.controlled && s?.release_pending;
+    $('mouse-controls').disabled = !active && !preparingDrag;
+    $('keyboard-controls').disabled = !active;
     // Renewal still owns the command lane; only foreground work or actual
     // control loss changes input availability in the page.
     document.querySelectorAll('[data-op]').forEach(button => { button.disabled = !active || client.foregroundBusy || !client.operations.get(button.dataset.op); });
-    $('drag').disabled = !active || !client.operations.get('mouse.drag.begin');
+    $('drag').disabled = (!active && !preparingDrag) || !client.operations.get('mouse.drag.begin');
     $('send').disabled = !active || client.foregroundBusy || !client.operations.get('keyboard.text.enqueue');
     if ($('result').textContent !== client.message) $('result').textContent = client.message;
     $('result-check').disabled = !client.session || !client.lastKey || client.foregroundBusy;
@@ -367,7 +449,7 @@ function mount() {
     $('host-name').textContent = peer?.label || s?.target_id || 'Your host awaits';
     $('owner').textContent = client.controlled ? 'This browser' : s?.remote_owner ? 'Another controller' : 'Not acquired';
     $('address').textContent = location.host;
-    if (!active || s.mode !== 'mouse') clear();
+    if (!client.controlled) { clear(); resetModifiers(); }
     $('scan').disabled = !can('wifi.scan.start'); $('scan-cancel').disabled = !can('wifi.scan.cancel') || !lists.scan?.scanning;
     $('pair-open').disabled = !can('bluetooth.pairing.open'); $('pair-close').disabled = !can('bluetooth.pairing.close');
     $('pair-cancel').disabled = !can('bluetooth.pairing.cancel_handshake') || !lists.peers?.handshake;
@@ -387,22 +469,19 @@ function mount() {
   async function selectSection(next) {
     if (drag) await finishDrag();
     clear(); section = next;
-    for (const tab of ['mouse', 'keyboard', 'connections']) $(`tab-${tab}`).setAttribute('aria-pressed', String(next === tab));
+    for (const tab of ['input', 'connections']) $(`tab-${tab}`).setAttribute('aria-pressed', String(next === tab));
     $('input-page').hidden = next === 'connections'; $('connections-page').hidden = next !== 'connections';
-    $('mouse-page').hidden = next !== 'mouse'; $('keyboard-page').hidden = next !== 'keyboard';
+    resetModifiers();
     if (next === 'connections') {
       if (client.controlled) await stop();
       if (client.session) await refreshLists();
-    } else if (client.controlled && client.state?.mode !== next) {
-      if (client.busy) await stop();
-      else await client.run('mode.select', {mode: next});
     }
     paint();
   }
   document.querySelectorAll('[data-tab]').forEach(button => { button.onclick = () => act(() => selectSection(button.dataset.tab)); });
   $('open-connections').onclick = () => act(() => selectSection('connections'));
   $('connect').onclick = () => act(async () => { await client.login(); if (section === 'connections') await refreshLists(); });
-  $('acquire').onclick = () => act(async () => { await client.acquire(); if (section !== 'connections' && client.state.mode !== section) await client.run('mode.select', {mode: section}); });
+  $('acquire').onclick = () => act(() => client.acquire());
   $('stop').onclick = () => act(stop);
   $('disconnect').onclick = () => act(async () => { clear(); await client.disconnect(); lists = {}; renderLists(); });
   $('result-check').onclick = () => act(() => client.checkResult());
@@ -412,14 +491,26 @@ function mount() {
   for (const button of document.querySelectorAll('[data-wheel]')) {
     button.dataset.op = 'mouse.scroll'; button.onclick = () => act(() => client.run('mouse.scroll', {wheel: Number(button.dataset.wheel)}));
   }
-  for (const [name, usage] of [['Esc',41],['Tab',43],['Enter',40],['Backspace',42],['Space',44],['←',80],['↓',81],['→',79],['Home',74],['End',77],['↑',82],['Delete',76]]) {
-    const button = document.createElement('button'); button.textContent = name; button.dataset.op = 'keyboard.key_tap';
-    button.onclick = () => act(() => client.run('keyboard.key_tap', {usage})); $('keycaps').append(button);
+  async function keyboard(action) {
+    if (client.busy) throw new Error("Wait for the current action; input is not queued for replay.");
+    const pin = client.pin;
+    if (drag) await finishDrag();
+    else { pad = movement = null; }
+    if (!pin || client.pin !== pin) throw new Error("Control ended before keyboard input.");
+    return action();
   }
+  const resetModifiers = mountKeyboard($('keycaps'), $('extra-keys'),
+    () => client.controlled && !client.foregroundBusy && client.operations.get('keyboard.key_tap'),
+    (usage, modifiers) => act(() => keyboard(() => client.run('keyboard.key_tap', {usage, modifiers}))));
   document.querySelectorAll('[data-shortcut]').forEach(button => {
-    button.dataset.op = 'keyboard.key_tap'; button.onclick = () => act(() => client.run('keyboard.key_tap', {usage: {copy:6,paste:25,undo:29}[button.dataset.shortcut], modifiers:Number($('shortcut-modifier').value)}));
+    button.dataset.op = 'keyboard.key_tap';
+    button.onclick = () => act(() => keyboard(() => client.run('keyboard.key_tap', {
+      usage: {copy:6,paste:25,undo:29}[button.dataset.shortcut], modifiers:Number($('shortcut-modifier').value)})));
   });
-  $('send').onclick = () => act(() => client.text($('text').value));
+  $('send').onclick = () => act(() => {
+    const text = validateText($('text').value);
+    return keyboard(() => client.text(text));
+  });
   $('text').oninput = () => { $('text-count').textContent = `${$('text').value.length} / 32 characters`; };
   const point = e => ({id: e.pointerId, x: e.clientX, y: e.clientY});
   function move(e, contact) {
@@ -457,8 +548,11 @@ function mount() {
     if (client.busy || drag || $('mouse-controls').disabled) return;
     drag = contact;
     try {
-      await client.run('mouse.drag.begin', {button:'left',deadman_ms:1500});
-      if (drag !== contact) { await stop(); return; }
+      await client.run('mouse.drag.begin', {button:'left',deadman_ms:1500}, undefined, {
+        current: () => drag === contact,
+        posting: op => { if (op === 'mouse.drag.begin') contact.submitted = true; },
+      });
+      if (drag !== contact) return;
       dragAt = performance.now(); $('drag').setAttribute('aria-pressed','true'); $('pad').dataset.drag = 'true';
     } catch (error) { clear(); throw error; }
   }
@@ -468,15 +562,24 @@ function mount() {
   };
   $('drag').onpointermove = e => move(e, drag);
   async function finishDrag() {
+    const submitted = drag?.submitted;
     clear();
-    if (!client.session) return;
+    if (!submitted || !client.session) return;
     if (client.busy || client.uncertain) await client.disconnect();
     else if (client.controlled) await client.run('mouse.drag.end',{button:'left'});
   }
   const endDrag = e => { if (drag?.id === e.pointerId) act(finishDrag); };
   $('drag').onpointerup = $('drag').onpointercancel = $('drag').onlostpointercapture = endDrag;
-  $('drag').onkeydown = e => { if ([' ', 'Enter'].includes(e.key) && !e.repeat) { e.preventDefault(); act(() => beginDrag({id:'key'})); } };
-  $('drag').onkeyup = e => { if ([' ', 'Enter'].includes(e.key) && drag?.id === 'key') { e.preventDefault(); act(finishDrag); } };
+  const keyId = e => e.code || e.key;
+  $('drag').onkeydown = e => {
+    if (![' ', 'Enter'].includes(e.key) || e.repeat) return;
+    e.preventDefault(); act(() => beginDrag({key:keyId(e)}));
+  };
+  window.addEventListener('keyup', e => {
+    if (drag?.key !== keyId(e)) return;
+    e.preventDefault(); act(finishDrag);
+  }, true);
+  $('drag').onblur = () => { if (drag?.key) act(finishDrag); };
   setInterval(() => {
     if (!client.controlled || client.busy || document.hidden) return;
     if (drag && performance.now() - dragAt >= 400) {
