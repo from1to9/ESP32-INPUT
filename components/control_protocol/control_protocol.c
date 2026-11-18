@@ -489,6 +489,11 @@ static record_t *find_key(cp_context_t *c, uint64_t key)
     }
     return NULL;
 }
+bool cp_result_is_terminal(cp_context_t *c, uint64_t key)
+{
+    record_t *r = c && key ? find_key(c, key) : NULL;
+    return r && !r->active;
+}
 static bool valid_result(const cp_result_t *result)
 {
     return result && (unsigned)result->state <= CP_RESULT_CLEANUP_PENDING &&

@@ -16,6 +16,25 @@ static TickType_t ticks=100;
 static bool signalled,delay_owner,stale_signal;
 static bool abandon_during_random;
 static unsigned entropy,registered,sent_frames;
+static bool exercise_moves,skip_hid,fail_hid,timeout_move;
+static uint64_t timed_out_key,accepted_moves;
+static unsigned failed_reports;
+static int last_dx;
+static bool send_hid(void *unused,uint8_t id,const uint8_t *data,size_t length)
+{
+    (void)unused;
+    if (fail_hid) { ++failed_reports; return false; }
+    if (id==HID_ENGINE_MOUSE_REPORT_ID && length>=3 && data[1]) {
+        ++accepted_moves; last_dx=(int8_t)data[1];
+    }
+    return true;
+}
+static void service_hid(void)
+{
+    hid_engine_observe_transport(&engine,ticks,false);
+    if (!skip_hid) (void)hid_engine_step(&engine,send_hid,NULL);
+    passport_control_service(ticks);
+}
 static httpd_ws_type_t sent_type;
 static size_t sent_length;
 static uint8_t wire[4096];
@@ -42,7 +61,15 @@ int xSemaphoreTake(SemaphoreHandle_t s,TickType_t wait)
     if(!wait)return 0;
     if(stale_signal) { stale_signal=false;++ticks;return pdTRUE; }
     if(delay_owner) { ticks+=wait;return 0; }
-    ++ticks;passport_control_http_service(ticks);assert(signalled);signalled=false;return pdTRUE;
+    ++ticks;
+    uint64_t key=passport_control_http_service(ticks);
+    if(exercise_moves)service_hid();
+    if(key) {
+        assert(mailbox==RUNNING && !signalled && !begin());
+        if(timeout_move){timed_out_key=key;ticks+=wait;return 0;}
+        passport_control_http_finish_move(key,ticks);
+    }
+    assert(signalled);signalled=false;return pdTRUE;
 }
 int httpd_req_to_sockfd(httpd_req_t *req) { (void)req;return 9; }
 int setup_getsockname(int fd,struct sockaddr *address,socklen_t *length)
@@ -144,10 +171,79 @@ static void session_open(void)
     call("/api/v1/open-session",HTTP_POST,"{}","200 OK");extract("session_token",token,sizeof(token));extract("csrf",csrf_token,sizeof(csrf_token));
     snprintf(auth,sizeof(auth),"Bearer %s",token);authorization=auth;csrf=csrf_token;
 }
+static void test_move_reply(void)
+{
+    reset();exercise_moves=true;
+    hid_engine_set_link(&engine,true,true);
+    service_hid();service_hid();
+    passport_control_observation_t observed={.ap_ip="192.168.4.1",.target="host",.transport_generation=7};
+    passport_control_observe(&observed,ticks);
+    session_open();
+    char sid[33],prefix[17],boot[33],envelope[1024],base[512],key[24],path[64];
+    extract("session_id",sid,sizeof(sid));extract("request_prefix",prefix,sizeof(prefix));extract("boot_id",boot,sizeof(boot));
+    call("/api/v1/state",HTTP_GET,"","200 OK");
+    cj_document_t d;assert(cj_parse(&d,output,strlen(output)));
+    uint16_t state=cj_get(&d,0,"protocol");
+    snprintf(envelope,sizeof(envelope),"{\"v\":1,\"boot_id\":\"%s\",\"session_id\":\"%s\",\"request_id\":\"%s%016x\",\"seq\":1,"
+        "\"deadline_ms\":\"%u\",\"epoch\":\"%s\",\"transport_generation\":\"7\",\"target_id\":\"host\","
+        "\"op\":\"control.acquire\",\"args\":{\"state_sequence\":\"%s\"}}",boot,sid,prefix,1,ticks+1500,
+        cj_string(&d,cj_get(&d,state,"epoch")),cj_string(&d,cj_get(&d,state,"state_sequence")));
+    call("/api/v1/commands",HTTP_POST,envelope,"202 Accepted");
+    service_hid();call("/api/v1/state",HTTP_GET,"","200 OK");
+    assert(cj_parse(&d,output,strlen(output)));state=cj_get(&d,0,"protocol");
+    snprintf(base,sizeof(base),"{\"v\":1,\"boot_id\":\"%s\",\"session_id\":\"%s\",\"epoch\":\"%s\","
+        "\"transport_generation\":\"7\",\"target_id\":\"host\",\"lease_id\":\"%s\",\"op\":\"mouse.move_relative\"",
+        boot,sid,cj_string(&d,cj_get(&d,state,"epoch")),cj_string(&d,cj_get(&d,state,"lease_id")));
+    enum { INLINE=2, PENDING, ABANDONED_MOVE, EXPIRED, TRANSPORT_FAILURE };
+    for(unsigned seq=INLINE;seq<=TRANSPORT_FAILURE;++seq){
+        skip_hid=seq==PENDING;timeout_move=seq==ABANDONED_MOVE;fail_hid=seq==TRANSPORT_FAILURE;
+        uint64_t before=accepted_moves;
+        snprintf(envelope,sizeof(envelope),"%s,\"request_id\":\"%s%016x\",\"seq\":%u,\"deadline_ms\":\"%u\","
+            "\"args\":{\"dx\":%u,\"dy\":0}}",base,prefix,seq,seq,seq==EXPIRED?ticks:ticks+150,seq);
+        const char *status=skip_hid?"202 Accepted":timeout_move?"503 Service Unavailable":"200 OK";
+        if(seq==EXPIRED)status="400 Bad Request";
+        if(fail_hid)status="202 Accepted";
+        call("/api/v1/commands",HTTP_POST,envelope,status);
+        if(timeout_move){
+            assert(strstr(output,"unknown") && mailbox==ABANDONED && !begin());
+            passport_control_http_finish_move(timed_out_key,ticks);
+            assert(mailbox==IDLE && accepted_moves==before+1);
+            timeout_move=false;
+            call("/api/v1/commands",HTTP_POST,envelope,"200 OK");
+        }
+        if(skip_hid){
+            assert(strstr(output,"accepted") && accepted_moves==before);
+            extract("command_key",key,sizeof(key));snprintf(path,sizeof(path),"/api/v1/requests/%s",key);
+            skip_hid=false;service_hid();
+            call(path,HTTP_GET,"","200 OK");
+        }
+        if(seq<=ABANDONED_MOVE){
+            assert(strstr(output,"\"state\":\"sent\"") && accepted_moves==before+1 && last_dx==(int)seq);
+            char retained[sizeof(output)];strcpy(retained,output);
+            call("/api/v1/commands",HTTP_POST,envelope,"200 OK");
+            assert(!strcmp(output,retained) && accepted_moves==before+1);
+        }else{
+            assert(accepted_moves==before && !strstr(output,"\"state\":\"sent\""));
+            if(seq==EXPIRED) assert(strstr(output,"expired"));
+            if(fail_hid) {
+                assert(failed_reports==1 && strstr(output,"\"state\":\"accepted\""));
+                extract("command_key",key,sizeof(key));snprintf(path,sizeof(path),"/api/v1/requests/%s",key);
+                fail_hid=false;service_hid();service_hid();
+                call(path,HTTP_GET,"","400 Bad Request");
+                assert(strstr(output,"\"state\":\"cancelled\"") && accepted_moves==before);
+            }
+        }
+    }
+    fail_hid=exercise_moves=false;
+    // A fresh session cannot observe an old owner's retained receipt.
+    session_open();
+    call(path,HTTP_GET,"","409 Conflict");
+    assert(strstr(output,"result_unknown") && !strstr(output,"command_key"));
+}
 int main(void)
 {
     assert(passport_control_http_register((void *)1)==ESP_OK&&registered==7);
-    reset();
+    test_move_reply();reset();
     httpd_req_t asset={.uri="/",.method=HTTP_GET};
     assert(web(&asset)==ESP_OK&&!strcmp(output,controller_html_fixture));
     host="foreign.example";assert(web(&asset)==ESP_OK&&!strcmp(asset.status,"403 Forbidden"));

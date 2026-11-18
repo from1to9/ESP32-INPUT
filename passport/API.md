@@ -255,7 +255,9 @@ boundary. Lock rejects all remote mutations, including input cancellation
    `producer: "script"`. Wait for the neutral barrier and active lease before
    input. Renew requires a new observed `state_sequence`.
 4. Inspect the result and poll `GET /api/v1/requests/<command_key>` for queued
-   work. `accepted` is admission, and `sent` means NimBLE accepted reports,
+   work. An HTTP relative move that finishes in the admission tick returns its
+   retained terminal result directly. A move still in progress returns its
+   original acceptance. Both paths use the same key and sequence. `accepted` is admission, and `sent` means NimBLE accepted reports,
    never observed host delivery. Text reports `started_prefix`,
    `completed_pairs` and `uncertain_index`; an interrupted key pair is not
    silently reported as completed. An exact retry preserves the original
@@ -309,9 +311,12 @@ semantics; agents targeting Apple hosts should send the explicit GUI modifier.
 
 Movement samples expire after 150 ms locally and use protocol deadlines of
 at most 200 ms. The touchpad groups deltas from one contact in 8 ms buckets.
-It selects fresh deltas immediately before the POST and preserves the oldest
-included delta's expiry. A recent verified state read supplies the device
-clock and target binding. A confirmed expired move or scroll is discarded.
+The browser combines signed deltas when the single command lane is free and
+at least 30 ms has elapsed since the previous movement POST. It keeps the
+oldest included delta's expiry. Recent same-boot state responses supply a
+conservative device clock lower bound. Each envelope retains the pinned lease
+and target. A confirmed sent sample can proceed without another state GET;
+ongoing movement refreshes state at least every 900 ms before submission. A confirmed expired move or scroll is discarded.
 The browser checks the lease, target, epoch, and input permission again before
 continuing. One browser command runs at a time, with no action replay.
 Drag holds use a 1500 ms device deadman refreshed while the contact remains

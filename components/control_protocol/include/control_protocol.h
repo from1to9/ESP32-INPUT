@@ -298,4 +298,7 @@ cp_error_t cp_http_configure(cp_context_t *, const char *host, const char *brows
 cp_error_t cp_http(cp_context_t *, const char *method, const char *resource,
                    const cp_http_security_t *, const char *body, size_t body_length,
                    uint64_t now_ms, cp_http_response_t *);
+// Owner-only hint for an accepted command. Reading its result still requires
+// the authenticated result route. Absent and active records return false.
+bool cp_result_is_terminal(cp_context_t *, uint64_t key);
 void cp_sha256(const void *, size_t, uint8_t output[CP_SECRET_BYTES]);
