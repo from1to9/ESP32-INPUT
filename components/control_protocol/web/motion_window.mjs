@@ -30,11 +30,12 @@ export class MotionWindow {
     this.ordered = ordered;
     this.onFault = onFault;
     this.moves = new Map();
+    this.retiredKeys = new Set();
     this.newestSequence = 0;
   }
   get size() { return this.moves.size; }
   get canSend() {
-    return this.size < this.width && this.socket.readyState === WebSocket.OPEN && !this.socket.bufferedAmount &&
+    return this.size + this.retiredKeys.size < this.width && this.socket.readyState === WebSocket.OPEN && !this.socket.bufferedAmount &&
       (this.ordered || [...this.moves.values()].every(move => move.key !== null));
   }
   nextSequence(confirmedNext) {
@@ -61,10 +62,11 @@ export class MotionWindow {
         !Number.isInteger(next) || next < seq + 1 || next > this.newestSequence + 1 ||
         typeof reply.error !== "string") return this.onFault();
     if (move.key === null) {
-      if (next !== seq + 1 || reply.motion_terminal ||
+      if (next !== seq + 1 || reply.motion_terminal || this.retiredKeys.has(key) ||
           [...this.moves.values()].some(other => other.key === key)) return this.onFault();
       if (reply.state === "accepted" && reply.error === "ok") {
         move.key = key;
+        if (!this.awaitingFirstReply()) this.retiredKeys.clear();
         clearTimeout(move.timer);
         move.timer = setTimeout(() => this.onFault(), 2200);
         move.onAccepted?.(reply);
@@ -78,8 +80,15 @@ export class MotionWindow {
     if (!(reply.state === "sent" && reply.error === "ok") &&
         !(["rejected", "cancelled", "failed"].includes(reply.state) && reply.error !== "ok")) return this.onFault();
     this.moves.delete(seq);
+    // Keep the key until overlapping writes have identities. Each retained key
+    // occupies its former slot so a delayed first reply cannot grow the set.
+    if (this.awaitingFirstReply()) this.retiredKeys.add(key);
+    else this.retiredKeys.clear();
     clearTimeout(move.timer);
     move.resolve(reply);
+  }
+  awaitingFirstReply() {
+    return [...this.moves.values()].some(move => move.key === null);
   }
   close() {
     const unresolved = [];
@@ -89,6 +98,7 @@ export class MotionWindow {
       move.reject(new Error("Input channel reply unavailable."));
     }
     this.moves.clear();
+    this.retiredKeys.clear();
     return unresolved;
   }
 }

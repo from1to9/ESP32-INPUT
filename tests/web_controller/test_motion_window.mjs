@@ -61,10 +61,23 @@ for (const fault of [false, true]) {
     assert.deepEqual(f.unresolved, [{seq: 7, key: "56"}, {seq: 8, key: null}]);
   } else {
     f.reply(7, "56", "sent");
+    assert(!f.window.canSend, "keep the completed key while the overlapping first reply is missing");
     f.reply(8, "57", "rejected", {error: "expired"});
     assert.equal((await first).state, "sent");
     assert.equal((await second).error, "expired");
     assert.equal(f.window.nextSequence(9), 9);
+    assert(f.window.canSend);
   }
+}
+for (const ordered of [false, true]) {
+  const f = fixture(ordered ? orderedRequest : {...frame, motion_window: 3});
+  const first = f.send(7);
+  if (!ordered) f.reply(7, "51", "accepted");
+  const second = f.send(8);
+  f.reply(7, "51", "sent", ordered ? {} : {motion_terminal: true});
+  assert.equal((await first).state, "sent");
+  f.reply(8, "51", ordered ? "sent" : "accepted");
+  await assert.rejects(second, /reply unavailable/);
+  assert.deepEqual(f.unresolved, [{seq: 8, key: null}]);
 }
 console.log("Motion window negotiation, admission, ordered receipts and loss checks passed.");
