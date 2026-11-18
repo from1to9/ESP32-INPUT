@@ -89,6 +89,7 @@ typedef struct {
     cp_operation_id_t operation;
     uint64_t command_key;
     uint64_t admission_order; /* Optional local coordinator order, never a wire field. */
+    bool motion_window;
     cp_identity_t identity;
     uint64_t deadline_ms;
     uint64_t management_generation;
@@ -238,6 +239,7 @@ cp_error_t cp_load_principal(cp_context_t *, const cp_principal_t *);
 cp_error_t cp_revoke_principal(cp_context_t *, const uint8_t id[CP_ID_BYTES], uint64_t now_ms);
 void cp_set_transport_capabilities(cp_context_t *, bool websocket, bool binary_download);
 void cp_set_motion_terminal_available(cp_context_t *, bool available);
+void cp_set_motion_window_available(cp_context_t *, bool available);
 
 typedef struct {
     bool tls;
@@ -281,12 +283,15 @@ typedef enum {
     CP_TERMINAL_DISABLED,
     CP_TERMINAL_MOVE,
     CP_TERMINAL_MOVE_AND_RENEW,
+    CP_TERMINAL_MOVE_WINDOW,
 } cp_terminal_mode_t;
 /* Optional enrolled browser channel state. A key is returned only for a newly
  * accepted relative move or, with the extended opt-in, lease renewal. */
 typedef struct {
     cp_terminal_mode_t mode;
+    bool motion_only;
     uint64_t accepted_key;
+    bool accepted_relative;
 } cp_motion_terminal_t;
 cp_error_t cp_transport_frame_motion(cp_context_t *, const cp_identity_t *, const char *frame,
                                      size_t length, uint64_t now_ms, cp_http_response_t *,

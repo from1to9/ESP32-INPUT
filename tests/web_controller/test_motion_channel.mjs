@@ -113,7 +113,7 @@ try {
         if ((record.oldValue !== null) !== record.target.hasAttribute("disabled")) changes.push(record.target.id || record.target.dataset.click);
       }
     });
-    for (const selector of ['[aria-label="Move up"]', '[aria-label="Type a"]', "[data-click=left]", "[data-click=right]"]) {
+    for (const selector of ['[aria-label="Move up"]', '[aria-label="Type a"]', "[data-click=left]", "[data-click=right]", "#result-check"]) {
       observer.observe(document.querySelector(selector), {attributes: true, attributeOldValue: true, attributeFilter: ["disabled"]});
     }
     window.finishMotionObservation = () => { observer.disconnect(); return changes; };
@@ -225,7 +225,7 @@ try {
   await left.evaluate(button => {
     button.addEventListener("click", () => {
       const others = [document.querySelector('[aria-label="Move right"]'), document.querySelector('[aria-label="Type a"]'),
-        document.querySelector("[data-click=left]")];
+        document.querySelector("[data-click=left]"), document.getElementById("result-check")];
       const peek = control => ({disabled: control.disabled, ariaDisabled: control.getAttribute("aria-disabled"),
         opacity: getComputedStyle(control).opacity});
       const controls = [button, ...others].map(peek);
@@ -239,7 +239,7 @@ try {
   await left.click();
   evidence.directionPending = await page.evaluate(() => window.directionObservation);
   assert.deepEqual(evidence.directionPending.controls,
-    Array.from({length: 4}, () => ({disabled: false, ariaDisabled: "true", opacity: "1"})));
+    Array.from({length: 5}, () => ({disabled: false, ariaDisabled: "true", opacity: "1"})));
   assert.equal(evidence.directionPending.afterRepeat, evidence.directionPending.pending);
   assert.equal(evidence.directionPending.stopDisabled, false);
   for (let i = 0; i < 100; ++i) {

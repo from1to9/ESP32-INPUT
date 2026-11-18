@@ -32,6 +32,11 @@ typedef struct {
     uint8_t shortcut_modifier; /* 0x01 Ctrl or 0x08 Command. */
 } app_remote_input_state_t;
 typedef struct {
+    cp_result_state_t state;
+    cp_error_t error;
+    uint64_t at_ms;
+} app_remote_input_movement_receipt_t;
+typedef struct {
     hid_engine_t *engine;
     interaction_t *interaction;
     void *user;
@@ -48,6 +53,9 @@ typedef struct {
      * queue. False retains it locally; it never repeats the HID operation.
      * Publish the new device/owner state BEFORE completing acquire/renew. */
     bool (*complete)(void *, const cp_result_t *);
+    /* Consume one deferred transport receipt. A pending result returns false.
+     * cancel requests removal if the report has not committed to the SDK. */
+    bool (*movement_result)(void *, uint64_t ticket, bool cancel, app_remote_input_movement_receipt_t *);
     /* Actual common coordinator paths for transport select/recover, mode,
      * keyboard submode, semantic ui.* and non-pad virtual touch. Mode/motion
      * delegates commit the desired engine epoch synchronously before returning;
@@ -98,6 +106,13 @@ void app_remote_input_service(app_remote_input_t *, uint64_t now_ms);
  * storage; rejection lets the engine cancel and run its reserved neutral barrier.
  * The authority provider may latch expiry in RAM. Never gate the neutral barrier. */
 bool app_remote_input_report_authorized(const app_remote_input_t *, uint64_t now_ms);
+/* Called at the transport boundary for ordinary mouse reports while the
+ * engine still owns its queue head. These functions only update the receipt. */
+bool app_remote_input_expire_movement_report(app_remote_input_t *, uint64_t now_ms);
+void app_remote_input_record_movement_submission(app_remote_input_t *, bool accepted);
+uint64_t app_remote_input_movement_deadline(const app_remote_input_t *, uint64_t *lease_end_ms);
+void app_remote_input_defer_movement_result(app_remote_input_t *, uint64_t ticket);
+bool app_remote_input_motion_blocked(const app_remote_input_t *);
 /* Process ONE existing, properly mapped board sample. Returns true when
  * consumed, including calibration/reference tracking with output suppressed.
  * Local ownership uses the native source; an active DEVICE_IMU Mouse lease or

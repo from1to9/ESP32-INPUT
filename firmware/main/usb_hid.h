@@ -49,6 +49,24 @@ void usb_hid_set_enabled(bool enabled);
 bool usb_hid_send_generation(uint64_t generation, uint8_t report_id,
     const uint8_t *data, size_t length);
 
+typedef enum {
+    USB_HID_MOVEMENT_PENDING,
+    USB_HID_MOVEMENT_SUBMITTED,
+    USB_HID_MOVEMENT_EXPIRED,
+    USB_HID_MOVEMENT_REFUSED,
+    USB_HID_MOVEMENT_CANCELLED,
+    USB_HID_MOVEMENT_UNKNOWN,
+} usb_hid_movement_state_t;
+
+/* Accept a relative movement into the same slot. Its receipt remains pending
+ * until TinyUSB answers or the unsent report is discarded. A zero ticket
+ * means no admission. The original deadlines are in device monotonic ms. */
+uint64_t usb_hid_send_movement(uint64_t generation, const uint8_t *data, size_t length,
+    uint64_t deadline_ms, uint64_t lease_end_ms);
+/* Consume the terminal receipt for this ticket. Cancellation can discard an
+ * uncommitted report but cannot recall a submission already in progress. */
+usb_hid_movement_state_t usb_hid_movement_result(uint64_t ticket, bool cancel, uint64_t *at_ms);
+
 /* Coordinator recovery after release exhaustion: invalidate generation,
  * cancel unsubmitted input and quarantine HID until a real USB reset/detach.
  * CDC remains available. This is not proof of release/disconnect at the host.

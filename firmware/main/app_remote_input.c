@@ -48,6 +48,9 @@ struct app_remote_input {
     size_t gesture_count;
     char virtual_surface[16];
     ri_job_t jobs[APP_REMOTE_INPUT_JOBS];
+    ri_job_t *movement_job;
+    const hid_engine_action_t *movement_action;
+    uint64_t movement_ticket;
     ri_safety_waiter_t safety[RI_SAFETY_WAITERS];
     ri_recent_t recent[RI_RECENT];
     size_t recent_next;
@@ -160,6 +163,11 @@ static bool hid_busy(const app_remote_input_t *m)
     return false;
 }
 
+bool app_remote_input_motion_blocked(const app_remote_input_t *m)
+{
+    return m && (hid_busy(m) || m->port.engine->count);
+}
+
 static cp_error_t enqueue_error(hid_engine_enqueue_result_t r)
 {
     switch (r) {
@@ -214,6 +222,8 @@ static void sample_text(app_remote_input_t *m, ri_job_t *j)
     }
 }
 
+static void poll_movement_result(app_remote_input_t *m, bool cancel);
+
 static void end_job(app_remote_input_t *m, ri_job_t *j, cp_result_state_t state, cp_error_t error)
 {
     if (j->kind == RI_JOB_NONE || j->terminal || j->ending) return;
@@ -225,6 +235,10 @@ static void end_job(app_remote_input_t *m, ri_job_t *j, cp_result_state_t state,
     if (j->preview && j->preview_token)
         (void)interaction_send_update(m->port.interaction, j->preview_token, j->result.started_prefix, false);
     secure_zero(j->text, sizeof j->text);
+    if (m->movement_job == j) {
+        if (m->movement_ticket) poll_movement_result(m, true);
+        else m->movement_job = NULL;
+    }
 }
 
 static void revoke(app_remote_input_t *m, cp_error_t error)
@@ -354,6 +368,79 @@ bool app_remote_input_report_authorized(const app_remote_input_t *m, uint64_t no
         (!m->port.authorize || m->port.authorize(m->port.user, &m->lease_identity, CP_OP_CONTROL_ACQUIRE));
 }
 
+static ri_job_t *head_movement_job(const app_remote_input_t *m)
+{
+    if (!m || !m->movement_job || m->movement_ticket) return NULL;
+    const hid_engine_t *engine = m->port.engine;
+    return engine->count && !engine->state.release_pending && engine->state.owner == INPUT_REMOTE &&
+        engine->state.epoch == m->movement_job->epoch && &engine->queue[engine->head] == m->movement_action ?
+        m->movement_job : NULL;
+}
+
+static void finish_movement(app_remote_input_t *m, ri_job_t *job, bool expired, uint64_t now_ms)
+{
+    m->movement_job = NULL;
+    job->terminal = job->publish = true;
+    job->result.state = expired ? CP_RESULT_REJECTED : CP_RESULT_SENT;
+    job->result.error = expired ? CP_EXPIRED : CP_OK;
+    if (expired) snprintf(job->result.reason, sizeof(job->result.reason), "send now=%" PRIu64 " deadline=%" PRIu64,
+                          now_ms, job->deadline_ms);
+    else snprintf(job->result.reason, sizeof(job->result.reason), "%s", "transport_accepted_reports");
+}
+
+bool app_remote_input_expire_movement_report(app_remote_input_t *m, uint64_t now_ms)
+{
+    ri_job_t *job = head_movement_job(m);
+    if (!job || now_ms < job->deadline_ms) return false;
+    finish_movement(m, job, true, now_ms);
+    return true;
+}
+
+void app_remote_input_record_movement_submission(app_remote_input_t *m, bool accepted)
+{
+    ri_job_t *job = head_movement_job(m);
+    if (!job) return;
+    if (!accepted) {
+        end_job(m, job, CP_RESULT_FAILED, CP_UNAVAILABLE);
+        return;
+    }
+    finish_movement(m, job, false, 0);
+}
+
+uint64_t app_remote_input_movement_deadline(const app_remote_input_t *m, uint64_t *lease_end_ms)
+{
+    const ri_job_t *job = head_movement_job(m);
+    if (!job || !m->port.movement_result) return 0;
+    *lease_end_ms = m->view.lease_expires_ms;
+    return job->deadline_ms;
+}
+
+void app_remote_input_defer_movement_result(app_remote_input_t *m, uint64_t ticket)
+{
+    if (ticket && head_movement_job(m)) m->movement_ticket = ticket;
+}
+
+static void poll_movement_result(app_remote_input_t *m, bool cancel)
+{
+    if (!m->movement_ticket) return;
+    app_remote_input_movement_receipt_t report = {0};
+    if (!m->port.movement_result(m->port.user, m->movement_ticket, cancel, &report)) return;
+    ri_job_t *job = m->movement_job;
+    m->movement_ticket = 0;
+    if ((report.state == CP_RESULT_SENT && report.error == CP_OK) ||
+        (report.state == CP_RESULT_REJECTED && report.error == CP_EXPIRED)) {
+        finish_movement(m, job, report.state == CP_RESULT_REJECTED, report.at_ms);
+        return;
+    }
+    m->movement_job = NULL;
+    end_job(m, job, report.state, report.error);
+    /* Cancellation during a committed dispatch cannot hide an SDK refusal. */
+    if (report.state == CP_RESULT_FAILED) {
+        job->end_state = report.state;
+        job->end_error = report.error;
+    }
+}
+
 void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
 {
     if (!m || m->servicing) return;
@@ -361,6 +448,7 @@ void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
     const bool regressed = m->clock_seen && now_ms < m->now_ms;
     m->clock_seen = true; m->now_ms = now_ms;
     const bool known = observe(m);
+    poll_movement_result(m, false);
     for (size_t i = 0; i < APP_REMOTE_INPUT_JOBS; ++i) sample_text(m, &m->jobs[i]);
     if ((m->view.active || m->view.pending) &&
         (regressed || !known || now_ms >= m->view.lease_expires_ms || m->port.engine->state.locked ||
@@ -379,6 +467,7 @@ void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
     for (size_t i = 0; i < APP_REMOTE_INPUT_JOBS; ++i) {
         ri_job_t *j = &m->jobs[i];
         if (j->kind == RI_JOB_NONE) continue;
+        const bool awaiting_movement = m->movement_job == j && m->movement_ticket;
         if (!j->terminal && !j->ending && j->preview && (!known || !revisions_available(m) ||
             j->ui_revision != m->state.ui_revision || !m->state.screen_awake || m->state.overlay_open)) {
             revoke(m,CP_STALE);
@@ -386,15 +475,20 @@ void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
         if (!j->terminal && !j->ending && (j->operation == CP_OP_MOUSE_CLICK ||
             j->operation == CP_OP_MOUSE_DRAG_BEGIN || j->operation == CP_OP_MOUSE_DRAG_END))
             interaction_freeze_after(m->port.interaction, now_ms);
-        if (!j->terminal && !j->ending && now_ms >= j->deadline_ms) {
+        if (!j->terminal && !j->ending && !awaiting_movement && now_ms >= j->deadline_ms) {
             end_job(m, j, CP_RESULT_CANCELLED, CP_EXPIRED);
             if (m->view.active || m->view.pending) revoke(m, CP_EXPIRED);
         }
-        if (!j->terminal && j->ending &&
+        if (!j->terminal && j->ending && !awaiting_movement &&
             (!m->port.engine->state.release_pending || target_changed(m, j->transport_generation, j->target_id))) {
             j->terminal = true; j->result.state = j->end_state; j->result.error = j->end_error;
-            (void)snprintf(j->result.reason, sizeof j->result.reason, "%s",
-                target_changed(m, j->transport_generation, j->target_id) ? "old_target_release_unverified" : "cancelled");
+            const bool replaced = target_changed(m, j->transport_generation, j->target_id);
+            const bool failed_move = j->end_state == CP_RESULT_FAILED && j->operation == CP_OP_MOUSE_MOVE_RELATIVE;
+            const char *reason = replaced ? "old_target_release_unverified" : "cancelled";
+            if (failed_move && j->end_error == CP_RESULT_UNKNOWN) reason = "submission_outcome_unknown";
+            else if (failed_move) reason = replaced ? "transport_rejected_report_old_target_release_unverified" :
+                "transport_rejected_report";
+            (void)snprintf(j->result.reason, sizeof j->result.reason, "%s", reason);
             j->publish = true;
         }
         if (!j->terminal && !j->ending && (j->kind == RI_JOB_ACQUIRE || j->kind == RI_JOB_RENEW) && ready(m)) {
@@ -404,7 +498,7 @@ void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
             (void)snprintf(j->result.reason, sizeof j->result.reason, "%s", "lease_applied_after_neutral_release");
             if (j->kind == RI_JOB_ACQUIRE) changed(m, APP_REMOTE_CHANGED_OWNER);
         }
-        if (!j->terminal && !j->ending && j->kind == RI_JOB_HID &&
+        if (!j->terminal && !j->ending && !awaiting_movement && j->kind == RI_JOB_HID &&
             m->port.engine->state.epoch == j->epoch && ready(m) && !m->port.engine->count) {
             j->terminal = true; j->result.state = CP_RESULT_SENT; j->publish = true;
             (void)snprintf(j->result.reason, sizeof j->result.reason, "%s", "transport_accepted_reports");
@@ -437,7 +531,11 @@ void app_remote_input_service(app_remote_input_t *m, uint64_t now_ms)
         }
         if (j->publish && m->port.complete(m->port.user, &j->result)) {
             j->publish = false;
-            if (j->terminal) { remember(m, j->operation, &j->identity, &j->result); secure_zero(j, sizeof *j); }
+            if (j->terminal) {
+                if (m->movement_job == j) m->movement_job = NULL;
+                remember(m, j->operation, &j->identity, &j->result);
+                secure_zero(j, sizeof *j);
+            }
         }
     }
     for (size_t i = 0; i < RI_SAFETY_WAITERS; ++i) {
@@ -687,6 +785,10 @@ static cp_error_t simple_hid(app_remote_input_t *m, const cp_command_t *cmd, cp_
     }
     const cp_error_t error = enqueue_error(admitted);
     if (error != CP_OK) { secure_zero(j,sizeof *j); return error; }
+    if (cmd->operation == CP_OP_MOUSE_MOVE_RELATIVE) {
+        m->movement_job = j;
+        m->movement_action = &m->port.engine->queue[m->port.engine->head];
+    }
     if (cmd->operation == CP_OP_MOUSE_CLICK) interaction_freeze_after(m->port.interaction,m->now_ms);
     *out = j->result;
     return CP_OK;

@@ -126,16 +126,23 @@ unlikely to arrive in time. Within the same channel, a recent device clock
 reading can preserve a better conservative time estimate across a slow reply.
 After consecutive matching device expiries, a recent device check also
 informs this selection when queueing takes longer than admission. The command
-deadline comes from the oldest included delta. Each command waits for its
-terminal result, and pad submissions are at least 30 ms apart. Opted-in channels also push the result of lease renewal
-so the pad need not wait for a separate result read. Lifting the finger or
-stopping control discards unsent movement.
+deadline comes from the oldest included delta. Pad submissions are at least
+30 ms apart. When Mosaico offers a two-command motion window, the page can send
+a second fresh pad command once the preceding command has been accepted.
+The page renews or submits other actions only with the window drained. Earlier channels
+wait for each command's terminal result before sending the next. Opted-in
+channels also push the result of lease renewal.
+Lifting the finger discards unsent movement. An already written move may
+still complete before its deadline. **Stop** discards unsent movement and
+requests cancellation of input still pending on the device.
 While movement or renewal is in flight, input buttons keep their appearance
 and focus. Additional button presses during that interval are discarded.
 **Stop** remains available.
 Lease renewal and device checks continue while the page is visible. A lost
 channel stops control and discards the pending contact. Reconnect if a result
-is unknown, then take control explicitly to resume.
+is unknown, then take control explicitly to resume. While the original
+session is available, **Check result** lists each move pending when the
+channel closed. A move without a matching recorded reply remains unknown.
 
 The active input lease is at most three seconds and is explicitly renewed
 while the visible page controls input. If a renewal is definitively rejected

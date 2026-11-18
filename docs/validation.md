@@ -114,6 +114,17 @@ closure. These runs showed more delivered travel in both directions.
 Directional error and gaps exceeding one second persisted. The receiving
 cursor was unobserved.
 
+An operator testing `34045243` reported that the pointer moved more readily
+but still felt sluggish, especially upward. In a separate Chromium check on
+the installed page, four strokes in each direction produced all 384 pointer
+moves without scrolling or cancellation. Of 288 input units per direction,
+BLE receipts accounted for 159 up, 72 down, 96 left and 90 right. A native
+HTTP client on the same firmware sent four separate 32-unit relative moves
+and one left and one right arrow key tap. All six reached a terminal
+`sent` receipt. The client restored mouse mode, confirmed neutral release
+and closed the session. The receiving screen was not observed in these
+instrumented checks.
+
 These bounded observations do not establish sustained Web
 reliability, physical display rendering, every BLE/USB input path, Safari
 behavior, speaker output or long-run radio coexistence. The
@@ -207,6 +218,24 @@ and [storage boundary](interaction.md#status-connectivity-and-display) for what 
   survived three renewals, and Stop completed the neutral release. This run
   did not reproduce the preview's gain in delivered travel. Pointer feel on
   a physical iPhone running this revision remains unverified.
+
+  On Mosaico `ad3c423`, two pairs of same-boot BLE trials compared one
+  outstanding move with the explicitly negotiated two-move WebSocket window.
+  On the 1,080-unit stroke, total confirmed travel rose from 690 to 855 and
+  from 696 to 765. Net travel in the two window runs was +123 and −39 for a
+  requested +72. On shorter 160-unit reversal strokes, travel fell from 92
+  to 56 in one pair and rose from 132 to 148 in the other. These receipts
+  show a repeatable gain in long-stroke travel and mixed reversal results.
+
+  The subsequent installed Mosaico image `252c30b` passed OTA confirmation.
+  On its served page in 390-pixel-wide Chrome, a 96-point BLE stroke issued
+  27 movement commands. Twenty-six reached `sent` and one expired. The
+  **Check result** button kept a steady opacity throughout the stroke,
+  compared with 20 changes on `ad3c423`. After lift it returned HTTP 200
+  and the last move's matching sequence, command key and `sent` state.
+  Control stayed on the same lease and Stop confirmed neutral release.
+  The USB submission change was checked with the host fixture. Physical
+  USB bus delivery and receiving cursor travel remain unverified.
 - **Bluetooth memory pressure.** The controller policy removes the internal
   DMA dependency for allocations explicitly eligible for PSRAM. Real PSRAM
   exhaustion or a full MSYS pool can still trigger the SDK assertion. Dynamic

@@ -123,6 +123,21 @@ static bool remote_complete(void *context, const cp_result_t *result)
     (void)context;
     return remote_publish() && app_control_runtime_complete(result->command_key, result) == ESP_OK;
 }
+
+static bool remote_movement_result(void *context, uint64_t ticket, bool cancel,
+    app_remote_input_movement_receipt_t *result)
+{
+    (void)context;
+    switch (usb_hid_movement_result(ticket, cancel, &result->at_ms)) {
+    case USB_HID_MOVEMENT_PENDING: return false;
+    case USB_HID_MOVEMENT_SUBMITTED: result->state = CP_RESULT_SENT; result->error = CP_OK; break;
+    case USB_HID_MOVEMENT_EXPIRED: result->state = CP_RESULT_REJECTED; result->error = CP_EXPIRED; break;
+    case USB_HID_MOVEMENT_REFUSED: result->state = CP_RESULT_FAILED; result->error = CP_UNAVAILABLE; break;
+    case USB_HID_MOVEMENT_CANCELLED: result->state = CP_RESULT_CANCELLED; result->error = CP_STALE; break;
+    default: result->state = CP_RESULT_FAILED; result->error = CP_RESULT_UNKNOWN; break;
+    }
+    return true;
+}
 #include "app_remote_media_bindings.inc"
 static void remote_changed(void *context, unsigned flags)
 {
@@ -201,6 +216,11 @@ static cp_error_t remote_delegate(void *context, const cp_command_t *command, cp
 static void command_lock(void *context) { (void)context; portENTER_CRITICAL(&s_command_lock); }
 static void command_unlock(void *context) { (void)context; portEXIT_CRITICAL(&s_command_lock); }
 static uint64_t command_clock(void *context) { (void)context; return (uint64_t)esp_timer_get_time() / 1000U; }
+static bool command_motion_blocked(void *context)
+{
+    (void)context;
+    return app_remote_input_motion_blocked(s_remote_input);
+}
 static bool command_available(void *context, cp_operation_id_t operation, char reason[CP_REASON_CAPACITY])
 {
     (void)context;
@@ -366,10 +386,12 @@ static void remote_control_init(bool usb_available)
         app_command_bridge_bytes(), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     app_remote_input_port_t input_port = {.engine = &s_engine, .interaction = &s_interaction,
         .observe = remote_observe, .authorize = remote_authorize, .changed = remote_changed, .complete = remote_complete,
+        .movement_result = remote_movement_result,
         .delegate_available = remote_delegate_available, .delegate = remote_delegate};
     app_command_bridge_port_t bridge_port = {.lock = command_lock, .unlock = command_unlock,
         .now_ms = command_clock, .available = command_available, .execute = command_execute,
-        .safety = command_safety, .read = command_read, .complete = remote_complete};
+        .safety = command_safety, .read = command_read, .complete = remote_complete,
+        .motion_blocked = command_motion_blocked};
     if (!input || !bridge || app_remote_input_init(input, app_remote_input_bytes(), &input_port, &s_remote_input) != CP_OK ||
         app_command_bridge_init(bridge, app_command_bridge_bytes(), &bridge_port, &s_command_bridge) != CP_OK) {
         heap_caps_free(input); heap_caps_free(bridge); s_remote_input = NULL; s_command_bridge = NULL; return;

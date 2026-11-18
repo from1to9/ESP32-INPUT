@@ -60,6 +60,27 @@ device details and does not wait for the coordinator's device-detail read.
   relative movement and `control.renew`. The reply is
   `{"motion_terminal":true,"renew_terminal":true}`. The admission reply
   includes `now_ms` as a decimal string in the device's monotonic time.
+  When Mosaico advertises `websocket_motion_window`, an enrolled browser can
+  send `{"v":1,"type":"motion_window"}`. The reply adds `"motion_window":2`
+  to the two terminal flags. A second fresh relative move can be written
+  after the preceding move's matching admission, with at most two relative
+  moves awaiting terminal results. Wait for all pending terminals before
+  sending renewal, other commands or resource reads on the channel.
+  Replies for recorded commands in this mode carry `command_seq` for the
+  original sequence and `command_key` for the individual result. Match both for a pushed
+  terminal even when it arrives out of order. `next_seq` reports the current
+  session sequence and can advance past the command being reported.
+  Admission records the queued command. `sent` reports acceptance by the
+  HID transport. Each move keeps its own deadline and can expire while
+  waiting to execute or at the report submission boundary. USB relative
+  moves stay pending until TinyUSB accepts the report or the device records
+  expiry, cancellation or submission refusal. An unknown or mismatched result stops the input
+  channel and requires checking the target before resuming. Close the
+  channel to stop in-flight input without waiting for its terminal replies.
+  A full window rejects additional WebSocket data by closing the channel.
+  The original authenticated HTTP session can read results by key or
+  recover a recorded result using an exact request retry. The browser uses
+  readback for known outstanding keys and never resends unknown input.
   HTTP, other operations, and channels without opt-in use the usual result reads.
   Read status and job resources separately. A session can remain valid
   after its input lease ends.

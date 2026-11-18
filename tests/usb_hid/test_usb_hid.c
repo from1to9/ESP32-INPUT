@@ -16,6 +16,7 @@ static int test_console_setvbuf(FILE *stream, char *buffer, int mode, size_t siz
 
 static struct {
     uint64_t now_us;
+    uint64_t dispatch_pause_us;
     unsigned lock_depth;
     bool usb_task;
     bool mounted, suspended, endpoint_ready, reject_report;
@@ -66,6 +67,10 @@ void usb_test_leave(portMUX_TYPE *lock)
     (void)lock;
     assert(hw.lock_depth == 1);
     hw.lock_depth = 0;
+    if (s_dispatching && hw.dispatch_pause_us) {
+        hw.now_us += hw.dispatch_pause_us;
+        hw.dispatch_pause_us = 0;
+    }
 }
 
 int64_t esp_timer_get_time(void)
@@ -204,6 +209,7 @@ static void reset_fixture(void)
     memset(s_wire, 0, sizeof(s_wire));
     s_wire_length = 0;
     s_report_generation = s_admitted_us = s_posted_us = s_retry_after_us = 0;
+    memset(&s_movement, 0, sizeof(s_movement));
     memset(&s_token, 0, sizeof(s_token));
     s_usb_worker = NULL;
     s_usb_monitor = NULL;
@@ -579,6 +585,99 @@ static void mount_before_manager_callback_registration(void)
     hw.mounted = hw.endpoint_ready = true;
 }
 
+static void test_timed_movement_uses_tinyusb_submission(void)
+{
+    const uint8_t movement[4] = {0, (uint8_t)-30, 0, 0};
+    const uint64_t deadline = 1020, lease_end = 1200;
+    for (unsigned scenario = 0; scenario < 5; ++scenario) {
+        start_ready();
+        const uint64_t generation = usb_hid_snapshot().generation;
+        hw.now_us = 1019000;
+        const uint64_t ticket = usb_hid_send_movement(generation, movement, sizeof movement, deadline, lease_end);
+        assert(ticket && hw.submits == 0 && usb_hid_snapshot().accepted == 1);
+        assert(usb_hid_movement_result(ticket + 1, false, NULL) == USB_HID_MOVEMENT_UNKNOWN);
+        assert(usb_hid_movement_result(ticket, false, NULL) == USB_HID_MOVEMENT_PENDING);
+        assert(post_dispatch());
+        if (scenario == 1) hw.now_us = 1020000;
+        if (scenario == 2) hw.now_us = 1025000;
+        if (scenario == 3) hw.dispatch_pause_us = 6000; /* Between commit/unlock and TinyUSB. */
+        if (scenario == 4) hw.reject_report = true;
+        run_deferred();
+        uint64_t at_ms = 0;
+        const usb_hid_snapshot_t snapshot = usb_hid_snapshot();
+        const usb_hid_movement_state_t result = usb_hid_movement_result(ticket, false, &at_ms);
+        assert(at_ms == hw.now_us / 1000U && usb_hid_movement_result(ticket, false, NULL) == USB_HID_MOVEMENT_UNKNOWN);
+        if (scenario == 0) {
+            assert(result == USB_HID_MOVEMENT_SUBMITTED && hw.submits == 1 && snapshot.submitted == 1);
+            assert(hw.submitted_wire[0] == HID_ENGINE_MOUSE_REPORT_ID && !memcmp(hw.submitted_wire + 1, movement, sizeof movement));
+            assert(!snapshot.completed);
+            complete_report();
+        } else if (scenario == 4) {
+            assert(result == USB_HID_MOVEMENT_REFUSED && hw.submits == 1 && !snapshot.submitted);
+            assert(snapshot.failed && snapshot.generation != generation && !post_dispatch());
+            assert(!usb_hid_send_movement(generation, movement, sizeof movement, deadline, lease_end));
+        } else {
+            assert(result == USB_HID_MOVEMENT_EXPIRED && !hw.submits && !snapshot.submitted);
+            assert(!snapshot.failed && snapshot.ready && snapshot.generation == generation);
+            assert(send_keyboard(0)); /* Neutral traffic still uses the ordinary slot. */
+            synchronize();
+            assert(hw.submits == 1 && hw.submitted_wire[0] == HID_ENGINE_KEYBOARD_REPORT_ID);
+            complete_report();
+        }
+    }
+
+    start_ready();
+    hw.now_us = 1019000;
+    uint64_t generation = usb_hid_snapshot().generation;
+    uint64_t ticket = usb_hid_send_movement(generation, movement, sizeof movement, deadline, lease_end);
+    assert(ticket && post_dispatch());
+    assert(usb_hid_movement_result(ticket, true, NULL) == USB_HID_MOVEMENT_CANCELLED);
+    run_deferred();
+    assert(!hw.submits && send_keyboard(0));
+    synchronize();
+    complete_report();
+
+    hw.now_us = 1030000;
+    ticket = usb_hid_send_movement(generation, movement, sizeof movement, 1031, lease_end);
+    assert(ticket && post_dispatch());
+    hw.endpoint_ready = false;
+    hw.now_us = 1031000;
+    run_deferred();
+    assert(usb_hid_movement_result(ticket, false, NULL) == USB_HID_MOVEMENT_EXPIRED);
+    assert(hw.submits == 1 && usb_hid_snapshot().congested);
+    hw.endpoint_ready = true;
+    synchronize();
+    assert(!usb_hid_snapshot().congested && send_keyboard(0));
+    synchronize();
+    complete_report();
+
+    ticket = usb_hid_send_movement(generation, movement, sizeof movement, 1050, 1032);
+    assert(ticket && post_dispatch());
+    hw.now_us = 1032000;
+    run_deferred();
+    assert(usb_hid_movement_result(ticket, false, NULL) == USB_HID_MOVEMENT_CANCELLED);
+    assert(hw.submits == 2 && usb_hid_snapshot().generation == generation);
+
+    const uint64_t old = usb_hid_send_movement(generation, movement, sizeof movement, 1050, lease_end);
+    assert(old && post_dispatch());
+    stack_reset();
+    assert(usb_hid_movement_result(old, false, NULL) == USB_HID_MOVEMENT_CANCELLED);
+    run_deferred();
+    assert(hw.submits == 2);
+    mount_device();
+    if (!usb_hid_snapshot().enabled) usb_hid_set_enabled(true);
+    if (usb_hid_snapshot().congested) synchronize();
+    const uint64_t replacement_generation = usb_hid_snapshot().generation;
+    assert(replacement_generation != generation);
+    ticket = usb_hid_send_movement(replacement_generation, movement, sizeof movement, 1050, lease_end);
+    assert(ticket && ticket != old && usb_hid_movement_result(old, true, NULL) == USB_HID_MOVEMENT_UNKNOWN);
+    hw.during_submit = disable_during_submit;
+    synchronize();
+    assert(usb_hid_movement_result(ticket, true, NULL) == USB_HID_MOVEMENT_SUBMITTED);
+    assert(hw.submits == 3 && usb_hid_snapshot().failed);
+    complete_report();
+}
+
 static void test_manager_failures_and_counter_boundaries(void)
 {
     for (unsigned failure = 0; failure < 8; ++failure) {
@@ -755,6 +854,7 @@ int main(void)
     test_disable_suspend_and_recovery_keep_cdc();
     test_suspend_visible_before_its_task_callback();
     test_backpressure_failures_and_deadlines();
+    test_timed_movement_uses_tinyusb_submission();
     test_manager_failures_and_counter_boundaries();
     test_real_tinyusb_descriptor_macros_and_long_lifecycle();
     puts("USB HID: shared CDC manager, real FS/HS descriptors, bounded reports, lifecycle generations, controls, failures and 100000 cycles passed");

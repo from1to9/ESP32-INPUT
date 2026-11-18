@@ -473,6 +473,12 @@ void app_connectivity_controls_bluetooth_stop(app_connectivity_controls_effect_t
 }
 
 usb_hid_snapshot_t usb_hid_snapshot(void) { return test_usb; }
+static struct {
+    uint64_t ticket, next_ticket, generation, deadline_ms, lease_end_ms, at_ms;
+    uint8_t report[HID_ENGINE_MOUSE_REPORT_LENGTH];
+    usb_hid_movement_state_t state;
+} test_usb_movement;
+
 void usb_hid_set_enabled(bool enabled)
 {
     assert(test_usb_enable_count < 32);
@@ -510,6 +516,32 @@ bool usb_hid_recover_generation(uint64_t generation)
 {
     ++test_usb_recovers;
     return test_usb_recover_accept && generation == test_usb.generation;
+}
+
+uint64_t usb_hid_send_movement(uint64_t generation, const uint8_t *data, size_t length,
+    uint64_t deadline_ms, uint64_t lease_end_ms)
+{
+    assert(length == sizeof(test_usb_movement.report) && !test_usb_movement.ticket);
+    assert(deadline_ms && lease_end_ms && generation == test_usb.generation && test_usb.ready);
+    memcpy(test_usb_movement.report, data, length);
+    test_usb_movement.generation = generation;
+    test_usb_movement.deadline_ms = deadline_ms;
+    test_usb_movement.lease_end_ms = lease_end_ms;
+    test_usb_movement.state = USB_HID_MOVEMENT_PENDING;
+    test_usb_movement.ticket = ++test_usb_movement.next_ticket;
+    return test_usb_movement.ticket;
+}
+
+usb_hid_movement_state_t usb_hid_movement_result(uint64_t ticket, bool cancel, uint64_t *at_ms)
+{
+    assert(ticket && ticket == test_usb_movement.ticket);
+    if (cancel && test_usb_movement.state == USB_HID_MOVEMENT_PENDING)
+        test_usb_movement.state = USB_HID_MOVEMENT_CANCELLED;
+    if (test_usb_movement.state != USB_HID_MOVEMENT_PENDING) {
+        *at_ms = test_usb_movement.at_ms;
+        test_usb_movement.ticket = 0;
+    }
+    return test_usb_movement.state;
 }
 
 esp_err_t board_power_read(board_power_status_t *status)
@@ -992,7 +1024,7 @@ static hid_engine_step_result_t step(void)
     const size_t before = trace_count;
     input_link_t active = input_link_snapshot(&test_link);
     const hid_engine_step_result_t result =
-        hid_engine_step(&s_engine, send_report, &active.generation);
+        hid_engine_step_with_submit(&s_engine, send_report, &active.generation);
     assert(trace_count - before <= 1);
     return result;
 }
@@ -3715,7 +3747,7 @@ static void transport_replaced_generation_and_refused_release_cannot_replay(void
         else ++test_link.generation;
         static const uint8_t zero[8] = {0};
         uint64_t obsolete = old_snapshot.generation;
-        assert(!send_report(&obsolete, 1, zero, 8));
+        assert(send_report(&obsolete, 1, zero, 8) == HID_ENGINE_REPORT_REJECTED);
         assert(trace_count == 1);
         const input_link_t replacement = input_link_snapshot(&test_link);
         observe_input_link(&replacement, &test_previous_link);
@@ -6287,6 +6319,144 @@ static void review_last_remote_report_authority(void)
     remote_control_service(); release_barrier(); assert(!s_engine.mouse_buttons && !s_engine.count);
 }
 
+static void window_movement_checks_deadline_at_transport_submission(void)
+{
+    for (unsigned scenario = 0; scenario < 4; ++scenario) {
+        transport_setup(INPUT_MOUSE, APP_INPUT_BLUETOOTH);
+        remote_acquire_current_host();
+        cp_command_t first = remote_test_command(CP_OP_MOUSE_MOVE_RELATIVE, 2, "{\"dx\":18,\"dy\":0}");
+        cp_command_t second = remote_test_command(CP_OP_MOUSE_MOVE_RELATIVE, 3, "{\"dx\":-30,\"dy\":0}");
+        first.identity.browser = second.identity.browser = true;
+        first.motion_window = second.motion_window = true;
+        second.deadline_ms = s_now_ms + 20;
+        cp_result_t result;
+        assert(app_command_bridge_submit(s_command_bridge, &first, &result) == CP_OK);
+        remote_control_service();
+        assert(app_command_bridge_submit(s_command_bridge, &second, &result) == CP_OK);
+        remote_control_service();
+        assert(s_engine.count == 1 && test_control_result.command_key == first.command_key);
+        const uint8_t positive[] = {0, 18, 0, 0};
+        expect_report(HID_ENGINE_MOUSE_REPORT_ID, positive, sizeof positive);
+        app_remote_input_service(s_remote_input, s_now_ms);
+        assert(test_control_result.command_key == first.command_key && test_control_result.state == CP_RESULT_SENT);
+
+        s_now_ms = second.deadline_ms - 1;
+        remote_control_service();
+        assert(s_engine.count == 1 && test_control_result.command_key == second.command_key &&
+               test_control_result.state == CP_RESULT_ACCEPTED);
+        const bool sdk_refuses = scenario == 3;
+        test_send_failure = test_usb_send_failure = sdk_refuses;
+        test_clock_override = true;
+        test_clock_ms = scenario == 0 || sdk_refuses ? second.deadline_ms - 1 : second.deadline_ms + scenario - 1;
+        const size_t reports = trace_count;
+        const unsigned attempts = test_ble_send_attempts + test_usb_send_attempts;
+        const uint64_t epoch = s_engine.state.epoch;
+        if (scenario == 0) {
+            const uint8_t negative[] = {0, (uint8_t)-30, 0, 0};
+            expect_report(HID_ENGINE_MOUSE_REPORT_ID, negative, sizeof negative);
+        } else if (sdk_refuses) assert(step() == HID_ENGINE_STEP_SEND_FAILED);
+        else assert(step() == HID_ENGINE_STEP_BLOCKED);
+        assert(test_ble_send_attempts + test_usb_send_attempts == attempts + (scenario == 0 || sdk_refuses));
+        assert(trace_count == reports + (scenario == 0));
+        assert(!s_engine.count);
+        test_send_failure = test_usb_send_failure = false;
+        test_clock_override = false;
+        s_now_ms = second.deadline_ms + 1;
+        if (sdk_refuses) {
+            assert(s_engine.state.release_pending && s_engine.send_failures == 1);
+            remote_control_service();
+            release_barrier();
+            remote_control_service();
+            assert(test_control_result.state == CP_RESULT_FAILED && test_control_result.error == CP_UNAVAILABLE);
+            assert(!strcmp(test_control_result.reason, "transport_rejected_report"));
+        } else {
+            remote_control_service();
+            assert(s_engine.state.epoch == epoch && !s_engine.state.release_pending && !s_engine.send_failures);
+            if (scenario == 0) assert(test_control_result.state == CP_RESULT_SENT && test_control_result.error == CP_OK);
+            else {
+                assert(test_control_result.state == CP_RESULT_REJECTED && test_control_result.error == CP_EXPIRED);
+                assert(!strncmp(test_control_result.reason, "send now=", sizeof("send now=") - 1U));
+            }
+            app_command_bridge_safety(s_command_bridge, CP_SAFETY_CLIENT_STOP, &second.identity);
+            remote_control_service();
+            release_barrier();
+        }
+        assert(test_control_result.command_key == second.command_key);
+    }
+}
+
+static void usb_movement_receipt_stays_with_original_command(void)
+{
+    for (unsigned scenario = 0; scenario < 5; ++scenario) {
+        transport_setup(INPUT_MOUSE, APP_INPUT_USB);
+        assert(!test_usb_movement.ticket);
+        remote_acquire_current_host();
+        cp_command_t first = remote_test_command(CP_OP_MOUSE_MOVE_RELATIVE, 2, "{\"dx\":18,\"dy\":0}");
+        cp_command_t second = remote_test_command(CP_OP_MOUSE_MOVE_RELATIVE, 3, "{\"dx\":-30,\"dy\":0}");
+        first.identity.browser = second.identity.browser = true;
+        first.motion_window = second.motion_window = true;
+        second.deadline_ms = s_now_ms + 20;
+        cp_result_t result;
+        assert(app_command_bridge_submit(s_command_bridge, &first, &result) == CP_OK);
+        assert(app_command_bridge_submit(s_command_bridge, &second, &result) == CP_OK);
+        remote_control_service();
+        const size_t before = trace_count;
+        assert(step() == HID_ENGINE_STEP_SENT && trace_count == before && !s_engine.count);
+        assert(test_usb_movement.deadline_ms == first.deadline_ms &&
+               test_usb_movement.lease_end_ms == s_now_ms + 3000 && test_usb_movement.report[1] == 18);
+        remote_control_service();
+        assert(test_control_result.command_key == first.command_key && test_control_result.state == CP_RESULT_ACCEPTED);
+        assert(!s_engine.count); /* The second move still waits in the real bridge. */
+        assert(usb_hid_send_generation(test_usb_movement.generation, HID_ENGINE_MOUSE_REPORT_ID,
+                                       test_usb_movement.report, sizeof(test_usb_movement.report)));
+        test_usb_movement.state = USB_HID_MOVEMENT_SUBMITTED;
+        app_remote_input_service(s_remote_input, s_now_ms);
+        assert(test_control_result.command_key == first.command_key && test_control_result.state == CP_RESULT_SENT);
+
+        s_now_ms = second.deadline_ms - 1;
+        remote_control_service();
+        assert(step() == HID_ENGINE_STEP_SENT && trace_count == before + 1);
+        assert(test_usb_movement.deadline_ms == second.deadline_ms && test_usb_movement.report[1] == (uint8_t)-30);
+        app_remote_input_service(s_remote_input, s_now_ms);
+        assert(test_control_result.command_key == second.command_key && test_control_result.state == CP_RESULT_ACCEPTED);
+        test_usb_movement.at_ms = scenario == 0 || scenario == 3 ? second.deadline_ms - 1 : second.deadline_ms + scenario - 1;
+        if (scenario == 4) {
+            app_command_bridge_safety(s_command_bridge, CP_SAFETY_CLIENT_STOP, &second.identity);
+            remote_control_service();
+            assert(!test_usb_movement.ticket && s_engine.state.release_pending);
+            release_barrier();
+            remote_control_service();
+            assert(test_control_result.state == CP_RESULT_CANCELLED && trace_count == before + 3);
+        } else {
+            s_now_ms = second.deadline_ms + 5;
+            app_remote_input_service(s_remote_input, s_now_ms); /* No premature terminal or lease revoke. */
+            assert(test_control_result.state == CP_RESULT_ACCEPTED && s_engine.state.owner == INPUT_REMOTE);
+            if (scenario == 0) {
+                assert(usb_hid_send_generation(test_usb_movement.generation, HID_ENGINE_MOUSE_REPORT_ID,
+                                               test_usb_movement.report, sizeof(test_usb_movement.report)));
+                test_usb_movement.state = USB_HID_MOVEMENT_SUBMITTED;
+            } else if (scenario == 3) {
+                test_usb_movement.state = USB_HID_MOVEMENT_REFUSED;
+                ++test_usb.generation;
+                test_usb.ready = false;
+                test_usb.failed = true;
+            } else test_usb_movement.state = USB_HID_MOVEMENT_EXPIRED;
+            remote_control_service();
+            assert(!test_usb_movement.ticket);
+            assert(trace_count == before + (scenario == 0 ? 2U : 1U));
+            if (scenario == 0) assert(test_control_result.state == CP_RESULT_SENT && test_control_result.error == CP_OK);
+            else if (scenario == 3) {
+                assert(test_control_result.state == CP_RESULT_FAILED && test_control_result.error == CP_UNAVAILABLE);
+                assert(!strcmp(test_control_result.reason, "transport_rejected_report_old_target_release_unverified"));
+            } else {
+                assert(test_control_result.state == CP_RESULT_REJECTED && test_control_result.error == CP_EXPIRED);
+                assert(s_engine.state.owner == INPUT_REMOTE && !s_engine.state.release_pending);
+            }
+        }
+        assert(test_control_result.command_key == second.command_key);
+    }
+}
+
 static void review_legacy_recovery(void)
 {
     for (unsigned fault = 0; fault < 8; ++fault) {
@@ -6879,6 +7049,8 @@ int main(int argc, char **argv)
     RUN(remote_device_routes_and_state_survive_missing_media);
     RUN(review_legacy_recovery);
     RUN(review_last_remote_report_authority);
+    RUN(window_movement_checks_deadline_at_transport_submission);
+    RUN(usb_movement_receipt_stays_with_original_command);
     RUN(remote_commands_share_actual_hid_queue_and_physical_takeover);
     RUN(remote_imu_uses_the_single_board_sample_and_hid_queue);
     RUN(remote_recenter_uses_shared_owner_and_duplicate_does_not_realign);

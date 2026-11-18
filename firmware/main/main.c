@@ -570,18 +570,18 @@ static void physical_lock(void)
     portEXIT_CRITICAL(&s_control_lock);
 }
 
-static bool send_report(void *context, uint8_t report_id,
-                         const uint8_t *data, size_t length)
+static hid_engine_report_result_t send_report(void *context, uint8_t report_id,
+                                               const uint8_t *data, size_t length)
 {
     const uint64_t *generation = context;
     /* This callback runs on the coordinator before either transport takes its
      * own lock. Check only ordinary remote reports; the engine's forced neutral
      * release must remain admissible after permission/session/lease loss. */
-    if (s_engine.state.owner == INPUT_REMOTE && !s_engine.state.release_pending &&
-        !app_remote_input_report_authorized(s_remote_input, (uint64_t)esp_timer_get_time() / 1000U)) return false;
-    const bool movement = report_id == HID_ENGINE_MOUSE_REPORT_ID &&
-        length == HID_ENGINE_MOUSE_REPORT_LENGTH && (data[1] || data[2]);
-    if (movement) motion_trace_count(&s_motion_trace.move_attempts);
+    const bool remote = s_engine.state.owner == INPUT_REMOTE && !s_engine.state.release_pending;
+    if (remote && !app_remote_input_report_authorized(s_remote_input, (uint64_t)esp_timer_get_time() / 1000U))
+        return HID_ENGINE_REPORT_REJECTED;
+    const bool mouse = report_id == HID_ENGINE_MOUSE_REPORT_ID && length == HID_ENGINE_MOUSE_REPORT_LENGTH;
+    const bool movement = mouse && (data[1] || data[2]);
 #if APP_TOUCH_TRACE_ENABLED
     if (movement && app_touch_trace_active()) {
         const hid_engine_action_t *head = &s_engine.queue[s_engine.head];
@@ -589,16 +589,32 @@ static bool send_report(void *context, uint8_t report_id,
             head->motion_since_ms, (uint64_t)esp_timer_get_time());
     }
 #endif
-    bool accepted = s_input_transport == APP_INPUT_USB ?
-        usb_hid_send_generation(*generation, report_id, data, length) :
-        ble_hid_send_generation(*generation, report_id, data, length);
+    if (remote && mouse &&
+        app_remote_input_expire_movement_report(s_remote_input, (uint64_t)esp_timer_get_time() / 1000U))
+        return HID_ENGINE_REPORT_EXPIRED;
+    const bool usb = s_input_transport == APP_INPUT_USB;
+    uint64_t lease_end_ms = 0;
+    const uint64_t deadline_ms = usb && remote && mouse ?
+        app_remote_input_movement_deadline(s_remote_input, &lease_end_ms) : 0;
+    bool accepted;
+    uint64_t ticket = 0;
+    if (deadline_ms) {
+        ticket = usb_hid_send_movement(*generation, data, length, deadline_ms, lease_end_ms);
+        accepted = ticket != 0;
+    } else {
+        accepted = usb ? usb_hid_send_generation(*generation, report_id, data, length) :
+            ble_hid_send_generation(*generation, report_id, data, length);
+    }
+    if (ticket) app_remote_input_defer_movement_result(s_remote_input, ticket);
+    else if (remote && mouse) app_remote_input_record_movement_submission(s_remote_input, accepted);
+    if (movement) motion_trace_count(&s_motion_trace.move_attempts);
     if (movement) app_touch_trace_send(accepted);
 #if APP_MOUSE_PHASE_ENABLED
     if (movement && s_engine.count && s_engine.queue[s_engine.head].buffered_motion)
         app_mouse_phase_event(accepted ? MOUSE_EVENT_SEND_OK : MOUSE_EVENT_SEND_FAIL);
 #endif
     if (movement) motion_trace_count(accepted ? &s_motion_trace.move_admitted : &s_motion_trace.move_rejected);
-    return accepted;
+    return accepted ? HID_ENGINE_REPORT_ACCEPTED : HID_ENGINE_REPORT_REJECTED;
 }
 
 static bool bluetooth_release_pending(void)
@@ -3374,7 +3390,7 @@ static void __attribute__((noinline, noreturn)) coordinator_run(esp_err_t error)
                 s_now_ms = (uint64_t)esp_timer_get_time() / 1000U;
                 observe_input_expiry(false);
             }
-            hid_engine_step_result_t step = hid_engine_step(&s_engine, send_report, &link.generation);
+            hid_engine_step_result_t step = hid_engine_step_with_submit(&s_engine, send_report, &link.generation);
             app_touch_trace_step((unsigned)step);
             if (step != previous_step &&
                 (step == HID_ENGINE_STEP_SEND_FAILED || step == HID_ENGINE_STEP_RETRY_EXHAUSTED)) {
