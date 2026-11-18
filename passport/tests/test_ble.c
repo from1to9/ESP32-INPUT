@@ -26,7 +26,7 @@ size_t heap_caps_get_free_size(uint32_t caps) { (void)caps; ++diagnostic_heap_re
 size_t heap_caps_get_largest_free_block(uint32_t caps) { (void)caps; return 12000; }
 void passport_management_install(void) {} // Adapter tested separately; this suite exercises the real BLE backend.
 void passport_control_http_service(uint64_t now) { (void)now; }
-void passport_wifi_snapshot(passport_wifi_state_t *out) { *out=(passport_wifi_state_t){0}; }
+void passport_wifi_link_snapshot(passport_wifi_link_t *out) { *out=(passport_wifi_link_t){0}; }
 void esp_fill_random(void *out,size_t size) { static uint8_t entropy; uint8_t *p=out; while(size--) *p++=++entropy; }
 
 void explicit_bzero(void *p, size_t size) { volatile uint8_t *b = p; while(size--) *b++=0; }

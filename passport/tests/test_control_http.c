@@ -6,7 +6,7 @@ const char controller_js_fixture[] __asm__("_binary_controller_js_start")="'use 
 #include "../main/passport_control_http.c"
 #include "control_json.h"
 static hid_engine_t engine;
-static passport_wifi_state_t network;
+static passport_wifi_link_t network;
 static const char *host,*origin,*type,*authorization,*csrf,*open_header,*subprotocol,*input,*local_ip;
 static int socket_family=AF_INET;
 static bool socket_short,socket_error;
@@ -31,7 +31,7 @@ static bool random_bytes(void *u,uint8_t *out,size_t n)
     while(n--)*out++=(uint8_t)++entropy;return true;
 }
 void explicit_bzero(void *p,size_t n) { volatile uint8_t *b=p;while(n--)*b++=0; }
-void passport_wifi_snapshot(passport_wifi_state_t *out) { *out=network; }
+void passport_wifi_link_snapshot(passport_wifi_link_t *out) { *out=network; }
 SemaphoreHandle_t xSemaphoreCreateBinary(void) { return &signalled; }
 TickType_t xTaskGetTickCount(void) { return ticks; }
 int xSemaphoreGive(SemaphoreHandle_t s) { assert(s==&signalled);signalled=true;return pdTRUE; }
@@ -126,7 +126,7 @@ static void extract(const char *key,char *out,size_t capacity)
 static void reset(void)
 {
     passport_control_deinit();hid_engine_init(&engine);ticks+=20;assert(passport_control_init(&engine,random_bytes));
-    network=(passport_wifi_state_t){.initialized=true,.ap_started=true,.dhcp_running=true,.ap_ip="192.168.4.1"};
+    network=(passport_wifi_link_t){.ap_started=true,.dhcp_running=true,.ap_ip="192.168.4.1"};
     passport_control_observation_t observed={.ap_ip="192.168.4.1"};passport_control_observe(&observed,ticks);
     mailbox=IDLE;signalled=delay_owner=stale_signal=false;memset(channels,0,sizeof(channels));
     host=local_ip="192.168.4.1";origin="http://192.168.4.1";type="application/json";open_header="1";

@@ -140,6 +140,18 @@ void passport_wifi_snapshot(passport_wifi_state_t *out)
 {
     portENTER_CRITICAL(&snapshot_lock); *out = published; portEXIT_CRITICAL(&snapshot_lock);
 }
+void passport_wifi_link_snapshot(passport_wifi_link_t *out)
+{
+    portENTER_CRITICAL(&snapshot_lock);
+    out->phase = published.phase;
+    out->ap_started = published.ap_started;
+    out->dhcp_running = published.dhcp_running;
+    out->ap_lease = published.ap_lease;
+    memcpy(out->sta_ip, published.sta_ip, sizeof(out->sta_ip));
+    memcpy(out->ap_ip, published.ap_ip, sizeof(out->ap_ip));
+    out->transport_generation = published.transport_generation;
+    portEXIT_CRITICAL(&snapshot_lock);
+}
 void passport_wifi_ap_credentials(char ssid[32], char password[17])
 {
     memcpy(ssid, ap_config.ap.ssid, 32);

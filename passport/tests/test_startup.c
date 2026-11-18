@@ -211,6 +211,14 @@ bool passport_sound_cue(passport_cue_t cue)
 void passport_wifi_prepare(void) {}
 esp_err_t passport_wifi_start(void) { return ESP_OK; }
 void passport_wifi_snapshot(passport_wifi_state_t *out) { *out = mock_wifi; }
+void passport_wifi_link_snapshot(passport_wifi_link_t *out)
+{
+    *out = (passport_wifi_link_t){.phase = mock_wifi.phase, .ap_started = mock_wifi.ap_started,
+        .dhcp_running = mock_wifi.dhcp_running, .ap_lease = mock_wifi.ap_lease,
+        .transport_generation = mock_wifi.transport_generation};
+    memcpy(out->sta_ip, mock_wifi.sta_ip, sizeof(out->sta_ip));
+    memcpy(out->ap_ip, mock_wifi.ap_ip, sizeof(out->ap_ip));
+}
 bool passport_wifi_request(const passport_wifi_command_t *command) { assert(wifi_request_count < 16); wifi_requests[wifi_request_count++] = *command; return true; }
 void passport_wifi_ap_credentials(char ssid[32], char password[17]) { snprintf(ssid, 32, "Passport-ABCD"); snprintf(password, 17, "0123456789ABCDEF"); }
 

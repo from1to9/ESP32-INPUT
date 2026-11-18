@@ -108,8 +108,20 @@ static void test_scan_and_ap(void)
     event(false,WIFI_EVENT_AP_STACONNECTED);
     queued_event_t lease = {.ip_event=true,.id=IP_EVENT_AP_STAIPASSIGNED,.data.lease={.esp_netif=ap_netif,.ip={43}}};
     handle_event(&lease,clock_ms); assert(state.ap_lease && state.ap_client);
+    // A client disconnect changes the network generation even if the AP address stays the same.
+    state.transport_generation = UINT64_C(0x100000002);
+    publish();
+    passport_wifi_link_t link;
+    passport_wifi_link_snapshot(&link);
+    assert(link.ap_started && link.dhcp_running && link.ap_lease && !strcmp(link.ap_ip, state.ap_ip));
     uint64_t network_generation=state.transport_generation;
+    assert(link.transport_generation == network_generation);
     event(false,WIFI_EVENT_AP_STADISCONNECTED); assert(!state.ap_lease && state.transport_generation==network_generation+1);
+    passport_wifi_link_snapshot(&link);
+    assert(link.ap_lease && link.transport_generation == network_generation);
+    publish();
+    passport_wifi_link_snapshot(&link);
+    assert(!link.ap_lease && link.transport_generation == network_generation + 1 && !strcmp(link.ap_ip, state.ap_ip));
     command_local(PW_SCAN,0,0); assert(state.scanning && scans == 1 && stops == 0);
     command_local(PW_SCAN_CANCEL,0,0); assert(scan_draining && !state.scanning);
     command_local(PW_SCAN,0,0); assert(scans == 1);
@@ -151,6 +163,10 @@ static void test_join_and_persistence(void)
     assert(state.phase == PW_ONLINE && commits == 1 && store.count == 1 && state.active_profile == 1);
     assert(state.pending_id == 1001 && state.request_state == PW_REQUEST_SAVED);
     assert(!desired_ap && !state.setup_open);
+    publish();
+    passport_wifi_link_t link;
+    passport_wifi_link_snapshot(&link);
+    assert(link.phase == PW_ONLINE && link.sta_ip[0] && !strcmp(link.sta_ip, state.sta_ip));
     passport_wifi_store_t restored;
     assert(passport_wifi_store_load(&restored) == ESP_OK && restored.records[0].id == 1);
     event(false,WIFI_EVENT_STA_DISCONNECTED); assert(!switching && fallback_at == clock_ms + 30000);

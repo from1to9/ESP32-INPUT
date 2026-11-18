@@ -27,6 +27,12 @@ typedef struct {
     bool current;
 } passport_wifi_row_t;
 typedef enum { PW_OFFLINE, PW_SWITCHING, PW_CONNECTING, PW_ASSOCIATED, PW_ONLINE } passport_wifi_phase_t;
+typedef struct {
+    passport_wifi_phase_t phase;
+    bool ap_started, dhcp_running, ap_lease;
+    char sta_ip[16], ap_ip[16];
+    uint64_t transport_generation;
+} passport_wifi_link_t;
 typedef enum { PW_REQUEST_NONE, PW_REQUEST_WAITING, PW_REQUEST_JOINING, PW_REQUEST_SAVED, PW_REQUEST_FAILED, PW_REQUEST_CANCELLED } passport_wifi_request_state_t;
 typedef enum { PW_SCAN_ACCEPTED, PW_SCAN_REJECTED, PW_SCAN_STALE, PW_SCAN_LOCKED, PW_SCAN_BUSY } passport_scan_result_t;
 typedef struct {
@@ -68,6 +74,8 @@ typedef struct {
 void passport_wifi_prepare(void);
 esp_err_t passport_wifi_start(void);
 void passport_wifi_snapshot(passport_wifi_state_t *out);
+// Link state and its generation from the same publication, without the scan/profile tables.
+void passport_wifi_link_snapshot(passport_wifi_link_t *out);
 bool passport_wifi_request(const passport_wifi_command_t *command);
 // Native screen and explicit physical USB reads only. Never pass these to HTTP.
 void passport_wifi_ap_credentials(char ssid[32], char password[17]);

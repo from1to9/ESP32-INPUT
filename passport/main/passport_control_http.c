@@ -19,7 +19,7 @@ static portMUX_TYPE lock=portMUX_INITIALIZER_UNLOCKED;
 static mailbox_state_t mailbox;
 static passport_control_request_t request;
 static SemaphoreHandle_t completed;
-static passport_wifi_state_t wifi;
+static passport_wifi_link_t wifi;
 typedef struct { bool used, closed; cp_identity_t identity; } channel_t;
 static channel_t channels[CP_MAX_SESSIONS];
 
@@ -87,7 +87,7 @@ static bool header(httpd_req_t *req,const char *name,char *out,size_t size,bool 
 }
 static bool binding(httpd_req_t *req)
 {
-    passport_wifi_snapshot(&wifi);
+    passport_wifi_link_snapshot(&wifi);
     struct in_addr local;
     if (!passport_http_local_ipv4(httpd_req_to_sockfd(req), &local)) return false;
     char ip[16], with_port[32];
