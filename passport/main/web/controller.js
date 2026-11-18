@@ -5,6 +5,9 @@ const TERMINAL = new Set(["rejected", "applied", "sent", "completed", "cancelled
 const HEX32 = /^[0-9a-f]{32}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/;
+const PAD_LIFETIME_MS = 150;
+const PAD_BUCKET_MS = 8;
+const STATE_INTERVAL_MS = 900;
 const THEME_KEY = "passport.browser.theme.v1";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -104,21 +107,27 @@ export class Controller {
     } catch (error) { await this.disconnect(); throw error; }
     finally { this.busy = false; this.changed(); }
   }
-  async refresh(expectedEpoch = this.pin?.epoch) {
+  async refresh(expectedEpoch = this.pin?.epoch, idleOnly = false) {
     if (!this.session) throw new Error("Connect this browser first.");
     const session = this.session;
-    let response;
+    const before = this.state;
+    const superseded = () => idleOnly && (this.busy || this.controlled || this.state !== before || this.session !== session);
+    let response, started;
     try {
       for (const delay of [0, 20, 40, 80]) {
         if (delay) await sleep(delay);
+        if (superseded()) return null;
+        started = performance.now();
         response = await this.request("/api/v1/state");
         if (![429, 503].includes(response.status) || response.json.error !== "busy") break;
       }
     } catch (error) {
+      if (superseded()) return null;
       this.state = null;
       this.halt("Connection unavailable. Control stopped locally; reconnect explicitly after checking the target.");
       throw error;
     }
+    if (superseded()) return null;
     if (this.session !== session) throw new Error("Browser session changed while reading state.");
     const s = response.json.protocol;
     if (response.status !== 200 || !s || s.boot_id !== this.session.boot_id ||
@@ -133,6 +142,8 @@ export class Controller {
       throw new Error(this.message);
     }
     this.state = s;
+    this.stateAt = performance.now();
+    this.stateRoundTrip = this.stateAt - started;
     if (this.controlled && (!s.lease_active || s.lease_id !== this.pin.lease_id ||
         s.target_id !== this.pin.target_id || s.transport_generation !== this.pin.transport_generation ||
         s.epoch !== expectedEpoch || s.locked || !s.remote_allowed || !s.input_ready)) {
@@ -147,7 +158,12 @@ export class Controller {
     // A discarded local gesture has no protocol result or sequence consumption.
     if (!currentGesture(gesture)) return null;
     const observe = op !== "control.renew";
-    let s = await this.refresh();
+    const sampledMove = op === "mouse.move_relative" && gesture?.takeSample;
+    // The preceding command already read back the pinned state. The device
+    // still validates every envelope. Keep the post-command read for takeover.
+    let s = sampledMove && this.controlled && this.state && performance.now() - this.stateAt < STATE_INTERVAL_MS
+      ? this.state : await this.refresh();
+    const deviceTime = at => BigInt(s.now_ms) + BigInt(Math.floor(at - this.stateAt));
     if (!currentGesture(gesture)) return null;
     if (op !== "control.acquire" && op !== "control.release" && !this.controlled) throw new Error("Take control again before sending input.");
     if (this.uncertain) throw new Error("A reply is unknown. Reconnect explicitly; no command will be replayed.");
@@ -155,9 +171,9 @@ export class Controller {
       if (!decimal(s.lease_expires_ms)) throw new Error("Input lease deadline is unavailable.");
       /* Busy input must not starve the timer that normally renews this already
        * explicit lease. Renew before a new action, never reacquire or replay. */
-      if (BigInt(s.lease_expires_ms) - BigInt(s.now_ms) < 1800n) {
+      if (BigInt(s.lease_expires_ms) - deviceTime(performance.now()) < 1800n) {
         await this.send("control.renew", {});
-        s = await this.refresh();
+        s = this.state;
         if (!this.controlled) throw new Error("Input control ended before the new action.");
       }
     }
@@ -179,28 +195,33 @@ export class Controller {
     if (mode && s.release_pending) throw new Error("Waiting for Passport to release input.");
     const seq = this.session.next_seq;
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
-    const lifetime = gesture?.expiresAt !== undefined ? Math.min(200, Math.floor(gesture.expiresAt - performance.now())) :
-      ["mouse.move_relative", "mouse.scroll"].includes(op) ? 200 : 1500;
-    if (gesture && (!gesture.current() || lifetime <= 0)) return null;
+    if (!currentGesture(gesture)) return null;
+    const now = performance.now();
+    const sample = sampledMove ? gesture.takeSample(now, this.stateRoundTrip) : null;
+    if (sampledMove && !sample) return null;
+    const expiresAt = sample?.expiresAt ?? gesture?.expiresAt;
+    const volatile = op === "mouse.move_relative" || op === "mouse.scroll";
+    const lifetime = expiresAt !== undefined ? Math.min(200, Math.floor(expiresAt - now)) : volatile ? 200 : 1500;
+    if (lifetime <= 0) return null;
     const envelope = {
       v: 1, boot_id: this.session.boot_id, session_id: this.session.session_id,
       request_id: this.session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
-      deadline_ms: (BigInt(s.now_ms) + BigInt(lifetime)).toString(),
+      deadline_ms: (deviceTime(now) + BigInt(lifetime)).toString(),
       epoch: s.epoch, transport_generation: s.transport_generation, target_id: s.target_id,
       ui_revision: s.ui_revision, op,
-      args: op === "control.acquire" || op === "control.renew" ? {...args, state_sequence: s.state_sequence} : args,
+      args: op === "control.acquire" || op === "control.renew" ? {...args, state_sequence: s.state_sequence} : sample?.args ?? args,
       ...(op !== "control.acquire" && s.lease_id ? {lease_id: s.lease_id} : {}),
     };
     // Nothing asynchronous may intervene between this check and request/fetch.
     // Once POST starts, retain its real result/uncertainty even if contact ends.
-    if (!currentGesture(gesture)) return null;
+    if (sample ? !gesture.current() || performance.now() >= sample.expiresAt : !currentGesture(gesture)) return null;
     const generation = this.generation;
-    let answer;
+    let answer, expiredSample = false;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
       gesture?.posting?.(op);
-      const response = await this.request("/api/v1/commands", "POST", envelope);
+      let response = await this.request("/api/v1/commands", "POST", envelope);
       answer = response.json;
       const next = Number(answer.next_seq);
       if (!Number.isInteger(next) || (next !== seq && next !== seq + 1)) throw new Error("Missing sequence acknowledgement.");
@@ -214,10 +235,16 @@ export class Controller {
         this.changed();
         if (!key || performance.now() >= until) throw new Error("Completion not established before the input deadline.");
         await sleep(100);
-        const result = await this.request(`/api/v1/requests/${key}`);
-        if (![200, 202, 400].includes(result.status) || !result.json.state) throw new Error("Result is unavailable.");
-        answer = result.json;
+        response = await this.request(`/api/v1/requests/${key}`);
+        if (generation !== this.generation || ![200, 202, 400].includes(response.status) ||
+            response.json.command_key !== key || !response.json.state) throw new Error("Result is unavailable.");
+        answer = response.json;
         if (observe) this.last = answer;
+      }
+      if (volatile && answer.state === "rejected" && answer.error === "expired") {
+        if (response.status !== 400 || !key || key === "0" || next !== seq + 1 || answer.next_seq !== seq + 1)
+          throw new Error("Movement rejection was not confirmed.");
+        expiredSample = true;
       }
     } catch (error) {
       this.uncertain = true;
@@ -226,6 +253,13 @@ export class Controller {
     }
     if (observe) this.message = op === "mode.select" && answer.state === "applied" ?
       `Passport selected ${args.mode} mode.` : describeResult(answer, total);
+    if (expiredSample) {
+      // Expiry is checked before the device checks the lease. Verify the
+      // original pin before the command lane can accept fresh input.
+      const confirmed = await this.refresh(s.epoch);
+      if (this.controlled && confirmed.release_pending) this.halt("Control ended while Passport was releasing input.");
+      return answer;
+    }
     if (answer.error !== "ok" || !["applied", "sent", "completed"].includes(answer.state)) {
       this.halt(describeResult(answer, total));
       throw new Error(this.message);
@@ -515,11 +549,18 @@ function mount() {
   const point = e => ({id: e.pointerId, x: e.clientX, y: e.clientY});
   function move(e, contact) {
     if (!contact || contact.id !== e.pointerId || $('mouse-controls').disabled) return;
-    e.preventDefault(); const now = performance.now();
-    if (!movement || now - movement.at > 150 || movement.contact !== contact) movement = {dx: 0, dy: 0, at: now, contact};
-    movement.dx = Math.max(-127, Math.min(127, movement.dx + e.clientX - contact.x));
-    movement.dy = Math.max(-127, Math.min(127, movement.dy + e.clientY - contact.y));
+    e.preventDefault();
+    const dx = e.clientX - contact.x, dy = e.clientY - contact.y;
     contact.x = e.clientX; contact.y = e.clientY;
+    if (!dx && !dy) return;
+    if (movement?.contact !== contact) movement = {contact, samples: []};
+    const samples = movement.samples, at = Math.min(e.timeStamp, performance.now());
+    while (samples.length && at - samples[0].at >= PAD_LIFETIME_MS) samples.shift();
+    let bucket = samples.at(-1);
+    if (!bucket || at - bucket.at >= PAD_BUCKET_MS) {
+      bucket = {at, dx:0, dy:0}; samples.push(bucket);
+    }
+    bucket.dx += dx; bucket.dy += dy;
   }
   $('pad').onpointerdown = e => {
     if ($('mouse-controls').disabled || pad || (e.pointerType === 'mouse' && e.button !== 0)) return;
@@ -585,17 +626,34 @@ function mount() {
     if (drag && performance.now() - dragAt >= 400) {
       act(async () => { await client.run('mouse.drag.refresh',{button:'left',deadman_ms:1500}); dragAt = performance.now(); }); return;
     }
-    if (!movement) return;
-    const next = movement; movement = null;
-    if (performance.now() - next.at > 150) return;
-    const dx = Math.trunc(next.dx), dy = Math.trunc(next.dy);
-    if (dx || dy) act(() => client.run('mouse.move_relative', {dx,dy}, undefined,
-      {expiresAt:next.at+150,current:() => next.contact === pad || next.contact === drag}));
+    if (!movement?.samples.length) return;
+    if (performance.now() >= movement.samples.at(-1).at + PAD_LIFETIME_MS) { movement = null; return; }
+    const pending = movement;
+    act(() => client.run('mouse.move_relative', {}, undefined, {
+      current: () => movement === pending && (pending.contact === pad || pending.contact === drag),
+      get expiresAt() { return pending.samples.at(-1).at + PAD_LIFETIME_MS; },
+      takeSample(now, roundTrip) {
+        // Reserve a recent HTTP round trip for the state reply and POST
+        // admission legs. Include only deltas with their original deadline.
+        const headroom = Math.min(roundTrip, PAD_LIFETIME_MS);
+        const {samples} = pending;
+        while (samples.length > 1 && now + headroom >= samples[0].at + PAD_LIFETIME_MS) samples.shift();
+        // A single fresh delta can still arrive sooner than the estimate.
+        if (now >= samples[0].at + PAD_LIFETIME_MS) { samples.length = 0; return null; }
+        const expiresAt = samples[0].at + PAD_LIFETIME_MS;
+        let dx = 0, dy = 0;
+        for (const bucket of samples) { dx += bucket.dx; dy += bucket.dy; }
+        samples.length = 0;
+        const axis = value => Math.max(-127, Math.min(127, Math.trunc(value)));
+        dx = axis(dx); dy = axis(dy);
+        return dx || dy ? {args:{dx,dy}, expiresAt} : null;
+      },
+    }));
   },60);
   setInterval(() => {
     if (!client.session || client.busy || loading || document.hidden) return;
-    act(async () => { if (client.controlled) await client.run('control.renew'); else await client.refresh(); });
-  },900);
+    act(async () => { if (client.controlled) await client.run('control.renew'); else await client.refresh(undefined, true); });
+  },STATE_INTERVAL_MS);
   const suspend = () => { clear(); if (client.session) act(() => client.disconnect(true)); };
   document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); });
   for (const name of ['pagehide','offline','blur']) globalThis.addEventListener(name, suspend);
