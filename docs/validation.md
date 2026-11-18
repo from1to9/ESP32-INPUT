@@ -125,6 +125,20 @@ and one left and one right arrow key tap. All six reached a terminal
 and closed the session. The receiving screen was not observed in these
 instrumented checks.
 
+The Passport release selects a three-move WebSocket window. In eight runs
+on one C3 boot, the production page negotiated either two or three slots.
+Each axis used a 3/2/2/3 order and the same 360-event, 1,080-unit stroke.
+Across the three-slot runs, 23 of 298 writes used the third slot. Horizontal
+successful HID receipt gaps at P95 were 268/311 ms with two slots and
+314/210 ms with three. Vertical P95 was 325/287 ms and 1,024/208 ms,
+respectively. Upward travel was 219/201 and 141/219 units. There was no
+consistent timing advantage. All eight runs kept the lease, matched every
+movement result, sent no movement after lift and confirmed neutral release
+and session closure. A separate 33-second stroke on the same browser input
+implementation crossed a WebSocket renewal, extended the original lease and
+issued no HTTP renewal or result query. These observations measure device
+receipts. The receiving host's cursor travel was not measured.
+
 These bounded observations do not establish sustained Web
 reliability, physical display rendering, every BLE/USB input path, Safari
 behavior, speaker output or long-run radio coexistence. The

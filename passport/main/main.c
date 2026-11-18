@@ -118,7 +118,7 @@ static esp_err_t start_health_server(void)
     config.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_RTCRAM;
     config.max_open_sockets = 3; // HTML, CSS and JS may be fetched concurrently.
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 14; // Health + setup (6) + API/WS (4) + controller assets (3).
+    config.max_uri_handlers = 15; // Health + setup (6) + API/WS (4) + controller assets (4).
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.recv_wait_timeout = 2;
     config.send_wait_timeout = 2;

@@ -34,8 +34,8 @@ It services the engine every 20 ms, with at most four command admissions and
 one report submission per service. Button callbacks only queue timestamped
 events; the main task owns the UI. Queue loss or a button event older than
 250 ms requests an emergency lock. Local input has a maximum three-second
-lease. Network input uses the same engine and shared remote owner, with a
-maximum three-second lease. A first physical takeover gesture suppresses
+lease. The same engine enforces the network lease deadline. The Passport
+browser defaults to 30 seconds, and native network clients to three seconds. A first physical takeover gesture suppresses
 ordinary input; the next complete press may produce local input. While awake,
 long DOWN still locks during takeover. Queued local
 commands also carry `input_revision` so a held direction cannot cross takeover.
@@ -253,16 +253,28 @@ boundary. Lock rejects all remote mutations, including input cancellation
    nonsafety requests are at most 2000 ms ahead. Acquire args contain the
    freshly read `state_sequence`, optionally `lifetime_ms` (up to 3000) and
    `producer: "script"`. Wait for the neutral barrier and active lease before
-   input. Renew requires a new observed `state_sequence`.
+   input. Without an explicit duration a Passport browser receives 30 seconds,
+   and a native client receives three seconds. Renewal of that browser default
+   grants another 30 seconds. Native and explicitly timed acquires renew for
+   three seconds. Renew requires a new observed `state_sequence`. After
+   selecting a motion window with `renew_terminal: true`, the page drains
+   outstanding moves and sends one `control.renew` on that WebSocket. It
+   matches `command_seq`, `next_seq` and `command_key`. A direct `applied`
+   or a pushed `motion_terminal: true` / `applied` after `accepted` must
+   confirm the original active lease and an extended device expiry. The page
+   reads the current state before submitting renewal. On success the confirmed
+   expiry updates the existing lease without a second GET. A keyed stale
+   rejection permits one new renewal after reading the same pin again.
+   Older connections without negotiated renewal use the HTTP command path.
 4. Inspect the result and poll `GET /api/v1/requests/<command_key>` for queued
-   work. An HTTP relative move that finishes in the admission tick returns its
+   work. An HTTP or browser WebSocket relative move that finishes in the admission tick returns its
    retained terminal result directly. A move still in progress returns its
    original acceptance. Both paths use the same key and sequence. `accepted` is admission, and `sent` means NimBLE accepted reports,
    never observed host delivery. Text reports `started_prefix`,
    `completed_pairs` and `uncertain_index`; an interrupted key pair is not
    silently reported as completed. An exact retry preserves the original
    envelope and sequence. Do not issue a new action to resolve an unknown
-   outcome. Results are bounded to sixteen records; eviction is explicitly
+   outcome. Passport retains up to four command records; eviction is explicitly
    `result_unknown`.
 5. For browser WS, obtain `POST /api/v1/ws-ticket` with an empty body and the
    same Bearer/CSRF headers, then open `/api/v1/ws` with subprotocols
@@ -274,11 +286,27 @@ boundary. Lock rejects all remote mutations, including input cancellation
    envelope, `{"v":1,"resource":"/api/v1/state"}`, or
    `{"v":1,"type":"heartbeat"}`. Losing WS releases its input owner while
    preserving independent HTTP read access. A new channel never resumes input.
+
+   A ticket-bound browser with view and input scopes may negotiate a window
+   when capabilities advertise `websocket_motion_window`. The Passport page
+   requests the advertised maximum, normally
+   `{"v":1,"type":"motion_window","motion_window":3}`. Each additional move
+   waits for keyed acceptance of the preceding move. Up to three moves can
+   await terminal results, each with its own sampled deadline.
+   The device returns `command_seq` and `command_key` with each
+   result. An immediate terminal completes that move. An acceptance keeps its
+   slot until a matching terminal with `motion_terminal:true` arrives. Other
+   page actions, including renewal, stay exclusive. Stop during outstanding
+   input closes the session. Lost replies leave the affected moves unconfirmed.
+
+   Set `CONFIG_CONTROL_MOTION_WINDOW_MAX` to 1, 2 or 3 when building for C3.
+   A value of one selects the single-request path. All widths share one HTTPD
+   task and one HID-owner mailbox.
 6. `DELETE /api/v1/sessions/current` closes the session and releases its input.
    Open sessions expire after sixty seconds without authenticated activity or
    thirty minutes absolute. Two slots are available; opening a third returns
    busy and never evicts an active controller. HTTP close alone does not end
-   a logical session; the input lease still expires within three seconds.
+   a logical session. The device enforces the granted lease deadline.
 
 `GET /api/v1/capabilities` identifies `access_policy: "open_network"` and
 resource bounds. `/api/v1/operations?cursor=0&limit=8` pages the common catalog
@@ -291,11 +319,11 @@ and host input behavior still require physical qualification.
 
 ## Board-hosted controller and management
 
-`GET /`, `/controller.css` and `/controller.js` serve the embedded controller
+`GET /`, `/controller.css`, `/controller.js` and `/motion_window.mjs` serve the embedded controller
 on the same observed LAN/AP listener and exact Host/Origin boundary. Assets
 need no session, external fonts, internet connection or PC relay. The server
-reserves fourteen route slots: health, six setup routes, four API/WS routes,
-and three controller assets. Registration failure stops the listener and
+reserves fifteen routes for health, six setup routes, four API/WS routes
+and four controller assets. Registration failure stops the listener and
 keeps the existing explicit unavailable state.
 
 The browser uses the open bearer session and the common HTTP command/result
@@ -313,15 +341,24 @@ Movement samples expire after 150 ms locally and use protocol deadlines of
 at most 200 ms. The touchpad groups deltas from one contact in 8 ms buckets.
 A contact that starts on the pad continues across the page with the same
 pointer ID until lift or cancellation, including after pointer capture loss.
-The browser combines signed deltas when the single command lane is free and
-at least 30 ms has elapsed since the previous movement POST. It keeps the
+The browser combines signed deltas when the channel can accept a move and
+at least 30 ms has elapsed since the previous movement submission. It keeps the
 oldest included delta's expiry. Recent same-boot state responses supply a
 conservative device clock lower bound. Each envelope retains the pinned lease
 and target. A confirmed sent sample can proceed without another state GET;
-ongoing movement refreshes state at least every 900 ms before submission. A confirmed expired move or scroll is discarded.
-For touchpad moves the browser opts in with `X-Passport-Expired-State: 1`.
+ongoing negotiated movement can reuse a fresh GET for up to 1500 ms.
+The page uses the compact HTTP `/api/v1/state?view=protocol` when capabilities
+advertise `protocol_state_view`. An admission timestamp or repeated keyed expiry
+can reserve up to 120 ms when selecting still-fresh samples. A confirmed expired move or scroll is discarded.
+When the device advertises WebSocket support, the page opens its ticketed channel
+at login and sends touchpad movement there. Negotiated windows match
+receipts as described above. The single-request path uses keyed HTTP lookup
+for pending replies. Losing the channel stops local
+control and requires explicit reconnection. Devices without WebSocket support use HTTP.
+For HTTP touchpad moves the browser opts in with `X-Passport-Expired-State: 1`.
 A new, sequence-consuming HTTP 400 `rejected/expired` may include the current
 `protocol` object from the same authenticated session's protocol state view.
+A fresh browser WebSocket expiry carries the same snapshot when available.
 The command key, sequence and rejection keep their normal meanings. Exact
 retries and result lookups return the retained command result alone. The
 browser validates the receipt and checks the snapshot's boot, lease, target,
@@ -329,13 +366,17 @@ epoch, permission, readiness and release state before accepting fresh input.
 The snapshot's 900 ms reuse window starts at POST submission. A missing
 snapshot, a reply outside that window, or a recent same-boot clock lower
 bound at or beyond an otherwise active lease's expiry requires a separate
-state read. Invalid state stops input. The expired displacement is discarded. One browser command runs at a time, with no action replay.
+state read. Invalid state stops input. The expired displacement is discarded. The browser never replays it.
 Drag holds use a 1500 ms device deadman refreshed while the contact remains
 active. Release ends the drag; cancellation while a command is in flight,
 Stop during busy/unknown work, blur, page hide and offline close the session
 best effort and discard local samples. Idle Stop releases control. The
-three-second input lease remains the final boundary when the browser cannot
-reach the board. A target/readiness change or lease loss requires explicit
+device lease expires at its granted deadline when the browser cannot reach
+the board. The page reads the observed device clock and lease expiry, renewing
+the default 30-second browser grant with about five seconds remaining.
+With a three-second grant the page renews every 900 ms when the input
+channel is free. It reserves 900 ms for negotiated touchpad moves and
+1800 ms for other input. A target/readiness change or lease loss requires explicit
 control acquisition; uncertain replies require explicit reconnect and target
 inspection. These are source and host-tested boundaries, not measured network
 or host delivery guarantees.
@@ -343,8 +384,9 @@ or host delivery guarantees.
 Management uses the same v1 envelope, `management_generation` from state,
 and `resource_revision` from the relevant list. No input lease is required.
 The protocol remains the owner of duplicate requests and retained results.
-Passport retains four protocol results, allows two active requests, and uses
-two remote-input jobs with four recent owner results. `/api/v1/capabilities`
+Passport retains four protocol results and four recent owner results. The
+default build allows three active requests and three remote-input jobs.
+Builds with a window of one or two reserve two of each. `/api/v1/capabilities`
 reports the result capacity. Exhaustion and eviction preserve the existing
 busy and result-unknown outcomes; clients must consume results promptly.
 

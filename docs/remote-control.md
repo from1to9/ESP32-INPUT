@@ -66,7 +66,8 @@ device details and does not wait for the coordinator's device-detail read.
   `websocket_motion_window_max` is the device's maximum. The wire protocol
   accepts requested widths from 2 to 5, up to the advertised maximum.
   On Mosaico S31, `CONFIG_CONTROL_MOTION_WINDOW_MAX` ranges from 1 to 5
-  and defaults to 3. An omitted request width selects two.
+  and defaults to 3. Passport C3 supports 1 to 3 and also defaults to 3.
+  An omitted request width selects two.
   The reply includes the exact selected integer width. Invalid or unsupported
   requests are rejected. A configured maximum of one uses the legacy
   channel. In a normal window, send further fresh relative moves only after

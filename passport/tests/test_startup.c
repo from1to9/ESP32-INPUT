@@ -55,7 +55,7 @@ esp_err_t httpd_start(httpd_handle_t *server, const httpd_config_t *config)
     ++http_start_calls;
     assert(config->stack_size == 4096);
     assert(config->task_caps == (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_RTCRAM));
-    assert(config->max_uri_handlers == 14 && config->recv_wait_timeout == 2 && config->uri_match_fn==httpd_uri_match_wildcard);
+    assert(config->max_uri_handlers == 15 && config->recv_wait_timeout == 2 && config->uri_match_fn==httpd_uri_match_wildcard);
     assert(config->max_open_sockets == 3 && config->lru_purge_enable);
     if (http_start_result != ESP_OK) return http_start_result;
     *server = &label;

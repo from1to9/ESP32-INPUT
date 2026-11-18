@@ -12,8 +12,8 @@ Mosaico protocol initializer retains enrolled TLS and its existing capacities.
 The implemented subset and internal API are documented in [API.md](API.md).
 The board-hosted Web controller, narrow BLE management, Wi-Fi scans and
 HTTP display-label editing are integrated. Bond IDs are device-local, not
-cross-device identities. This is a source/host/build candidate; device and operating-system compatibility are
-not qualified.
+cross-device identities. The [device validation record](../docs/validation.md)
+describes the physical Passport and browser checks for this release.
 
 ## Build and inspect
 
@@ -208,8 +208,9 @@ Tab, Backspace, and four arrows, each as a down/up tap. A limited list scrolls
 by focus. The connection identity and readiness appear before input actions.
 The firmware requires a saved bond, encryption, both report subscriptions,
 and completion of the shared engine's two-report neutral barrier. Input is
-shared between local and network owners with a three-second maximum lease
-and no automatic input replay. A physical press takes over an active network
+shared between local and network owners. The interactive browser requests the
+Passport default 30-second lease and checks its device deadline before renewing.
+Native network clients keep their three-second maximum. Input is never replayed. A physical press takes over an active network
 controller and consumes ordinary input from that gesture; release and press again for local input.
 
 The NimBLE task owns the engine and all BLE changes. The BSP callback queues
@@ -493,8 +494,11 @@ shows `Network control: open`, the active controller, IP and Lock. Lock
 rejects remote mutations while status and local recovery remain available.
 No HTTP downgrade is enabled on Mosaico.
 
-Passport uses two sessions, four retained protocol results, two active requests,
-two remote jobs, four recent owner results, a 2048-byte input frame and a single
+Passport v0.1.0 defaults to three outstanding browser moves. Each additional
+move waits for admission of the previous one. Select a window from one to
+three with `CONFIG_CONTROL_MOTION_WINDOW_MAX` for a custom C3 build.
+Passport uses two sessions, four retained protocol results, three active requests
+and three remote jobs in the default build, four recent owner results, a 2048-byte input frame and a single
 transport mailbox. `/api/v1/capabilities` reports the result capacity. Old results
 can become unknown sooner; concurrent commands retain the existing busy response
 when capacity is exhausted. Argument, response and JSON limits are unchanged.

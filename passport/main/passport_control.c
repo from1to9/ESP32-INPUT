@@ -11,8 +11,12 @@
 #include "esp_log.h"
 #endif
 
+_Static_assert(CP_MOTION_WINDOW_CONFIG_MAX <= CP_MAX_ACTIVE_REQUESTS &&
+               CP_MOTION_WINDOW_CONFIG_MAX <= APP_REMOTE_INPUT_JOBS,
+               "Passport motion window exceeds the configured request or HID job capacity");
+
 static cp_context_t *protocol;
-// Written only by synchronous dispatch and consumed by that same owner's HTTP call.
+// Written only by synchronous dispatch and consumed by that same owner's transport call.
 static uint64_t new_move_key;
 static app_remote_input_t *remote;
 static hid_engine_t *engine;
@@ -149,6 +153,8 @@ bool passport_control_init(hid_engine_t *input, cp_random_fn random)
         free(p); free(r); protocol=NULL; remote=NULL; engine=NULL; return false;
     }
     cp_set_transport_capabilities(protocol,true,false);
+    cp_set_motion_window_max(protocol,CP_MOTION_WINDOW_CONFIG_MAX);
+    cp_set_motion_window_ordered(protocol,true);
     return true;
 }
 void passport_control_deinit(void)
@@ -213,22 +219,44 @@ uint64_t passport_control_execute(passport_control_request_t *request, uint64_t 
     switch (request->kind) {
     case PC_HTTP: request->error=cp_http(protocol,request->method,request->resource,&sec,request->body,request->length,now,&request->response); break;
     case PC_WS_OPEN: request->error=cp_transport_upgrade(protocol,&sec,request->ticket[0] ? request->ticket : NULL,now,&request->identity); break;
-    case PC_WS_FRAME: request->error=cp_transport_frame(protocol,&request->identity,request->body,request->length,now,&request->response); break;
+    case PC_WS_FRAME: request->error=cp_transport_frame_motion(protocol,&request->identity,request->body,request->length,now,
+        &request->response,&request->motion); break;
+    case PC_WS_TERMINAL: request->error=cp_transport_motion_result(protocol,&request->identity,
+        request->motion.accepted_key,now,&request->response); break;
     case PC_WS_HEARTBEAT: request->error=cp_transport_heartbeat(protocol,&request->identity,now); break;
     }
     passport_control_service(now);
-    uint64_t key=request->kind==PC_HTTP && request->error==CP_OK && request->response.status==202 ? new_move_key : 0;
+    bool inline_move=request->kind==PC_HTTP || (request->kind==PC_WS_FRAME && request->identity.browser &&
+        (request->motion.mode==CP_TERMINAL_DISABLED || request->motion.ordered));
+    uint64_t key=inline_move && request->error==CP_OK && request->response.status==202 ? new_move_key : 0;
     new_move_key=0;
     return key;
+}
+bool passport_control_terminal_ready(const cp_identity_t *identity, uint64_t key, uint64_t time)
+{
+    // Missing records also wake the HTTP task so the channel reports loss.
+    return cp_transport_motion_result(protocol,identity,key,time,NULL)!=CP_BUSY;
 }
 void passport_control_finish_move(passport_control_request_t *request, uint64_t key, uint64_t time)
 {
     // A retry or neutral cleanup can still be pending after one HID step.
     // Leave the original acceptance intact until the record is terminal.
     if (!cp_result_is_terminal(protocol,key)) return;
-    strcpy(request->method,"GET");
+    if (request->kind==PC_WS_FRAME && request->motion.mode==CP_TERMINAL_MOVE_WINDOW) {
+        request->error=cp_transport_motion_inline_result(protocol,&request->identity,key,time,&request->response);
+        request->motion.accepted_key=0;
+        if (request->error!=CP_OK) request->response.status=0;
+        return;
+    }
     snprintf(request->resource,sizeof(request->resource),"/api/v1/requests/%" PRIu64,key);
-    request->length=0;
+    if (request->kind==PC_WS_FRAME) {
+        // Read under the authenticated channel identity that submitted the move.
+        request->length=(size_t)snprintf(request->body,sizeof(request->body),
+            "{\"v\":1,\"resource\":\"%s\"}",request->resource);
+    } else {
+        strcpy(request->method,"GET");
+        request->length=0;
+    }
     (void)passport_control_execute(request,time);
 }
 void passport_control_close(const cp_identity_t *identity, uint64_t time)
@@ -241,6 +269,8 @@ void passport_control_local(uint64_t time)
     now=time; observed.local_busy=true; cp_physical_override(protocol,engine->state.locked,now);
     app_remote_input_revoke(remote,CP_SAFETY_LOCAL_OVERRIDE,NULL,now); passport_control_service(now);
 }
+bool passport_control_expire_movement(uint64_t time)
+{ return app_remote_input_expire_movement_report(remote,time); }
 bool passport_control_report_authorized(uint64_t time)
 { return engine && (engine->state.owner!=INPUT_REMOTE || app_remote_input_report_authorized(remote,time)); }
 void passport_control_view(passport_control_view_t *out)

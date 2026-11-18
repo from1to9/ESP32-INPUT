@@ -37,6 +37,9 @@ typedef struct {
 } record_t;
 typedef struct {
     bool pending, active;
+#ifdef CP_PASSPORT_BROWSER_LEASE_MS
+    bool browser_default;
+#endif
     uint8_t session, id[16];
     uint64_t session_generation, expires, epoch, acquire_key;
     char producer[16];
@@ -1307,6 +1310,12 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
                 cj_integer(d, cj_get(d, args, "lifetime_ms"), &requested)) {
                 lifetime = (uint64_t)requested;
             }
+#ifdef CP_PASSPORT_BROWSER_LEASE_MS
+            bool browser_default = o->id == CP_OP_CONTROL_ACQUIRE ?
+                s->browser && c->policy == CP_POLICY_PASSPORT_OPEN_HTTP && cj_get(d, args, "lifetime_ms") == CJ_NONE :
+                c->lease.browser_default;
+            if (browser_default) lifetime = CP_PASSPORT_BROWSER_LEASE_MS;
+#endif
             cmd->lease_expires_ms = c->now + lifetime;
             r->lease_expiry = cmd->lease_expires_ms;
             if (o->id == CP_OP_CONTROL_ACQUIRE) {
@@ -1316,6 +1325,9 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
                                      .expires = cmd->lease_expires_ms,
                                      .epoch = cmd->input_epoch,
                                      .acquire_key = r->key};
+#ifdef CP_PASSPORT_BROWSER_LEASE_MS
+                c->lease.browser_default = browser_default;
+#endif
                 const char *producer = cj_string(d, cj_get(d, args, "producer"));
                 snprintf(c->lease.producer, sizeof(c->lease.producer), "%s",
                          producer ? producer : "script");
@@ -1722,6 +1734,9 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
     if (c->policy == CP_POLICY_PASSPORT_OPEN_HTTP) {
         const char *exact[] = {"/api/v1/state", "/api/v1/capabilities", "/api/v1/wifi/profiles", "/api/v1/bluetooth/peers"};
         bool allowed = false;
+#ifdef CP_PASSPORT_BROWSER_LEASE_MS
+        allowed = !strcmp(resource, "/api/v1/state?view=protocol");
+#endif
         for (unsigned i = 0; i < sizeof(exact) / sizeof(exact[0]); ++i) allowed |= !strcmp(resource, exact[i]);
         const char *prefix[] = {"/api/v1/operations", "/api/v1/requests/", "/api/v1/wifi/scans/", "/api/v1/display-names"};
         for (unsigned i = 0; i < sizeof(prefix) / sizeof(prefix[0]); ++i) {
@@ -1770,6 +1785,9 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
         if (c->policy == CP_POLICY_PASSPORT_OPEN_HTTP) {
             out->length = (size_t)snprintf(out->body, sizeof(out->body),
                 "{\"api_version\":1,\"catalog_sha256\":\"%s\",\"access_policy\":\"open_network\","
+#ifdef CP_PASSPORT_BROWSER_LEASE_MS
+                "\"protocol_state_view\":true,"
+#endif
                 "\"enrollment\":\"none\",\"command_bytes\":%u,\"args_bytes\":%u,\"authenticated_clients\":%u,"
                 "\"results\":%u,\"websocket\":%s,\"binary_download\":false,\"operations\":%u%s%s%s}",
                 cp_catalog_sha256(), CP_MAX_FRAME_BYTES, CP_MAX_ARGS_BYTES, CP_MAX_SESSIONS,
@@ -2471,7 +2489,8 @@ cp_error_t cp_transport_frame_motion(cp_context_t *c, const cp_identity_t *who, 
             error = CP_BUSY;
         } else if (op != CJ_NONE) {
             error = commands(c, (unsigned)session, frame, length, out,
-                             motion_allowed && motion->mode != CP_TERMINAL_DISABLED ? motion : NULL, false);
+                             motion_allowed && motion->mode != CP_TERMINAL_DISABLED ? motion : NULL,
+                             c->policy == CP_POLICY_PASSPORT_OPEN_HTTP && who->browser);
             if (motion_allowed && motion->mode >= CP_TERMINAL_MOVE_AND_RENEW && motion->accepted_key) {
                 size_t used = out->length ? out->length - 1U : 0U;
                 if (used && append(out->body, sizeof(out->body), &used,

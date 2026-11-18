@@ -52,6 +52,7 @@ control; it remains a serial protocol, not USB HID. Source, host, browser and
 ESP32-C3 builds pass, and bounded tests on one Passport cover BLE HID input,
 USB control, AP/DHCP and unattended LAN health. Sustained Web reliability and
 broader phone, tablet and computer compatibility remain to be qualified.
+[Download Passport ESP32-C3 v0.1.0](https://github.com/from1to9/ESP32-INPUT/releases/tag/passport-v0.1.0) ·
 [Passport setup, build, and validation](passport/README.md) ·
 [Passport API](passport/API.md) ·
 [Passport USB control](docs/passport-usb-control.md) ·

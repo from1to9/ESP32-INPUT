@@ -11,15 +11,16 @@ const root=fileURLToPath(new URL('../../..',import.meta.url));
 const out=process.env.PASSPORT_CONTROL_OUTPUT || path.join(root,'.agent/local/passport-web/browser');
 await mkdir(out,{recursive:true});
 const assets=new Map(await Promise.all(['html','css','js'].map(async ext=>[ext,await readFile(path.join(root,`passport/main/web/controller.${ext}`))])));
+const motionModule=await readFile(path.join(root,"components/control_protocol/web/motion_window.mjs"));
 const catalog=JSON.parse(await readFile(path.join(root,'api/control-v1.json'))).operations;
 const supported=new Set(['control.acquire','control.renew','control.release','mouse.move_relative','mouse.click','mouse.scroll','mouse.drag.begin','mouse.drag.refresh','mouse.drag.end','keyboard.text.enqueue','keyboard.key_tap','keyboard.shortcut','mode.select','input.release_all','input.cancel','bluetooth.pairing.open','bluetooth.pairing.close','bluetooth.pairing.cancel_handshake','bluetooth.target.request','bluetooth.disconnect','wifi.scan.start','wifi.scan.cancel','display_name.list','display_name.set','display_name.clear']);
 const session={session_token:'a'.repeat(64),session_id:'b'.repeat(32),boot_id:'c'.repeat(32),request_prefix:'d'.repeat(16),csrf:'e'.repeat(32),next_seq:1,scopes:['view','input.control','connections.manage','wifi.configure']};
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-let afterMode, beginReply, touchTiming;
+let afterMode, beginReply, touchTiming, tickingLease;
 let state,commands,results,seq,closed,delayState,delayRenew,failSession,failRenew,failCommand,label,locked,pendingManagement;
 const host='10:20:30:40:50:60/0', bond='01'.padEnd(32,'0'), ap='12'.repeat(32);
 const hx=s=>Buffer.from(s).toString('hex');
-function reset(){afterMode=beginReply=touchTiming=null;state={boot_id:session.boot_id,now_ms:'10000',epoch:'2',transport_generation:'3',state_sequence:'5',ui_revision:'2',management_generation:'1',target_id:host,mode:'mouse',locked:false,release_pending:false,input_ready:true,remote_allowed:true,remote_owner:false,lease_active:false,lease_id:'f'.repeat(32),lease_expires_ms:'13000'};commands=[];results=new Map();seq=1;closed=0;delayState=delayRenew=0;failSession=failRenew=failCommand=false;label='Studio laptop';locked=false;pendingManagement=false;}
+function reset(){tickingLease=false;afterMode=beginReply=touchTiming=null;state={boot_id:session.boot_id,now_ms:'10000',epoch:'2',transport_generation:'3',state_sequence:'5',ui_revision:'2',management_generation:'1',target_id:host,mode:'mouse',locked:false,release_pending:false,input_ready:true,remote_allowed:true,remote_owner:false,lease_active:false,lease_id:'f'.repeat(32),lease_expires_ms:'13000'};commands=[];results=new Map();seq=1;closed=0;delayState=delayRenew=0;failSession=failRenew=failCommand=false;label='Studio laptop';locked=false;pendingManagement=false;}
 reset();
 const server=http.createServer(async(req,res)=>{
   res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
@@ -35,10 +36,8 @@ const server=http.createServer(async(req,res)=>{
     if(url.pathname==='/api/v1/state'){
       if(delayState)await pause(delayState);
       const timing=touchTiming, currentState=state;
-      if(timing){
-        currentState.now_ms=String(Math.floor(performance.now()));
-        timing.trace.push('state');
-      }
+      if(timing || tickingLease) currentState.now_ms=String(Math.floor(performance.now()));
+      if(timing) timing.trace.push('state');
       const protocol={...currentState,locked};
       if(timing?.stateReturnMs)await pause(timing.stateReturnMs);
       if(timing?.path){
@@ -74,7 +73,7 @@ const server=http.createServer(async(req,res)=>{
         assert.equal(c.epoch,state.epoch);assert.equal(c.lease_id,state.lease_id);
         assert(!state.release_pending && state.lease_active);
       }
-      if(touchTiming && ['control.acquire','control.renew'].includes(c.op)){
+      if((touchTiming || tickingLease) && ['control.acquire','control.renew'].includes(c.op)){
         state.lease_expires_ms=String(Math.floor(performance.now())+3000);
       }
       if(touchTiming && c.op==='mouse.move_relative'){
@@ -117,6 +116,9 @@ const server=http.createServer(async(req,res)=>{
     if(url.pathname==='/api/v1/display-names'){send({known:true,revision:'8589934595',count:1,next_cursor:0,labels:label?[{kind:'hid_bond',id:bond,label}]:[]});return;}
     send({error:'not_found'},404);return;
   }
+  if(url.pathname==='/motion_window.mjs'){
+    res.writeHead(200,{'Content-Type':'text/javascript'});res.end(motionModule);return;
+  }
   const ext=url.pathname==='/'?'html':url.pathname==='/controller.css'?'css':url.pathname==='/controller.js'?'js':null;
   if(!ext){res.writeHead(404);res.end();return;}res.setHeader('Content-Type',{html:'text/html',css:'text/css',js:'text/javascript'}[ext]);res.end(assets.get(ext));
 });
@@ -148,6 +150,334 @@ async function padTouch(context,page){
   const cdp=await context.newCDPSession(page);
   return (type,dx=0,dy=0)=>cdp.send('Input.dispatchTouchEvent',{type,
     touchPoints:type==='touchEnd'?[]:[{x:x+dx,y:y+dy,id:1}]});
+}
+// Exercise the production controller through a routed browser WebSocket. The
+// native frame/owner fixture covers the device side of this same exchange.
+async function socketTouch(ending){
+  reset();
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  const frames=[],lookups=[];
+  const originalSession={...session};
+  const late=ending==='late-sent' || ending==='session-expired';
+  let tickets=0,ws,lateKey,finishLookup;
+  try{
+    await context.route('**/api/v1/capabilities',route=>route.fulfill({json:{access_policy:'open_network',websocket:true}}));
+    await context.route('**/api/v1/ws-ticket',route=>{
+      const req=route.request();
+      assert.equal(req.method(),'POST');assert.equal(req.headers().authorization,'Bearer '+session.session_token);
+      assert.equal(req.headers()['x-csrf-token'],session.csrf);
+      tickets++;return route.fulfill({json:{ticket:String(tickets).repeat(64)}});
+    });
+    if(late)await context.route('**/api/v1/requests/*',async route=>{
+      if(!lateKey || !route.request().url().endsWith('/'+lateKey))return route.continue();
+      // The owner already submitted this move. Its keyed HTTP read arrives
+      // after the input socket closed, so both facts must remain visible.
+      ws.close({code:1001,reason:'test disconnect during lookup'});
+      await new Promise(resolve=>{finishLookup=resolve;});
+      await route.fulfill({json:results.get(lateKey)});
+    });
+    await context.routeWebSocket('**/api/v1/ws',channel=>{
+      assert(!ws);ws=channel;
+      ws.onMessage(data=>{
+        const c=JSON.parse(data);
+        assert.equal(c.op,'mouse.move_relative');assert.equal(c.seq,seq++);
+        assert.equal(c.session_id,session.session_id);assert.equal(c.lease_id,state.lease_id);
+        assert.equal(c.target_id,state.target_id);assert.equal(c.epoch,state.epoch);
+        frames.push(c);
+        const receipt={state:'sent',error:'ok',command_key:String(1000+c.seq),next_seq:seq};
+        if(frames.length===1){
+          results.set(receipt.command_key,receipt);
+          ws.send(JSON.stringify({...receipt,state:'accepted'}));
+        }else if(frames.length===2){
+          ws.send(JSON.stringify({...receipt,state:'rejected',error:'expired',protocol:{...state,locked}}));
+        }else if(frames.length===3){
+          ws.send(JSON.stringify(receipt));
+        }else if(late){
+          lateKey=receipt.command_key;
+          results.set(lateKey,receipt);ws.send(JSON.stringify({...receipt,state:'accepted'}));
+        }else if(ending==='loss'){
+          ws.close({code:1001,reason:'test disconnect'});
+        }else if(ending==='wrong-sequence'){
+          ws.send(JSON.stringify({...receipt,next_seq:c.seq}));
+        }
+        // In the Stop case the fourth frame remains unanswered.
+      });
+    });
+    const page=await open(context);
+    // Record lookup requests before connecting so the first keyed lookup is visible.
+    page.on('request',req=>{if(req.url().includes('/api/v1/requests/'))lookups.push(req.url().split('/').at(-1));});
+    await connect(page);await acquire(page);assert.equal(tickets,1);
+    const touch=await padTouch(context,page);
+    await touch('touchStart');
+    for(const [i,x] of [8,16,24,32].entries()){
+      await touch('touchMove',x);
+      const until=performance.now()+3000;
+      while(frames.length<=i && performance.now()<until)await pause(5);
+      assert.equal(frames.length,i+1);
+      if(i<3)await pause(70);
+    }
+    assert(lookups.includes(String(1000+frames[0].seq)));
+    assert(!lookups.includes(String(1000+frames[2].seq)));
+    if(ending==='stop'){
+      const deleted=page.waitForResponse(r=>r.request().method()==='DELETE');
+      await page.locator('#stop').click();assert.equal((await deleted).status(),200);
+    }
+    await page.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+    if(late){
+      finishLookup();
+      await page.waitForFunction(()=>document.getElementById('result').textContent.includes('Sent to the HID transport'));
+      assert.match(await page.locator('#connection').textContent(),/input channel disconnected/i);
+      assert.match(await page.locator('#readiness').textContent(),/Disconnect, then Connect/);
+      assert(await page.locator('#acquire').isDisabled());
+    }
+    await touch('touchMove',44);await touch('touchEnd');await pause(100);
+    assert.equal(frames.length,4);assert.equal(tickets,1);
+    assert(!commands.some(c=>c.op==='mouse.move_relative'));
+    if(late){
+      if(ending==='session-expired'){
+        await page.route('**/api/v1/state',route=>route.fulfill({status:401,json:{error:'unauthenticated'}}),{times:1});
+      }else await page.locator('#disconnect').click();
+      await page.waitForFunction(()=>!document.getElementById('connect').hidden);
+      assert(!/Disconnect, then Connect/.test(await page.locator('#readiness').textContent()));
+      if(ending==='session-expired'){
+        session.boot_id=state.boot_id='1'.repeat(32);session.session_id='2'.repeat(32);
+        session.session_token='3'.repeat(64);seq=1;state.lease_active=false;
+      }
+      ws=null;await connect(page);await acquire(page);
+      assert.match(await page.locator('#connection').textContent(),/is controlling/);
+      assert.equal(frames.length,4);assert.equal(tickets,2);
+      const ended=page.waitForResponse(r=>r.request().method()==='DELETE');
+      await page.locator('#disconnect').click();assert.equal((await ended).status(),200);
+    }
+    console.log('PASS WebSocket touch',ending,'single submission, keyed pending, expired pin, direct sent');
+  }finally{await context.close();Object.assign(session,originalSession);}
+}
+async function socketRenew(outcome){
+  reset();
+  state.lease_expires_ms=outcome==='short-grant'?'13000':'40000';
+  const context=await browser.newContext();
+  const frames=[],lookups=[],timeline=[];
+  let ws,negotiated=false,resolveRenew;
+  const written=new Promise(resolve=>{resolveRenew=resolve;});
+  try{
+    await context.route('**/api/v1/capabilities',r=>r.fulfill({json:{access_policy:'open_network',websocket:true,
+      protocol_state_view:true,websocket_motion_window:true,websocket_motion_window_max:2,websocket_motion_ordered:true}}));
+    await context.route('**/api/v1/ws-ticket',r=>r.fulfill({json:{ticket:'1'.repeat(64)}}));
+    await context.routeWebSocket('**/api/v1/ws',channel=>{
+      ws=channel;
+      channel.onMessage(data=>{
+        const frame=JSON.parse(data);
+        if(!negotiated){
+          assert.deepEqual(frame,{v:1,type:'motion_window',motion_window:2});
+          negotiated=true;
+          channel.send(JSON.stringify({motion_terminal:true,renew_terminal:true,motion_window:2}));
+          return;
+        }
+        assert.equal(frame.op,'control.renew');assert.equal(frame.seq,seq++);
+        assert.equal(frame.lease_id,state.lease_id);assert.equal(frame.target_id,state.target_id);
+        assert.equal(frame.args.state_sequence,state.state_sequence);
+        frames.push(frame);timeline.push('renew');resolveRenew();
+        if(outcome==='stale' && frames.length===1){
+          ws.send(JSON.stringify({command_seq:frame.seq,next_seq:seq,command_key:'711',state:'rejected',error:'stale'}));
+        }
+      });
+    });
+    const page=await open(context);
+    page.on('request',r=>{
+      if(r.url().includes('/api/v1/requests/'))lookups.push(r.url());
+      if(r.url().endsWith('/state?view=protocol'))timeline.push('state');
+      if(r.url().endsWith('/commands'))timeline.push(r.postDataJSON().op);
+    });
+    await connect(page);await acquire(page);
+    assert(!Object.hasOwn(commands[0].args,'lifetime_ms'));
+    if(outcome==='short-grant'){
+      // The short grant is authoritative even when acquire omitted a duration.
+      await Promise.race([written,pause(2000).then(()=>{throw Error('Missing idle renewal on a short grant');})]);
+      assert.deepEqual(timeline.slice(-2),['state','renew']);
+      const frame=frames[0];
+      ws.send(JSON.stringify({command_seq:frame.seq,next_seq:seq,command_key:'712',state:'applied',error:'ok',
+        lease_active:true,lease_id:state.lease_id,lease_expires_ms:'14000'}));
+      assert.equal(frames.length,1);assert(!commands.some(c=>c.op==='control.renew'));
+      console.log('PASS observed 3 s grant uses the free-lane S31 renewal timer');
+      return;
+    }
+    const click=page.locator('[data-click=left]');
+    state.now_ms='33500'; // 6500 ms remain on the real grant reported by the fixture.
+    const first=page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON().op==='mouse.click');
+    await click.click();await first;
+    await page.waitForFunction(()=>!document.querySelector('[data-click=left]').disabled);
+    assert.equal(frames.length,0);
+    state.now_ms='35100'; // 4900 ms remain. Wait for the initiating click to read it.
+    await click.click();await Promise.race([written,pause(4000).then(()=>{throw Error('Missing WS renewal');})]);
+    if(outcome==='stale'){
+      const until=performance.now()+2000;
+      while(frames.length<2 && performance.now()<until)await pause(5);
+      assert.equal(frames.length,2);assert.equal(frames[1].seq,frames[0].seq+1);
+    }
+    assert.deepEqual(timeline.slice(-2),['state','renew']);
+    const receipt={command_seq:frames.at(-1).seq,next_seq:seq,command_key:'712',error:'ok'};
+    const clicks=()=>commands.filter(c=>c.op==='mouse.click').length;
+    if(outcome!=='direct'){
+      ws.send(JSON.stringify({...receipt,state:'accepted',lease_active:true,lease_id:state.lease_id,lease_expires_ms:'40000'}));
+      await pause(50);assert.equal(clicks(),1);
+    }
+    if(outcome==='loss'){
+      ws.close({code:1001,reason:'lost accepted renewal'});
+      await page.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+      assert.equal(clicks(),1);
+      results.set(receipt.command_key,{...receipt,state:'applied'});
+      const checked=page.waitForResponse(r=>r.url().endsWith('/requests/712'));
+      await page.locator('#result-check').click();await checked;
+      await page.waitForFunction(()=>document.getElementById('result').textContent.includes('Device applied'));
+      assert(await page.locator('#mouse-controls').evaluate(el=>el.disabled));
+      assert(await click.isDisabled());
+    }else if(['wrong-key','wrong-sequence','old-expiry'].includes(outcome)){
+      ws.send(JSON.stringify({...receipt,state:'applied',motion_terminal:true,lease_active:true,lease_id:state.lease_id,
+        lease_expires_ms:outcome==='old-expiry'?'40000':'65100',
+        ...(outcome==='wrong-key'?{command_key:'713'}:outcome==='wrong-sequence'?{command_seq:receipt.command_seq+1}:{})}));
+      await page.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+      assert.equal(clicks(),1);
+    }else{
+      state.lease_expires_ms='65100';
+      const next=page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON().op==='mouse.click');
+      ws.send(JSON.stringify({...receipt,state:'applied',lease_active:true,lease_id:state.lease_id,
+        lease_expires_ms:state.lease_expires_ms,...(outcome==='direct'?{}:{motion_terminal:true})}));
+      await next;assert.equal(clicks(),2);
+      assert.equal(timeline[timeline.lastIndexOf('renew')+1],'mouse.click');
+    }
+    assert.equal(frames.length,outcome==='stale'?2:1);
+    assert(!commands.some(c=>c.op==='control.renew'));assert.equal(lookups.length,outcome==='loss'?1:0);
+    console.log('PASS negotiated WS renewal',outcome,'30 s grant, exclusive keyed completion, no HTTP renewal or result poll');
+  }finally{await context.close();}
+}
+async function windowTouch(ending){
+  reset();state.lease_expires_ms=String(Number(state.now_ms)+30000);
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  const moves=[],lookups=[];
+  let ws,negotiated=false;
+  try{
+    await context.route('**/api/v1/capabilities',r=>r.fulfill({json:{access_policy:'open_network',websocket:true,
+      websocket_motion_window:true,websocket_motion_window_max:2,websocket_motion_ordered:true}}));
+    await context.route('**/api/v1/ws-ticket',r=>r.fulfill({json:{ticket:'1'.repeat(64)}}));
+    await context.routeWebSocket('**/api/v1/ws',channel=>{
+      ws=channel;
+      channel.onMessage(data=>{
+        const frame=JSON.parse(data);
+        if(!negotiated){
+          assert.deepEqual(frame,{v:1,type:'motion_window',motion_window:2});
+          negotiated=true;
+          channel.send(JSON.stringify({motion_terminal:true,renew_terminal:true,motion_window:2}));
+          return;
+        }
+        assert.equal(frame.op,'mouse.move_relative');assert.equal(frame.seq,seq++);
+        assert.equal(frame.lease_id,state.lease_id);assert.equal(frame.target_id,state.target_id);
+        moves.push(frame);
+      });
+    });
+    const page=await open(context);
+    page.on('request',req=>{if(req.url().includes('/api/v1/requests/'))lookups.push(req.url().split('/').at(-1));});
+    await connect(page);await acquire(page);
+    const touch=await padTouch(context,page);
+    if(ending==='stationary-lock'){
+      await touch('touchStart');
+      locked=true;state.lease_active=false;
+      await page.waitForFunction(()=>document.getElementById('connection').textContent==='Passport is locked',null,{timeout:2200});
+      assert(await page.locator('[data-click=left]').isDisabled());
+      await touch('touchMove',12);await touch('touchEnd');
+      assert.equal(moves.length,0);assert.deepEqual(commands.map(c=>c.op),['control.acquire']);
+      console.log('PASS stationary touch reflects local lock without movement or renewal');
+      return;
+    }
+    const waitMoves=async count=>{
+      const until=performance.now()+700;
+      while(moves.length<count && performance.now()<until)await pause(5);
+      assert.equal(moves.length,count);
+    };
+    const receipt=(i,extra={})=>({state:'sent',error:'ok',command_seq:moves[i].seq,
+      next_seq:moves[i].seq+1,command_key:String(1000+moves[i].seq),...extra});
+    const reply=(i,extra)=>ws.send(JSON.stringify(receipt(i,extra)));
+    await touch('touchStart');await touch('touchMove',10);await waitMoves(1);
+    await touch('touchMove',2);await pause(38);assert.equal(moves.length,1);
+    reply(0,{state:'accepted',now_ms:state.now_ms});
+    await waitMoves(2);
+    assert.deepEqual(moves.map(m=>m.args.dx),[10,-8]);
+    assert(BigInt(moves[1].deadline_ms)>=BigInt(moves[0].deadline_ms));
+    await touch('touchMove',15);await pause(42);assert.equal(moves.length,2);
+    if(ending==='reverse'){
+      reply(1,{state:'rejected',error:'expired',protocol:{...state,locked:false}});
+      await waitMoves(3);
+      assert.equal(moves[2].args.dx,13);
+      reply(2,{state:'accepted'});reply(2,{motion_terminal:true});
+      reply(0,{next_seq:seq,motion_terminal:true});
+      await touch('touchEnd');
+      await page.waitForFunction(()=>!document.querySelector('[data-click]').disabled);
+      const released=page.waitForResponse(r=>r.request().postDataJSON?.()?.op==='control.release');
+      await page.locator('#stop').click();await released;
+      assert.equal(commands.at(-1).op,'control.release');
+      assert.equal(commands.at(-1).seq,moves.at(-1).seq+1);
+    }else if(ending.startsWith('drain')){
+      let reads=0;
+      page.on('request',req=>{if(new URL(req.url()).pathname==='/api/v1/state')reads++;});
+      if(ending==='drain-stale')await pause(920);
+      reply(1,{state:'rejected',error:'expired',...(ending==='drain-stale'?{protocol:{...state,locked:false}}:{})});
+      await pause(45);
+      assert.equal(reads,0);assert.equal(moves.length,2);
+      if(ending==='drain-stop' || ending==='drain-loss'){
+        if(ending==='drain-stop'){
+          const ended=page.waitForResponse(r=>r.request().method()==='DELETE');
+          await page.locator('#stop').click();assert.equal((await ended).status(),200);
+        }else ws.close({code:1001,reason:'close during drain'});
+        await page.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+        await touch('touchMove',29);await touch('touchEnd');await pause(40);
+        assert.equal(reads,0);assert.equal(moves.length,2);
+      }else{
+        await touch('touchEnd');
+        reply(0,{next_seq:seq,motion_terminal:true});
+        await page.waitForFunction(()=>!document.querySelector('[data-click]').disabled);
+        assert.equal(reads,1);
+        await touch('touchStart');await touch('touchMove',9);await waitMoves(3);
+        assert.equal(moves[2].args.dx,9);reply(2,{state:'accepted'});reply(2,{motion_terminal:true});await touch('touchEnd');
+      }
+    }else if(ending==='late-after-busy'){
+      const refused=receipt(1,{state:'rejected',error:'busy'});
+      results.set(refused.command_key,refused);
+      reply(1,refused);
+      await page.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+      reply(0,{next_seq:seq,motion_terminal:true});
+      await page.waitForFunction(()=>document.getElementById('result').textContent.includes('Sent to the HID transport'));
+      const message=await page.locator('#result').textContent();
+      assert(message.includes(`#${moves[1].seq} (key ${refused.command_key}): rejected: busy`));
+      assert(message.includes(`#${moves[0].seq} (key ${1000+moves[0].seq}): Sent`));
+      const read=page.waitForResponse(r=>r.url().endsWith('/requests/'+refused.command_key));
+      await page.locator('#result-check').click();await read;
+      assert.equal(lookups.at(-1),refused.command_key);
+      await touch('touchMove',25);await touch('touchEnd');assert.equal(moves.length,2);
+    }else{
+      if(ending==='stop'){
+        const closed=page.waitForResponse(r=>r.request().method()==='DELETE');
+        await page.locator('#stop').click();assert.equal((await closed).status(),200);
+      }else{
+        ws.close({code:1001,reason:'test two outstanding moves'});
+      }
+      await page.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+      assert.match(await page.locator('#result').textContent(),new RegExp(`#${moves[0].seq} \\(key ${1000+moves[0].seq}\\)`));
+      assert.match(await page.locator('#result').textContent(),/key unknown/);
+      await touch('touchMove',28);await touch('touchEnd');await pause(80);
+      assert.equal(moves.length,2);
+      if(ending==='loss'){
+        const stored=receipt(0,{next_seq:seq});
+        results.set(stored.command_key,stored);
+        await page.locator('#result-check').click();
+        await page.waitForFunction(()=>document.getElementById('result').textContent.includes('Sent to the HID transport'));
+        assert(lookups.includes(stored.command_key));
+        assert.match(await page.locator('#result').textContent(),/key unknown/);
+        assert(await page.locator('#mouse-controls').evaluate(fieldset=>fieldset.disabled));
+        assert(await page.locator('[data-click]').first().isDisabled());
+      }
+    }
+    assert(!commands.some(c=>c.op==='mouse.move_relative'));
+    console.log('PASS admission-gated window',ending,'second write after first acceptance; third bounded; no replay');
+  }finally{await context.close();}
 }
 async function touchAcrossPadEdge(){
   reset();touchTiming={trace:[],moves:[],firstAdmissionMs:5,stateReturnMs:0,inline:true};
@@ -367,6 +697,9 @@ if(process.argv.includes('--trajectory')){
     await trajectory('left 40',20,45,i=>-2*i);
   }finally{await browser.close();await new Promise(r=>server.close(r));}
 }else try{
+  for(const outcome of ['direct','pushed','loss','wrong-key','wrong-sequence','old-expiry','stale','short-grant'])await socketRenew(outcome);
+  for(const ending of ['stationary-lock','reverse','loss','stop','drain','drain-stale','drain-stop','drain-loss','late-after-busy'])await windowTouch(ending);
+  for(const ending of ['loss','stop','wrong-sequence','late-sent','session-expired'])await socketTouch(ending);
   await fractionalTouch();
   await touchAcrossPadEdge();
   await touchAcrossRelease();
@@ -401,7 +734,7 @@ if(process.argv.includes('--trajectory')){
     await context.close();
   }
   // A physical hold is tied to its initiating key, including during mode preparation.
-  reset();state.mode='keyboard';
+  reset();tickingLease=true;state.mode='keyboard';
   const holdContext=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true});
   const heldPage=await open(holdContext);await connect(heldPage);await acquire(heldPage);
   afterMode=()=>{state.release_pending=true;};
@@ -458,7 +791,7 @@ if(process.argv.includes('--trajectory')){
   assert.deepEqual(commands.filter(c=>c.op.startsWith('mouse.drag.')).map(c=>c.op),['mouse.drag.begin']);
   await pendingContext.close();
   // A slow renewal must retain the command lane without flashing controls.
-  reset();const renewalContext=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  reset();tickingLease=true;const renewalContext=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
   const renewalPage=await open(renewalContext);await connect(renewalPage);await acquire(renewalPage);
   await renewalPage.evaluate(()=>{
     window.disabledDuringRenewal=[];
@@ -572,6 +905,13 @@ if(process.argv.includes('--trajectory')){
   let browserTime=0;
   Object.defineProperty(performance,'now',{configurable:true,value:()=>browserTime});
   try{
+    const schedule=new Controller();
+    schedule.state={boot_id:session.boot_id,now_ms:'1000',lease_expires_ms:'4000'};
+    schedule.stateAt=0;schedule.pin={longLease:false};schedule.channel={renewTerminal:true};
+    assert(!schedule.renewDue(2100,true) && schedule.renewDue(2101,true)); // 900 ms motion reserve
+    assert(!schedule.renewDue(1200) && schedule.renewDue(1201)); // 1800 ms for discrete input
+    schedule.pin.longLease=true;schedule.state.lease_expires_ms='31000';
+    assert(!schedule.renewDue(25000,true) && schedule.renewDue(25001,true));
     for(const scenario of ['late reply','window boundary','stronger anchor','remaining reuse']){
       reset();browserTime=0;
       let posts=0,reads=0;
@@ -590,15 +930,25 @@ if(process.argv.includes('--trajectory')){
         assert.equal(url,'/api/v1/commands');
         const input=JSON.parse(options.body);
         assert.equal(input.op,'mouse.move_relative');posts++;
-        const atDevice=scenario==='stronger anchor'?2800:1165;
+        const atDevice=1165;
         browserTime+=replyMs[scenario];
         return new Response(JSON.stringify({state:'rejected',error:'expired',next_seq:input.seq+1,
           command_key:'2',protocol:{...s,now_ms:String(atDevice)}}),{status:400});
       });
       c.session={...session};c.operations.set('mouse.move_relative',true);
-      c.pin={lease_id:s.lease_id,target_id:s.target_id,epoch:s.epoch,transport_generation:s.transport_generation};c.controlled=true;
+      c.pin={longLease:false,lease_id:s.lease_id,target_id:s.target_id,epoch:s.epoch,transport_generation:s.transport_generation};c.controlled=true;
       await c.refresh();browserTime=5;
-      if(scenario==='stronger anchor'){await c.refresh();browserTime+=5;}
+      if(scenario==='stronger anchor'){
+        // The older clock sample establishes that renewal is already due.
+        // An earlier in-flight reply with only the weaker clock must still
+        // require a fresh read when it arrives inside the 900 ms window.
+        await c.refresh();browserTime+=5;
+        assert(c.renewDue());
+        const started=browserTime;browserTime+=replyMs[scenario];
+        assert.equal(c.observeState({...s,now_ms:'2800'},s.epoch,started,{inline:true}),null);
+        assert.equal(posts,0);
+        continue;
+      }
       const sample={current:()=>true,takeSample:()=>({args:{dx:1,dy:0},expiresAt:browserTime+150})};
       const before=reads;
       await c.run('mouse.move_relative',{},undefined,sample);

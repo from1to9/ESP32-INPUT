@@ -46,6 +46,7 @@ struct os_mbuf { uint8_t data[256]; unsigned len; };
 #define OS_MBUF_PKTLEN(m) ((m)->len)
 int os_mbuf_append(struct os_mbuf *, const void *, unsigned);
 int os_mbuf_copydata(struct os_mbuf *, unsigned, unsigned, void *);
+int os_mbuf_free_chain(struct os_mbuf *);
 struct os_mbuf *ble_hs_mbuf_from_flat(const void *, unsigned);
 int ble_gatts_notify_custom(uint16_t, uint16_t, struct os_mbuf *);
 typedef struct { int value; } ble_uuid_t;

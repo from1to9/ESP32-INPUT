@@ -420,16 +420,26 @@ static void advertise(bool pairing, uint32_t duration)
     result(pairing ? "Pair in host Bluetooth settings" : "Waiting for selected host");
 }
 
-static bool send_report(void *arg, uint8_t id, const uint8_t *data, size_t length)
+static hid_engine_report_result_t send_report(void *arg, uint8_t id, const uint8_t *data, size_t length)
 {
     (void)arg;
-    if (engine.state.owner==INPUT_REMOTE && !engine.state.release_pending && !passport_control_report_authorized(now_ms())) return false;
     struct os_mbuf *buffer = ble_hs_mbuf_from_flat(data, length);
-    if (!buffer) return false;
+    if (!buffer) return HID_ENGINE_REPORT_REJECTED;
+    if (engine.state.owner == INPUT_REMOTE && !engine.state.release_pending) {
+        const uint64_t at = now_ms();
+        if (!passport_control_report_authorized(at)) {
+            os_mbuf_free_chain(buffer);
+            return HID_ENGINE_REPORT_REJECTED;
+        }
+        if (id == HID_ENGINE_MOUSE_REPORT_ID && passport_control_expire_movement(at)) {
+            os_mbuf_free_chain(buffer);
+            return HID_ENGINE_REPORT_EXPIRED;
+        }
+    }
     uint16_t handle = id == HID_ENGINE_KEYBOARD_REPORT_ID ? keyboard_handle : mouse_handle;
     int rc = ble_gatts_notify_custom(connection, handle, buffer);
     if (!rc) memcpy(id == HID_ENGINE_KEYBOARD_REPORT_ID ? keyboard : mouse, data, length);
-    return rc == 0;
+    return rc == 0 ? HID_ENGINE_REPORT_ACCEPTED : HID_ENGINE_REPORT_REJECTED;
 }
 
 static int gap_event(struct ble_gap_event *event, void *arg)
@@ -754,7 +764,7 @@ static void service(struct ble_npl_event *event)
     control_state.local_busy=lease_end>now; control_state.transition=transition;
     passport_control_observe(&control_state,now);
     uint64_t move_key=passport_control_http_service(now);
-    hid_engine_step_result_t step = hid_engine_step(&engine, send_report, NULL);
+    hid_engine_step_result_t step = hid_engine_step_with_submit(&engine, send_report, NULL);
     passport_control_service(now);
     if (move_key) passport_control_http_finish_move(move_key,now);
     if (step == HID_ENGINE_STEP_RETRY_EXHAUSTED) {

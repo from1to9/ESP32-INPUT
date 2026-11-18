@@ -632,6 +632,10 @@ static cp_error_t safety_stop(app_remote_input_t *m, const cp_command_t *cmd, cp
 
 static bool expiry_valid(const app_remote_input_t *m, const cp_command_t *cmd)
 {
+#ifdef CP_PASSPORT_BROWSER_LEASE_MS
+    if (cmd->identity.browser) return cmd->lease_expires_ms > m->now_ms &&
+        cmd->lease_expires_ms - m->now_ms <= CP_PASSPORT_BROWSER_LEASE_MS;
+#endif
     return cmd->lease_expires_ms > m->now_ms &&
         cmd->lease_expires_ms - m->now_ms <= APP_REMOTE_INPUT_LEASE_MAX_MS;
 }

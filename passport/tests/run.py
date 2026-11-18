@@ -18,7 +18,7 @@ headers = (
     'esp_log.h esp_timer.h lvgl.h'
 ).split()
 def sdk_function(source, name):
-    match = re.search(r'(?m)^(?:static )?(?:int|void|esp_err_t|uint32_t|bool|size_t|ssize_t)\s+' +
+    match = re.search(r'(?m)^(?:static )?(?:int|void|esp_err_t|uint32_t|bool|size_t|ssize_t|hid_engine_report_result_t)\s+' +
                       re.escape(name) + r'\([^;{]*\)\s*\{', source)
     if not match:
         raise RuntimeError(f'Missing pinned SDK function: {name}')
@@ -100,6 +100,8 @@ for test in sys.argv[1:] or tests:
         if test == 'control_http':
             (work / 'lwip').mkdir()
             (work / 'lwip/sockets.h').write_text('#include "control_http_stubs.h"\n')
+            (work / 'ble_submit.inc').write_text(sdk_function(
+                (root / 'passport/main/passport_ble.c').read_text(), 'send_report'))
             sdk_ws = (root / '.tools/passport-esp-idf/components/esp_http_server/src/httpd_ws.c').read_text()
             # Keep the actual length/header and payload semantics; substitute socket I/O only.
             (work / 'sdk_ws_receive.inc').write_text(''.join(sdk_function(sdk_ws, name)
@@ -110,8 +112,8 @@ for test in sys.argv[1:] or tests:
                 'components/interaction/interaction.c', 'components/control_protocol/control_protocol.c',
                 'components/control_protocol/control_json.c', 'components/control_protocol/control_registry.c',
                 'components/control_protocol/control_sha256.c')]
-            defines += ['-D_POSIX_C_SOURCE=200809L', '-DCP_MAX_RESULTS=4U', '-DCP_MAX_ACTIVE_REQUESTS=2U',
-                        '-DCJ_CAPACITY=4096U', '-DCJ_TOKENS=192U', '-DAPP_REMOTE_INPUT_JOBS=2U', '-DAPP_REMOTE_INPUT_RECENT=4U']
+            defines += ['-D_POSIX_C_SOURCE=200809L', '-DCP_PASSPORT_BROWSER_LEASE_MS=30000U', '-DCP_MAX_RESULTS=4U', '-DCP_MAX_ACTIVE_REQUESTS=3U', '-DCP_MOTION_WINDOW_CONFIG_MAX=3U',
+                        '-DCJ_CAPACITY=4096U', '-DCJ_TOKENS=192U', '-DAPP_REMOTE_INPUT_JOBS=3U', '-DAPP_REMOTE_INPUT_RECENT=4U']
         if test == 'management':
             sources += [root / 'passport/main/passport_management.c', root / 'passport/main/passport_wifi_text.c']
         if test == 'sound':

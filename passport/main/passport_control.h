@@ -8,7 +8,7 @@ typedef struct {
     char target[CP_TARGET_CAPACITY], sta_ip[16], ap_ip[16];
     bool local_busy, transition;
 } passport_control_observation_t;
-typedef enum { PC_HTTP, PC_WS_OPEN, PC_WS_FRAME, PC_WS_HEARTBEAT } passport_control_request_kind_t;
+typedef enum { PC_HTTP, PC_WS_OPEN, PC_WS_FRAME, PC_WS_HEARTBEAT, PC_WS_TERMINAL } passport_control_request_kind_t;
 typedef struct {
     passport_control_request_kind_t kind;
     char method[8], resource[128], host[32], origin[48], authorization[80], csrf[33], open[8], ticket[65];
@@ -16,6 +16,7 @@ typedef struct {
     size_t length;
     bool expiry_state;
     cp_identity_t identity; // Internal transport copy, never decoded from a request body.
+    cp_motion_terminal_t motion;
     cp_http_response_t response;
     cp_error_t error;
 } passport_control_request_t;
@@ -26,13 +27,15 @@ bool passport_control_init(hid_engine_t *, cp_random_fn);
 void passport_control_deinit(void);
 void passport_control_observe(const passport_control_observation_t *, uint64_t now_ms);
 void passport_control_service(uint64_t now_ms);
-// Nonzero only for a newly admitted HTTP relative move, never an exact retry.
+// Nonzero for a new relative move eligible for a same-tick terminal reply.
 uint64_t passport_control_execute(passport_control_request_t *, uint64_t now_ms);
+bool passport_control_terminal_ready(const cp_identity_t *, uint64_t key, uint64_t now_ms);
 void passport_control_finish_move(passport_control_request_t *, uint64_t key, uint64_t now_ms);
 void passport_control_close(const cp_identity_t *, uint64_t now_ms);
 void passport_control_network_reset(uint64_t now_ms);
 // A physical takeover consumes its gesture; the UI must require a fresh press.
 void passport_control_local(uint64_t now_ms);
+bool passport_control_expire_movement(uint64_t now_ms);
 bool passport_control_report_authorized(uint64_t now_ms);
 void passport_control_view(passport_control_view_t *);
 

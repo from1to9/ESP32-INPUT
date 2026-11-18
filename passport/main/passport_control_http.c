@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "passport_control_http.h"
 #include "passport_control.h"
+#include "control_motion_window.h"
 #include "passport_wifi.h"
 #include "passport_http_address.h"
 #include "freertos/FreeRTOS.h"
@@ -20,7 +21,15 @@ static mailbox_state_t mailbox;
 static passport_control_request_t request;
 static SemaphoreHandle_t completed;
 static passport_wifi_link_t wifi;
-typedef struct { bool used, closed; cp_identity_t identity; } channel_t;
+typedef struct {
+    bool used, closed;
+    int fd;
+    cp_identity_t identity;
+    cp_motion_terminal_t motion;
+    control_motion_window_t pending;
+} channel_t;
+static httpd_handle_t listener;
+static struct { channel_t *channel; uint64_t key; } delivery;
 static channel_t channels[CP_MAX_SESSIONS];
 
 static void wipe(void *data, size_t size) { explicit_bzero(data,size); }
@@ -64,6 +73,57 @@ static void complete_exchange(uint64_t now)
         release();
     } else xSemaphoreGive(completed);
 }
+// Runs on HTTPD. The original fd must still belong to this channel, and the
+// key must still be outstanding there before borrowing the single mailbox.
+static void push_terminal(void *unused)
+{
+    (void)unused;
+    portENTER_CRITICAL(&lock);
+    channel_t *channel=delivery.channel;
+    uint64_t key=delivery.key;
+    control_motion_slot_t *slot=control_motion_find(&channel->pending,key);
+    bool live=slot && channel->used && !channel->closed;
+    portEXIT_CRITICAL(&lock);
+    if (live && httpd_sess_get_ctx(listener,channel->fd)==channel && begin()) {
+        request.kind=PC_WS_TERMINAL;
+        request.identity=channel->identity;
+        request.motion.accepted_key=key;
+        bool done=exchange();
+        esp_err_t sent=ESP_FAIL;
+        if (done && request.error==CP_OK) {
+            httpd_ws_frame_t frame={.final=true,.type=HTTPD_WS_TYPE_TEXT,
+                .payload=(uint8_t *)request.response.body,.len=request.response.length};
+            sent=httpd_ws_send_frame_async(listener,channel->fd,&frame);
+        }
+        if (done) release();
+        portENTER_CRITICAL(&lock);
+        *slot=(control_motion_slot_t){0};
+        portEXIT_CRITICAL(&lock);
+        if (sent!=ESP_OK) (void)shutdown(channel->fd,SHUT_RDWR);
+    }
+    portENTER_CRITICAL(&lock); delivery.channel=NULL; portEXIT_CRITICAL(&lock);
+}
+static void queue_terminal(uint64_t now)
+{
+    portENTER_CRITICAL(&lock); bool busy=delivery.channel!=NULL; portEXIT_CRITICAL(&lock);
+    if (busy) return;
+    // Only the HID owner recycles a closed channel. No command body is kept
+    // per slot, and HTTPD sends behind the handler that wrote the acceptance.
+    for (unsigned i=0;i<CP_MAX_SESSIONS;++i) {
+        channel_t *channel=&channels[i];
+        for (unsigned j=0;j<CP_MOTION_WINDOW_CONFIG_MAX;++j) {
+            portENTER_CRITICAL(&lock);
+            uint64_t key=channel->used && !channel->closed ? channel->pending.slots[j].key : 0;
+            portEXIT_CRITICAL(&lock);
+            if (!key || !passport_control_terminal_ready(&channel->identity,key,now)) continue;
+            portENTER_CRITICAL(&lock); delivery.channel=channel; delivery.key=key; portEXIT_CRITICAL(&lock);
+            if (httpd_queue_work(listener,push_terminal,NULL)!=ESP_OK) {
+                portENTER_CRITICAL(&lock); delivery.channel=NULL; portEXIT_CRITICAL(&lock);
+            }
+            return;
+        }
+    }
+}
 uint64_t passport_control_http_service(uint64_t now)
 {
     for (unsigned i=0;i<CP_MAX_SESSIONS;++i) {
@@ -80,6 +140,7 @@ uint64_t passport_control_http_service(uint64_t now)
     if (ready || abandoned) mailbox=RUNNING;
     portEXIT_CRITICAL(&lock);
     if (abandoned) { release(); return 0; }
+    queue_terminal(now);
     if (!ready) return 0;
     uint64_t move_key=passport_control_execute(&request,now);
     if (!move_key) complete_exchange(now);
@@ -205,6 +266,7 @@ static esp_err_t websocket_open(httpd_req_t *req)
         if (done) release();
         return ESP_FAIL;
     }
+    channel->fd=httpd_req_to_sockfd(req);
     channel->identity=request.identity;
     req->sess_ctx=channel; req->free_ctx=channel_closed;
     release(); return ESP_OK;
@@ -224,7 +286,21 @@ static esp_err_t websocket(httpd_req_t *req)
     if (frame.type==HTTPD_WS_TYPE_CLOSE) { release(); return ESP_FAIL; }
     request.identity=channel->identity; request.length=frame.len;
     request.kind=frame.type==HTTPD_WS_TYPE_TEXT ? PC_WS_FRAME : PC_WS_HEARTBEAT;
+    if (request.kind==PC_WS_FRAME) {
+        request.motion=channel->motion;
+        portENTER_CRITICAL(&lock);
+        bool available=control_motion_prepare(&channel->pending,&request.motion);
+        portEXIT_CRITICAL(&lock);
+        if (!available) { release(); return ESP_FAIL; }
+    }
     if (!exchange()) return ESP_FAIL;
+    if (request.kind==PC_WS_FRAME) {
+        channel->motion=request.motion;
+        portENTER_CRITICAL(&lock);
+        bool tracked=control_motion_track(&channel->pending,&request.motion);
+        portEXIT_CRITICAL(&lock);
+        if (!tracked) { release(); return ESP_FAIL; }
+    }
     esp_err_t rc=ESP_OK;
     if (frame.type==HTTPD_WS_TYPE_TEXT && request.response.status) {
         frame=(httpd_ws_frame_t){.final=true,.type=HTTPD_WS_TYPE_TEXT,.payload=(uint8_t *)request.response.body,.len=request.response.length};
@@ -233,6 +309,7 @@ static esp_err_t websocket(httpd_req_t *req)
     else if (frame.type==HTTPD_WS_TYPE_PING) { frame.type=HTTPD_WS_TYPE_PONG; rc=httpd_ws_send_frame(req,&frame); }
     release(); return rc;
 }
+extern const char motion_window_js[] __asm__("_binary_motion_window_mjs_start");
 extern const char controller_html[] __asm__("_binary_controller_html_start");
 extern const char controller_css[] __asm__("_binary_controller_css_start");
 extern const char controller_js[] __asm__("_binary_controller_js_start");
@@ -242,8 +319,9 @@ static esp_err_t web(httpd_req_t *req)
     bool allowed=binding(req) && !req->content_len;
     release();
     if (!allowed) return error(req,"403 Forbidden","{\"error\":\"origin_or_interface\"}");
-    if (strcmp(req->uri,"/") && strcmp(req->uri,"/controller.css") && strcmp(req->uri,"/controller.js")) return error(req,"404 Not Found","{\"error\":\"not_found\"}");
-    const char *asset=!strcmp(req->uri,"/") ? controller_html : !strcmp(req->uri,"/controller.css") ? controller_css : controller_js;
+    if (strcmp(req->uri,"/") && strcmp(req->uri,"/controller.css") && strcmp(req->uri,"/controller.js") && strcmp(req->uri,"/motion_window.mjs")) return error(req,"404 Not Found","{\"error\":\"not_found\"}");
+    const char *asset=!strcmp(req->uri,"/") ? controller_html : !strcmp(req->uri,"/controller.css") ? controller_css :
+        !strcmp(req->uri,"/motion_window.mjs") ? motion_window_js : controller_js;
     httpd_resp_set_type(req,!strcmp(req->uri,"/") ? "text/html; charset=utf-8" : !strcmp(req->uri,"/controller.css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8");
     httpd_resp_set_hdr(req,"Cache-Control","no-store");
     httpd_resp_set_hdr(req,"X-Content-Type-Options","nosniff");
@@ -254,11 +332,13 @@ static esp_err_t web(httpd_req_t *req)
 }
 esp_err_t passport_control_http_register(httpd_handle_t server)
 {
+    listener=server;
     completed=xSemaphoreCreateBinary();
     if (!completed) return ESP_ERR_NO_MEM;
     const httpd_uri_t routes[]={
         {.uri="/",.method=HTTP_GET,.handler=web},
         {.uri="/controller.css",.method=HTTP_GET,.handler=web},
+        {.uri="/motion_window.mjs",.method=HTTP_GET,.handler=web},
         {.uri="/controller.js",.method=HTTP_GET,.handler=web},
         {.uri="/api/v1/ws",.method=HTTP_GET,.handler=websocket,.is_websocket=true,.handle_ws_control_frames=true,.supported_subprotocol="passport.v1",.ws_pre_handshake_cb=websocket_open},
         {.uri="/api/v1/*",.method=HTTP_GET,.handler=api},

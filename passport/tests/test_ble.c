@@ -77,6 +77,7 @@ int xQueueReceive(QueueHandle_t q,void *value,TickType_t t) {
 }
 int os_mbuf_append(struct os_mbuf *b,const void *data,unsigned len) { assert(b->len+len<=sizeof(b->data));memcpy(b->data+b->len,data,len);b->len+=len;return 0; }
 int os_mbuf_copydata(struct os_mbuf *b,unsigned off,unsigned len,void *out) { if(off+len>b->len)return 1;memcpy(out,b->data+off,len);return 0; }
+int os_mbuf_free_chain(struct os_mbuf *b) { assert(b==&mbuf);b->len=0;return 0; }
 struct os_mbuf *ble_hs_mbuf_from_flat(const void *data,unsigned len) { mbuf.len=0;os_mbuf_append(&mbuf,data,len);return &mbuf; }
 int ble_gatts_notify_custom(uint16_t conn,uint16_t handle,struct os_mbuf *b) {
     assert(conn==connection&&report_count<128&&b->len<=8);

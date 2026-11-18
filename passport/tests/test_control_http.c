@@ -1,3 +1,4 @@
+const char motion_js_fixture[] __asm__("_binary_motion_window_mjs_start")="export class MotionWindow {}";
 const char controller_html_fixture[] __asm__("_binary_controller_html_start")="<!doctype html>fixture";
 const char controller_css_fixture[] __asm__("_binary_controller_css_start")="body{}";
 const char controller_js_fixture[] __asm__("_binary_controller_js_start")="'use strict';";
@@ -17,23 +18,44 @@ static TickType_t ticks=100;
 static bool signalled,delay_owner,stale_signal;
 static bool abandon_during_random;
 static unsigned entropy,registered,sent_frames;
+static bool congested;
 static bool exercise_moves,skip_hid,fail_hid,timeout_move;
 static uint64_t timed_out_key,accepted_moves;
 static unsigned failed_reports;
 static int last_dx;
-static bool send_hid(void *unused,uint8_t id,const uint8_t *data,size_t length)
+// Compile the Passport report callback against a clock and the two NimBLE
+// buffer-ownership paths. Advancing the clock during allocation distinguishes
+// the service tick from the final handoff to the stack.
+static uint8_t keyboard[8],mouse[4];
+static uint16_t keyboard_handle=1,mouse_handle=2,connection=9;
+struct os_mbuf { const uint8_t *data; size_t length; };
+static struct os_mbuf report_buffer;
+static unsigned allocation_ms, expired_buffers;
+static uint64_t now_ms(void) { return ticks; }
+static struct os_mbuf *ble_hs_mbuf_from_flat(const void *data,size_t length)
 {
-    (void)unused;
-    if (fail_hid) { ++failed_reports; return false; }
-    if (id==HID_ENGINE_MOUSE_REPORT_ID && length>=3 && data[1]) {
+    assert(!report_buffer.data);
+    report_buffer=(struct os_mbuf){data,length};
+    ticks+=allocation_ms;
+    return &report_buffer;
+}
+static void os_mbuf_free_chain(struct os_mbuf *b)
+{ assert(b==&report_buffer && b->data);b->data=NULL;++expired_buffers; }
+static int ble_gatts_notify_custom(uint16_t conn,uint16_t handle,struct os_mbuf *b)
+{
+    assert(conn==connection && b==&report_buffer && b->data);
+    const uint8_t *data=b->data;b->data=NULL;
+    if (fail_hid) { ++failed_reports; return -1; }
+    if (handle==mouse_handle && b->length>=3 && data[1]) {
         ++accepted_moves; last_dx=(int8_t)data[1];
     }
-    return true;
+    return 0;
 }
+#include "ble_submit.inc"
 static void service_hid(void)
 {
-    hid_engine_observe_transport(&engine,ticks,false);
-    if (!skip_hid) (void)hid_engine_step(&engine,send_hid,NULL);
+    hid_engine_observe_transport(&engine,ticks,congested);
+    if (!skip_hid) (void)hid_engine_step_with_submit(&engine,send_report,NULL);
     passport_control_service(ticks);
 }
 static httpd_ws_type_t sent_type;
@@ -131,11 +153,26 @@ static int httpd_recv_with_opt(httpd_req_t *req,char *out,size_t length,int opti
 #pragma GCC diagnostic pop
 esp_err_t httpd_ws_send_frame(httpd_req_t *req,httpd_ws_frame_t *frame)
 { (void)req;++sent_frames;sent_type=frame->type;sent_length=frame->len;assert(frame->len<sizeof(output));memcpy(output,frame->payload,frame->len);output[frame->len]=0;return ESP_OK; }
+static void *live_socket_context;
+static void (*queued_work)(void *);
+void *httpd_sess_get_ctx(httpd_handle_t server,int fd)
+{ assert(server==listener && fd==9); return live_socket_context; }
+esp_err_t httpd_queue_work(httpd_handle_t server,void (*work)(void *),void *arg)
+{ assert(server==listener && !queued_work && !arg); queued_work=work; return ESP_OK; }
+esp_err_t httpd_ws_send_frame_async(httpd_handle_t server,int fd,httpd_ws_frame_t *frame)
+{ assert(server==listener && fd==9 && live_socket_context); return httpd_ws_send_frame(NULL,frame); }
+static void run_push(void)
+{
+    void (*work)(void *)=queued_work;
+    assert(work); queued_work=NULL; work(NULL);
+}
 static size_t append_frame(httpd_ws_type_t type,bool final,const char *payload)
 {
     const uint8_t mask[]={0x12,0x34,0x56,0x78};size_t length=strlen(payload);
-    assert(length<126 && wire_length+length+6<=sizeof(wire));
-    wire[wire_length++]=(final?0x80:0)|(uint8_t)type;wire[wire_length++]=0x80|(uint8_t)length;
+    assert(length<=CP_MAX_FRAME_BYTES && wire_length+length+8<=sizeof(wire));
+    wire[wire_length++]=(final?0x80:0)|(uint8_t)type;
+    wire[wire_length++]=0x80|(length<126 ? (uint8_t)length : 126);
+    if(length>=126){wire[wire_length++]=(uint8_t)(length>>8);wire[wire_length++]=(uint8_t)length;}
     memcpy(wire+wire_length,mask,sizeof(mask));wire_length+=sizeof(mask);
     for(size_t i=0;i<length;++i)wire[wire_length++]=(uint8_t)payload[i]^mask[i%4];
     return wire_length;
@@ -173,7 +210,7 @@ static void session_open(void)
     call("/api/v1/open-session",HTTP_POST,"{}","200 OK");extract("session_token",token,sizeof(token));extract("csrf",csrf_token,sizeof(csrf_token));
     snprintf(auth,sizeof(auth),"Bearer %s",token);authorization=auth;csrf=csrf_token;
 }
-static void test_move_reply(void)
+static void test_move_reply(bool ws)
 {
     reset();exercise_moves=true;
     hid_engine_set_link(&engine,true,true);
@@ -197,6 +234,140 @@ static void test_move_reply(void)
     snprintf(base,sizeof(base),"{\"v\":1,\"boot_id\":\"%s\",\"session_id\":\"%s\",\"epoch\":\"%s\","
         "\"transport_generation\":\"7\",\"target_id\":\"host\",\"lease_id\":\"%s\",\"op\":\"mouse.move_relative\"",
         boot,sid,cj_string(&d,cj_get(&d,state,"epoch")),cj_string(&d,cj_get(&d,state,"lease_id")));
+    if(ws) {
+        // Browser frames share the HTTP-acquired lease and the same HID owner.
+        call("/api/v1/ws-ticket",HTTP_POST,"","200 OK");extract("ticket",ticket,sizeof(ticket));
+        snprintf(protocol_header,sizeof(protocol_header),"passport.v1, %s",ticket);subprotocol=protocol_header;
+        authorization=csrf="";
+        httpd_req_t channel={.uri="/api/v1/ws",.method=HTTP_GET};
+        assert(websocket_open(&channel)==ESP_OK && websocket(&channel)==ESP_OK);
+        for(unsigned seq=2;seq<=4;seq++){
+            skip_hid=seq==3;
+            unsigned before=accepted_moves;
+            snprintf(envelope,sizeof(envelope),"%s,\"request_id\":\"%s%016x\",\"seq\":%u,\"deadline_ms\":\"%u\","
+                "\"args\":{\"dx\":%u,\"dy\":0}}",base,prefix,seq,seq,seq==4?ticks:ticks+150,seq);
+            append_frame(HTTPD_WS_TYPE_TEXT,true,envelope);
+            assert(receive_frame(&channel)==ESP_OK && sent_type==HTTPD_WS_TYPE_TEXT);
+            extract("command_key",key,sizeof(key));
+            if(seq==2)assert(strstr(output,"\"state\":\"sent\"") && accepted_moves==before+1);
+            if(seq==3){
+                assert(strstr(output,"\"state\":\"accepted\"") && accepted_moves==before);
+                skip_hid=false;service_hid();authorization=auth;csrf=csrf_token;
+                snprintf(path,sizeof(path),"/api/v1/requests/%s",key);
+                call(path,HTTP_GET,"","200 OK");assert(strstr(output,"\"state\":\"sent\"") && accepted_moves==before+1);
+            }
+            if(seq==4)assert(strstr(output,"\"error\":\"expired\"") && strstr(output,owned_lease) && accepted_moves==before);
+        }
+        live_socket_context=channel.sess_ctx;
+        wire_at=wire_length=0;
+        append_frame(HTTPD_WS_TYPE_TEXT,true,"{\"v\":1,\"type\":\"motion_window\",\"motion_window\":2,\"motion_ordered\":true}");
+        assert(receive_frame(&channel)==ESP_OK && strstr(output,"\"motion_ordered\":true"));
+        for(unsigned first=5;first<=7;first+=2){
+            unsigned before=accepted_moves;
+            size_t boundaries[2];
+            const unsigned deadline=ticks+(first==7?3:4);
+            for(unsigned j=0;j<2;j++){
+                unsigned seq=first+j;
+                snprintf(envelope,sizeof(envelope),"%s,\"request_id\":\"%s%016x\",\"seq\":%u,\"deadline_ms\":\"%u\","
+                    "\"args\":{\"dx\":%d,\"dy\":0}}",base,prefix,seq,seq,j ? deadline : ticks+150,j?-9:12);
+                boundaries[j]=append_frame(HTTPD_WS_TYPE_TEXT,true,envelope);
+            }
+            char keys[2][24];
+            for(unsigned j=0;j<2;j++){
+                allocation_ms=j;
+                unsigned freed=expired_buffers;
+                assert(receive_frame(&channel)==ESP_OK && wire_at==boundaries[j] && mailbox==IDLE);
+                assert(cj_parse(&d,output,strlen(output)));
+                int64_t next=0;assert(cj_integer(&d,cj_get(&d,0,"next_seq"),&next) && next==first+j+1);
+                int64_t command_seq=0;
+                assert(cj_integer(&d,cj_get(&d,0,"command_seq"),&command_seq) && command_seq==first+j);
+                assert(cj_get(&d,0,"motion_terminal")==CJ_NONE);
+                extract("command_key",keys[j],sizeof(keys[j]));
+                bool expired=first+j==8;
+                assert(expired_buffers==freed+expired && !report_buffer.data);
+                if(j){
+                    assert(ticks==deadline-!expired);
+                    if(expired){
+                        char reason[64];snprintf(reason,sizeof(reason),"send now=%u deadline=%u",ticks,deadline);
+                        assert(strstr(output,reason));
+                    }
+                    printf("seq %u: BLE handoff clock %u, deadline %u, %s\n",first+j,ticks,deadline,
+                           expired?"expired without notify":"notify accepted");
+                }
+                allocation_ms=0;
+                assert(strstr(output,expired?"\"error\":\"expired\"":"\"state\":\"sent\""));
+                assert(accepted_moves==before+j+!expired && last_dx==(j&&!expired?-9:12));
+            }
+            assert(strcmp(keys[0],keys[1]) && sent_frames>=2);
+            printf("queued pair %u/%u, ordered complete frame boundaries, distinct keys, %u real reports\n",
+                   first,first+1,(unsigned)(accepted_moves-before));
+        }
+        wire_at=wire_length=0;
+        // The production page requests three slots with keyed admissions.
+        append_frame(HTTPD_WS_TYPE_TEXT,true,"{\"v\":1,\"type\":\"motion_window\",\"motion_window\":3}");
+        assert(receive_frame(&channel)==ESP_OK && strstr(output,"\"motion_window\":3") && !strstr(output,"motion_ordered"));
+        for (unsigned seq=9;seq<=10;++seq) {
+            congested=seq==10;
+            service_hid();
+            call("/api/v1/state?view=protocol",HTTP_GET,"","200 OK");
+            assert(!strstr(output,"\"device\":"));
+            assert(cj_parse(&d,output,strlen(output)));state=cj_get(&d,0,"protocol");
+            uint64_t prior=strtoull(cj_string(&d,cj_get(&d,state,"lease_expires_ms")),NULL,10);
+            snprintf(envelope,sizeof(envelope),"{\"v\":1,\"boot_id\":\"%s\",\"session_id\":\"%s\",\"request_id\":\"%s%016x\","
+                "\"seq\":%u,\"deadline_ms\":\"%u\",\"epoch\":\"%s\",\"transport_generation\":\"7\",\"target_id\":\"host\","
+                "\"lease_id\":\"%s\",\"op\":\"control.renew\",\"args\":{\"state_sequence\":\"%s\"}}",
+                boot,sid,prefix,seq,seq,ticks+1500,cj_string(&d,cj_get(&d,state,"epoch")),
+                owned_lease,cj_string(&d,cj_get(&d,state,"state_sequence")));
+            append_frame(HTTPD_WS_TYPE_TEXT,true,envelope);
+            assert(receive_frame(&channel)==ESP_OK);
+            extract("command_key",key,sizeof(key));
+            assert(!strstr(output,"\"motion_terminal\":true"));
+            assert(strstr(output,"\"state\":\"accepted\""));
+            if(congested){
+                passport_control_http_service(ticks);assert(!queued_work);
+                congested=false;service_hid();
+            }
+            passport_control_http_service(ticks);assert(queued_work);run_push();
+            assert(strstr(output,"\"motion_terminal\":true"));
+            assert(cj_parse(&d,output,strlen(output)));
+            int64_t ack=0;
+            assert(cj_integer(&d,cj_get(&d,0,"command_seq"),&ack) && ack==seq);
+            assert(cj_integer(&d,cj_get(&d,0,"next_seq"),&ack) && ack==seq+1);
+            assert(!strcmp(cj_string(&d,cj_get(&d,0,"command_key")),key));
+            assert(strstr(output,"\"state\":\"applied\"") && strstr(output,"\"lease_active\":true") && strstr(output,owned_lease));
+            assert(strtoull(cj_string(&d,cj_get(&d,0,"lease_expires_ms")),NULL,10)>prior);
+        }
+        for(unsigned seq=11;seq<=12;++seq){
+            if(seq==12){
+                append_frame(HTTPD_WS_TYPE_TEXT,true,"{\"v\":1,\"type\":\"motion_window\",\"motion_window\":2}");
+                assert(receive_frame(&channel)==ESP_OK && strstr(output,"\"motion_window\":2") && !strstr(output,"motion_ordered"));
+            }
+            skip_hid=seq==11;
+            snprintf(envelope,sizeof(envelope),"%s,\"request_id\":\"%s%016x\",\"seq\":%u,\"deadline_ms\":\"%u\","
+                "\"args\":{\"dx\":4,\"dy\":0}}",base,prefix,seq,seq,ticks+150);
+            append_frame(HTTPD_WS_TYPE_TEXT,true,envelope);
+            unsigned before=accepted_moves;
+            assert(receive_frame(&channel)==ESP_OK && strstr(output,"\"state\":\"accepted\""));
+            assert(accepted_moves==before+(seq==12));
+            extract("command_key",key,sizeof(key));
+            skip_hid=false;service_hid();
+            assert(accepted_moves==before+1);
+            passport_control_http_service(ticks);
+            assert(queued_work);
+            if(seq==12)break;
+            run_push();
+            char terminal_key[24];extract("command_key",terminal_key,sizeof(terminal_key));
+            assert(!strcmp(key,terminal_key) && strstr(output,"\"command_seq\":11") &&
+                   strstr(output,"\"motion_terminal\":true") && strstr(output,"\"state\":\"sent\""));
+        }
+        channel.free_ctx(channel.sess_ctx);passport_control_http_service(ticks);
+        live_socket_context=NULL;
+        unsigned sent_before=sent_frames;run_push();assert(sent_frames==sent_before && !delivery.channel);
+        call("/api/v1/state",HTTP_GET,"","200 OK");assert(!strstr(output,owned_lease));
+        exercise_moves=false;
+        wire_at=wire_length=wire_reads=sent_frames=0;
+        return;
+    }
     enum { INLINE=2, PENDING, ABANDONED_MOVE, EXPIRED, EXPIRED_WITH_STATE, TRANSPORT_FAILURE };
     for(unsigned seq=INLINE;seq<=TRANSPORT_FAILURE;++seq){
         skip_hid=seq==PENDING;timeout_move=seq==ABANDONED_MOVE;fail_hid=seq==TRANSPORT_FAILURE;
@@ -268,11 +439,12 @@ static void test_move_reply(void)
 }
 int main(void)
 {
-    assert(passport_control_http_register((void *)1)==ESP_OK&&registered==7);
-    test_move_reply();reset();
+    assert(passport_control_http_register((void *)1)==ESP_OK&&registered==8);
+    test_move_reply(true);test_move_reply(false);reset();
     httpd_req_t asset={.uri="/",.method=HTTP_GET};
     assert(web(&asset)==ESP_OK&&!strcmp(output,controller_html_fixture));
-    host="foreign.example";assert(web(&asset)==ESP_OK&&!strcmp(asset.status,"403 Forbidden"));
+    asset.uri="/motion_window.mjs";assert(web(&asset)==ESP_OK&&!strcmp(output,motion_js_fixture));
+    asset.uri="/";host="foreign.example";assert(web(&asset)==ESP_OK&&!strcmp(asset.status,"403 Forbidden"));
     reset();host="evil.test";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
     reset();origin="http://evil.test";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");
     reset();local_ip="192.168.1.3";call("/api/v1/open-session",HTTP_POST,"{}","403 Forbidden");

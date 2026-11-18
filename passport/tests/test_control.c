@@ -11,6 +11,7 @@ static passport_control_request_t request;
 static passport_control_observation_t observation;
 static cj_document_t document;
 static uint64_t clock_ms;
+static bool native_client;
 static unsigned entropy, seq, reports;
 static uint8_t pressed_modifier, pressed_usage;
 static char token[65],session[33],prefix[17],boot[33],csrf[33],lease[33];
@@ -71,7 +72,7 @@ static void field(uint16_t parent,const char *key,char *out,size_t cap)
 { const char *s=cj_string(&document,cj_get(&document,parent,key));assert(s&&strlen(s)<cap);strcpy(out,s); }
 static cp_error_t http(const char *method,const char *path,const char *body)
 {
-    memset(&request,0,sizeof(request));strcpy(request.host,"192.0.2.1");strcpy(request.origin,"http://192.0.2.1");
+    memset(&request,0,sizeof(request));strcpy(request.host,"192.0.2.1");if (!native_client) strcpy(request.origin,"http://192.0.2.1");
     snprintf(request.authorization,sizeof(request.authorization),"Bearer %s",token);strcpy(request.csrf,csrf);
     strcpy(request.open,"1");strcpy(request.method,method);strcpy(request.resource,path);
     if(body){strcpy(request.body,body);request.length=strlen(body);}
@@ -108,6 +109,29 @@ static void acquire(void)
     cp_error_t e=command("control.acquire",args);if(e!=CP_OK)fprintf(stderr,"acquire: %s %s\n",cp_error_name(e),request.response.body);
     assert(e==CP_OK);assert(input.state.owner==INPUT_REMOTE&&input.state.release_pending);
     tick();tick();state();assert(passport_control_report_authorized(clock_ms));
+}
+static void test_grant(bool native, bool explicit_duration)
+{
+    native_client=native;setup();state();
+    unsigned grant=explicit_duration?1200:native?3000:30000;
+    unsigned renewal=native || explicit_duration?3000:30000;
+    char args[128];
+    snprintf(args,sizeof(args),"{\"state_sequence\":\"%s\"%s}",sequence,explicit_duration?",\"lifetime_ms\":1200":"");
+    uint64_t end=clock_ms+grant;
+    assert(command("control.acquire",args)==CP_OK);tick();tick();state();
+    uint16_t protocol=cj_get(&document,0,"protocol");
+    assert(strtoull(cj_string(&document,cj_get(&document,protocol,"lease_expires_ms")),NULL,10)==end);
+    clock_ms=end-200;state();
+    snprintf(args,sizeof(args),"{\"state_sequence\":\"%s\"}",sequence);
+    end=clock_ms+renewal;
+    assert(command("control.renew",args)==CP_OK);tick();state();
+    protocol=cj_get(&document,0,"protocol");
+    assert(strtoull(cj_string(&document,cj_get(&document,protocol,"lease_expires_ms")),NULL,10)==end);
+    assert(passport_control_report_authorized(end-1));
+    assert(!passport_control_report_authorized(end));
+    clock_ms=end;passport_control_service(clock_ms);
+    assert(input.state.owner==INPUT_LOCAL && input.state.release_pending);
+    native_client=false;
 }
 static void test_capacity(void)
 {
@@ -184,7 +208,7 @@ int main(void)
     assert(http("GET","/api/v1/state",NULL)==CP_UNAUTHENTICATED);
     setup();acquire();++observation.network_generation;tick();assert(input.state.owner==INPUT_LOCAL);
     assert(http("GET","/api/v1/state",NULL)==CP_UNAUTHENTICATED); // Same IP cannot preserve an old network session.
-    setup();acquire();clock_ms+=3001;passport_control_service(clock_ms);assert(input.state.owner==INPUT_LOCAL&&input.state.release_pending);
+    test_grant(false,false);test_grant(false,true);test_grant(true,false);
     passport_control_deinit();puts("PASS: real open protocol/shared owner/HID integration, release barriers, local takeover, Lock, target/network/session/WS loss, lease and drag expiry");
     return 0;
 }
