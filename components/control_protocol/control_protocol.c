@@ -1150,8 +1150,9 @@ static cp_error_t result_response(cp_context_t *c, unsigned session, const recor
     out->length = used;
     return r->result.error;
 }
+static void attach_expiry_state(cp_context_t *c, unsigned session, cp_http_response_t *out);
 static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, size_t length,
-                           cp_http_response_t *out, cp_motion_terminal_t *motion)
+                           cp_http_response_t *out, cp_motion_terminal_t *motion, bool expiry_state)
 {
     session_t *s = &c->sessions[session];
     cj_document_t *d = &c->document;
@@ -1412,7 +1413,14 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
          (r->operation == CP_OP_CONTROL_RENEW && motion->mode == CP_TERMINAL_MOVE_AND_RENEW))) {
         motion->accepted_key = r->key;
     }
-    return result_response(c, session, r, out);
+    cp_error_t rc = result_response(c, session, r, out);
+    const cp_scope_mask_t required = CP_SCOPE_VIEW | CP_SCOPE_INPUT_CONTROL;
+    if (expiry_state && s->used && s->browser && s->generation == r->session_generation &&
+        r->operation == CP_OP_MOUSE_MOVE_RELATIVE && r->result.state == CP_RESULT_REJECTED &&
+        rc == CP_EXPIRED && (c->principals[s->principal].scopes & required) == required) {
+        attach_expiry_state(c, session, out);
+    }
+    return rc;
 }
 static bool query_integer(const char *resource, const char *key, unsigned fallback,
                           unsigned maximum, unsigned *out)
@@ -1501,23 +1509,22 @@ static cp_error_t provider_read(cp_context_t *c, unsigned session, const char *r
     }
     return CP_OK;
 }
-static cp_error_t state_response(cp_context_t *c, unsigned session, bool include_device,
-                                 cp_http_response_t *out)
+static cp_error_t append_protocol_state(cp_context_t *c, unsigned session, char *body,
+                                        size_t capacity, size_t *used)
 {
     if (!c->state_known) {
-        return failure(out, CP_UNAVAILABLE);
+        return CP_UNAVAILABLE;
     }
     session_t *s = &c->sessions[session];
-    size_t used = 0;
     cp_identity_t viewer = identity(c, session);
     char boot[33], target[CP_TARGET_CAPACITY * 6 + 3], mode[80];
     encode(c->boot, 16, boot);
     if (!cj_escape(c->state.target_id, target, sizeof(target)) ||
         !cj_escape(c->state.mode, mode, sizeof(mode))) {
-        return failure(out, CP_INTERNAL);
+        return CP_INTERNAL;
     }
-    append(out->body, sizeof(out->body), &used,
-           "{\"protocol\":{\"v\":1,\"boot_id\":\"%s\",\"now_ms\":\"%" PRIu64
+    if (!append(body, capacity, used,
+           "\"protocol\":{\"v\":1,\"boot_id\":\"%s\",\"now_ms\":\"%" PRIu64
            "\",\"management_generation\":\"%" PRIu64 "\",\"epoch\":\"%" PRIu64
            "\",\"transport_generation\":\"%" PRIu64 "\",\"ui_revision\":\"%" PRIu64
            "\",\"state_sequence\":\"%" PRIu64
@@ -1530,16 +1537,44 @@ static cp_error_t state_response(cp_context_t *c, unsigned session, bool include
            ((c->state.remote_allowed && c->blocked_allowance != c->state.allowance_generation) ||
             (c->callbacks.input_authorized && c->callbacks.input_authorized(c->callbacks.user, &viewer)))
                ? "true"
-               : "false");
+               : "false")) return CP_TOO_LARGE;
     if ((c->lease.active || c->lease.pending) && c->lease.session == session &&
         c->lease.session_generation == s->generation) {
         char lease[33];
         encode(c->lease.id, 16, lease);
-        append(out->body, sizeof(out->body), &used,
+        if (!append(body, capacity, used,
                ",\"lease_id\":\"%s\",\"lease_active\":%s,\"lease_expires_ms\":\"%" PRIu64 "\"",
-               lease, c->lease.active ? "true" : "false", c->lease.expires);
+               lease, c->lease.active ? "true" : "false", c->lease.expires)) return CP_TOO_LARGE;
     }
-    append(out->body, sizeof(out->body), &used, "}");
+    return append(body, capacity, used, "}") ? CP_OK : CP_TOO_LARGE;
+}
+
+static void observe_state(cp_context_t *c, unsigned session)
+{
+    c->sessions[session].state_at = c->now;
+    c->sessions[session].delivered_sequence = c->state.state_sequence;
+}
+static void attach_expiry_state(cp_context_t *c, unsigned session, cp_http_response_t *out)
+{
+    // Keep the original receipt and observation intact if the snapshot cannot fit.
+    size_t original = out->length, used = original - 1;
+    out->body[used++] = ',';
+    if (append_protocol_state(c, session, out->body, sizeof(out->body), &used) != CP_OK ||
+        !append(out->body, sizeof(out->body), &used, "}")) {
+        out->body[original - 1] = '}';
+        out->body[original] = 0;
+        return;
+    }
+    out->length = used;
+    observe_state(c, session);
+}
+static cp_error_t state_response(cp_context_t *c, unsigned session, bool include_device,
+                                 cp_http_response_t *out)
+{
+    out->body[0] = '{';
+    size_t used = 1;
+    cp_error_t rc = append_protocol_state(c, session, out->body, sizeof(out->body), &used);
+    if (rc != CP_OK) return failure(out, rc);
     if (include_device) {
         append(out->body, sizeof(out->body), &used, ",\"device\":");
         size_t device_length = 0;
@@ -1554,9 +1589,8 @@ static cp_error_t state_response(cp_context_t *c, unsigned session, bool include
             return failure(out, error);
         }
     }
-    append(out->body, sizeof(out->body), &used, "}");
-    s->state_at = c->now;
-    s->delivered_sequence = c->state.state_sequence;
+    if (!append(out->body, sizeof(out->body), &used, "}")) return failure(out, CP_TOO_LARGE);
+    observe_state(c, session);
     out->status = 200;
     out->length = used;
     return CP_OK;
@@ -1960,7 +1994,8 @@ static cp_error_t http_inner(cp_context_t *c, const char *method, const char *re
         return CP_OK;
     }
     if (strcmp(resource, "/api/v1/commands") == 0 && strcmp(method, "POST") == 0) {
-        return commands(c, (unsigned)session, body, length, out, NULL);
+        return commands(c, (unsigned)session, body, length, out, NULL,
+                        c->policy == CP_POLICY_PASSPORT_OPEN_HTTP && security->expiry_state);
     }
     if (strcmp(method, "GET") == 0) {
         return get_resource(c, (unsigned)session, resource, out);
@@ -2363,7 +2398,7 @@ cp_error_t cp_transport_frame_motion(cp_context_t *c, const cp_identity_t *who, 
         uint16_t op = cj_get(&c->document, 0, "op");
         if (op != CJ_NONE) {
             error = commands(c, (unsigned)session, frame, length, out,
-                             motion_allowed && motion->mode != CP_TERMINAL_DISABLED ? motion : NULL);
+                             motion_allowed && motion->mode != CP_TERMINAL_DISABLED ? motion : NULL, false);
             if (motion_allowed && motion->mode == CP_TERMINAL_MOVE_AND_RENEW && motion->accepted_key) {
                 size_t used = out->length ? out->length - 1U : 0U;
                 if (used && append(out->body, sizeof(out->body), &used,

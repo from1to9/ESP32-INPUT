@@ -12,6 +12,7 @@ static int socket_family=AF_INET;
 static bool socket_short,socket_error;
 static char output[8192],token[65],csrf_token[33],auth[80],ticket[65],protocol_header[96];
 static size_t offset;
+static const char *expiry_header="";
 static TickType_t ticks=100;
 static bool signalled,delay_owner,stale_signal;
 static bool abandon_during_random;
@@ -88,6 +89,7 @@ int setup_getsockname(int fd,struct sockaddr *address,socklen_t *length)
 }
 static const char *value(const char *name)
 {
+    if(!strcmp(name,"X-Passport-Expired-State"))return expiry_header;
     if(!strcmp(name,"Host"))return host;if(!strcmp(name,"Origin"))return origin;
     if(!strcmp(name,"Content-Type"))return type;if(!strcmp(name,"Authorization"))return authorization;
     if(!strcmp(name,"X-CSRF-Token"))return csrf;if(!strcmp(name,"X-Passport-Open"))return open_header;
@@ -191,17 +193,20 @@ static void test_move_reply(void)
     call("/api/v1/commands",HTTP_POST,envelope,"202 Accepted");
     service_hid();call("/api/v1/state",HTTP_GET,"","200 OK");
     assert(cj_parse(&d,output,strlen(output)));state=cj_get(&d,0,"protocol");
+    char owned_lease[33];strcpy(owned_lease,cj_string(&d,cj_get(&d,state,"lease_id")));
     snprintf(base,sizeof(base),"{\"v\":1,\"boot_id\":\"%s\",\"session_id\":\"%s\",\"epoch\":\"%s\","
         "\"transport_generation\":\"7\",\"target_id\":\"host\",\"lease_id\":\"%s\",\"op\":\"mouse.move_relative\"",
         boot,sid,cj_string(&d,cj_get(&d,state,"epoch")),cj_string(&d,cj_get(&d,state,"lease_id")));
-    enum { INLINE=2, PENDING, ABANDONED_MOVE, EXPIRED, TRANSPORT_FAILURE };
+    enum { INLINE=2, PENDING, ABANDONED_MOVE, EXPIRED, EXPIRED_WITH_STATE, TRANSPORT_FAILURE };
     for(unsigned seq=INLINE;seq<=TRANSPORT_FAILURE;++seq){
         skip_hid=seq==PENDING;timeout_move=seq==ABANDONED_MOVE;fail_hid=seq==TRANSPORT_FAILURE;
+        const bool expired=seq==EXPIRED || seq==EXPIRED_WITH_STATE;
+        expiry_header=seq==EXPIRED ? "" : "1";
         uint64_t before=accepted_moves;
         snprintf(envelope,sizeof(envelope),"%s,\"request_id\":\"%s%016x\",\"seq\":%u,\"deadline_ms\":\"%u\","
-            "\"args\":{\"dx\":%u,\"dy\":0}}",base,prefix,seq,seq,seq==EXPIRED?ticks:ticks+150,seq);
+            "\"args\":{\"dx\":%u,\"dy\":0}}",base,prefix,seq,seq,expired?ticks:ticks+150,seq);
         const char *status=skip_hid?"202 Accepted":timeout_move?"503 Service Unavailable":"200 OK";
-        if(seq==EXPIRED)status="400 Bad Request";
+        if(expired)status="400 Bad Request";
         if(fail_hid)status="202 Accepted";
         call("/api/v1/commands",HTTP_POST,envelope,status);
         if(timeout_move){
@@ -224,7 +229,19 @@ static void test_move_reply(void)
             assert(!strcmp(output,retained) && accepted_moves==before+1);
         }else{
             assert(accepted_moves==before && !strstr(output,"\"state\":\"sent\""));
-            if(seq==EXPIRED) assert(strstr(output,"expired"));
+            if(expired) {
+                assert(strstr(output,"expired") && cj_parse(&d,output,strlen(output)));
+                uint16_t snapshot=cj_get(&d,0,"protocol");
+                if(seq==EXPIRED_WITH_STATE) {
+                    assert(snapshot!=CJ_NONE && !strcmp(cj_string(&d,cj_get(&d,snapshot,"target_id")),"host"));
+                    assert(cj_get(&d,snapshot,"lease_id")!=CJ_NONE && cj_get(&d,snapshot,"now_ms")!=CJ_NONE);
+                    assert(!strcmp(owned_lease,cj_string(&d,cj_get(&d,snapshot,"lease_id"))));
+                    char original_key[24];extract("command_key",original_key,sizeof(original_key));
+                    call("/api/v1/commands",HTTP_POST,envelope,"400 Bad Request");
+                    extract("command_key",key,sizeof(key));assert(!strcmp(original_key,key));
+                    assert(!strstr(output,"\"protocol\""));
+                } else assert(snapshot==CJ_NONE);
+            }
             if(fail_hid) {
                 assert(failed_reports==1 && strstr(output,"\"state\":\"accepted\""));
                 extract("command_key",key,sizeof(key));snprintf(path,sizeof(path),"/api/v1/requests/%s",key);
@@ -234,9 +251,18 @@ static void test_move_reply(void)
             }
         }
     }
-    fail_hid=exercise_moves=false;
+    expiry_header="";fail_hid=exercise_moves=false;
     // A fresh session cannot observe an old owner's retained receipt.
     session_open();
+    extract("session_id",sid,sizeof(sid));extract("request_prefix",prefix,sizeof(prefix));
+    expiry_header="1";
+    snprintf(envelope,sizeof(envelope),"{\"v\":1,\"boot_id\":\"%s\",\"session_id\":\"%s\",\"request_id\":\"%s%016x\","
+        "\"seq\":1,\"deadline_ms\":\"%u\",\"op\":\"mouse.move_relative\",\"args\":{\"dx\":1,\"dy\":0}}",
+        boot,sid,prefix,1,ticks);
+    call("/api/v1/commands",HTTP_POST,envelope,"400 Bad Request");
+    assert(cj_parse(&d,output,strlen(output)));
+    state=cj_get(&d,0,"protocol");assert(state!=CJ_NONE && cj_get(&d,state,"lease_id")==CJ_NONE);
+    assert(!strstr(output,owned_lease));expiry_header="";
     call(path,HTTP_GET,"","409 Conflict");
     assert(strstr(output,"result_unknown") && !strstr(output,"command_key"));
 }

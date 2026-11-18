@@ -93,7 +93,10 @@ const server=http.createServer(async(req,res)=>{
           await pause(35);
         }
         if(timing.moveReply)await timing.moveReply;
-        if(expired)send(receipt,400);
+        if(expired && timing.expiryState && req.headers['x-passport-expired-state']==='1'){
+          timing.trace.push('attached');
+          send({...receipt,protocol:{...state,locked,now_ms:String(Math.floor(performance.now()))}},400);
+        }else if(expired)send(receipt,400);
         else if(timing.inline)send(receipt);
         else send({...receipt,state:'accepted'},202);
         return;
@@ -268,10 +271,10 @@ async function touchAcrossRelease(){
 }
 // Use trusted touch events and a running device clock. The first command
 // misses admission. Later movements must reach terminal sent on the same lease.
-async function delayedTouch(){
+async function delayedTouch(expiryState){
   reset();
   delayState=45;
-  const timing=touchTiming={trace:[],moves:[],firstAdmissionMs:180,stateReturnMs:35};
+  const timing=touchTiming={trace:[],moves:[],firstAdmissionMs:180,stateReturnMs:35,expiryState};
   const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
   try{
     const page=await open(context);await connect(page);await acquire(page);
@@ -295,7 +298,9 @@ async function delayedTouch(){
     assert(timing.moves.slice(1).every(m=>m.dx<0 && m.dy===0),JSON.stringify(timing.moves));
     assert.equal(commands.filter(c=>c.op==='control.acquire').length,1);
     assert.equal(await page.locator('#connection').textContent(),'This browser is controlling');
-    assert(timing.trace.slice(timing.trace.indexOf('move'),timing.trace.indexOf('move',timing.trace.indexOf('move')+1)).includes('state'));
+    const during=timing.trace.slice(timing.trace.indexOf('move'),timing.trace.indexOf('move',timing.trace.indexOf('move')+1));
+    assert(during.includes(expiryState?'attached':'state'),JSON.stringify(during));
+    if(expiryState)assert(!during.includes('state'),JSON.stringify(during));
     assert.match(await page.locator('#result').textContent(),/Sent to the HID transport/);
     console.log('PASS delayed touch',JSON.stringify(timing.moves));
     await page.locator('#stop').click();
@@ -365,7 +370,8 @@ if(process.argv.includes('--trajectory')){
   await fractionalTouch();
   await touchAcrossPadEdge();
   await touchAcrossRelease();
-  await delayedTouch();
+  await delayedTouch(false);
+  await delayedTouch(true);
   if(!process.argv.includes('--behavior-only')) for(const [name,width,height,mobile] of [['desktop',1440,1060,false],['iphone',390,844,true],['ipad',1024,1366,true]])for(const theme of ['dark','light']){
     reset();const ctx=await browser.newContext({viewport:{width,height},colorScheme:theme,isMobile:mobile,hasTouch:mobile,deviceScaleFactor:1});const p=await open(ctx);
     assert.equal(await p.locator('html').getAttribute('data-theme'),theme);await connect(p);await acquire(p);await bounded(p);
@@ -586,29 +592,41 @@ if(process.argv.includes('--trajectory')){
   }
   // An expired POST can coincide with a real takeover, or be followed by
   // an unavailable state read. An uncorrelated rejection is an unknown reply.
-  for(const change of ['lease_active','lease_id','target_id','epoch','transport_generation','locked','release_pending','remote_allowed','input_ready','read-error','bad-key','bad-sequence','lost']){
+  for(const inline of [false,true])for(const change of ['lease_active','lease_id','target_id','epoch','transport_generation','locked','release_pending','remote_allowed','input_ready','read-error','bad-key','bad-sequence','lost','malformed','late-stop']){
+    if(!inline && ['malformed','late-stop'].includes(change))continue;
     reset();
-    let moves=0;
+    let moves=0,readsAfterMove=0;
     const changeClient=new Controller(async (url,options)=>{
       if(url==='/api/v1/commands' && JSON.parse(options.body).op==='mouse.move_relative'){
         moves++;
+        assert.equal(options.headers['X-Passport-Expired-State'],inline?'1':undefined);
         if(change==='lost')throw new TypeError('Response lost');
         if(change==='locked')locked=true;
         else if(change==='release_pending')state.release_pending=true;
         else if(['lease_active','remote_allowed','input_ready'].includes(change))state[change]=false;
         else if(['target_id','lease_id','epoch','transport_generation'].includes(change))state[change]='9';
         const receipt={state:'rejected',error:'expired',command_key:change==='bad-key'?null:'4',next_seq:change==='bad-sequence'?seq:seq+1};
+        if(inline && change!=='read-error')receipt.protocol=change==='malformed'?null:{...state,locked};
+        if(inline && change==='locked')await pause(40);
+        if(change==='late-stop')await changeClient.disconnect();
         return new Response(JSON.stringify(receipt),{status:400});
       }
-      if(moves && url==='/api/v1/state' && change==='read-error')return new Response('{}',{status:401});
+      if(moves && url==='/api/v1/state'){
+        readsAfterMove++;
+        if(change==='read-error')return new Response('{}',{status:401});
+      }
       return fetch(origin+url,options);
     });
     await changeClient.login();await changeClient.acquire();
-    const moving=changeClient.run('mouse.move_relative',{dx:2,dy:0});
-    if(['read-error','bad-key','bad-sequence','lost'].includes(change))await assert.rejects(moving);
+    const sample={current:()=>true,takeSample:()=>({args:{dx:2,dy:0},expiresAt:performance.now()+150})};
+    const moving=changeClient.run('mouse.move_relative',{dx:2,dy:0},undefined,inline?sample:undefined);
+    if(['read-error','bad-key','bad-sequence','lost','late-stop','malformed'].includes(change))await assert.rejects(moving);
     else await moving;
     assert.equal(changeClient.controlled,false,change);
-    assert.equal(changeClient.uncertain,['bad-key','bad-sequence','lost'].includes(change),change);
+    assert.equal(changeClient.uncertain,['bad-key','bad-sequence','lost','late-stop'].includes(change),change);
+    if(inline)assert.equal(readsAfterMove,change==='read-error'?1:0,change);
+    if(inline && change==='locked')assert(changeClient.clockSamples.at(-1).rtt>=39);
+    if(change==='late-stop')assert.equal(changeClient.state,null);
     await assert.rejects(changeClient.run('mouse.move_relative',{dx:-2,dy:0}));
     assert.equal(moves,1,change);
     await changeClient.disconnect();

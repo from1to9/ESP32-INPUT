@@ -14,6 +14,7 @@ typedef struct {
     char method[8], resource[128], host[32], origin[48], authorization[80], csrf[33], open[8], ticket[65];
     char body[CP_MAX_FRAME_BYTES + 1];
     size_t length;
+    bool expiry_state;
     cp_identity_t identity; // Internal transport copy, never decoded from a request body.
     cp_http_response_t response;
     cp_error_t error;

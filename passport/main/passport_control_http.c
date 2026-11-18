@@ -156,6 +156,10 @@ static esp_err_t api(httpd_req_t *req)
     }
     strcpy(request.resource,req->uri);
     strcpy(request.method,req->method==HTTP_GET ? "GET" : req->method==HTTP_POST ? "POST" : "DELETE");
+    if (req->method==HTTP_POST && !strcmp(req->uri,"/api/v1/commands")) {
+        char value[2]={0};
+        request.expiry_state=header(req,"X-Passport-Expired-State",value,sizeof(value),false) && !strcmp(value,"1");
+    }
     if (req->method!=HTTP_GET) {
         char type[48]={0};
         if (!header(req,"Content-Type",type,sizeof(type),true) ||

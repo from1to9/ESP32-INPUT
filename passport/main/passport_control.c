@@ -203,7 +203,8 @@ uint64_t passport_control_execute(passport_control_request_t *request, uint64_t 
     passport_control_service(now);
     cp_http_security_t sec={.host=request->host,.origin=request->origin[0] ? request->origin : NULL,
         .authorization=request->authorization[0] ? request->authorization : NULL,
-        .csrf=request->csrf[0] ? request->csrf : NULL,.open_request=request->open[0] ? request->open : NULL};
+        .csrf=request->csrf[0] ? request->csrf : NULL,.open_request=request->open[0] ? request->open : NULL,
+        .expiry_state=request->expiry_state};
     if (request->kind==PC_HTTP || request->kind==PC_WS_OPEN) {
         char expected[48]; snprintf(expected,sizeof(expected),"http://%s",request->host);
         request->error=cp_http_configure(protocol,request->host,expected);

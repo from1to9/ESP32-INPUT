@@ -247,6 +247,7 @@ typedef struct {
     const char *cookie;
     const char *csrf;
     const char *open_request;  /* Exact X-Passport-Open header for open-session only. */
+    bool expiry_state;         /* X-Passport-Expired-State: 1 on HTTP commands. */
 } cp_http_security_t;
 /* Trusted transport entry points, serialized by the same protocol owner as
  * cp_http. Established channel identity is an internal copy from successful

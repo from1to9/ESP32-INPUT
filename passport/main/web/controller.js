@@ -70,21 +70,25 @@ export class Controller {
     if (message) this.message = message;
     this.changed();
   }
-  async request(path, method = "GET", body, csrf = this.session?.csrf, keepalive = false, token = this.session?.session_token) {
+  async request(path, method = "GET", body, {
+    csrf = this.session?.csrf, keepalive = false, token = this.session?.session_token, expiryState = false,
+  } = {}) {
     const abort = new AbortController();
     const timeout = setTimeout(() => abort.abort(), 3500);
     try {
       // Preserve a concrete Origin under no-referrer in Safari. API paths are
       // relative and the page's connect-src policy remains restricted to self.
+      const started = performance.now();
       const response = await this.fetcher(path, {
         method, mode: "cors", credentials: "same-origin", cache: "no-store", redirect: "error",
         headers: {Accept: "application/json", ...(token ? {Authorization: `Bearer ${token}`} : {}),
+          ...(expiryState ? {"X-Passport-Expired-State":"1"} : {}),
           ...(path === "/api/v1/open-session" ? {"X-Passport-Open": "1"} : {}), ...(method === "GET" ? {} : {"Content-Type": "application/json"}),
           ...(csrf && method !== "GET" ? {"X-CSRF-Token": csrf} : {})},
         ...(body === undefined ? {} : {body: JSON.stringify(body)}), signal: abort.signal, keepalive,
       });
       const json = await response.json();
-      return {status: response.status, json};
+      return {status: response.status, json, started};
     } finally { clearTimeout(timeout); }
   }
   async login() {
@@ -116,12 +120,11 @@ export class Controller {
     const session = this.session;
     const before = this.state;
     const superseded = () => idleOnly && (this.busy || this.controlled || this.state !== before || this.session !== session);
-    let response, started;
+    let response;
     try {
       for (const delay of [0, 20, 40, 80]) {
         if (delay) await sleep(delay);
         if (superseded()) return null;
-        started = performance.now();
         response = await this.request("/api/v1/state");
         if (![429, 503].includes(response.status) || response.json.error !== "busy") break;
       }
@@ -133,12 +136,14 @@ export class Controller {
     }
     if (superseded()) return null;
     if (this.session !== session) throw new Error("Browser session changed while reading state.");
-    const s = response.json.protocol;
-    if (response.status !== 200 || !s || s.boot_id !== this.session.boot_id ||
+    return this.observeState(response.json.protocol, expectedEpoch, response.started, response.status);
+  }
+  observeState(s, expectedEpoch, started, status) {
+    if ((status !== undefined && status !== 200) || !s || s.boot_id !== this.session.boot_id ||
         !["now_ms", "epoch", "transport_generation", "state_sequence", "ui_revision"].every(k => decimal(s[k])) ||
         typeof s.target_id !== "string" || !["mouse", "keyboard", "audio"].includes(s.mode) ||
         !["locked", "release_pending", "input_ready", "remote_allowed"].every(k => typeof s[k] === "boolean")) {
-      if ([401, 403].includes(response.status) || (s && s.boot_id !== this.session.boot_id)) {
+      if ([401, 403].includes(status) || (s && s.boot_id !== this.session.boot_id)) {
         this.session = null; ++this.generation;
       }
       this.state = null;
@@ -149,7 +154,8 @@ export class Controller {
     this.stateAt = performance.now();
     this.clockSamples = this.clockSamples.filter(a => a.boot === s.boot_id && this.stateAt - a.at < CLOCK_WINDOW_MS).slice(-7);
     this.clockSamples.push({boot:s.boot_id, at:this.stateAt, time:BigInt(s.now_ms), rtt:this.stateAt-started});
-    if (this.controlled && (!s.lease_active || s.lease_id !== this.pin.lease_id ||
+    if (this.controlled && (s.lease_active !== true || s.lease_id !== this.pin.lease_id ||
+        !decimal(s.lease_expires_ms) || BigInt(s.lease_expires_ms) <= BigInt(s.now_ms) ||
         s.target_id !== this.pin.target_id || s.transport_generation !== this.pin.transport_generation ||
         s.epoch !== expectedEpoch || s.locked || !s.remote_allowed || !s.input_ready)) {
       this.halt("Control ended: local takeover, target/readiness change or lease expiry. Take control again only after checking Passport.");
@@ -234,12 +240,13 @@ export class Controller {
     // Once POST starts, retain its real result/uncertainty even if contact ends.
     if (sample ? !gesture.current() || performance.now() >= sample.expiresAt : !currentGesture(gesture)) return null;
     const generation = this.generation;
-    let answer, expiredSample = false, confirmedMove = false;
+    let answer, expiredSample = false, confirmedMove = false, expirySnapshot;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
       gesture?.posting?.(op);
-      let response = await this.request("/api/v1/commands", "POST", envelope);
+      const post = await this.request("/api/v1/commands", "POST", envelope, {expiryState:Boolean(sampledMove)});
+      let response = post;
       answer = response.json;
       const next = Number(answer.next_seq);
       if (!Number.isInteger(next) || (next !== seq && next !== seq + 1)) throw new Error("Missing sequence acknowledgement.");
@@ -270,6 +277,7 @@ export class Controller {
         if (response.status !== 400 || !key || key === "0" || next !== seq + 1 || answer.next_seq !== seq + 1)
           throw new Error("Movement rejection was not confirmed.");
         expiredSample = true;
+        if (sampledMove && response === post && Object.hasOwn(answer, "protocol")) expirySnapshot = post;
       }
     } catch (error) {
       this.uncertain = true;
@@ -281,7 +289,9 @@ export class Controller {
     if (expiredSample) {
       // Expiry is checked before the device checks the lease. Verify the
       // original pin before the command lane can accept fresh input.
-      const confirmed = await this.refresh(s.epoch);
+      const confirmed = expirySnapshot
+        ? this.observeState(answer.protocol, s.epoch, expirySnapshot.started)
+        : await this.refresh(s.epoch);
       if (this.controlled && confirmed.release_pending) this.halt("Control ended while Passport was releasing input.");
       return answer;
     }
@@ -393,7 +403,7 @@ export class Controller {
     if (session) {
       this.closing = true; this.changed();
       try {
-        const response = await this.request("/api/v1/sessions/current", "DELETE", undefined, session.csrf, keepalive, session.session_token);
+        const response = await this.request("/api/v1/sessions/current", "DELETE", undefined, {csrf:session.csrf, keepalive, token:session.session_token});
         if (response.status !== 200) throw new Error();
         if (!this.uncertain) this.message = "Browser session closed. Connect again explicitly; no input lease will resume.";
       } catch { this.message = "Session close unconfirmed. Control is stopped locally; the device's short lease expires independently."; }

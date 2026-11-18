@@ -319,8 +319,15 @@ oldest included delta's expiry. Recent same-boot state responses supply a
 conservative device clock lower bound. Each envelope retains the pinned lease
 and target. A confirmed sent sample can proceed without another state GET;
 ongoing movement refreshes state at least every 900 ms before submission. A confirmed expired move or scroll is discarded.
-The browser checks the lease, target, epoch, and input permission again before
-continuing. One browser command runs at a time, with no action replay.
+For touchpad moves the browser opts in with `X-Passport-Expired-State: 1`.
+A new, sequence-consuming HTTP 400 `rejected/expired` may include the current
+`protocol` object from the same authenticated session's protocol state view.
+The command key, sequence and rejection keep their normal meanings. Exact
+retries and result lookups return the retained command result alone. The
+browser validates the receipt and checks the snapshot's boot, lease, target,
+epoch, permission, readiness and release state before accepting fresh input.
+If the snapshot is absent it reads state separately. Invalid state stops
+input. The expired displacement is discarded. One browser command runs at a time, with no action replay.
 Drag holds use a 1500 ms device deadman refreshed while the contact remains
 active. Release ends the drag; cancellation while a command is in flight,
 Stop during busy/unknown work, blur, page hide and offline close the session
