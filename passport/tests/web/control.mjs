@@ -36,12 +36,11 @@ const server=http.createServer(async(req,res)=>{
       if(delayState)await pause(delayState);
       const timing=touchTiming, currentState=state;
       if(timing){
-        await pause(45);
         currentState.now_ms=String(Math.floor(performance.now()));
         timing.trace.push('state');
       }
       const protocol={...currentState,locked};
-      if(timing)await pause(35);
+      if(timing?.stateReturnMs)await pause(timing.stateReturnMs);
       send({protocol});return;
     }
     if(url.pathname==='/api/v1/capabilities'){send({access_policy:'open_network'});return;}
@@ -78,7 +77,7 @@ const server=http.createServer(async(req,res)=>{
         const timing=touchTiming;
         const first=!timing.moves.length;
         timing.trace.push('move');
-        await pause(first?180:35);
+        await pause(first?timing.firstAdmissionMs:35);
         const slack=Number(c.deadline_ms)-performance.now();
         const expired=slack<=0;
         const receipt={state:expired?'rejected':'sent',error:expired?'expired':'ok',next_seq:seq,command_key:String(seq)};
@@ -127,19 +126,47 @@ async function bounded(p) {
   });
   assert.deepEqual(issues,[]);
 }
+async function padTouch(context,page){
+  const pad=page.locator('#pad');await pad.scrollIntoViewIfNeeded();
+  const box=await pad.boundingBox(),x=Math.round(box.x+box.width/2),y=Math.round(box.y+box.height/2);
+  const cdp=await context.newCDPSession(page);
+  return (type,dx=0,dy=0)=>cdp.send('Input.dispatchTouchEvent',{type,
+    touchPoints:type==='touchEnd'?[]:[{x:x+dx,y:y+dy,id:1}]});
+}
+// Motion during neutral release cannot become part of a later fresh delta.
+async function touchAcrossRelease(){
+  reset();state.mode='keyboard';afterMode=()=>{state.release_pending=true;};
+  touchTiming={trace:[],moves:[],firstAdmissionMs:35,stateReturnMs:0};
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await open(context);await connect(page);await acquire(page);
+    const touch=await padTouch(context,page);
+    await touch('touchStart');await touch('touchMove',16);
+    await page.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+    await touch('touchMove',16,35);
+    state.release_pending=false;
+    await page.waitForFunction(()=>!document.getElementById('mouse-controls').disabled);
+    await pause(230);
+    const before=commands.length;
+    const posted=page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON().op==='mouse.move_relative');
+    await touch('touchMove',17,35);await posted;await touch('touchEnd');
+    await pause(200);
+    const later=commands.slice(before).filter(c=>c.op==='mouse.move_relative').map(c=>c.args);
+    assert.deepEqual(later,[{dx:1,dy:0}]);
+    assert(commands.filter(c=>c.op==='mouse.move_relative').every(c=>c.args.dy===0));
+    console.log('PASS touch across neutral release',JSON.stringify(later));
+  }finally{await context.close();}
+}
 // Use trusted touch events and a running device clock. The first command
 // misses admission. Later movements must reach terminal sent on the same lease.
 async function delayedTouch(){
   reset();
-  const timing=touchTiming={trace:[],moves:[]};
+  delayState=45;
+  const timing=touchTiming={trace:[],moves:[],firstAdmissionMs:180,stateReturnMs:35};
   const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
   try{
     const page=await open(context);await connect(page);await acquire(page);
-    const pad=page.locator('#pad');await pad.scrollIntoViewIfNeeded();
-    const box=await pad.boundingBox(),x=Math.round(box.x+box.width/2),y=Math.round(box.y+box.height/2);
-    const cdp=await context.newCDPSession(page);
-    const touch=(type,dx=0,dy=0)=>cdp.send('Input.dispatchTouchEvent',{type,
-      touchPoints:type==='touchEnd'?[]:[{x:x+dx,y:y+dy,id:1}]});
+    const touch=await padTouch(context,page);
     await touch('touchStart');
     const firstPost=page.waitForRequest(req=>req.url().endsWith('/commands')&&req.postDataJSON().op==='mouse.move_relative');
     await touch('touchMove',24);await firstPost;
@@ -167,6 +194,7 @@ async function delayedTouch(){
   }finally{await context.close();touchTiming=null;}
 }
 try{
+  await touchAcrossRelease();
   await delayedTouch();
   if(!process.argv.includes('--behavior-only')) for(const [name,width,height,mobile] of [['desktop',1440,1060,false],['iphone',390,844,true],['ipad',1024,1366,true]])for(const theme of ['dark','light']){
     reset();const ctx=await browser.newContext({viewport:{width,height},colorScheme:theme,isMobile:mobile,hasTouch:mobile,deviceScaleFactor:1});const p=await open(ctx);
