@@ -28,8 +28,14 @@ same Wi-Fi resource profile reported complete USB status through connection
 phases and served LAN `/health` with HTTP 200 on an unattended boot while
 marking all three physical button observations pending. Its bounded LAN checks
 included eight sequential requests, two concurrent requests and one follow-up,
-all complete. Earlier builds sometimes stalled on multiple HTTP requests, and
-the cause is still unknown. These observations do not establish sustained Web
+all complete. A later LAN test on `beb3c1b` reproduced a controller page
+stall before the browser opened a control session. The client received the
+HTTP 200 headers for the home page and timed out after 12 seconds with zero
+of 8,670 body bytes. The stylesheet also closed before its body arrived.
+In a separate capture, a 704-byte health response completed in 0.19 seconds.
+During the subsequent home-page request the server reported send errno 11
+and a handler failure while the client timed out waiting for headers. The
+cause of the send stall remains open. These observations do not establish sustained Web
 reliability, physical display rendering, every BLE/USB input path, Safari
 behavior, speaker output or long-run radio coexistence. The
 community release gate and remaining hardware cases are listed in the
@@ -86,9 +92,11 @@ and [storage boundary](interaction.md#status-connectivity-and-display) for what 
 
 - **Mosaico iPhone Web pad expiry.** A physical iPhone session received
   `rejected: expired` for movement despite an authorized control session.
-  Source and host checks cover the subsequent timing and rejection-reason
-  changes, but the latest diagnostic image has not been installed on that
-  Mosaico board. The on-device reason and a corrective fix remain open.
+  The updated firmware at `8c8057e` was installed on the Mosaico and passed
+  same-boot OTA health confirmation. The served HTTPS page and JavaScript
+  matched the candidate. An authorized client read state and configuration
+  and received an authenticated WebSocket heartbeat. The check sent no HID
+  input. A physical iPhone Safari swipe on this version remains unverified.
 - **Bluetooth memory pressure.** The controller policy removes the internal
   DMA dependency for allocations explicitly eligible for PSRAM. Real PSRAM
   exhaustion or a full MSYS pool can still trigger the SDK assertion. Dynamic
