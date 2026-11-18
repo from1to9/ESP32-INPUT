@@ -7,6 +7,8 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const DECIMAL = /^(0|[1-9][0-9]{0,19})$/;
 const PAD_LIFETIME_MS = 150;
 const PAD_BUCKET_MS = 8;
+const PAD_BATCH_MS = 30;
+const CLOCK_WINDOW_MS = 2500;
 const STATE_INTERVAL_MS = 900;
 const THEME_KEY = "passport.browser.theme.v1";
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -43,6 +45,8 @@ export class Controller {
     this.fetcher = fetcher;
     this.session = null;
     this.state = null;
+    this.clockSamples = [];
+    this.onInputLaneReleased = () => {};
     this.controlled = false;
     this.busy = false;
     this.renewing = false;
@@ -143,7 +147,8 @@ export class Controller {
     }
     this.state = s;
     this.stateAt = performance.now();
-    this.stateRoundTrip = this.stateAt - started;
+    this.clockSamples = this.clockSamples.filter(a => a.boot === s.boot_id && this.stateAt - a.at < CLOCK_WINDOW_MS).slice(-7);
+    this.clockSamples.push({boot:s.boot_id, at:this.stateAt, time:BigInt(s.now_ms), rtt:this.stateAt-started});
     if (this.controlled && (!s.lease_active || s.lease_id !== this.pin.lease_id ||
         s.target_id !== this.pin.target_id || s.transport_generation !== this.pin.transport_generation ||
         s.epoch !== expectedEpoch || s.locked || !s.remote_allowed || !s.input_ready)) {
@@ -159,8 +164,8 @@ export class Controller {
     if (!currentGesture(gesture)) return null;
     const observe = op !== "control.renew";
     const sampledMove = op === "mouse.move_relative" && gesture?.takeSample;
-    // The preceding command already read back the pinned state. The device
-    // still validates every envelope. Keep the post-command read for takeover.
+    // Each POST is gated by the device against the pinned lease and target.
+    // Read state periodically during motion and always after an expired sample.
     let s = sampledMove && this.controlled && this.state && performance.now() - this.stateAt < STATE_INTERVAL_MS
       ? this.state : await this.refresh();
     const deviceTime = at => BigInt(s.now_ms) + BigInt(Math.floor(at - this.stateAt));
@@ -197,7 +202,20 @@ export class Controller {
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
     if (!currentGesture(gesture)) return null;
     const now = performance.now();
-    const sample = sampledMove ? gesture.takeSample(now, this.stateRoundTrip) : null;
+    let clock = deviceTime(now), sample = null;
+    if (sampledMove) {
+      // Device time at state generation is a lower bound at browser receipt.
+      // A slower reply must not move a recent, better lower bound backwards.
+      let travel = Infinity;
+      for (const anchor of this.clockSamples) {
+        const age = now - anchor.at;
+        if (age >= CLOCK_WINDOW_MS) continue;
+        const lower = anchor.time + BigInt(Math.floor(age)) - 2n;
+        if (lower > clock) clock = lower;
+        travel = Math.min(travel, anchor.rtt);
+      }
+      sample = gesture.takeSample(now, travel);
+    }
     if (sampledMove && !sample) return null;
     const expiresAt = sample?.expiresAt ?? gesture?.expiresAt;
     const volatile = op === "mouse.move_relative" || op === "mouse.scroll";
@@ -206,7 +224,7 @@ export class Controller {
     const envelope = {
       v: 1, boot_id: this.session.boot_id, session_id: this.session.session_id,
       request_id: this.session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
-      deadline_ms: (deviceTime(now) + BigInt(lifetime)).toString(),
+      deadline_ms: (clock + BigInt(lifetime)).toString(),
       epoch: s.epoch, transport_generation: s.transport_generation, target_id: s.target_id,
       ui_revision: s.ui_revision, op,
       args: op === "control.acquire" || op === "control.renew" ? {...args, state_sequence: s.state_sequence} : sample?.args ?? args,
@@ -216,7 +234,7 @@ export class Controller {
     // Once POST starts, retain its real result/uncertainty even if contact ends.
     if (sample ? !gesture.current() || performance.now() >= sample.expiresAt : !currentGesture(gesture)) return null;
     const generation = this.generation;
-    let answer, expiredSample = false;
+    let answer, expiredSample = false, confirmedMove = false;
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
@@ -230,16 +248,23 @@ export class Controller {
       key = decimal(answer.command_key) ? answer.command_key : null;
       if (observe) { this.last = answer; this.lastKey = key; }
       const until = performance.now() + 2200;
+      let pollDelay = sampledMove ? 0 : 100;
       while (ACTIVE.has(answer.state)) {
         if (observe) this.message = describeResult(answer, total);
         this.changed();
         if (!key || performance.now() >= until) throw new Error("Completion not established before the input deadline.");
-        await sleep(100);
+        if (pollDelay) await sleep(pollDelay);
+        pollDelay = 100;
         response = await this.request(`/api/v1/requests/${key}`);
         if (generation !== this.generation || ![200, 202, 400].includes(response.status) ||
             response.json.command_key !== key || !response.json.state) throw new Error("Result is unavailable.");
         answer = response.json;
         if (observe) this.last = answer;
+      }
+      if (sampledMove && answer.state === "sent" && answer.error === "ok") {
+        if (response.status !== 200 || !key || key === "0" || next !== seq + 1 || answer.next_seq !== seq + 1)
+          throw new Error("Movement completion was not confirmed.");
+        confirmedMove = true;
       }
       if (volatile && answer.state === "rejected" && answer.error === "expired") {
         if (response.status !== 400 || !key || key === "0" || next !== seq + 1 || answer.next_seq !== seq + 1)
@@ -266,7 +291,7 @@ export class Controller {
     }
     const expectedEpoch = op === "mode.select" && args.mode !== s.mode ?
       String(BigInt(s.epoch) + 1n) : this.pin?.epoch;
-    await this.refresh(expectedEpoch);
+    if (!confirmedMove) await this.refresh(expectedEpoch);
     this.changed();
     return answer;
   }
@@ -278,7 +303,10 @@ export class Controller {
     this.changed();
     try { return await this.send(op, args, total, gesture); }
     catch (error) { this.halt(this.uncertain ? this.message : error.message); throw error; }
-    finally { this.busy = this.renewing = false; this.changed(); }
+    finally {
+      this.busy = this.renewing = false; this.changed();
+      this.onInputLaneReleased();
+    }
   }
   async acquire() {
     if (!this.session || this.uncertain) throw new Error("Connect a fresh browser session first.");
@@ -546,34 +574,62 @@ function mount() {
     return keyboard(() => client.text(text));
   });
   $('text').oninput = () => { $('text-count').textContent = `${$('text').value.length} / 32 characters`; };
+  let lastPadPost = -Infinity;
   const point = e => ({id: e.pointerId, x: e.clientX, y: e.clientY});
+  function cancelOppositeFraction(bucket, axis, incoming) {
+    const fraction = bucket[axis] % 1;
+    if (fraction * incoming >= 0) return incoming;
+    const matched = Math.sign(incoming) * Math.min(Math.abs(incoming), Math.abs(fraction));
+    bucket[axis] += matched;
+    return incoming - matched;
+  }
   function move(e, contact) {
     if (!contact || contact.id !== e.pointerId) return;
     e.preventDefault();
-    const dx = e.clientX - contact.x, dy = e.clientY - contact.y;
+    let dx = e.clientX - contact.x, dy = e.clientY - contact.y;
     contact.x = e.clientX; contact.y = e.clientY;
     // Track the contact across neutral release without accumulating disabled motion.
     if ($('mouse-controls').disabled || client.state?.release_pending || (!dx && !dy)) return;
     if (movement?.contact !== contact) movement = {contact, samples: []};
     const samples = movement.samples, at = Math.min(e.timeStamp, performance.now());
     while (samples.length && at - samples[0].at >= PAD_LIFETIME_MS) samples.shift();
+    // Resolve opposing fractions at contact time, including while a POST is in flight.
+    for (let i = 0; i < samples.length && (dx || dy);) {
+      const prior = samples[i];
+      dx = cancelOppositeFraction(prior, 'dx', dx);
+      dy = cancelOppositeFraction(prior, 'dy', dy);
+      if (prior.dx || prior.dy) i++;
+      else samples.splice(i, 1);
+    }
+    if (!dx && !dy) {
+      if (!samples.length) movement = null;
+      return;
+    }
     let bucket = samples.at(-1);
     if (!bucket || at - bucket.at >= PAD_BUCKET_MS) {
       bucket = {at, dx:0, dy:0}; samples.push(bucket);
     }
     bucket.dx += dx; bucket.dy += dy;
+    movement.unread = true;
+    sendMovement();
   }
   $('pad').onpointerdown = e => {
     if ($('mouse-controls').disabled || pad || (e.pointerType === 'mouse' && e.button !== 0)) return;
     e.preventDefault(); pad = point(e); movement = null; $('pad').setPointerCapture(e.pointerId);
   };
-  $('pad').onpointermove = e => move(e, pad);
   const endPad = e => {
     if (pad?.id !== e.pointerId) return;
     pad = movement = null;
     if (drag) act(finishDrag);
   };
-  $('pad').onpointerup = $('pad').onpointercancel = $('pad').onlostpointercapture = endPad;
+  // Capture loss can retarget a held pointer elsewhere in the page.
+  document.addEventListener('pointermove', e => {
+    if (pad?.id !== e.pointerId) return;
+    if (e.pointerType === 'mouse' && !(e.buttons & 1)) endPad(e);
+    else move(e, pad);
+  }, {capture:true, passive:false});
+  document.addEventListener('pointerup', endPad, true);
+  document.addEventListener('pointercancel', endPad, true);
   $('pad').onkeydown = e => {
     const directions = {ArrowLeft:[-24,0],ArrowRight:[24,0],ArrowUp:[0,-24],ArrowDown:[0,24]};
     if (!directions[e.key] || e.repeat || $('mouse-controls').disabled) return;
@@ -622,21 +678,29 @@ function mount() {
     e.preventDefault(); act(finishDrag);
   }, true);
   $('drag').onblur = () => { if (drag?.key) act(finishDrag); };
-  setInterval(() => {
-    if (!client.controlled || client.busy || document.hidden) return;
-    if (drag && performance.now() - dragAt >= 400) {
-      act(async () => { await client.run('mouse.drag.refresh',{button:'left',deadman_ms:1500}); dragAt = performance.now(); }); return;
+  function retainFraction(samples, axis, remaining) {
+    for (let i = samples.length - 1; i >= 0; i--) {
+      const delta = samples[i][axis];
+      const kept = remaining * delta > 0 ? Math.sign(remaining) * Math.min(Math.abs(remaining), Math.abs(delta)) : 0;
+      samples[i][axis] = kept;
+      remaining -= kept;
     }
-    if (!movement?.samples.length) return;
+  }
+  function sendMovement() {
+    if (!client.controlled || client.busy || document.hidden) return;
+    if (drag?.submitted && performance.now() - dragAt >= 400) return;
+    if (!movement?.unread || performance.now() - lastPadPost < PAD_BATCH_MS) return;
     if (performance.now() >= movement.samples.at(-1).at + PAD_LIFETIME_MS) { movement = null; return; }
     const pending = movement;
     act(() => client.run('mouse.move_relative', {}, undefined, {
       current: () => movement === pending && (pending.contact === pad || pending.contact === drag),
       get expiresAt() { return pending.samples.at(-1).at + PAD_LIFETIME_MS; },
+      posting(op) { if (op === 'mouse.move_relative') lastPadPost = performance.now(); },
       takeSample(now, roundTrip) {
         // Reserve a recent HTTP round trip for the state reply and POST
         // admission legs. Include only deltas with their original deadline.
         const headroom = Math.min(roundTrip, PAD_LIFETIME_MS);
+        pending.unread = false;
         const {samples} = pending;
         while (samples.length > 1 && now + headroom >= samples[0].at + PAD_LIFETIME_MS) samples.shift();
         // A single fresh delta can still arrive sooner than the estimate.
@@ -644,13 +708,30 @@ function mount() {
         const expiresAt = samples[0].at + PAD_LIFETIME_MS;
         let dx = 0, dy = 0;
         for (const bucket of samples) { dx += bucket.dx; dy += bucket.dy; }
-        samples.length = 0;
-        const axis = value => Math.max(-127, Math.min(127, Math.trunc(value)));
-        dx = axis(dx); dy = axis(dy);
-        return dx || dy ? {args:{dx,dy}, expiresAt} : null;
+        const x = Math.trunc(dx), y = Math.trunc(dy);
+        if (x === dx && y === dy) samples.length = 0;
+        else {
+          // Consume whole units from older contributions first. Any fractional
+          // remainder stays in its original signed bucket with its own expiry.
+          retainFraction(samples, 'dx', dx - x);
+          retainFraction(samples, 'dy', dy - y);
+          pending.samples = samples.filter(bucket => bucket.dx || bucket.dy);
+        }
+        if (!x && !y) return null; // Wait for a new event on this contact.
+        const axis = value => Math.max(-127, Math.min(127, value));
+        return {args:{dx:axis(x), dy:axis(y)}, expiresAt};
       },
     }));
-  },60);
+  }
+  client.onInputLaneReleased = () => {
+    if (movement?.unread) queueMicrotask(sendMovement);
+  };
+  setInterval(() => {
+    if (!client.controlled || client.busy || document.hidden) return;
+    if (drag?.submitted && performance.now() - dragAt >= 400) {
+      act(async () => { await client.run('mouse.drag.refresh',{button:'left',deadman_ms:1500}); dragAt = performance.now(); });
+    } else sendMovement();
+  },PAD_BATCH_MS);
   setInterval(() => {
     if (!client.session || client.busy || loading || document.hidden) return;
     act(async () => { if (client.controlled) await client.run('control.renew'); else await client.refresh(undefined, true); });

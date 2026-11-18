@@ -753,9 +753,10 @@ static void service(struct ble_npl_event *event)
     for (unsigned i = 0; i < 4 && xQueueReceive(commands, &request, 0) == pdTRUE; ++i) command(&request, now);
     control_state.local_busy=lease_end>now; control_state.transition=transition;
     passport_control_observe(&control_state,now);
-    passport_control_http_service(now);
+    uint64_t move_key=passport_control_http_service(now);
     hid_engine_step_result_t step = hid_engine_step(&engine, send_report, NULL);
     passport_control_service(now);
+    if (move_key) passport_control_http_finish_move(move_key,now);
     if (step == HID_ENGINE_STEP_RETRY_EXHAUSTED) {
         usb_command_finish(PR_UNKNOWN, 0);
         state.release_unknown = true;

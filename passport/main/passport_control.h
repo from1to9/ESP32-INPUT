@@ -25,7 +25,9 @@ bool passport_control_init(hid_engine_t *, cp_random_fn);
 void passport_control_deinit(void);
 void passport_control_observe(const passport_control_observation_t *, uint64_t now_ms);
 void passport_control_service(uint64_t now_ms);
-void passport_control_execute(passport_control_request_t *, uint64_t now_ms);
+// Nonzero only for a newly admitted HTTP relative move, never an exact retry.
+uint64_t passport_control_execute(passport_control_request_t *, uint64_t now_ms);
+void passport_control_finish_move(passport_control_request_t *, uint64_t key, uint64_t now_ms);
 void passport_control_close(const cp_identity_t *, uint64_t now_ms);
 void passport_control_network_reset(uint64_t now_ms);
 // A physical takeover consumes its gesture; the UI must require a fresh press.

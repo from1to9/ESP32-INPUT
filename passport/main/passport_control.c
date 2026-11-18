@@ -2,6 +2,7 @@
 #include "passport_control.h"
 #include "app_remote_input.h"
 #include "control_json.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,8 @@
 #endif
 
 static cp_context_t *protocol;
+// Written only by synchronous dispatch and consumed by that same owner's HTTP call.
+static uint64_t new_move_key;
 static app_remote_input_t *remote;
 static hid_engine_t *engine;
 static interaction_t interaction;
@@ -92,7 +95,12 @@ static cp_error_t dispatch(void *user, const cp_command_t *command, cp_result_t 
         char producer[24];
         if (cp_command_string(command,"producer",producer,sizeof(producer)) && strcmp(producer,"script")) return CP_UNAVAILABLE;
     }
-    if (app_remote_input_owns(command->operation)) return app_remote_input_execute(remote,command,now,result);
+    if (app_remote_input_owns(command->operation)) {
+        cp_error_t rc=app_remote_input_execute(remote,command,now,result);
+        if (command->operation==CP_OP_MOUSE_MOVE_RELATIVE && rc==CP_OK && result->state==CP_RESULT_ACCEPTED)
+            new_move_key=command->command_key;
+        return rc;
+    }
     return provider ? provider->dispatch(command,now,result) : CP_UNAVAILABLE;
 }
 static void safety(void *user, cp_safety_reason_t reason, const cp_identity_t *identity)
@@ -186,12 +194,12 @@ void passport_control_service(uint64_t time)
     cp_result_t result;
     if (provider && provider->poll(now,&result)) (void)cp_complete(protocol,result.command_key,&result,now);
 }
-void passport_control_execute(passport_control_request_t *request, uint64_t time)
+uint64_t passport_control_execute(passport_control_request_t *request, uint64_t time)
 {
-    now=time;
+    now=time; new_move_key=0;
     memset(&request->response,0,sizeof(request->response));
     request->error=CP_UNAVAILABLE;
-    if (!protocol) { early_failure("execute_without_protocol",request->error); return; }
+    if (!protocol) { early_failure("execute_without_protocol",request->error); return 0; }
     passport_control_service(now);
     cp_http_security_t sec={.host=request->host,.origin=request->origin[0] ? request->origin : NULL,
         .authorization=request->authorization[0] ? request->authorization : NULL,
@@ -199,7 +207,7 @@ void passport_control_execute(passport_control_request_t *request, uint64_t time
     if (request->kind==PC_HTTP || request->kind==PC_WS_OPEN) {
         char expected[48]; snprintf(expected,sizeof(expected),"http://%s",request->host);
         request->error=cp_http_configure(protocol,request->host,expected);
-        if (request->error!=CP_OK) { early_failure("http_configure",request->error); return; }
+        if (request->error!=CP_OK) { early_failure("http_configure",request->error); return 0; }
     }
     switch (request->kind) {
     case PC_HTTP: request->error=cp_http(protocol,request->method,request->resource,&sec,request->body,request->length,now,&request->response); break;
@@ -208,6 +216,19 @@ void passport_control_execute(passport_control_request_t *request, uint64_t time
     case PC_WS_HEARTBEAT: request->error=cp_transport_heartbeat(protocol,&request->identity,now); break;
     }
     passport_control_service(now);
+    uint64_t key=request->kind==PC_HTTP && request->error==CP_OK && request->response.status==202 ? new_move_key : 0;
+    new_move_key=0;
+    return key;
+}
+void passport_control_finish_move(passport_control_request_t *request, uint64_t key, uint64_t time)
+{
+    // A retry or neutral cleanup can still be pending after one HID step.
+    // Leave the original acceptance intact until the record is terminal.
+    if (!cp_result_is_terminal(protocol,key)) return;
+    strcpy(request->method,"GET");
+    snprintf(request->resource,sizeof(request->resource),"/api/v1/requests/%" PRIu64,key);
+    request->length=0;
+    (void)passport_control_execute(request,time);
 }
 void passport_control_close(const cp_identity_t *identity, uint64_t time)
 { if (protocol) { now=time; (void)cp_transport_close(protocol,identity,now); passport_control_service(now); } }

@@ -41,6 +41,10 @@ const server=http.createServer(async(req,res)=>{
       }
       const protocol={...currentState,locked};
       if(timing?.stateReturnMs)await pause(timing.stateReturnMs);
+      if(timing?.path){
+        const replyDelays=[22,60,85];
+        await pause(replyDelays[timing.reads++ % replyDelays.length]);
+      }
       send({protocol});return;
     }
     if(url.pathname==='/api/v1/capabilities'){send({access_policy:'open_network'});return;}
@@ -83,7 +87,14 @@ const server=http.createServer(async(req,res)=>{
         const receipt={state:expired?'rejected':'sent',error:expired?'expired':'ok',next_seq:seq,command_key:String(seq)};
         timing.moves.push({seq:c.seq,...c.args,slack:Math.floor(slack),state:receipt.state});
         results.set(receipt.command_key,receipt);
+        if(timing.path){
+          assert(BigInt(c.deadline_ms)<=BigInt(Math.ceil(performance.now())+150));
+          assert(performance.now()<Number(state.lease_expires_ms),'active input lease');
+          await pause(35);
+        }
+        if(timing.moveReply)await timing.moveReply;
         if(expired)send(receipt,400);
+        else if(timing.inline)send(receipt);
         else send({...receipt,state:'accepted'},202);
         return;
       }
@@ -94,7 +105,9 @@ const server=http.createServer(async(req,res)=>{
       if(c.op==='mouse.drag.begin'&&beginReply)await beginReply;
       send(r);return;
     }
-    if(url.pathname.startsWith('/api/v1/requests/')){send(results.get(url.pathname.split('/').at(-1))||{state:'failed',error:'result_unknown'});return;}
+    if(url.pathname.startsWith('/api/v1/requests/')){
+      if(touchTiming?.path)await pause(45);
+      send(results.get(url.pathname.split('/').at(-1))||{state:'failed',error:'result_unknown'});return;}
     if(url.pathname==='/api/v1/bluetooth/peers'){send({known:true,revision:'7',generation:'3',connected:true,ready:true,pairing:false,handshake:false,window_seconds:0,message:'Connected and ready',peers:[{id:bond,original:host,label,label_known:true,labelable:true,current:true},{id:'02'.padEnd(32,'0'),original:'10:20:30:40:50:61/0',label:'Studio laptop',label_known:true,labelable:true,current:false}]});return;}
     if(url.pathname==='/api/v1/wifi/profiles'){send({known:true,revision:'4',sta_ip:'192.0.2.1',ap_ip:'',ap_active:false,message:'LAN connected',profiles:[{id:'00000001',ssid_hex:hx('Meridian Studio'),label:'Home office',label_known:true,current:true}]});return;}
     if(url.pathname==='/api/v1/wifi/scans/current'){send({known:true,generation:9,next_cursor:0,scanning:false,records:[{id:ap,index:0,ssid_hex:hx('<img src=x onerror=alert(1)>'),bssid:'001122334455',rssi:-53,security:1,label:'Workshop',label_known:true,labelable:true,saved_matches:0}]});return;}
@@ -132,6 +145,102 @@ async function padTouch(context,page){
   const cdp=await context.newCDPSession(page);
   return (type,dx=0,dy=0)=>cdp.send('Input.dispatchTouchEvent',{type,
     touchPoints:type==='touchEnd'?[]:[{x:x+dx,y:y+dy,id:1}]});
+}
+async function touchAcrossPadEdge(){
+  reset();touchTiming={trace:[],moves:[],firstAdmissionMs:5,stateReturnMs:0,inline:true};
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await open(context);await connect(page);await acquire(page);
+    const pad=page.locator('#pad');await pad.scrollIntoViewIfNeeded();
+    const box=await pad.boundingBox(),x=Math.round(box.x+box.width/2),y=Math.floor(box.y+box.height)-8;
+    await pad.evaluate(el=>{
+      el.addEventListener('pointerdown',e=>{window.padPointer=e.pointerId;});
+      window.outsideMoves=[];
+      document.addEventListener('pointermove',e=>{
+        if(!el.contains(e.target))window.outsideMoves.push(e.pointerId);
+      },true);
+    });
+    const cdp=await context.newCDPSession(page);
+    const touch=(type,dx=0,dy=0)=>cdp.send('Input.dispatchTouchEvent',{type,
+      touchPoints:['touchCancel','touchEnd'].includes(type)?[]:[{x:x+dx,y:y+dy,id:1}]});
+    const moveResponse=()=>page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON().op==='mouse.move_relative');
+    for(const end of ['touchEnd','touchCancel']){
+      await touch('touchStart');
+      await pad.evaluate(el=>{
+        if(!el.hasPointerCapture(window.padPointer))throw Error('Pad did not capture the contact');
+        el.releasePointerCapture(window.padPointer);
+      });
+      let posted=moveResponse();
+      await touch('touchMove',0,22);await posted;
+      posted=moveResponse();
+      await touch('touchMove',6,22);
+      assert.deepEqual((await posted).request().postDataJSON().args,{dx:6,dy:0});
+      assert(await page.evaluate(()=>window.outsideMoves.includes(window.padPointer)));
+      await touch(end);
+      await pause(180);
+    }
+    const count=commands.filter(c=>c.op==='mouse.move_relative').length;
+    await touch('touchStart',0,22);await touch('touchMove',4,22);
+    await touch('touchMove',4,-4);await touch('touchEnd');
+    await pause(180);
+    assert.equal(commands.filter(c=>c.op==='mouse.move_relative').length,count);
+    console.log('PASS trusted touch continues outside pad after capture loss, lift and cancel discard, outside start ignored');
+  }finally{await context.close();}
+}
+async function fractionalTouch(){
+  reset();touchTiming={trace:[],moves:[],firstAdmissionMs:1,stateReturnMs:0,inline:true};
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await open(context);await connect(page);await acquire(page);
+    const touch=await padTouch(context,page);
+    // Delaying an already-sent vertical move must not change horizontal rounding.
+    for(const holdReply of [false,true]){
+      const first=touchTiming.moves.length;
+      let release;
+      touchTiming.moveReply=holdReply ? new Promise(resolve=>{release=resolve;}) : null;
+      try{
+        await touch('touchStart');await touch('touchMove',0.5,1);await pause(85);
+        assert.equal(touchTiming.moves[first]?.state,'sent');
+        await touch('touchMove',0,1);await pause(85);await touch('touchMove',-0.5,1);
+      }finally{release?.();}
+      await pause(100);await touch('touchEnd');
+      assert.deepEqual(touchTiming.moves.slice(first).map(({dx,dy,state})=>({dx,dy,state})),
+        [{dx:0,dy:1,state:'sent'}]);
+    }
+    for(const sign of [1,-1]){
+      const first=commands.length;
+      await touch('touchStart');
+      for(let i=1;i<=48;i++){
+        await touch('touchMove',sign*i/2);
+        await pause(25);
+      }
+      await pause(90);await touch('touchEnd');
+      const moves=commands.slice(first).filter(c=>c.op==='mouse.move_relative');
+      assert.equal(moves.reduce((n,c)=>n+c.args.dx,0),sign*24);
+      assert(moves.every(c=>c.args.dy===0 && Math.sign(c.args.dx)===sign));
+    }
+    // Once a reversal cancels a fraction, expiry cannot bring either half back.
+    const reversal=commands.length;
+    await touch('touchStart');await touch('touchMove',0.5);await pause(80);
+    await touch('touchMove',0);await pause(80);await touch('touchMove',-0.5);
+    await pause(35);
+    assert(!commands.slice(reversal).some(c=>c.op==='mouse.move_relative'));
+    await touch('touchMove',-1);await pause(70);await touch('touchEnd');
+    assert.deepEqual(commands.slice(reversal).filter(c=>c.op==='mouse.move_relative').map(c=>c.args),[{dx:-1,dy:0}]);
+    // Two half steps cannot combine across lift or after the first expires.
+    const first=commands.length;
+    await touch('touchStart');await touch('touchMove',0.5);await touch('touchEnd');
+    await touch('touchStart');await touch('touchMove',0.5);
+    await pause(190);await touch('touchMove',1);await pause(75);await touch('touchEnd');
+    assert(!commands.slice(first).some(c=>c.op==='mouse.move_relative'));
+    // Horizontal integer output must leave the original fractional Y intact.
+    await touch('touchStart');await touch('touchMove',1,0.5);await pause(55);
+    await touch('touchMove',2,1);await pause(90);await touch('touchEnd');
+    const mixed=commands.slice(first).filter(c=>c.op==='mouse.move_relative');
+    assert.equal(mixed.reduce((n,c)=>n+c.args.dx,0),2);
+    assert.equal(mixed.reduce((n,c)=>n+c.args.dy,0),1);
+    console.log('PASS fractional touch: 48 half pixels each way deliver +24/-24, mixed axes, immediate/delayed reversal, lift and original expiry');
+  }finally{await context.close();}
 }
 // Motion during neutral release cannot become part of a later fresh delta.
 async function touchAcrossRelease(){
@@ -193,7 +302,68 @@ async function delayedTouch(){
     await page.waitForFunction(()=>document.getElementById('connection').textContent!=='This browser is controlling');
   }finally{await context.close();touchTiming=null;}
 }
-try{
+// The two boards use the same pointer path. These delays model HTTP legs;
+// they do not measure BLE or guarantee a physical receiving application.
+async function trajectory(name,steps,interval,offset){
+  reset();delayState=35;
+  const timing=touchTiming={path:true,inline:process.argv.includes('--inline-receipt'),reads:0,trace:[],moves:[],firstAdmissionMs:35};
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await open(context);
+    const sent=[],rejected=[];
+    page.on('response',async response=>{
+      const route=new URL(response.url()).pathname;
+      if(route!=='/api/v1/commands' && !route.startsWith('/api/v1/requests/'))return;
+      const receipt=await response.json().catch(()=>null);
+      if(!receipt?.command_key)return;
+      const c=commands.find(cmd=>String(cmd.seq+1)===receipt.command_key);
+      if(c?.op!=='mouse.move_relative')return;
+      const row={at:performance.now(),seq:c.seq,dx:c.args.dx};
+      if(receipt.state==='sent' && receipt.error==='ok')sent.push(row);
+      if(receipt.state==='rejected' && receipt.error==='expired')rejected.push(row);
+    });
+    await connect(page);await acquire(page);
+    await page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON().op==='control.renew');
+    await page.waitForResponse(r=>r.url().endsWith('/state'));
+    const touch=await padTouch(context,page);
+    const start=performance.now(), before=commands.length;
+    await touch('touchStart');
+    let pathLength=0,last=0;
+    for(let i=1;i<=steps;i++){
+      const x=offset(i);
+      await pause(Math.max(0,start+interval*i-performance.now()));
+      await touch('touchMove',x);
+      pathLength+=Math.abs(x-last);last=x;
+    }
+    await touch('touchEnd');
+    const duration=Math.round(performance.now()-start);
+    await pause(800);
+    const after=commands.slice(before),moves=after.filter(c=>c.op==='mouse.move_relative');
+    const gaps=sent.slice(1).map((r,i)=>Math.round(r.at-sent[i].at)).sort((a,b)=>a-b);
+    const quantile=n=>gaps[Math.ceil(n*gaps.length)-1]??null;
+    const sum=(items,abs)=>items.reduce((n,r)=>n+(abs?Math.abs(r.dx):r.dx),0);
+    const summary={name,duration,input_path:pathLength,input_net:last,posted:moves.length,sent:sent.length,
+      sent_path:sum(sent,true),sent_net:sum(sent,false),expired:rejected.length,p50_ms:quantile(.5),p95_ms:quantile(.95),
+      renewals:after.filter(c=>c.op==='control.renew').length,one_lease:moves.every(c=>c.lease_id===state.lease_id)
+        && commands.filter(c=>c.op==='control.acquire').length===1 && state.lease_active};
+    assert.equal(await page.locator('#connection').textContent(),'This browser is controlling');
+    assert(summary.one_lease && moves.length===sent.length+rejected.length);
+    assert.equal(new Set([...sent,...rejected].map(c=>c.seq)).size,moves.length);
+    assert(moves.every(c=>c.args.dy===0));
+    await page.locator('#stop').click();
+    await page.waitForFunction(()=>document.getElementById('connection').textContent!=='This browser is controlling');
+    console.log(JSON.stringify(summary));
+  }finally{await context.close();touchTiming=null;}
+}
+if(process.argv.includes('--trajectory')){
+  try{
+    await trajectory('360-step reversal',360,23,i=>3*(32-Math.abs(32-i%64)));
+    await trajectory('right 40',20,45,i=>2*i);
+    await trajectory('left 40',20,45,i=>-2*i);
+  }finally{await browser.close();await new Promise(r=>server.close(r));}
+}else try{
+  await fractionalTouch();
+  await touchAcrossPadEdge();
   await touchAcrossRelease();
   await delayedTouch();
   if(!process.argv.includes('--behavior-only')) for(const [name,width,height,mobile] of [['desktop',1440,1060,false],['iphone',390,844,true],['ipad',1024,1366,true]])for(const theme of ['dark','light']){
@@ -390,6 +560,30 @@ try{
   assert.equal(await p.locator('#pair-open').isDisabled(),true);assert.equal(commands.length,afterUnknown);
   await ctx.close();assert.deepEqual(errors,[]);
   const {Controller,describeResult}=await import('data:text/javascript;base64,'+assets.get('js').toString('base64'));
+  // A direct terminal reply and a polled terminal reply must be tied to the
+  // submission; an invalid successful-looking reply stops the single lane.
+  for(const bad of ['key','sequence','status','polled key']){
+    reset();
+    let submissions=0;
+    const c=new Controller(async(url,options)=>{
+      const receipt={state:'sent',error:'ok',command_key:'2',next_seq:seq+1};
+      if(url==='/api/v1/commands' && JSON.parse(options.body).op==='mouse.move_relative'){
+        submissions++;
+        if(bad==='polled key')return new Response(JSON.stringify({...receipt,state:'accepted'}),{status:202});
+        if(bad==='key')receipt.command_key=null;
+        if(bad==='sequence')receipt.next_seq=seq;
+        return new Response(JSON.stringify(receipt),{status:bad==='status'?503:200});
+      }
+      if(url.startsWith('/api/v1/requests/'))return new Response(JSON.stringify({...receipt,command_key:'3'}));
+      return fetch(origin+url,options);
+    });
+    await c.login();await c.acquire();
+    const sample={current:()=>true,takeSample:()=>({args:{dx:1,dy:0},expiresAt:performance.now()+150})};
+    await assert.rejects(c.run('mouse.move_relative',{},undefined,sample));
+    assert(c.uncertain && !c.controlled);
+    await assert.rejects(c.acquire());assert.equal(submissions,1);
+    await c.disconnect();
+  }
   // An expired POST can coincide with a real takeover, or be followed by
   // an unavailable state read. An uncorrelated rejection is an unknown reply.
   for(const change of ['lease_active','lease_id','target_id','epoch','transport_generation','locked','release_pending','remote_allowed','input_ready','read-error','bad-key','bad-sequence','lost']){

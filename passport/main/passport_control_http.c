@@ -53,7 +53,18 @@ static bool exchange(void)
         // A late notification from the previous completed request is harmless.
     }
 }
-void passport_control_http_service(uint64_t now)
+static void complete_exchange(uint64_t now)
+{
+    portENTER_CRITICAL(&lock);
+    bool abandoned=mailbox==ABANDONED;
+    if (!abandoned) mailbox=DONE;
+    portEXIT_CRITICAL(&lock);
+    if (abandoned) {
+        if (request.kind==PC_WS_OPEN && request.error==CP_OK) passport_control_close(&request.identity,now);
+        release();
+    } else xSemaphoreGive(completed);
+}
+uint64_t passport_control_http_service(uint64_t now)
 {
     for (unsigned i=0;i<CP_MAX_SESSIONS;++i) {
         portENTER_CRITICAL(&lock);
@@ -68,16 +79,23 @@ void passport_control_http_service(uint64_t now)
     bool abandoned=mailbox==ABANDONED, ready=mailbox==READY;
     if (ready || abandoned) mailbox=RUNNING;
     portEXIT_CRITICAL(&lock);
-    if (!ready && !abandoned) return;
-    if (ready) passport_control_execute(&request,now);
+    if (abandoned) { release(); return 0; }
+    if (!ready) return 0;
+    uint64_t move_key=passport_control_execute(&request,now);
+    if (!move_key) complete_exchange(now);
+    return move_key;
+}
+void passport_control_http_finish_move(uint64_t key, uint64_t now)
+{
+    // The HTTP task cannot reuse the slot before DONE, even on timeout. Read
+    // the retained result under the original credentials; never submit again.
     portENTER_CRITICAL(&lock);
-    abandoned=abandoned || mailbox==ABANDONED;
-    if (!abandoned) mailbox=DONE;
+    bool waiting=mailbox==RUNNING;
     portEXIT_CRITICAL(&lock);
-    if (abandoned) {
-        if (ready && request.kind==PC_WS_OPEN && request.error==CP_OK) passport_control_close(&request.identity,now);
-        release();
-    } else xSemaphoreGive(completed);
+    if (waiting) {
+        passport_control_finish_move(&request,key,now);
+    }
+    complete_exchange(now);
 }
 static bool header(httpd_req_t *req,const char *name,char *out,size_t size,bool required)
 {
