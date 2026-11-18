@@ -46,11 +46,12 @@ function padFixture() {
   const constants = source.match(/^const PAD_.*;$/gm).join("\n");
   let sendTimer, queued;
   const microtasks = [];
-  const mount = new Function("$", "client", "act", "setInterval", "queueMicrotask",
+  const page = new EventTarget();
+  const mount = new Function("document", "globalThis", "$", "client", "act", "setInterval", "queueMicrotask",
     `${constants}\nlet pad = null, movement = null, lastMovementAt = 0;
      ${source.slice(start, end)}\n${source.slice(stop, stopEnd)}
      return () => { pad = movement = null; };`);
-  const clear = mount($, f.client, run => { queued = run(); }, (run, interval) => {
+  const clear = mount(page, new EventTarget(), $, f.client, run => { queued = run(); }, (run, interval) => {
     assert.equal(interval, 30);
     sendTimer = run;
   }, run => microtasks.push(run));
@@ -73,9 +74,12 @@ function padFixture() {
     },
     close() {},
   };
-  const fire = (kind, x = 0, y = 0, id = 7) => pointer["onpointer" + kind]({
-    clientX: x, clientY: y, pointerId: id, pointerType: "touch", preventDefault() {},
-  });
+  const fire = (kind, x = 0, y = 0, id = 7) => {
+    const event = Object.assign(new Event("pointer" + kind, {cancelable: true}),
+      {clientX: x, clientY: y, pointerId: id, pointerType: "touch"});
+    if (kind === "down") pointer.onpointerdown(event);
+    else page.dispatchEvent(event);
+  };
   const run = action => { queued = undefined; action?.(); return queued; };
   return {...f, motions, sentAt, fire, stop: () => { controls.onclick(); return queued; },
     tick: () => run(sendTimer), release: () => run(microtasks.shift()), microtasks};
