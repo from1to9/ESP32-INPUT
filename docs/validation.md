@@ -95,6 +95,25 @@ the browser session closed, and the saved BLE connection remained ready.
 The remaining loss of travel under network timing and pointer feel on the
 receiving device remain open.
 
+On `34045243`, all 16 expired touchpad moves in one 360-point stroke
+returned the current lease and input state with the rejection. Two state
+queries immediately followed an expiry, both before a lease renewal.
+On the same trajectory, the earlier installed `b1a1442f` sent a separate
+state query after each of 24 expiries. Confirmed BLE travel rose from 174
+to 315 of the 1,080 input units. Net travel was +84 and +105 respectively
+for a requested +72. The longest gap between successful movement receipts
+was 1.33 seconds on the earlier image and 1.57 seconds on the candidate.
+
+In a second comparison on one boot of `34045243`, Chromium loaded the
+installed page for both strokes. With the optional request header suppressed,
+right and left travel reached +120 and −27. With the header enabled, they
+reached +153 and −42. The first successful movement receipt arrived
+3.23 seconds and 0.17 seconds after stroke start respectively. Both strokes
+retained the lease and ended with confirmed neutral release and session
+closure. These runs showed more delivered travel in both directions.
+Directional error and gaps exceeding one second persisted. The receiving
+cursor was unobserved.
+
 These bounded observations do not establish sustained Web
 reliability, physical display rendering, every BLE/USB input path, Safari
 behavior, speaker output or long-run radio coexistence. The
