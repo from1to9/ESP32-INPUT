@@ -387,6 +387,7 @@ typedef struct {
     uint64_t generation;
     bool closed;
     cp_terminal_mode_t terminal_mode;
+    unsigned motion_width;
 } channel_t;
 static void websocket_closed(channel_t *c)
 {
@@ -545,7 +546,7 @@ static esp_err_t websocket_data(httpd_req_t *request)
         return ESP_FAIL;
     }
     server_t *s = channel->server;
-    cp_motion_terminal_t motion = {.mode = channel->terminal_mode};
+    cp_motion_terminal_t motion = {.mode = channel->terminal_mode, .width = channel->motion_width};
     portENTER_CRITICAL(&s_lock);
     bool blocked = channel->closed || s->stop_requested ||
         !control_motion_prepare(&s->channels[channel->slot].motion, &motion);
@@ -575,6 +576,7 @@ static esp_err_t websocket_data(httpd_req_t *request)
                                           now_ms(), &s->response, &motion);
         enable_low_latency = channel->terminal_mode == CP_TERMINAL_DISABLED && motion.mode != CP_TERMINAL_DISABLED;
         channel->terminal_mode = motion.mode;
+        channel->motion_width = motion.width;
         if (motion.accepted_key) {
             // Mark before the admission frame is written. Queued terminal work
             // can only run on this same HTTP owner after this handler returns.
@@ -690,7 +692,7 @@ static void queue_motion_terminal(server_t *s)
     if (!s->stop_requested && !s->motion_work.queued) {
         for (unsigned i = 0; i < CP_MAX_SESSIONS; ++i) {
             if (!s->channels[i].used) continue;
-            for (unsigned j = 0; j < CONTROL_MOTION_WINDOW_SIZE; ++j) {
+            for (unsigned j = 0; j < CP_MOTION_WINDOW_CONFIG_MAX; ++j) {
                 const control_motion_slot_t *slot = &s->channels[i].motion.slots[j];
                 if (slot->ready) {
                     s->motion_work.queued = queue = true;

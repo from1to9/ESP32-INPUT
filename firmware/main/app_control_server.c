@@ -20,7 +20,7 @@
 #include "app_control_dns.h"
 #include "app_network_task.h"
 #include "app_control_web.h"
-#include "app_control_motion_window.h"
+#include "control_motion_window.h"
 #include "app_wifi.h"
 
 #define CERT_BYTES 2048U
@@ -543,7 +543,7 @@ static esp_err_t initialize(server_t *s)
 #endif
     cp_set_transport_capabilities(s->protocol, websocket, error == ESP_OK);
     cp_set_motion_terminal_available(s->protocol, websocket);
-    cp_set_motion_window_available(s->protocol, websocket);
+    cp_set_motion_window_max(s->protocol, CP_MOTION_WINDOW_CONFIG_MAX);
     portENTER_CRITICAL(&s_lock);
     s_snapshots[s->slot].websocket_available = websocket;
     portEXIT_CRITICAL(&s_lock);

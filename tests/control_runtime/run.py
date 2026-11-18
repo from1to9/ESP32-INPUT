@@ -80,6 +80,8 @@ def main():
                            str(ROOT / "components/control_protocol/control_registry.c"),
                            *([str(ROOT / "components/control_protocol/control_protocol.c")] if name in ("access", "server") else []), "-lm", "-o", str(binary)]
                 command += defines
+                if name == "server":
+                    command.append("-DCP_MOTION_WINDOW_CONFIG_MAX=3")
                 subprocess.run(command, check=True)
                 subprocess.run([str(binary)], check=True)
     if not selected or selected=="work":
