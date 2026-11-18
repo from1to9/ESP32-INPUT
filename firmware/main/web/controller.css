@@ -107,7 +107,7 @@ legend { font-weight: 650; margin-bottom: 10px; }
 fieldset:disabled #pad { opacity: .6; cursor: default; }
 .last-action { border-top: 1px solid var(--line); padding-top: 8px; }
 .last-action h2 { font-size: 15px; }
-#result { margin: 2px 0 0; font-size: 14px; }
+#result { margin: 2px 0 0; font-size: 14px; height: 3em; overflow: auto; }
 #pad { background-image: radial-gradient(var(--line) 1px, transparent 1px); background-size: 15px 15px; }
 #pad span { padding: 4px 10px; border-radius: 5px; background: var(--surface); }
 .mouse-row { display: grid; grid-template-columns: 1.5fr repeat(4, 1fr) 1.5fr; gap: 4px; margin: 6px 0 14px; }
@@ -147,7 +147,7 @@ footer { margin: 20px 0 0; border-top: 1px solid var(--line); padding-top: 14px;
   .masthead h1 { font-size: 24px; }
   .toolbar { gap: 4px; }
   .theme-control span { position: absolute; clip-path: inset(50%); }
-  .theme-control select { min-width: 0; max-width: 84px; }
+  .theme-control select { min-width: 92px; }
   .actions { gap: 5px; }
   .actions button { padding-inline: 8px; }
   .key-row { gap: 2px; }

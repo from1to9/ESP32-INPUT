@@ -178,6 +178,19 @@ try {
     });
     assert(!metrics.overflow);
     for (const group of [metrics.qwerty, metrics.actions, metrics.mouse]) assert.equal(new Set(group).size, 1);
+    // Last action sits above the pad. A longer device receipt must not shift
+    // the touch surface under a finger during continuous motion.
+    const stablePad = await phone.evaluate(() => {
+      const result = document.getElementById("result"), pad = document.getElementById("pad");
+      const original = result.textContent;
+      result.textContent = "Sending input…";
+      const top = pad.offsetTop;
+      result.textContent = "rejected: expired (dequeue now=17735280 deadline=17735246).";
+      const stable = pad.offsetTop === top;
+      result.textContent = original;
+      return stable;
+    });
+    assert(stablePad);
     await phone.locator('section[aria-labelledby="input-title"]').screenshot({path: path.join(output, `controls-${width}.png`)});
   }
   await phone.locator("#disconnect").click();
