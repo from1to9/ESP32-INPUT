@@ -1,0 +1,1 @@
+../../../components/control_protocol/web/motion_window.mjs

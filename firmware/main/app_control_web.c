@@ -10,6 +10,9 @@ extern const uint8_t app_web_css_end[] __asm__("_binary_controller_css_end");
 extern const uint8_t app_web_js_start[] __asm__("_binary_controller_js_start");
 extern const uint8_t app_web_js_end[] __asm__("_binary_controller_js_end");
 
+extern const uint8_t motion_window_start[] __asm__("_binary_motion_window_mjs_start");
+extern const uint8_t motion_window_end[] __asm__("_binary_motion_window_mjs_end");
+
 esp_err_t app_control_web_serve(httpd_req_t *request, const char *allowed_host,
                                 const char *browser_origin)
 {
@@ -33,6 +36,8 @@ esp_err_t app_control_web_serve(httpd_req_t *request, const char *allowed_host,
         start = app_web_css_start; end = app_web_css_end; type = "text/css; charset=utf-8";
     } else if (!strcmp(request->uri, "/controller.js")) {
         start = app_web_js_start; end = app_web_js_end; type = "text/javascript; charset=utf-8";
+    } else if (!strcmp(request->uri, "/motion_window.mjs")) {
+        start = motion_window_start; end = motion_window_end; type = "text/javascript; charset=utf-8";
     } else {
         httpd_resp_set_status(request, "404 Not Found");
         return httpd_resp_sendstr(request, "Not found");

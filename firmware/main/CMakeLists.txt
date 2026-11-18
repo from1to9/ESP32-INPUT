@@ -11,7 +11,7 @@ idf_component_register(SRCS "main.c" "app_ui.c" "ble_hid.c" "board_mosaico.c" "u
                            "app_remote_device.c" "app_device_restart.c" "app_factory_reset.c"
                            "app_remote_media.c" "app_display_names.c"
                        INCLUDE_DIRS "." "${CMAKE_CURRENT_BINARY_DIR}/generated"
-                       EMBED_TXTFILES "web/controller.html" "web/controller.css" "web/controller.js"
+                       EMBED_TXTFILES "web/controller.html" "web/controller.css" "web/controller.js" "web/motion_window.mjs"
                        REQUIRES esp-mosaico-bsp hid_engine interaction device_settings haptics bt audio_engine control_protocol spoken_letters esp-sr
                                 nvs_flash esp_tinyusb esp_timer mbedtls esp_wifi esp_netif
                                 esp_event esp_http_server esp_https_server esp_http_client app_update esp_app_format esp_driver_i2c esp_driver_spi esp_partition spi_flash)

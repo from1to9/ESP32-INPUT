@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 const source = await readFile(new URL("../../firmware/main/web/controller.js", import.meta.url), "utf8");
-const {Controller, validateText, describeResult} = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+import {Controller, validateText, describeResult} from "../../firmware/main/web/controller.js";
 const id = "1".repeat(32), prefix = "2".repeat(16), boot = "3".repeat(32), lease = "4".repeat(32);
 const statePath = "/api/v1/state?view=protocol";
 function movementSample(args, lifetime, current = () => true) {
@@ -369,7 +369,8 @@ for (const [operation, outcome] of [
     globalThis.WebSocket = OriginalSocket;
   }
 }
-for (const fault of ["older terminal missing", "both terminals missing", "instant rejection key collision"]) {
+for (const fault of ["older terminal missing", "both terminals missing", "instant rejection key collision", "three moves"]) {
+  const three = fault === "three moves";
   const {client} = fixture();
   const Socket = globalThis.WebSocket;
   let socket;
@@ -388,7 +389,7 @@ for (const fault of ["older terminal missing", "both terminals missing", "instan
       const item = JSON.parse(serialized);
       sent.push(item);
       if (item.type === "motion_window") queueMicrotask(() => this.reply({
-        motion_terminal: true, renew_terminal: true, motion_window: 2,
+        motion_terminal: true, renew_terminal: true, motion_window: three ? 3 : 2,
       }));
     }
     reply(reply) { this.onmessage?.({data: JSON.stringify(reply)}); }
@@ -406,7 +407,8 @@ for (const fault of ["older terminal missing", "both terminals missing", "instan
     client.stateAt = performance.now();
     client.request = async (path, method = "GET") => {
       if (path === "/api/v1/capabilities") return {status: 200, json: {websocket: true,
-        websocket_motion_terminal: true, websocket_renew_terminal: true, websocket_motion_window: true}};
+        websocket_motion_terminal: true, websocket_renew_terminal: true, websocket_motion_window: true,
+        ...(three && {websocket_motion_window_max: 3})}};
       if (path === "/api/v1/ws-ticket") return {status: 200, json: {ticket: "0".repeat(64)}};
       assert.equal(method, "GET");
       reads.push(path);
@@ -416,6 +418,7 @@ for (const fault of ["older terminal missing", "both terminals missing", "instan
       return {status: 200, json: {command_key: "102", command_seq: 11, state: "sent", error: "ok"}};
     };
     await client.openMotionChannel(client.generation);
+    assert.deepEqual(sent[0], {v: 1, type: "motion_window", ...(three && {motion_window: 3})});
     const move = dx => client.run("mouse.move_relative", {}, undefined, movementSample({dx, dy: 0}, 120));
     const accepted = (seq, key) => ({command_seq: seq, next_seq: seq + 1, command_key: key,
       state: "accepted", error: "ok", now_ms: "100"});
@@ -424,6 +427,24 @@ for (const fault of ["older terminal missing", "both terminals missing", "instan
     socket.reply(accepted(10, "101"));
     const second = move(-30).catch(error => error);
     assert.equal(sent.at(-1).seq, 11);
+    if (three) {
+      assert(!client.canContinuePad());
+      socket.reply(accepted(11, "102"));
+      const third = move(15);
+      assert.equal(sent.at(-1).seq, 12);
+      socket.reply(accepted(12, "103"));
+      assert(!client.canContinuePad());
+      await assert.rejects(client.run("control.renew"), /Wait for the current action/);
+      await assert.rejects(move(2), /Wait for the current action/);
+      for (const [seq, key] of [[12, "103"], [10, "101"], [11, "102"]]) {
+        socket.reply({...accepted(seq, key), next_seq: 13, state: "sent", motion_terminal: true});
+      }
+      assert.deepEqual((await Promise.all([first, second, third])).map(r => r.command_seq), [10, 11, 12]);
+      assert.equal(client.lastKey, "103");
+      assert.equal(client.session.next_seq, 13);
+      assert(!client.busy && !client.uncertain);
+      continue;
+    }
     if (fault === "instant rejection key collision") {
       socket.reply({...accepted(11, "101"), state: "rejected", error: "expired"});
       assert.equal(socket.readyState, 3, "a first reply cannot claim another outstanding sequence's key");

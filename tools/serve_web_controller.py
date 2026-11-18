@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 ASSET_ROOT = Path(__file__).resolve().parents[1] / "firmware/main/web"
 ASSETS = {"/": ("controller.html", "text/html"), "/controller.css": ("controller.css", "text/css"),
-          "/controller.js": ("controller.js", "text/javascript")}
+          "/controller.js": ("controller.js", "text/javascript"), "/motion_window.mjs": ("motion_window.mjs", "text/javascript")}
 MAX_COMMAND_BYTES = 2048
 MAX_REPLY_BYTES = 4096
 BOOTSTRAP_SCRIPT = b"""

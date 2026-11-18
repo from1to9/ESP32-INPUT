@@ -127,8 +127,9 @@ reading can preserve a better conservative time estimate across a slow reply.
 After consecutive matching device expiries, a recent device check also
 informs this selection when queueing takes longer than admission. The command
 deadline comes from the oldest included delta. Pad submissions are at least
-30 ms apart. When Mosaico offers a two-command motion window, the page can send
-a second fresh pad command once the preceding command has been accepted.
+30 ms apart. The page uses the motion window size advertised by the firmware,
+or two moves for devices with the original window capability. Each additional
+fresh pad command waits for admission of the preceding move and a free slot.
 The page renews or submits other actions only with the window drained. Earlier channels
 wait for each command's terminal result before sending the next. Opted-in
 channels also push the result of lease renewal.

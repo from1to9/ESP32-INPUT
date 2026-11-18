@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import {MotionWindow, motionWindowRequest} from "./motion_window.mjs";
+
 // The browser owns no HID state. Every action uses the device's typed input API.
 const ACTIVE = new Set(["accepted", "running", "applying", "cleanup_pending"]);
 const TERMINAL = new Set(["rejected", "applied", "sent", "completed", "cancelled", "failed"]);
@@ -78,13 +80,13 @@ class MotionChannel {
   constructor(socket, lost) {
     this.socket = socket;
     this.pending = null;
-    this.moves = new Map();
-    this.newestMove = 0;
+    this.moveWindow = null;
     this.motionTerminal = false;
     this.renewTerminal = false;
     socket.onmessage = event => {
-      if (this.moves.size) {
-        this.receiveMove(event.data);
+      if (this.moveWindow?.size) {
+        try { this.moveWindow.receive(JSON.parse(event.data)); }
+        catch { this.close(); }
         return;
       }
       const pending = this.pending;
@@ -114,51 +116,8 @@ class MotionChannel {
     };
     socket.onclose = () => { this.close(); lost(this); };
   }
-  get canContinueMoves() {
-    return this.moveWindow && this.moves.size === 1 && [...this.moves.values()][0].key !== null &&
-      this.socket.readyState === WebSocket.OPEN && !this.socket.bufferedAmount;
-  }
-  receiveMove(data) {
-    try {
-      const reply = JSON.parse(data);
-      const seq = reply.command_seq;
-      const move = Number.isInteger(seq) && this.moves.get(seq);
-      const next = Number(reply.next_seq);
-      if (!move || !decimal(reply.command_key) || this.moves.size > 2 ||
-          !Number.isInteger(next) || next < seq + 1 || next > this.newestMove + 1 ||
-          typeof reply.error !== "string") throw new Error();
-      if (!move.key && [...this.moves.values()].some(other => other.key === reply.command_key)) throw new Error();
-      if (!move.key && reply.state === "accepted") {
-        if (reply.error !== "ok" || reply.motion_terminal || next !== seq + 1) throw new Error();
-        move.key = reply.command_key;
-        clearTimeout(move.timer);
-        move.timer = setTimeout(() => this.close(), 2200);
-        move.accept(reply);
-        return;
-      }
-      if (!TERMINAL.has(reply.state) || (move.key
-        ? reply.motion_terminal !== true || move.key !== reply.command_key
-        : reply.motion_terminal || reply.state !== "rejected" || next !== seq + 1)) throw new Error();
-      this.moves.delete(seq);
-      clearTimeout(move.timer);
-      move.resolve(reply);
-    } catch { this.close(); }
-  }
-  exchangeMove(payload, accept) {
-    if (this.pending || (this.moves.size && !this.canContinueMoves) ||
-        this.socket.readyState !== WebSocket.OPEN || this.socket.bufferedAmount) {
-      throw new Error("Input channel unavailable.");
-    }
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.close(), 3500);
-      this.moves.set(payload.seq, {key: null, resolve, reject, accept, timer});
-      this.newestMove = payload.seq;
-      try { this.socket.send(JSON.stringify(payload)); }
-      catch { this.close(); }
-    });
-  }
   async exchange(payload, onAccepted) {
-    if (this.pending || this.moves.size || this.socket.readyState !== WebSocket.OPEN || this.socket.bufferedAmount) {
+    if (this.pending || this.moveWindow?.size || this.socket.readyState !== WebSocket.OPEN || this.socket.bufferedAmount) {
       throw new Error("Input channel unavailable.");
     }
     let timeout;
@@ -181,12 +140,7 @@ class MotionChannel {
   }
   close() {
     this.pending?.reject(new Error("Input channel reply unavailable."));
-    if (this.moves.size) this.unresolvedMoves = [...this.moves].map(([seq, move]) => ({seq, key: move.key}));
-    for (const move of this.moves.values()) {
-      clearTimeout(move.timer);
-      move.reject(new Error("Input channel reply unavailable."));
-    }
-    this.moves.clear();
+    if (this.moveWindow?.size) this.unresolvedMoves = this.moveWindow.close();
     this.socket.close();
   }
 }
@@ -252,16 +206,14 @@ export class Controller {
     try {
       if (capabilities.json.websocket_motion_terminal === true) {
         const renewTerminal = capabilities.json.websocket_renew_terminal === true;
-        const moveWindow = renewTerminal && capabilities.json.websocket_motion_window === true;
-        const selected = await channel.exchange({v: 1, type: moveWindow ? "motion_window" :
-          renewTerminal ? "renew_terminal" : "motion_terminal"});
-        if (selected.motion_terminal !== true || (renewTerminal && selected.renew_terminal !== true) ||
-            (moveWindow && selected.motion_window !== 2)) {
+        const request = renewTerminal && motionWindowRequest(capabilities.json);
+        const selected = await channel.exchange(request || {v: 1, type: renewTerminal ? "renew_terminal" : "motion_terminal"});
+        if (selected.motion_terminal !== true || (renewTerminal && selected.renew_terminal !== true)) {
           throw new Error("Device input channel negotiation failed.");
         }
         channel.motionTerminal = true;
         channel.renewTerminal = renewTerminal;
-        channel.moveWindow = moveWindow;
+        if (request) channel.moveWindow = MotionWindow.fromSelection(channel.socket, request, selected, () => channel.close());
       }
     } catch (error) {
       channel.close();
@@ -410,7 +362,7 @@ export class Controller {
         if (!this.controlled) throw new Error("Input control ended before the new action.");
       }
     }
-    const seq = this.session.next_seq;
+    const seq = window ? window.nextSequence(this.session.next_seq) : this.session.next_seq;
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
     // A recent admission measures the gap between our clock estimate at
     // write and the device's check. Require that headroom at the next write
@@ -450,7 +402,7 @@ export class Controller {
     if (sample && performance.now() >= sample.expiresAt) return null;
     const generation = this.generation;
     let answer, confirmedCommand = false;
-    const latest = () => observe && (!window || (!this.uncertain && seq >= window.newestMove));
+    const latest = () => observe && (!window || (!this.uncertain && seq >= window.newestSequence));
     if (latest()) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
@@ -473,7 +425,7 @@ export class Controller {
       } : undefined;
       let response;
       if (channel) {
-        const reply = window ? window.exchangeMove(envelope, accepted) : channel.exchange(envelope, accepted);
+        const reply = window ? window.send(envelope, accepted) : channel.exchange(envelope, accepted);
         // exchange starts the socket write before returning its promise.
         if (pushedTerminal && sample) this.lastPadSubmissionAt = performance.now();
         response = {json: await reply};
@@ -568,12 +520,12 @@ export class Controller {
   canContinuePad() {
     const at = performance.now() - this.stateAt;
     return this.padRuns > 0 && !this.padReadback && this.controlled && !this.uncertain &&
-      this.motionChannel?.canContinueMoves && this.state?.mode === "mouse" && at >= 0 && at < 1500 &&
+      this.motionChannel?.moveWindow?.size > 0 && this.motionChannel.moveWindow.canSend && this.state?.mode === "mouse" && at >= 0 && at < 1500 &&
       decimal(this.state.lease_expires_ms) &&
       BigInt(this.state.lease_expires_ms) - BigInt(this.state.now_ms) - BigInt(Math.floor(at)) >= BigInt(PAD_RENEW_RESERVE_MS);
   }
   async run(op, args = {}, total, readSample, mode = null) {
-    const window = readSample && op === "mouse.move_relative" && this.motionChannel?.moveWindow ? this.motionChannel : null;
+    const window = readSample && op === "mouse.move_relative" ? this.motionChannel?.moveWindow : null;
     if (this.busy && !(window && this.canContinuePad())) throw new Error("Wait for the current action; input is not queued for replay.");
     const generation = this.generation;
     if (window) ++this.padRuns;
@@ -601,7 +553,7 @@ export class Controller {
       if (window) --this.padRuns;
       if (!this.padRuns) {
         try {
-          if (this.padReadback && this.motionChannel === window && this.generation === generation) await this.refresh();
+          if (window && this.padReadback && this.motionChannel?.moveWindow === window && this.generation === generation) await this.refresh();
         } finally {
           this.padReadback = false;
           this.busy = this.renewing = this.moving = false;

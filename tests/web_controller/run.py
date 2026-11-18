@@ -34,9 +34,10 @@ def build(directory, protocol, log):
     subprocess.run([sys.executable, ROOT / "tools/build_identity.py", "--root", ROOT,
                     "--output", directory / "app_build_identity.h"], check=True)
     assets = []
-    for extension in ("html", "css", "js"):
-        name = f"controller_{extension}"
-        path = ROOT / f"firmware/main/web/controller.{extension}"
+    web_assets = [ROOT / "firmware/main/web" / name for name in
+                  ("controller.html", "controller.css", "controller.js", "motion_window.mjs")]
+    for path in web_assets:
+        name = path.name.replace(".", "_")
         assets += [f'.global _binary_{name}_start\n_binary_{name}_start:\n.incbin "{path}"\n.byte 0\n'
                    f'.global _binary_{name}_end\n_binary_{name}_end:\n']
     section = ".section __TEXT,__const\n" if sys.platform == "darwin" else ".section .rodata\n"
@@ -64,7 +65,7 @@ def build(directory, protocol, log):
         ROOT / "firmware/main/app_remote_input_bindings.inc",
         protocol / "components/control_protocol/include/control_protocol.h",
         protocol / "firmware/main/app_control_access.h",
-        *[ROOT / f"firmware/main/web/controller.{extension}" for extension in ("html", "css", "js")]]
+        *web_assets]
     hashes = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
     subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
     if hashes != {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}:

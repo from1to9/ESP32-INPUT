@@ -493,7 +493,7 @@ static esp_err_t initialize(server_t *s)
     config.httpd.if_name = &s->interface;
     config.httpd.ctrl_port = 32770 + s->slot;
     config.httpd.max_open_sockets = 4;
-    config.httpd.max_uri_handlers = 7;
+    config.httpd.max_uri_handlers = 8;
     /* Reserve room for browser UA, Accept, Fetch Metadata and cookie headers.
      * The SDK allocates according to the actual request header length. */
     config.httpd.max_req_hdr_len = 3072;
@@ -531,7 +531,7 @@ static esp_err_t initialize(server_t *s)
                              .user_ctx = s};
         error = httpd_register_uri_handler(s->listener, &route);
     }
-    const char *const web_paths[] = {"/", "/controller.css", "/controller.js"};
+    const char *const web_paths[] = {"/", "/controller.css", "/controller.js", "/motion_window.mjs"};
     for (unsigned i = 0; error == ESP_OK && i < sizeof(web_paths) / sizeof(web_paths[0]); ++i) {
         httpd_uri_t route = {.uri = web_paths[i], .method = HTTP_GET,
                              .handler = handle_web, .user_ctx = s};
