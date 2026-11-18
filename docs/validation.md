@@ -134,8 +134,21 @@ and [storage boundary](interaction.md#status-connectivity-and-display) for what 
   receipts and the cause of the uneven motion were not established by that test.
   Follow-up image `4e80279` passed on-device OTA health confirmation, served
   the matching HTML, CSS and JavaScript over HTTPS, and negotiated the renewal
-  terminal extension on an authenticated WebSocket. Physical iPhone motion
-  smoothness on that revision awaits a swipe observation.
+  terminal extension on an authenticated WebSocket. The iPhone operator
+  subsequently reported loss of control after 5–10 seconds of rapid swiping.
+  Movement still expired on `6322e6c`. On `6850c24` the operator reported
+  better touch response and no disconnect during that observation. Pointer
+  jumps remained a concern.
+
+  A desktop Chromium test drove the board running `6850c24` with the same
+  360-point stroke before and after loading the `b861a98` script in the
+  browser. Of 1,080 units of horizontal travel, terminal HID receipts accounted
+  for 492 with the installed script and 801 with the candidate. The input
+  ended 72 units to the right. The reported net movements were +126 and +99.
+  In a separate test the candidate tracked 29 moves outside the pad after
+  losing pointer capture. The finger lifted outside, all 12 submitted moves
+  reached the HID transport, and Stop completed the neutral release. The
+  candidate's behavior on a physical iPhone remains unverified.
 - **Bluetooth memory pressure.** The controller policy removes the internal
   DMA dependency for allocations explicitly eligible for PSRAM. Real PSRAM
   exhaustion or a full MSYS pool can still trigger the SDK assertion. Dynamic
