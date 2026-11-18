@@ -858,7 +858,12 @@ if(process.argv.includes('--trajectory')){
   assert(commands.some(c=>c.op==='keyboard.key_tap'&&c.args.usage===6&&c.args.modifiers===8));
   await p.locator('#shortcut-modifier').selectOption('1');await p.locator('[data-shortcut=paste]').click();await p.waitForTimeout(150);
   assert(commands.some(c=>c.op==='keyboard.key_tap'&&c.args.usage===25&&c.args.modifiers===1));
-  const sent=commands.length;await p.locator('#text').fill('not\nANSI');await p.locator('#send').click();await p.waitForTimeout(150);assert.equal(commands.length,sent);
+  const beforeInvalidText=commands.length;
+  await p.locator('#text').fill('not\nANSI');
+  await p.locator('#send').click();
+  await p.waitForFunction(()=>document.getElementById('result').textContent.includes('Remove newlines'));
+  // The lease timer can renew independently while the page rejects local text.
+  assert(commands.slice(beforeInvalidText).every(command=>command.op==='control.renew'));
   await p.waitForFunction(()=>!document.getElementById('keyboard-controls').disabled);await p.locator('#text').fill('Hello host');await p.locator('#send').click();await p.waitForTimeout(180);assert(commands.some(c=>c.op==='keyboard.text.enqueue'&&c.args.text==='Hello host'));
   const beforeMouse=commands.length;
   await p.locator('[data-click=right]').click();
