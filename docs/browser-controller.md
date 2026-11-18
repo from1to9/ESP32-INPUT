@@ -62,7 +62,10 @@ for API and MCP clients.
 
 Mouse uses relative touchpad movement, four direction buttons and explicit left
 and right clicks. Dragging the pad moves the target pointer; it does not hold a
-host mouse button. Mouse and touch use Pointer Events and pointer capture.
+host mouse button. A drag that starts on the touchpad continues across the rest
+of the page with the same finger or held mouse button. Lifting, browser
+cancellation or losing window focus ends the gesture. A drag that starts
+outside the pad leaves the pointer still.
 Movement is coalesced only inside the current contact, limited to the existing
 signed 127-unit report bounds, and discarded after 150 ms or contact/context
 loss. It is not queued for later replay.
@@ -119,9 +122,12 @@ fresh unsent deltas from the current contact, within the per-axis report
 limits. When the channel also supplies device admission timing, older deltas
 expire independently after at most 150 ms. The browser uses the previous
 admission and a small allowance for device dispatch to skip deltas that are
-unlikely to arrive in time. The command deadline comes from the oldest
-included delta. Each command waits for its terminal result, and pad submissions are
-at least 30 ms apart. Opted-in channels also push the result of lease renewal
+unlikely to arrive in time. Within the same channel, a recent device clock
+reading can preserve a better conservative time estimate across a slow reply.
+After consecutive matching device expiries, a recent device check also
+informs this selection when queueing takes longer than admission. The command
+deadline comes from the oldest included delta. Each command waits for its
+terminal result, and pad submissions are at least 30 ms apart. Opted-in channels also push the result of lease renewal
 so the pad need not wait for a separate result read. Lifting the finger or
 stopping control discards unsent movement.
 While movement or renewal is in flight, input buttons keep their appearance

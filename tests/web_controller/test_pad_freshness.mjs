@@ -86,7 +86,7 @@ try {
   const beforeCancel = moves().length;
   const cdp = await context.newCDPSession(page);
   const touch = (type, x = 0, y = 0) => cdp.send("Input.dispatchTouchEvent", {type,
-    touchPoints: type === "touchCancel" ? [] : [{x, y, id: 1}]});
+    touchPoints: type === "touchCancel" || type === "touchEnd" ? [] : [{x, y, id: 1}]});
   await touch("touchStart", box.x + 40, box.y + 40); const gate = await pauseState();
   try {
     await touch("touchMove", box.x + 67, box.y + 49); await gate.paused;
@@ -96,6 +96,27 @@ try {
   assert.equal(moves().length, beforeCancel, "cancelled touch must not be submitted after preflight");
   assert(!(await reports()).some(report => report.id === 2 && (report.bytes[1] || report.bytes[2])));
   cases.push("real Chromium touch cancellation invalidates the pending contact");
+
+  // Release capture while the finger is still down, then move wholly outside the pad.
+  const edgeX = Math.round(box.x + 60), bottom = Math.floor(box.y + box.height);
+  await page.locator("#pad").evaluate(pad => pad.addEventListener("gotpointercapture",
+    event => pad.releasePointerCapture(event.pointerId), {once: true}));
+  await touch("touchStart", edgeX, bottom - 40);
+  await touch("touchMove", edgeX, bottom - 12);
+  await touch("touchMove", edgeX, bottom + 12);
+  await afterRenewal(); await fixture("reset-trace");
+  const outsideMove = page.waitForRequest(request => request.url().endsWith("/api/v1/commands") &&
+    request.postDataJSON().op === "mouse.move_relative" && request.postDataJSON().args.dy === 33);
+  await touch("touchMove", edgeX, bottom + 45);
+  await outsideMove; await waitText("result", "Sent to the HID transport");
+  assert((await reports()).some(r => r.id === 2 && r.bytes[1] === 0 && r.bytes[2] === 33));
+  await touch("touchEnd");
+  const endedCount = moves().length;
+  await touch("touchStart", edgeX, bottom + 12);
+  await touch("touchMove", edgeX, bottom - 40);
+  await touch("touchEnd"); await afterRenewal();
+  assert.equal(moves().length, endedCount, "a new contact starting outside must not drive the pad");
+  cases.push("a continuous touch moves beyond the pad after capture loss and ends on outside lift");
 
   await page.getByRole("button", {name: "Move right", exact: true}).click(); await waitText("result", "Sent to the HID transport");
   await page.getByRole("button", {name: "Left click", exact: true}).click(); await waitText("result", "Sent to the HID transport");

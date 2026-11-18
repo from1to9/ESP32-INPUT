@@ -567,10 +567,12 @@ static esp_err_t websocket_data(httpd_req_t *request)
     }
     drain_channel_closures(s);
     cp_error_t error;
+    bool enable_low_latency = false;
     if (frame.type == HTTPD_WS_TYPE_TEXT) {
         cp_motion_terminal_t motion = {.mode = channel->terminal_mode};
         error = cp_transport_frame_motion(s->protocol, &channel->identity, s->body, frame.len,
                                           now_ms(), &s->response, &motion);
+        enable_low_latency = channel->terminal_mode == CP_TERMINAL_DISABLED && motion.mode != CP_TERMINAL_DISABLED;
         channel->terminal_mode = motion.mode;
         if (motion.accepted_key) {
             // Mark before the admission frame is written. Queued terminal work
@@ -589,6 +591,14 @@ static esp_err_t websocket_data(httpd_req_t *request)
         clear(s->body, sizeof(s->body));
         clear(&s->response, sizeof(s->response));
         return ESP_FAIL;
+    }
+    if (enable_low_latency) {
+        /* HTTPD sends the header and payload of longer WebSocket frames in
+         * separate writes. A negotiated input socket needs both promptly. */
+        const int enabled = 1;
+        if (setsockopt(channel->fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) < 0) {
+            ESP_LOGW("ControlWeb", "TCP_NODELAY unavailable for the negotiated input channel");
+        }
     }
     if (frame.type == HTTPD_WS_TYPE_BINARY) {
         app_control_media_port_t port;

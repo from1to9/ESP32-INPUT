@@ -11,6 +11,8 @@ const PAD_CHANNEL_BATCH_MS = 30;
 const PAD_SAMPLE_LIFETIME_MS = 150;
 const PAD_SAMPLE_BUCKET_MS = 8;
 const PAD_TIMING_RESERVE_MS = 12;
+const PAD_EXPIRY_TIMING_MS = 1500;
+const PAD_CLOCK_WINDOW_MS = 2500;
 const PAD_RENEW_RESERVE_MS = 900;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
@@ -240,6 +242,14 @@ export class Controller {
     this.message = s.scopes.includes("input.control") ? "Browser connected. Take control to send input." : "Browser connected with device access.";
     this.changed();
   }
+  rememberPadClock(channel, deviceAt, receivedAt) {
+    const previous = channel.padClock;
+    // Keep the strongest recent lower bound, or start again once it ages out.
+    if (!previous || receivedAt - previous.at >= PAD_CLOCK_WINDOW_MS ||
+        deviceAt - previous.deviceAt >= BigInt(Math.ceil(receivedAt - previous.at))) {
+      channel.padClock = {at: receivedAt, deviceAt};
+    }
+  }
   async refresh(allowEpochChange = false, passive = false) {
     if (!this.session) throw new Error("Connect this browser first.");
     const session = this.session;
@@ -281,6 +291,7 @@ export class Controller {
     }
     this.state = s;
     this.stateAt = performance.now();
+    if (this.motionChannel?.renewTerminal) this.rememberPadClock(this.motionChannel, BigInt(s.now_ms), this.stateAt);
     if (this.controlled) {
       const differences = [];
       if (s.locked) differences.push("device locked");
@@ -333,8 +344,20 @@ export class Controller {
     // write and the device's check. Require that headroom at the next write
     // while keeping each bucket's original deadline.
     const timing = readSample && channel?.padTiming;
-    const lead = timing ? Number(timing.deviceAt - deviceTime(timing.sentAt)) + PAD_TIMING_RESERVE_MS : 0;
-    const headroom = Math.max(0, Math.min(PAD_SAMPLE_LIFETIME_MS - PAD_CHANNEL_BATCH_MS, lead));
+    const expired = readSample && channel?.padExpiryTiming;
+    const anchor = readSample && channel?.padClock;
+    const motionTime = anchor && performance.now() - anchor.at < PAD_CLOCK_WINDOW_MS ? at => {
+      const lower = anchor.deviceAt + BigInt(Math.floor(at - anchor.at)) - 2n;
+      const current = deviceTime(at);
+      return lower > current ? lower : current;
+    } : deviceTime;
+    const measuredLead = timing => timing ? Number(timing.deviceAt - motionTime(timing.sentAt)) + PAD_TIMING_RESERVE_MS : 0;
+    // Repeated expiries indicate that admission timing alone misses too much
+    // queue time. Use the measured expiry briefly to select fresher movement.
+    const expiryLead = expired?.repeated && performance.now() - expired.sentAt < PAD_EXPIRY_TIMING_MS ?
+      measuredLead(expired) : 0;
+    const headroom = Math.max(0, Math.min(PAD_SAMPLE_LIFETIME_MS - PAD_CHANNEL_BATCH_MS,
+      Math.max(measuredLead(timing), expiryLead)));
     const sample = readSample?.(true, headroom);
     if (readSample && !sample) return null;
     const sentAt = performance.now();
@@ -344,7 +367,7 @@ export class Controller {
     const envelope = {
       v: 1, boot_id: this.session.boot_id, session_id: this.session.session_id,
       request_id: this.session.request_prefix + BigInt(seq).toString(16).padStart(16, "0"), seq,
-      deadline_ms: (deviceTime(sentAt) + BigInt(lifetime)).toString(),
+      deadline_ms: ((sample ? motionTime(sentAt) : deviceTime(sentAt)) + BigInt(lifetime)).toString(),
       epoch: s.epoch, transport_generation: s.transport_generation, target_id: s.target_id,
       ui_revision: s.ui_revision, op,
       args: op === "control.acquire" || op === "control.renew" ? {...args, state_sequence: s.state_sequence} : sample?.args ?? args,
@@ -362,7 +385,11 @@ export class Controller {
       const accepted = pushedTerminal ? admitted => {
         if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
         this.session.next_seq = seq + 1;
-        if (decimal(admitted.now_ms)) channel.padTiming = {sentAt, deviceAt: BigInt(admitted.now_ms)};
+        if (decimal(admitted.now_ms)) {
+          const deviceAt = BigInt(admitted.now_ms);
+          channel.padTiming = {sentAt, deviceAt};
+          if (channel.renewTerminal) this.rememberPadClock(channel, deviceAt, performance.now());
+        }
         if (observe) {
           this.lastKey = admitted.command_key;
           this.last = admitted;
@@ -417,8 +444,19 @@ export class Controller {
     if (relativeMove && confirmedCommand && answer.state === "rejected" && answer.error === "expired") {
       // This movement was definitively rejected before any effect. Read back
       // the lease so a simultaneous takeover or expiry still stops input.
+      if (sample && channel?.renewTerminal && answer.command_key === key && Number(answer.next_seq) === seq + 1) {
+        const stamp = /^(?:protocol|submit|dequeue|input) now=(\d+) deadline=(\d+)$/.exec(answer.reason || "");
+        if (stamp && stamp[2] === envelope.deadline_ms && decimal(stamp[1]) && BigInt(stamp[1]) >= BigInt(stamp[2])) {
+          const previous = channel.padExpiryTiming;
+          const repeated = Boolean(previous && sentAt - previous.sentAt < PAD_EXPIRY_TIMING_MS);
+          channel.padExpiryTiming = {sentAt, deviceAt: BigInt(stamp[1]), repeated};
+        }
+      }
       await this.refresh();
       return answer;
+    }
+    if (sample && answer.state === "sent" && answer.error === "ok" && channel?.padExpiryTiming?.repeated === false) {
+      channel.padExpiryTiming = null;
     }
     if (renewalRetry && op === "control.renew" && confirmedCommand &&
         answer.state === "rejected" && answer.error === "stale" &&
@@ -1173,8 +1211,12 @@ function mount() {
     event.preventDefault(); $("pad").setPointerCapture(event.pointerId);
     pad = {id: event.pointerId, x: event.clientX, y: event.clientY, samples: []}; movement = null;
   };
-  $("pad").onpointermove = event => {
+  const endPad = event => { if (pad?.id === event.pointerId) { pad = null; movement = null; } };
+  // Capture normally keeps events on the pad. Follow the original pointer
+  // across the page even if the browser retargets it before the finger lifts.
+  document.addEventListener("pointermove", event => {
     if (!pad || pad.id !== event.pointerId || $("mouse-controls").disabled) return;
+    if (event.pointerType === "mouse" && !(event.buttons & 1)) { endPad(event); return; }
     event.preventDefault();
     const now = performance.now();
     if (client.motionChannel?.motionTerminal) {
@@ -1200,9 +1242,10 @@ function mount() {
     movement.dx = Math.max(-127, Math.min(127, movement.dx + event.clientX - pad.x));
     movement.dy = Math.max(-127, Math.min(127, movement.dy + event.clientY - pad.y));
     pad.x = event.clientX; pad.y = event.clientY;
-  };
-  const endPad = event => { if (pad?.id === event.pointerId) { pad = null; movement = null; } };
-  $("pad").onpointerup = $("pad").onpointercancel = $("pad").onlostpointercapture = endPad;
+  }, {capture: true, passive: false});
+  document.addEventListener("pointerup", endPad, true);
+  document.addEventListener("pointercancel", endPad, true);
+  globalThis.addEventListener("blur", () => { pad = movement = null; });
   $("pad").onkeydown = event => {
     const moves = {ArrowLeft: [-24, 0], ArrowRight: [24, 0], ArrowUp: [0, -24], ArrowDown: [0, 24]};
     if (!moves[event.key] || event.repeat || $("mouse-controls").disabled) return;

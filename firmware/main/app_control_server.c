@@ -8,6 +8,7 @@
 #include <net/if.h>
 #include <unistd.h>
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_https_server.h"
 #include "esp_netif.h"
 #include "esp_random.h"

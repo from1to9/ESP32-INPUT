@@ -46,11 +46,12 @@ function padFixture() {
   const constants = source.match(/^const PAD_.*;$/gm).join("\n");
   let sendTimer, queued;
   const microtasks = [];
-  const mount = new Function("$", "client", "act", "setInterval", "queueMicrotask",
+  const page = new EventTarget();
+  const mount = new Function("document", "globalThis", "$", "client", "act", "setInterval", "queueMicrotask",
     `${constants}\nlet pad = null, movement = null, lastMovementAt = 0;
      ${source.slice(start, end)}\n${source.slice(stop, stopEnd)}
      return () => { pad = movement = null; };`);
-  const clear = mount($, f.client, run => { queued = run(); }, (run, interval) => {
+  const clear = mount(page, new EventTarget(), $, f.client, run => { queued = run(); }, (run, interval) => {
     assert.equal(interval, 30);
     sendTimer = run;
   }, run => microtasks.push(run));
@@ -73,9 +74,12 @@ function padFixture() {
     },
     close() {},
   };
-  const fire = (kind, x = 0, y = 0, id = 7) => pointer["onpointer" + kind]({
-    clientX: x, clientY: y, pointerId: id, pointerType: "touch", preventDefault() {},
-  });
+  const fire = (kind, x = 0, y = 0, id = 7) => {
+    const event = Object.assign(new Event("pointer" + kind, {cancelable: true}),
+      {clientX: x, clientY: y, pointerId: id, pointerType: "touch"});
+    if (kind === "down") pointer.onpointerdown(event);
+    else page.dispatchEvent(event);
+  };
   const run = action => { queued = undefined; action?.(); return queued; };
   return {...f, motions, sentAt, fire, stop: () => { controls.onclick(); return queued; },
     tick: () => run(sendTimer), release: () => run(microtasks.shift()), microtasks};
@@ -524,6 +528,75 @@ for (const lostReply of [false, true]) {
     await paced.tick();
     assert.deepEqual(paced.motions[0].args, {dx: 6, dy: 5}, "headroom trims only the older bucket at equality");
     assert.equal(paced.motions[0].deadline_ms, "310", "admission timing cannot extend the newer bucket's deadline");
+
+    for (const receipt of ["matched", "different deadline", "future deadline", "isolated expiry"]) {
+      now = 2000;
+      const f = padFixture();
+      f.client.stateAt = now;
+      const channel = f.client.motionChannel;
+      const send = channel.exchange;
+      channel.exchange = async (command, admitted) => {
+        const result = await send(command);
+        if (command.seq > 2) return result;
+        const first = command.seq === 1;
+        now += 40;
+        admitted({command_key: "12", now_ms: first ? "140" : "310"});
+        now = first ? 2100 : 2260;
+        f.fire("move", first ? 14 : 30, 0);
+        now = first ? 2150 : 2310;
+        f.fire("move", first ? 20 : 36, 0);
+        now = first ? 2170 : 2330;
+        f.state.now_ms = first ? "270" : "430";
+        if (!first && receipt === "isolated expiry") return result;
+        const deadline = !first && receipt === "different deadline" ? "349" : command.deadline_ms;
+        const checked = first ? 250 : receipt === "future deadline" ? 330 : 400;
+        return {state: "rejected", error: "expired", command_key: "12", next_seq: command.seq + 1,
+          reason: `dequeue now=${checked} deadline=${deadline}`};
+      };
+      f.fire("down");
+      f.fire("move", 4, 0);
+      assert.equal((await f.tick()).error, "expired");
+      await f.release();
+      await f.release();
+      const newerOnly = receipt === "matched";
+      assert.deepEqual(f.motions.map(move => [move.seq, move.args.dx, move.deadline_ms]),
+        [[1, 4, "250"], [2, 16, "350"], [3, newerOnly ? 6 : 16, newerOnly ? "560" : "510"]], receipt);
+      assert.deepEqual(f.calls.map(call => call.path), Array(receipt === "isolated expiry" ? 1 : 2).fill(statePath),
+        "each expiry still reads the lease before more input");
+      assert(f.client.controlled);
+    }
+
+    now = 2000;
+    const clock = padFixture();
+    clock.state.now_ms = "1000";
+    clock.state.lease_expires_ms = "3900";
+    await clock.client.refresh();
+    const fetch = clock.client.fetcher;
+    clock.client.fetcher = (url, options) => {
+      now = 2110;
+      return fetch(url, options);
+    };
+    now = 2010;
+    clock.state.now_ms = "1010";
+    await clock.client.refresh();
+    clock.client.motionChannel.padTiming = {sentAt: 2090, deviceAt: 1095n};
+    let headroom;
+    const send = expiresAt => clock.client.run("mouse.move_relative", {}, undefined, (consume, budget) => {
+      if (consume) headroom = budget;
+      return {args: {dx: 5, dy: 0}, expiresAt};
+    });
+    await send(2180);
+    assert.equal(headroom, 19, "the stronger same-channel clock also corrects the admission budget");
+    assert.equal(clock.motions[0].deadline_ms, "1178", "the slow snapshot cannot displace a recent conservative bound");
+    assert.equal(clock.motions[0].lease_id, lease);
+
+    now = 4500;
+    clock.client.fetcher = fetch;
+    clock.state.now_ms = "3400";
+    clock.state.lease_expires_ms = "7000";
+    await clock.client.refresh();
+    await send(4600);
+    assert.equal(clock.motions[1].deadline_ms, "3500", "an aged anchor cannot extend the newer estimate");
 
     now = 2000;
     const renew = padFixture();
