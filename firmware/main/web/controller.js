@@ -1191,8 +1191,12 @@ function mount() {
     event.preventDefault(); $("pad").setPointerCapture(event.pointerId);
     pad = {id: event.pointerId, x: event.clientX, y: event.clientY, samples: []}; movement = null;
   };
-  $("pad").onpointermove = event => {
+  const endPad = event => { if (pad?.id === event.pointerId) { pad = null; movement = null; } };
+  // Capture normally keeps events on the pad. Follow the original pointer
+  // across the page even if the browser retargets it before the finger lifts.
+  document.addEventListener("pointermove", event => {
     if (!pad || pad.id !== event.pointerId || $("mouse-controls").disabled) return;
+    if (event.pointerType === "mouse" && !(event.buttons & 1)) { endPad(event); return; }
     event.preventDefault();
     const now = performance.now();
     if (client.motionChannel?.motionTerminal) {
@@ -1218,9 +1222,10 @@ function mount() {
     movement.dx = Math.max(-127, Math.min(127, movement.dx + event.clientX - pad.x));
     movement.dy = Math.max(-127, Math.min(127, movement.dy + event.clientY - pad.y));
     pad.x = event.clientX; pad.y = event.clientY;
-  };
-  const endPad = event => { if (pad?.id === event.pointerId) { pad = null; movement = null; } };
-  $("pad").onpointerup = $("pad").onpointercancel = $("pad").onlostpointercapture = endPad;
+  }, {capture: true, passive: false});
+  document.addEventListener("pointerup", endPad, true);
+  document.addEventListener("pointercancel", endPad, true);
+  globalThis.addEventListener("blur", () => { pad = movement = null; });
   $("pad").onkeydown = event => {
     const moves = {ArrowLeft: [-24, 0], ArrowRight: [24, 0], ArrowUp: [0, -24], ArrowDown: [0, 24]};
     if (!moves[event.key] || event.repeat || $("mouse-controls").disabled) return;

@@ -62,7 +62,10 @@ for API and MCP clients.
 
 Mouse uses relative touchpad movement, four direction buttons and explicit left
 and right clicks. Dragging the pad moves the target pointer; it does not hold a
-host mouse button. Mouse and touch use Pointer Events and pointer capture.
+host mouse button. A drag that starts on the touchpad continues across the rest
+of the page with the same finger or held mouse button. Lifting, browser
+cancellation or losing window focus ends the gesture. A drag that starts
+outside the pad leaves the pointer still.
 Movement is coalesced only inside the current contact, limited to the existing
 signed 127-unit report bounds, and discarded after 150 ms or contact/context
 loss. It is not queued for later replay.
