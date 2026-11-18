@@ -14,11 +14,12 @@ const assets=new Map(await Promise.all(['html','css','js'].map(async ext=>[ext,a
 const catalog=JSON.parse(await readFile(path.join(root,'api/control-v1.json'))).operations;
 const supported=new Set(['control.acquire','control.renew','control.release','mouse.move_relative','mouse.click','mouse.scroll','mouse.drag.begin','mouse.drag.refresh','mouse.drag.end','keyboard.text.enqueue','keyboard.key_tap','keyboard.shortcut','mode.select','input.release_all','input.cancel','bluetooth.pairing.open','bluetooth.pairing.close','bluetooth.pairing.cancel_handshake','bluetooth.target.request','bluetooth.disconnect','wifi.scan.start','wifi.scan.cancel','display_name.list','display_name.set','display_name.clear']);
 const session={session_token:'a'.repeat(64),session_id:'b'.repeat(32),boot_id:'c'.repeat(32),request_prefix:'d'.repeat(16),csrf:'e'.repeat(32),next_seq:1,scopes:['view','input.control','connections.manage','wifi.configure']};
-let afterMode, beginReply;
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+let afterMode, beginReply, touchTiming;
 let state,commands,results,seq,closed,delayState,delayRenew,failSession,failRenew,failCommand,label,locked,pendingManagement;
 const host='10:20:30:40:50:60/0', bond='01'.padEnd(32,'0'), ap='12'.repeat(32);
 const hx=s=>Buffer.from(s).toString('hex');
-function reset(){afterMode=beginReply=null;state={boot_id:session.boot_id,now_ms:'10000',epoch:'2',transport_generation:'3',state_sequence:'5',ui_revision:'2',management_generation:'1',target_id:host,mode:'mouse',locked:false,release_pending:false,input_ready:true,remote_allowed:true,remote_owner:false,lease_active:false,lease_id:'f'.repeat(32),lease_expires_ms:'13000'};commands=[];results=new Map();seq=1;closed=0;delayState=delayRenew=0;failSession=failRenew=failCommand=false;label='Studio laptop';locked=false;pendingManagement=false;}
+function reset(){afterMode=beginReply=touchTiming=null;state={boot_id:session.boot_id,now_ms:'10000',epoch:'2',transport_generation:'3',state_sequence:'5',ui_revision:'2',management_generation:'1',target_id:host,mode:'mouse',locked:false,release_pending:false,input_ready:true,remote_allowed:true,remote_owner:false,lease_active:false,lease_id:'f'.repeat(32),lease_expires_ms:'13000'};commands=[];results=new Map();seq=1;closed=0;delayState=delayRenew=0;failSession=failRenew=failCommand=false;label='Studio laptop';locked=false;pendingManagement=false;}
 reset();
 const server=http.createServer(async(req,res)=>{
   res.setHeader('Cache-Control','no-store');res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
@@ -31,7 +32,17 @@ const server=http.createServer(async(req,res)=>{
   if(url.pathname.startsWith('/api/')){
     assert.equal(req.headers.authorization,`Bearer ${session.session_token}`);
     if(req.method!=='GET')assert.equal(req.headers['x-csrf-token'],session.csrf);
-    if(url.pathname==='/api/v1/state'){if(delayState)await new Promise(r=>setTimeout(r,delayState));send({protocol:{...state,locked}});return;}
+    if(url.pathname==='/api/v1/state'){
+      if(delayState)await pause(delayState);
+      const timing=touchTiming, currentState=state;
+      if(timing){
+        currentState.now_ms=String(Math.floor(performance.now()));
+        timing.trace.push('state');
+      }
+      const protocol={...currentState,locked};
+      if(timing?.stateReturnMs)await pause(timing.stateReturnMs);
+      send({protocol});return;
+    }
     if(url.pathname==='/api/v1/capabilities'){send({access_policy:'open_network'});return;}
     if(url.pathname==='/api/v1/operations'){const i=Number(url.searchParams.get('cursor'));send({items:catalog.slice(i,i+8).map(x=>({name:x.name,available:supported.has(x.name)}))});return;}
     if(req.method==='DELETE'){closed++;state.lease_active=false;send({});return;}
@@ -58,6 +69,23 @@ const server=http.createServer(async(req,res)=>{
         assert.equal(c.target_id,state.target_id);assert.equal(c.transport_generation,state.transport_generation);
         assert.equal(c.epoch,state.epoch);assert.equal(c.lease_id,state.lease_id);
         assert(!state.release_pending && state.lease_active);
+      }
+      if(touchTiming && ['control.acquire','control.renew'].includes(c.op)){
+        state.lease_expires_ms=String(Math.floor(performance.now())+3000);
+      }
+      if(touchTiming && c.op==='mouse.move_relative'){
+        const timing=touchTiming;
+        const first=!timing.moves.length;
+        timing.trace.push('move');
+        await pause(first?timing.firstAdmissionMs:35);
+        const slack=Number(c.deadline_ms)-performance.now();
+        const expired=slack<=0;
+        const receipt={state:expired?'rejected':'sent',error:expired?'expired':'ok',next_seq:seq,command_key:String(seq)};
+        timing.moves.push({seq:c.seq,...c.args,slack:Math.floor(slack),state:receipt.state});
+        results.set(receipt.command_key,receipt);
+        if(expired)send(receipt,400);
+        else send({...receipt,state:'accepted'},202);
+        return;
       }
       if(c.op==='mouse.move_relative'||c.op==='mouse.scroll')assert(BigInt(c.deadline_ms)-BigInt(state.now_ms)<=250n);
       if(c.op==='display_name.set'){label=c.args.label;reason='label_write_confirmed';}
@@ -98,7 +126,76 @@ async function bounded(p) {
   });
   assert.deepEqual(issues,[]);
 }
+async function padTouch(context,page){
+  const pad=page.locator('#pad');await pad.scrollIntoViewIfNeeded();
+  const box=await pad.boundingBox(),x=Math.round(box.x+box.width/2),y=Math.round(box.y+box.height/2);
+  const cdp=await context.newCDPSession(page);
+  return (type,dx=0,dy=0)=>cdp.send('Input.dispatchTouchEvent',{type,
+    touchPoints:type==='touchEnd'?[]:[{x:x+dx,y:y+dy,id:1}]});
+}
+// Motion during neutral release cannot become part of a later fresh delta.
+async function touchAcrossRelease(){
+  reset();state.mode='keyboard';afterMode=()=>{state.release_pending=true;};
+  touchTiming={trace:[],moves:[],firstAdmissionMs:35,stateReturnMs:0};
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await open(context);await connect(page);await acquire(page);
+    const touch=await padTouch(context,page);
+    await touch('touchStart');await touch('touchMove',16);
+    await page.waitForFunction(()=>document.getElementById('mouse-controls').disabled);
+    await touch('touchMove',16,35);
+    state.release_pending=false;
+    await page.waitForFunction(()=>!document.getElementById('mouse-controls').disabled);
+    await pause(230);
+    const before=commands.length;
+    const posted=page.waitForResponse(r=>r.url().endsWith('/commands') && r.request().postDataJSON().op==='mouse.move_relative');
+    await touch('touchMove',17,35);await posted;await touch('touchEnd');
+    await pause(200);
+    const later=commands.slice(before).filter(c=>c.op==='mouse.move_relative').map(c=>c.args);
+    assert.deepEqual(later,[{dx:1,dy:0}]);
+    assert(commands.filter(c=>c.op==='mouse.move_relative').every(c=>c.args.dy===0));
+    console.log('PASS touch across neutral release',JSON.stringify(later));
+  }finally{await context.close();}
+}
+// Use trusted touch events and a running device clock. The first command
+// misses admission. Later movements must reach terminal sent on the same lease.
+async function delayedTouch(){
+  reset();
+  delayState=45;
+  const timing=touchTiming={trace:[],moves:[],firstAdmissionMs:180,stateReturnMs:35};
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await open(context);await connect(page);await acquire(page);
+    const touch=await padTouch(context,page);
+    await touch('touchStart');
+    const firstPost=page.waitForRequest(req=>req.url().endsWith('/commands')&&req.postDataJSON().op==='mouse.move_relative');
+    await touch('touchMove',24);await firstPost;
+    // This delta arrives during the slow POST and is stale by readback.
+    await touch('touchMove',24,12);
+    await page.waitForFunction(()=>document.getElementById('result').textContent.includes('expired'));
+    assert.equal(await page.locator('#connection').textContent(),'This browser is controlling','expired sample lost control');
+    for(let i=1;i<=48;i++){
+      await touch('touchMove',24-i,12);
+      await pause(18);
+    }
+    await touch('touchEnd');await pause(330);
+    const sent=timing.moves.filter(m=>m.state==='sent');
+    assert.equal(timing.moves[0].state,'rejected');
+    assert.equal(timing.moves[0].dx,24);
+    assert(sent.length>=2,JSON.stringify(timing.moves));
+    assert(timing.moves.slice(1).every(m=>m.dx<0 && m.dy===0),JSON.stringify(timing.moves));
+    assert.equal(commands.filter(c=>c.op==='control.acquire').length,1);
+    assert.equal(await page.locator('#connection').textContent(),'This browser is controlling');
+    assert(timing.trace.slice(timing.trace.indexOf('move'),timing.trace.indexOf('move',timing.trace.indexOf('move')+1)).includes('state'));
+    assert.match(await page.locator('#result').textContent(),/Sent to the HID transport/);
+    console.log('PASS delayed touch',JSON.stringify(timing.moves));
+    await page.locator('#stop').click();
+    await page.waitForFunction(()=>document.getElementById('connection').textContent!=='This browser is controlling');
+  }finally{await context.close();touchTiming=null;}
+}
 try{
+  await touchAcrossRelease();
+  await delayedTouch();
   if(!process.argv.includes('--behavior-only')) for(const [name,width,height,mobile] of [['desktop',1440,1060,false],['iphone',390,844,true],['ipad',1024,1366,true]])for(const theme of ['dark','light']){
     reset();const ctx=await browser.newContext({viewport:{width,height},colorScheme:theme,isMobile:mobile,hasTouch:mobile,deviceScaleFactor:1});const p=await open(ctx);
     assert.equal(await p.locator('html').getAttribute('data-theme'),theme);await connect(p);await acquire(p);await bounded(p);
@@ -293,6 +390,35 @@ try{
   assert.equal(await p.locator('#pair-open').isDisabled(),true);assert.equal(commands.length,afterUnknown);
   await ctx.close();assert.deepEqual(errors,[]);
   const {Controller,describeResult}=await import('data:text/javascript;base64,'+assets.get('js').toString('base64'));
+  // An expired POST can coincide with a real takeover, or be followed by
+  // an unavailable state read. An uncorrelated rejection is an unknown reply.
+  for(const change of ['lease_active','lease_id','target_id','epoch','transport_generation','locked','release_pending','remote_allowed','input_ready','read-error','bad-key','bad-sequence','lost']){
+    reset();
+    let moves=0;
+    const changeClient=new Controller(async (url,options)=>{
+      if(url==='/api/v1/commands' && JSON.parse(options.body).op==='mouse.move_relative'){
+        moves++;
+        if(change==='lost')throw new TypeError('Response lost');
+        if(change==='locked')locked=true;
+        else if(change==='release_pending')state.release_pending=true;
+        else if(['lease_active','remote_allowed','input_ready'].includes(change))state[change]=false;
+        else if(['target_id','lease_id','epoch','transport_generation'].includes(change))state[change]='9';
+        const receipt={state:'rejected',error:'expired',command_key:change==='bad-key'?null:'4',next_seq:change==='bad-sequence'?seq:seq+1};
+        return new Response(JSON.stringify(receipt),{status:400});
+      }
+      if(moves && url==='/api/v1/state' && change==='read-error')return new Response('{}',{status:401});
+      return fetch(origin+url,options);
+    });
+    await changeClient.login();await changeClient.acquire();
+    const moving=changeClient.run('mouse.move_relative',{dx:2,dy:0});
+    if(['read-error','bad-key','bad-sequence','lost'].includes(change))await assert.rejects(moving);
+    else await moving;
+    assert.equal(changeClient.controlled,false,change);
+    assert.equal(changeClient.uncertain,['bad-key','bad-sequence','lost'].includes(change),change);
+    await assert.rejects(changeClient.run('mouse.move_relative',{dx:-2,dy:0}));
+    assert.equal(moves,1,change);
+    await changeClient.disconnect();
+  }
   reset();const c=new Controller((url,options)=>fetch(origin+url,options));await c.login();await c.acquire();
   let contact=true;delayState=180;const count=commands.length;
   const move=c.run('mouse.move_relative',{dx:12,dy:0},undefined,{expiresAt:performance.now()+150,current:()=>contact});

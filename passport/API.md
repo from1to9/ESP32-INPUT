@@ -308,7 +308,12 @@ shortcuts send `keyboard.key_tap` with modifiers 1/8 and usage 6 (copy), 25
 semantics; agents targeting Apple hosts should send the explicit GUI modifier.
 
 Movement samples expire after 150 ms locally and use protocol deadlines of
-at most 200 ms. One browser command runs at a time, with no action replay.
+at most 200 ms. The touchpad groups deltas from one contact in 8 ms buckets.
+It selects fresh deltas immediately before the POST and preserves the oldest
+included delta's expiry. A recent verified state read supplies the device
+clock and target binding. A confirmed expired move or scroll is discarded.
+The browser checks the lease, target, epoch, and input permission again before
+continuing. One browser command runs at a time, with no action replay.
 Drag holds use a 1500 ms device deadman refreshed while the contact remains
 active. Release ends the drag; cancellation while a command is in flight,
 Stop during busy/unknown work, blur, page hide and offline close the session
