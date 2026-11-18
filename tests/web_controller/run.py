@@ -83,6 +83,8 @@ def main():
                         help="Run the motion-channel case directly on the device origin and its CSP")
     parser.add_argument("--motion-poll", action="store_true",
                         help="Exercise the legacy WebSocket polling feature set in the motion-channel case")
+    parser.add_argument("--channel-delay-ms", type=int, default=35,
+                        help="One-way WebSocket delay in the motion-channel fixture (default: 35 ms)")
     parser.add_argument("--case", choices=("all", "pad-freshness", "management", "authorization-feedback", "lease-renewal",
                                            "control-timing", "motion-channel"),
                         default="all")
@@ -92,6 +94,9 @@ def main():
         parser.error("--channel-direct requires --case motion-channel")
     if args.motion_poll and not channel_test:
         parser.error("--motion-poll requires --case motion-channel")
+    if args.channel_delay_ms < 0:
+        parser.error("--channel-delay-ms must be non-negative")
+    channel_delay = args.channel_delay_ms / 1000
     args.protocol_root = args.protocol_root.resolve()
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -147,7 +152,7 @@ def main():
                 self.send_header("Sec-WebSocket-Protocol", offered[0])
                 self.end_headers()
                 self.close_connection = True
-                motion_enabled = False
+                motion_enabled, renewal_enabled = False, False
 
                 def send_text(payload):
                     payload = payload.encode()
@@ -171,20 +176,24 @@ def main():
                             self.wfile.write(b"\x88\x00")
                             return
                         assert opcode == 0x81
-                        # Model the device trace's 70–100 ms request/reply path
-                        # without advancing the native command clock early.
-                        time.sleep(0.035)
-                        reply, operation = self.submit("/_fixture/ws-frame", frame.decode())
+                        # Apply one-way delay without advancing the native clock early.
+                        time.sleep(channel_delay)
+                        payload = frame.decode()
+                        reply, operation = self.submit("/_fixture/ws-frame", payload)
                         admitted_at = time.monotonic()
                         reply_data = json.loads(reply["body"])
-                        motion_enabled = motion_enabled or reply_data.get("motion_terminal") is True
-                        push = motion_enabled and operation == "mouse.move_relative" and reply_data.get("state") == "accepted"
+                        if operation is None and reply_data.get("motion_terminal") is True:
+                            motion_enabled = True
+                            renewal_enabled = json.loads(payload).get("type") == "renew_terminal"
+                        push = reply_data.get("state") == "accepted" and (
+                            (motion_enabled and operation == "mouse.move_relative") or
+                            (renewal_enabled and operation == "control.renew"))
                         terminal = None
                         if push:
                             time.sleep(0.020)
                             terminal, _ = self.submit("/_fixture/ws-motion-result", "")
                             terminal_at = time.monotonic()
-                        time.sleep(max(0, admitted_at + 0.035 - time.monotonic()))
+                        time.sleep(max(0, admitted_at + channel_delay - time.monotonic()))
                         if operation == "mouse.move_relative" and drop_motion:
                             drop_motion = False
                             if push:
@@ -198,7 +207,7 @@ def main():
                                 terminal_at = time.monotonic()
                             if terminal["status"] not in (200, 400):
                                 return
-                            time.sleep(max(0, terminal_at + 0.035 - time.monotonic()))
+                            time.sleep(max(0, terminal_at + channel_delay - time.monotonic()))
                             send_text(terminal["body"])
                 finally:
                     self.submit("/_fixture/ws-close", "")
@@ -274,7 +283,8 @@ def main():
                         "boundaries": "Real loopback HTTP(S)/Chromium and production C HTTP/protocol/access/coordinator/HID engine; simulated station sockets, NVS, trusted clock, local approval and HID send API; no physical device",
                         "source_sha256_at_compile": hashes,
                         "native_binary_sha256": hashlib.sha256((temporary / "native_bridge").read_bytes()).hexdigest(),
-                        "protocol_root": str(args.protocol_root)}
+                        "protocol_root": str(args.protocol_root),
+                        "channel_delay_ms": args.channel_delay_ms if channel_test else None}
             (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
             print((output / "browser.log").read_text())
             if result.returncode or backend.returncode:

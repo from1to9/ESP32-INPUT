@@ -328,7 +328,7 @@ static void browser_motion_expiry_stage(void)
     dual_field(http->response->body, "ticket", ticket, sizeof(ticket));
     cp_identity_t identity;
     assert(cp_transport_upgrade(http->context, &http->security, ticket, input->now, &identity) == CP_OK);
-    cp_motion_terminal_t motion = {.enabled = true};
+    cp_motion_terminal_t motion = {.mode = CP_TERMINAL_MOVE};
     const size_t before = input->reports_count;
     const char *stages[] = {"protocol", "submit", "dequeue", "input"};
     for (size_t i = 0; i <= sizeof(stages) / sizeof(stages[0]); ++i) {

@@ -9,6 +9,9 @@ const IDENTITY_KEY = "mosaico.browser.identity.v1";
 const THEME_KEY = "mosaico.browser.theme.v1";
 const PAD_CHANNEL_BATCH_MS = 30;
 const PAD_SAMPLE_LIFETIME_MS = 150;
+const PAD_SAMPLE_BUCKET_MS = 8;
+const PAD_TIMING_RESERVE_MS = 12;
+const PAD_RENEW_RESERVE_MS = 900;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hex = bytes => Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 const decimal = value => typeof value === "string" && DECIMAL.test(value) && BigInt(value) <= 18446744073709551615n;
@@ -74,6 +77,7 @@ class MotionChannel {
     this.socket = socket;
     this.pending = null;
     this.motionTerminal = false;
+    this.renewTerminal = false;
     socket.onmessage = event => {
       const pending = this.pending;
       if (!pending || pending.done) { this.close(); return; }
@@ -109,7 +113,8 @@ class MotionChannel {
     let timeout;
     try {
       return await new Promise((resolve, reject) => {
-        this.pending = {resolve, reject, sequence: payload.seq, negotiating: payload.type === "motion_terminal",
+        this.pending = {resolve, reject, sequence: payload.seq,
+          negotiating: payload.type === "motion_terminal" || payload.type === "renew_terminal",
           accepted: onAccepted && (answer => {
             clearTimeout(timeout);
             timeout = setTimeout(() => this.close(), 2200);
@@ -180,9 +185,13 @@ export class Controller {
     });
     try {
       if (capabilities.json.websocket_motion_terminal === true) {
-        const selected = await channel.exchange({v: 1, type: "motion_terminal"});
-        if (selected.motion_terminal !== true) throw new Error("Device input channel negotiation failed.");
+        const renewTerminal = capabilities.json.websocket_renew_terminal === true;
+        const selected = await channel.exchange({v: 1, type: renewTerminal ? "renew_terminal" : "motion_terminal"});
+        if (selected.motion_terminal !== true || (renewTerminal && selected.renew_terminal !== true)) {
+          throw new Error("Device input channel negotiation failed.");
+        }
         channel.motionTerminal = true;
+        channel.renewTerminal = renewTerminal;
       }
     } catch (error) {
       channel.close();
@@ -300,7 +309,8 @@ export class Controller {
       if (!decimal(s.lease_expires_ms)) throw new Error("Input lease deadline is unavailable.");
       /* Busy input must not starve the timer that normally renews this already
        * explicit lease. Renew before a new action, never reacquire or replay. */
-      if (BigInt(s.lease_expires_ms) - deviceTime(performance.now()) < 1800n) {
+      const renewalReserve = readSample && channel?.renewTerminal ? BigInt(PAD_RENEW_RESERVE_MS) : 1800n;
+      if (BigInt(s.lease_expires_ms) - deviceTime(performance.now()) < renewalReserve) {
         await this.send("control.renew", {});
         s = this.state; // Successful renewal already refreshed state.
         if (!this.controlled) throw new Error("Input control ended before the new action.");
@@ -308,7 +318,13 @@ export class Controller {
     }
     const seq = this.session.next_seq;
     if (seq > 4294967295) throw new Error("Session sequence exhausted. Reconnect.");
-    const sample = readSample?.(true);
+    // A recent admission measures the gap between our clock estimate at
+    // write and the device's check. Require that headroom at the next write
+    // while keeping each bucket's original deadline.
+    const timing = readSample && channel?.padTiming;
+    const lead = timing ? Number(timing.deviceAt - deviceTime(timing.sentAt)) + PAD_TIMING_RESERVE_MS : 0;
+    const headroom = Math.max(0, Math.min(PAD_SAMPLE_LIFETIME_MS - PAD_CHANNEL_BATCH_MS, lead));
+    const sample = readSample?.(true, headroom);
     if (readSample && !sample) return null;
     const sentAt = performance.now();
     const lifetime = sample ? Math.min(200, Math.floor(sample.expiresAt - sentAt)) :
@@ -331,19 +347,23 @@ export class Controller {
     if (observe) { this.lastKey = null; this.lastTotal = total ?? null; }
     let key = null;
     try {
-      const moveAccepted = channel?.motionTerminal && relativeMove ? admitted => {
+      const pushedTerminal = relativeMove ? channel?.motionTerminal : op === "control.renew" && channel?.renewTerminal;
+      const accepted = pushedTerminal ? admitted => {
         if (generation !== this.generation) throw new Error("Browser session changed while input was in flight.");
         this.session.next_seq = seq + 1;
-        this.lastKey = admitted.command_key;
-        this.last = admitted;
-        if (!readSample) this.message = describeResult(admitted, total);
-        this.changed();
+        if (decimal(admitted.now_ms)) channel.padTiming = {sentAt, deviceAt: BigInt(admitted.now_ms)};
+        if (observe) {
+          this.lastKey = admitted.command_key;
+          this.last = admitted;
+          if (!readSample) this.message = describeResult(admitted, total);
+          this.changed();
+        }
       } : undefined;
       let response;
       if (channel) {
-        const reply = channel.exchange(envelope, moveAccepted);
+        const reply = channel.exchange(envelope, accepted);
         // exchange starts the socket write before returning its promise.
-        if (moveAccepted && sample) this.lastPadSubmissionAt = performance.now();
+        if (pushedTerminal && sample) this.lastPadSubmissionAt = performance.now();
         response = {json: await reply};
       } else {
         response = await this.request("/api/v1/commands", "POST", envelope);
@@ -408,7 +428,11 @@ export class Controller {
     this.changed();
     return answer;
   }
-  async run(op, args = {}, total, readSample) {
+  input(op, args, total, readSample) {
+    const mode = op.startsWith("mouse.") ? "mouse" : "keyboard";
+    return this.run(op, args, total, readSample, mode);
+  }
+  async run(op, args = {}, total, readSample, mode = null) {
     if (this.busy) throw new Error("Wait for the current action; input is not queued for replay.");
     const generation = this.generation;
     this.busy = true;
@@ -418,6 +442,13 @@ export class Controller {
     this.changed();
     try {
       if (op === "control.acquire" && this.motionURL && !this.motionChannel) await this.openMotionChannel(generation);
+      if (mode && this.controlled && this.state?.mode !== mode) {
+        if (readSample && !readSample()) return null;
+        await this.send("mode.select", {mode});
+        if (this.generation !== generation || !this.controlled || this.state?.mode !== mode) {
+          throw new Error("Input mode or control changed before the action.");
+        }
+      }
       return await this.send(op, args, total, readSample);
     }
     catch (error) {
@@ -498,7 +529,7 @@ export class Controller {
       this.changed();
     }
   }
-  async text(value) { validateText(value); return this.run("keyboard.text.enqueue", {text: value}, value.length); }
+  async text(value) { validateText(value); return this.input("keyboard.text.enqueue", {text: value}, value.length); }
   async checkResult() {
     if (!this.lastKey || !this.session) throw new Error("No known command key is available. The unknown action cannot be inferred from current target state.");
     const response = await this.request(`/api/v1/requests/${this.lastKey}`);
@@ -904,6 +935,66 @@ function mountManagement(client, $, clearInput) {
   };
 }
 
+// Modifiers apply to one explicit key tap. No host key is held between taps.
+function mountKeyboard(keys, extra, available, sendKey) {
+  let modifiers = 0;
+  const toggles = [], printable = [];
+  function update() {
+    for (const [button, mask] of toggles) button.setAttribute("aria-pressed", String(Boolean(modifiers & mask)));
+    for (const [button, plain, shifted] of printable) {
+      const value = modifiers & 2 ? shifted : plain;
+      button.textContent = value.toUpperCase();
+      button.setAttribute("aria-label", `Type ${value}`);
+    }
+  }
+  const row = (parent, style = "") => {
+    const el = document.createElement("div");
+    el.className = "key-row " + style; parent.append(el); return el;
+  };
+  function button(parent, label, css, action) {
+    const el = document.createElement("button");
+    el.textContent = label; el.className = css;
+    el.onclick = () => { if (available()) action(); };
+    parent.append(el); return el;
+  }
+  function tap(usage) {
+    const mask = modifiers;
+    modifiers = 0; update(); sendKey(usage, mask);
+  }
+  function modifier(parent, label, mask, css = "") {
+    toggles.push([button(parent, label, "special " + css, () => { modifiers ^= mask; update(); }), mask]);
+  }
+  function characters(parent, plain, shifted, firstUsage, alphabet = false) {
+    Array.from(plain).forEach((ch, i) => {
+      const usage = alphabet ? ch.charCodeAt(0) - 93 : firstUsage + i;
+      printable.push([button(parent, ch, "", () => tap(usage)), ch, shifted[i]]);
+    });
+  }
+  const special = (parent, label, usage, css = "") => button(parent, label, "special " + css, () => tap(usage));
+  characters(row(keys), "1234567890", "!@#$%^&*()", 30);
+  for (const [letters, css] of [["qwertyuiop", ""], ["asdfghjkl", "home"]]) {
+    characters(row(keys, css), letters, letters.toUpperCase(), 0, true);
+  }
+  const lower = row(keys);
+  modifier(lower, "Shift", 2, "wide");
+  characters(lower, "zxcvbnm", "ZXCVBNM", 0, true);
+  special(lower, "⌫", 42, "wide").setAttribute("aria-label", "Backspace");
+  const bottom = row(keys);
+  modifier(bottom, "Ctrl", 1); modifier(bottom, "Alt", 4); modifier(bottom, "Meta", 8);
+  special(bottom, "Space", 44, "space"); special(bottom, "Enter", 40, "wide");
+  const symbols = row(extra);
+  characters(symbols, "-=[]", "_+{}", 45);
+  characters(symbols, "\\", "|", 49);
+  characters(symbols, ";'`,./", ':"~<>?', 51);
+  for (const list of [[["Tab",43],["Esc",41],["Delete",76],["Home",74],["End",77]],
+                      [["←",80],["↑",82],["↓",81],["→",79]]]) {
+    const line = row(extra);
+    for (const [label, usage] of list) special(line, label, usage);
+  }
+  update();
+  return () => { if (modifiers) { modifiers = 0; update(); } };
+}
+
 function mount() {
   const $ = id => document.getElementById(id);
   const motionURL = ["https:", "http:"].includes(location.protocol) ?
@@ -944,8 +1035,8 @@ function mount() {
     if ($("connection").textContent !== connection) $("connection").textContent = connection;
     $("connection").dataset.state = client.controlled ? "controlling" : client.session && s ? "online" : "offline";
     $("target").textContent = s ? `${s.target_id.startsWith("usb:") ? "USB" : s.target_id.startsWith("bluetooth:") ? "Bluetooth" : "Input"} · ${s.target_id || "unavailable"}` : "Unavailable";
-    $("readiness").textContent = !s ? "Connect to read the actual input state." : !inputPermission ?
-      "This browser does not have keyboard or mouse permission." : s.locked ? "Device locked" :
+    $("readiness").textContent = !s ? "Connect to view target." : !inputPermission ?
+      "Keyboard and mouse permission required." : s.locked ? "Device locked" :
       !s.input_ready ? "Input not ready" : s.release_pending ? "Waiting for input releases" :
       !s.remote_allowed ? "Remote input is not allowed on Mosaico" : `${s.mode} · ready${client.controlled ? " · this browser owns control" : " · no control acquired here"}`;
     const active = client.controlled && !client.uncertain && s?.input_ready && !s.release_pending && !s.locked && s.remote_allowed;
@@ -953,22 +1044,15 @@ function mount() {
     // their temporary unavailability without disabling focus.
     const ready = active && !client.foregroundBusy;
     const paintInputButton = button => {
-      button.disabled = !ready;
+      if (button.disabled === ready) button.disabled = !ready;
       if (ready && client.busy) {
         if (!button.hasAttribute("aria-disabled")) button.setAttribute("aria-disabled", "true");
       } else {
         button.removeAttribute("aria-disabled");
       }
     };
-    $("mouse-controls").disabled = !active || s.mode !== "mouse";
-    $("keyboard-controls").disabled = !active || s.mode !== "keyboard";
-    $("mouse-controls").hidden = s?.mode === "keyboard";
-    $("keyboard-controls").hidden = s?.mode !== "keyboard";
-    document.querySelectorAll("#mouse-controls button, #keyboard-controls button").forEach(paintInputButton);
-    for (const mode of ["mouse", "keyboard"]) {
-      paintInputButton($(`${mode}-mode`));
-      $(`${mode}-mode`).setAttribute("aria-pressed", String(s?.mode === mode));
-    }
+    $("mouse-controls").disabled = $("keyboard-controls").disabled = !active;
+    inputButtons.forEach(paintInputButton);
     $("acquire").disabled = !inputPermission || client.busy || client.uncertain || client.controlled || !s?.input_ready || s.locked || s.release_pending || !s.remote_allowed;
     $("stop").disabled = !inputPermission || (client.managing && !client.controlled);
     $("disconnect").disabled = !client.session;
@@ -978,7 +1062,7 @@ function mount() {
     $("check").disabled = !identity || pairingBusy || client.closing || Boolean(client.session);
     $("result-check").disabled = !client.lastKey || !client.session || client.foregroundBusy;
     if ($("result").textContent !== client.message) $("result").textContent = client.message;
-    if (!active || s.mode !== "mouse") { pad = null; movement = null; }
+    if (!active) { pad = movement = null; resetModifiers(); }
     management.paint();
   }
   client.onchange = paint;
@@ -1007,7 +1091,7 @@ function mount() {
         await client.login(identity);
       } catch {
         throw new Error(client.session ? "Browser access approved. Device state unavailable. Try Refresh." :
-          "Browser access approved. Could not connect. Try Connect saved browser.");
+          "Browser access approved. Could not connect. Try Connect.");
       }
       $("pair-title").textContent = "Browser access · approved";
       $("pairing").open = false;
@@ -1047,25 +1131,19 @@ function mount() {
     if (client.busy || client.uncertain) await client.disconnect();
     else { await client.run("control.release"); client.halt("Control released. Take control explicitly to send more input."); }
   });
-  for (const mode of ["mouse", "keyboard"]) $(`${mode}-mode`).onclick = () => inputAction(() => client.run("mode.select", {mode}));
-  document.querySelectorAll("[data-click]").forEach(button => button.onclick = () => inputAction(() => client.run("mouse.click", {button: button.dataset.click})));
+  document.querySelectorAll("[data-click]").forEach(button => button.onclick = () => inputAction(() => client.input("mouse.click", {button: button.dataset.click})));
   document.querySelectorAll("[data-move]").forEach(button => button.onclick = () => {
     const [dx, dy] = button.dataset.move.split(",").map(Number);
-    inputAction(() => client.run("mouse.move_relative", {dx, dy}));
+    inputAction(() => client.input("mouse.move_relative", {dx, dy}));
   });
-  for (const character of "abcdefghijklmnopqrstuvwxyz1234567890") {
-    const button = document.createElement("button");
-    button.textContent = character.toUpperCase();
-    button.setAttribute("aria-label", `Type ${character}`);
-    button.onclick = () => inputAction(() => client.run("keyboard.key_tap", {usage: /[a-z]/.test(character) ? character.charCodeAt(0) - 93 : character === "0" ? 39 : Number(character) + 29}));
-    $("letters").append(button);
-  }
-  for (const [label, usage] of [["Space", 44], ["Enter", 40], ["Backspace", 42], ["Tab", 43], ["Esc", 41], ["Delete", 76], ["Home", 74], ["End", 77], ["←", 80], ["↑", 82], ["↓", 81], ["→", 79]]) {
-    const button = document.createElement("button"); button.textContent = label;
-    button.onclick = () => inputAction(() => client.run("keyboard.key_tap", {usage}));
-    $("function-keys").append(button);
-  }
-  $("send").onclick = () => inputAction(() => client.text($("text").value));
+  const resetModifiers = mountKeyboard($("keys"), $("extra-keys"),
+    () => !client.busy && !$("keyboard-controls").disabled,
+    (usage, modifiers) => inputAction(() => {
+      pad = movement = null;
+      return client.input("keyboard.key_tap", {usage, modifiers});
+    }));
+  const inputButtons = document.querySelectorAll("#mouse-controls button, #keyboard-controls button");
+  $("send").onclick = () => inputAction(() => { pad = movement = null; return client.text($("text").value); });
   $("text").oninput = () => { $("text-count").textContent = `${$("text").value.length} / 32 characters`; };
   $("result-check").onclick = () => { if (!client.busy) return act(() => client.checkResult()); };
   $("forget").onclick = () => act(async () => {
@@ -1076,13 +1154,30 @@ function mount() {
   $("pad").onpointerdown = event => {
     if ($("mouse-controls").disabled || (event.pointerType === "mouse" && event.button !== 0) || pad) return;
     event.preventDefault(); $("pad").setPointerCapture(event.pointerId);
-    pad = {id: event.pointerId, x: event.clientX, y: event.clientY}; movement = null;
+    pad = {id: event.pointerId, x: event.clientX, y: event.clientY, samples: []}; movement = null;
   };
   $("pad").onpointermove = event => {
     if (!pad || pad.id !== event.pointerId || $("mouse-controls").disabled) return;
     event.preventDefault();
     const now = performance.now();
-    const batch = client.motionChannel && !client.motionChannel.motionTerminal ?
+    if (client.motionChannel?.motionTerminal) {
+      trimPadSamples(pad.samples, now);
+      const dx = Math.round(event.clientX) - Math.round(pad.x);
+      const dy = Math.round(event.clientY) - Math.round(pad.y);
+      pad.x = event.clientX; pad.y = event.clientY;
+      if (!dx && !dy) return;
+      // The first delta supplies the bucket's deadline. Short buckets bound
+      // storage while allowing later movement to outlive the oldest bucket.
+      const bucketMs = client.motionChannel.renewTerminal ? PAD_SAMPLE_BUCKET_MS : PAD_SAMPLE_LIFETIME_MS;
+      let bucket = pad.samples[pad.samples.length - 1];
+      if (!bucket || now - bucket.at >= bucketMs) {
+        bucket = {at: now, dx: 0, dy: 0};
+        pad.samples.push(bucket);
+      }
+      bucket.dx += dx; bucket.dy += dy;
+      return;
+    }
+    const batch = client.motionChannel ?
       PAD_CHANNEL_BATCH_MS : PAD_SAMPLE_LIFETIME_MS;
     if (!movement || now - movement.at >= batch) movement = {dx: 0, dy: 0, at: now, contact: pad};
     movement.dx = Math.max(-127, Math.min(127, movement.dx + event.clientX - pad.x));
@@ -1094,44 +1189,48 @@ function mount() {
   $("pad").onkeydown = event => {
     const moves = {ArrowLeft: [-24, 0], ArrowRight: [24, 0], ArrowUp: [0, -24], ArrowDown: [0, 24]};
     if (!moves[event.key] || event.repeat || $("mouse-controls").disabled) return;
-    event.preventDefault(); const [dx, dy] = moves[event.key]; inputAction(() => client.run("mouse.move_relative", {dx, dy}));
+    event.preventDefault(); const [dx, dy] = moves[event.key]; inputAction(() => client.input("mouse.move_relative", {dx, dy}));
   };
+  function trimPadSamples(samples, now, headroom = 0) {
+    while (samples.length && now + headroom >= samples[0].at + PAD_SAMPLE_LIFETIME_MS) samples.shift();
+  }
+  function readPadSample(contact, consume = false, headroom = 0) {
+    if (pad !== contact) return null;
+    const {samples} = contact;
+    trimPadSamples(samples, performance.now(), headroom);
+    if (!samples.length) return null;
+    let dx = 0, dy = 0;
+    for (const sample of samples) { dx += sample.dx; dy += sample.dy; }
+    if (!dx && !dy) return null;
+    const expiresAt = samples[0].at + PAD_SAMPLE_LIFETIME_MS;
+    if (consume) samples.length = 0;
+    return {args: {dx: Math.max(-127, Math.min(127, dx)), dy: Math.max(-127, Math.min(127, dy))}, expiresAt};
+  }
   function sendPadMovement() {
-    if (!movement || !pad || !client.controlled || client.busy) return;
+    if (!pad || !client.controlled || client.busy) return;
     const now = performance.now();
-    const accumulate = client.motionChannel?.motionTerminal === true;
-    if (accumulate) {
-      if (now >= movement.at + PAD_SAMPLE_LIFETIME_MS) {
-        movement = null;
-        return;
-      }
-      if (now - client.lastPadSubmissionAt < PAD_CHANNEL_BATCH_MS ||
-          (!Math.trunc(movement.dx) && !Math.trunc(movement.dy))) return;
-    } else {
-      if (!client.motionChannel && now - lastMovementAt < 60) return;
-      lastMovementAt = now;
-    }
     const contact = pad;
-    // Keep one aggregate live across state reads and renewal. Legacy
-    // transports keep their existing detached sample and replacement rule.
-    const next = accumulate ? null : movement;
-    if (!accumulate) movement = null;
-    act(() => client.run("mouse.move_relative", {}, undefined, consume => {
+    if (client.motionChannel?.motionTerminal) {
+      if (now - client.lastPadSubmissionAt < PAD_CHANNEL_BATCH_MS || !readPadSample(contact)) return;
+      act(() => client.input("mouse.move_relative", {}, undefined, (consume, headroom) => readPadSample(contact, consume, headroom)));
+      return;
+    }
+    if (!movement || (!client.motionChannel && now - lastMovementAt < 60)) return;
+    lastMovementAt = now;
+    const next = movement;
+    movement = null;
+    act(() => client.input("mouse.move_relative", {}, undefined, consume => {
       if (pad !== contact) return null;
       const latest = movement?.contact === contact ? movement : next;
-      if (!latest) return null;
       const expiresAt = latest.at + PAD_SAMPLE_LIFETIME_MS;
-      if (performance.now() >= expiresAt) {
-        if (accumulate) movement = null;
-        return null;
-      }
+      if (performance.now() >= expiresAt) return null;
       const dx = Math.trunc(latest.dx), dy = Math.trunc(latest.dy);
       if (consume && latest === movement) movement = null;
       return dx || dy ? {args: {dx, dy}, expiresAt} : null;
     }));
   }
   client.onInputLaneReleased = () => {
-    if (client.motionChannel?.motionTerminal && pad && movement) queueMicrotask(sendPadMovement);
+    if (client.motionChannel?.motionTerminal && pad?.samples.length) queueMicrotask(sendPadMovement);
   };
   setInterval(sendPadMovement, PAD_CHANNEL_BATCH_MS);
   setInterval(() => {

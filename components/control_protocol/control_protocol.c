@@ -1146,7 +1146,7 @@ static cp_error_t result_response(cp_context_t *c, unsigned session, const recor
     return r->result.error;
 }
 static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, size_t length,
-                           cp_http_response_t *out, uint64_t *accepted_move)
+                           cp_http_response_t *out, cp_motion_terminal_t *motion)
 {
     session_t *s = &c->sessions[session];
     cj_document_t *d = &c->document;
@@ -1402,9 +1402,10 @@ static cp_error_t commands(cp_context_t *c, unsigned session, const char *body, 
             wipe(&c->lease, sizeof(c->lease));
         }
     }
-    if (accepted_move && r->operation == CP_OP_MOUSE_MOVE_RELATIVE && r->active &&
-        r->result.state == CP_RESULT_ACCEPTED && r->result.error == CP_OK) {
-        *accepted_move = r->key;
+    if (motion && r->active && r->result.state == CP_RESULT_ACCEPTED && r->result.error == CP_OK &&
+        (r->operation == CP_OP_MOUSE_MOVE_RELATIVE ||
+         (r->operation == CP_OP_CONTROL_RENEW && motion->mode == CP_TERMINAL_MOVE_AND_RENEW))) {
+        motion->accepted_key = r->key;
     }
     return result_response(c, session, r, out);
 }
@@ -1723,13 +1724,13 @@ static cp_error_t get_resource(cp_context_t *c, unsigned session, const char *re
             out->body, sizeof(out->body),
             "{\"api_version\":1,\"catalog_sha256\":\"%s\",\"command_bytes\":%u,"
             "\"args_bytes\":%u,\"authenticated_clients\":%u,\"principals\":%u,"
-            "\"results\":%u,\"websocket\":%s,\"websocket_motion_terminal\":%s,"
+            "\"results\":%u,\"websocket\":%s,\"websocket_motion_terminal\":%s,\"websocket_renew_terminal\":%s,"
             "\"binary_download\":%s,\"enrollment\":\"protected_"
             "local_"
             "import\",\"operations\":%u,\"configuration_fields\":%u}",
             cp_catalog_sha256(), CP_MAX_FRAME_BYTES, CP_MAX_ARGS_BYTES, CP_MAX_SESSIONS,
             CP_MAX_PRINCIPALS, CP_MAX_RESULTS, c->websocket_available ? "true" : "false",
-            c->motion_terminal_available ? "true" : "false",
+            c->motion_terminal_available ? "true" : "false", c->motion_terminal_available ? "true" : "false",
             c->binary_download_available ? "true" : "false", (unsigned)cp_operation_count(),
             (unsigned)cp_config_count());
         return CP_OK;
@@ -2223,7 +2224,7 @@ cp_error_t cp_transport_motion_result(cp_context_t *c, const cp_identity_t *who,
     if (session < 0) return CP_UNAUTHENTICATED;
     record_t *r = find_key(c, key);
     if (!r || r->session != (unsigned)session || r->session_generation != c->sessions[session].generation ||
-        r->operation != CP_OP_MOUSE_MOVE_RELATIVE) return CP_RESULT_UNKNOWN;
+        (r->operation != CP_OP_MOUSE_MOVE_RELATIVE && r->operation != CP_OP_CONTROL_RENEW)) return CP_RESULT_UNKNOWN;
     if (r->active) return CP_BUSY;
     if (out) {
         memset(out, 0, sizeof(*out));
@@ -2357,7 +2358,16 @@ cp_error_t cp_transport_frame_motion(cp_context_t *c, const cp_identity_t *who, 
         uint16_t op = cj_get(&c->document, 0, "op");
         if (op != CJ_NONE) {
             error = commands(c, (unsigned)session, frame, length, out,
-                             motion_allowed && motion->enabled ? &motion->accepted_key : NULL);
+                             motion_allowed && motion->mode != CP_TERMINAL_DISABLED ? motion : NULL);
+            if (motion_allowed && motion->mode == CP_TERMINAL_MOVE_AND_RENEW && motion->accepted_key) {
+                size_t used = out->length ? out->length - 1U : 0U;
+                if (used && append(out->body, sizeof(out->body), &used,
+                                   ",\"now_ms\":\"%" PRIu64 "\"}", c->now)) {
+                    out->length = used;
+                } else {
+                    error = failure(out, CP_INTERNAL);
+                }
+            }
         } else {
             unsigned count = 0;
             for (uint16_t t = c->document.nodes[0].child; t != CJ_NONE;
@@ -2375,9 +2385,11 @@ cp_error_t cp_transport_frame_motion(cp_context_t *c, const cp_identity_t *who, 
                         (size_t)snprintf(out->body, sizeof(out->body),
                                          "{\"authenticated\":true,\"media_idle_limit_ms\":5000}");
                     error = CP_OK;
-                } else if (kind && !strcmp(kind, "motion_terminal") && motion_allowed) {
-                    motion->enabled = true;
-                    strcpy(out->body, "{\"motion_terminal\":true}");
+                } else if (kind && motion_allowed &&
+                           (!strcmp(kind, "motion_terminal") || !strcmp(kind, "renew_terminal"))) {
+                    motion->mode = !strcmp(kind, "renew_terminal") ? CP_TERMINAL_MOVE_AND_RENEW : CP_TERMINAL_MOVE;
+                    strcpy(out->body, motion->mode == CP_TERMINAL_MOVE_AND_RENEW ?
+                           "{\"motion_terminal\":true,\"renew_terminal\":true}" : "{\"motion_terminal\":true}");
                     out->length = strlen(out->body);
                     out->status = 200;
                     error = CP_OK;

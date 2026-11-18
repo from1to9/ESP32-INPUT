@@ -8,7 +8,7 @@ const {chromium} = await import(pathToFileURL(process.env.WEB_PLAYWRIGHT_MODULE)
 const origin = process.env.WEB_ORIGIN, device = process.env.WEB_FIXTURE_ORIGIN;
 const browser = await chromium.launch({headless: true,
   ...(process.env.WEB_BROWSER_EXECUTABLE ? {executablePath: process.env.WEB_BROWSER_EXECUTABLE} : {})});
-const evidence = {motionCommands: [], motionResults: [], renewals: [], httpCommands: [], httpStateReads: 0, movementReports: []};
+const evidence = {motionCommands: [], motionResults: [], renewals: [], httpCommands: [], httpStateReads: 0};
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const atMs = () => Math.round(performance.timeOrigin + performance.now());
 const expectPush = process.env.WEB_EXPECT_MOTION_TERMINAL === "1";
@@ -54,7 +54,14 @@ try {
     if (source.includes(releaseExpiry)) insertions.push([
       releaseExpiry, `${releaseExpiry} ${observe}("expired_before_submit", movement);`,
     ]);
-    for (const [needle, injected] of insertions) {
+    const bucketTrim = "    while (samples.length && now + headroom >= samples[0].at + PAD_SAMPLE_LIFETIME_MS) samples.shift();";
+    const selected = source.includes(bucketTrim) ? [
+      [bucketTrim, bucketTrim.replace("samples.shift();", `{ const sample = samples.shift(); ${observe}(now >= sample.at + PAD_SAMPLE_LIFETIME_MS ? "expired_before_submit" : "insufficient_headroom", sample); }`)],
+      ["    if (consume) samples.length = 0;", "    if (consume) globalThis.recordMotionClip?.(dx - Math.max(-127, Math.min(127, dx)), dy - Math.max(-127, Math.min(127, dy)));\n"],
+      ["  const endPad = event => { if (pad?.id === event.pointerId) { pad = null;",
+        `  const endPad = event => { if (pad?.id === event.pointerId) { for (const sample of pad.samples) ${observe}("contact_end", sample); pad = null;`],
+    ] : insertions;
+    for (const [needle, injected] of selected) {
       assert.equal(source.split(needle).length, 2);
       source = source.replace(needle, injected.endsWith("\n") ? injected + needle : injected);
     }
@@ -79,7 +86,7 @@ try {
       if (typeof payload !== "string") return;
       const frame = JSON.parse(payload);
       if (frame.state) evidence.motionResults.push({state: frame.state, error: frame.error, key: frame.command_key,
-        nextSeq: frame.next_seq, pushed: frame.motion_terminal === true, atMs: atMs()});
+        nextSeq: frame.next_seq, reason: frame.reason, deviceNow: frame.now_ms, pushed: frame.motion_terminal === true, atMs: atMs()});
     });
   });
   await page.goto(origin);
@@ -92,7 +99,9 @@ try {
   evidence.secureCookieRetained = cookie.secure;
   await page.locator("#acquire").click();
   await waitText("connection", "Controlling");
-  assert.equal(sentFrames.filter(frame => frame.type === "motion_terminal").length, expectPush ? 1 : 0);
+  const negotiations = sentFrames.filter(frame => ["motion_terminal", "renew_terminal"].includes(frame.type));
+  assert.equal(negotiations.length, expectPush ? 1 : 0);
+  const expectRenewPush = negotiations[0]?.type === "renew_terminal";
   await page.locator("#pad").scrollIntoViewIfNeeded();
   const pad = await page.locator("#pad").boundingBox();
   const point = {id: 1, x: pad.x + 35, y: pad.y + 50};
@@ -104,7 +113,7 @@ try {
         if ((record.oldValue !== null) !== record.target.hasAttribute("disabled")) changes.push(record.target.id || record.target.dataset.click);
       }
     });
-    for (const selector of ["#mouse-mode", "#keyboard-mode", "[data-click=left]", "[data-click=right]"]) {
+    for (const selector of ['[aria-label="Move up"]', '[aria-label="Type a"]', "[data-click=left]", "[data-click=right]"]) {
       observer.observe(document.querySelector(selector), {attributes: true, attributeOldValue: true, attributeFilter: ["disabled"]});
     }
     window.finishMotionObservation = () => { observer.disconnect(); return changes; };
@@ -114,9 +123,13 @@ try {
     // An inline renewal can consume the sample's entire admission window.
     const prior = evidence.renewals.at(-1) ?? 0;
     for (let i = 0; i < 100; ++i) {
-      const applied = evidence.motionResults.some(reply => reply.state === "applied" &&
+      const applied = evidence.motionResults.find(reply => reply.state === "applied" &&
         evidence.renewals.some(seq => seq > prior && Number(reply.nextSeq) === seq + 1));
-      if (applied) return;
+      if (applied) {
+        assert.equal(applied.pushed, expectRenewPush);
+        assert.equal(sentFrames.some(frame => frame.resource === `/api/v1/requests/${applied.key}`), !expectRenewPush);
+        return;
+      }
       await delay(25);
     }
     assert.fail("Expected a fresh lease before injecting a command fault");
@@ -164,24 +177,28 @@ try {
     };
   });
   await touch("touchStart");
-  for (let i = 0; i < 90; ++i) {
+  const padSamples = Number(process.env.WEB_TEST_PAD_SAMPLES || 90);
+  assert(point.x + padSamples * 2 < pad.x + pad.width, "test drag fits the pad");
+  let halfway;
+  for (let i = 0; i < padSamples; ++i) {
     point.x += 2;
     await touch("touchMove");
     await delay(18);
-    if (i === 44 || i === 89) {
-      const trace = await reports();
-      evidence.movementReports.push(trace.filter(report => report.id === 2 && report.bytes[1] > 0).length);
-    }
+    if (i + 1 === Math.floor(padSamples / 2)) halfway = atMs();
   }
   await touch("touchEnd");
   const afterTouch = atMs();
   const {samples, discarded, clipped} = await page.evaluate(() => window.finishTouchTiming());
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Move right"]').hasAttribute("aria-disabled"));
+  const touchHid = (await reports()).filter(report => report.id === 2 && report.atMs >= beforeTouch &&
+    (report.bytes[1] || report.bytes[2]));
+  evidence.movementReports = [halfway, afterTouch].map(end => touchHid.filter(report => report.atMs <= end).length);
   evidence.touchTiming = {
     startedAtMs: beforeTouch, endedAtMs: afterTouch, initialPoint, samples, discarded, clipped,
     sent: sentFrames.filter(frame => frame.atMs >= beforeTouch && frame.atMs <= afterTouch),
     received: evidence.motionResults.filter(frame => frame.atMs >= beforeTouch && frame.atMs <= afterTouch),
-    hid: (await reports()).filter(report => report.id === 2 && report.atMs >= beforeTouch && report.atMs <= afterTouch &&
-      (report.bytes[1] || report.bytes[2])),
+    hid: touchHid,
+    halfwayAtMs: halfway, plannedSamples: padSamples,
   };
   const [earlier, later] = evidence.movementReports;
   assert(earlier >= 4 && later >= earlier + 4, JSON.stringify(evidence.movementReports));
@@ -207,7 +224,7 @@ try {
   const left = page.getByRole("button", {name: "Move left"});
   await left.evaluate(button => {
     button.addEventListener("click", () => {
-      const others = [document.querySelector('[aria-label="Move right"]'), document.getElementById("keyboard-mode"),
+      const others = [document.querySelector('[aria-label="Move right"]'), document.querySelector('[aria-label="Type a"]'),
         document.querySelector("[data-click=left]")];
       const peek = control => ({disabled: control.disabled, ariaDisabled: control.getAttribute("aria-disabled"),
         opacity: getComputedStyle(control).opacity});
@@ -268,7 +285,7 @@ try {
   }
   await touch("touchEnd");
   assert.equal(await page.locator("#connection").textContent(), "Connected / idle");
-  assert(await page.locator("#mouse-mode").isDisabled());
+  assert(await page.locator('[aria-label="Move up"]').isDisabled());
   await delay(1000);
   assert.equal(evidence.motionCommands.length, sentBeforeLoss + 1);
   assert(!evidence.httpCommands.includes("mouse.move_relative"));

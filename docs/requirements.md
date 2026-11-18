@@ -114,6 +114,10 @@ types, units and apply/save semantics.
   page over local HTTP and support the enrolled HTTPS/WSS service. A manual
   mode switch closes the old sessions and releases remote input before
   changing interfaces. [Wi-Fi setup](wifi-provisioning.md)
+- After explicit input acquisition, show the touchpad and US QWERTY keyboard
+  together on phone, tablet and desktop. An input gesture selects its required
+  device mode without a separate mode button; only send its input while the
+  same target and lease remain verified.
 - The Mosaico browser page is reachable before authorization. An eight-digit
   code generated in local settings survives reboot and admits a separate,
   revocable credential for each browser. Replacing the code preserves existing

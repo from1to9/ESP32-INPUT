@@ -385,7 +385,8 @@ typedef struct {
     int fd;
     unsigned slot;
     uint64_t generation;
-    bool closed, motion_terminal;
+    bool closed;
+    cp_terminal_mode_t terminal_mode;
 } channel_t;
 static void websocket_closed(channel_t *c)
 {
@@ -567,10 +568,10 @@ static esp_err_t websocket_data(httpd_req_t *request)
     drain_channel_closures(s);
     cp_error_t error;
     if (frame.type == HTTPD_WS_TYPE_TEXT) {
-        cp_motion_terminal_t motion = {.enabled = channel->motion_terminal};
+        cp_motion_terminal_t motion = {.mode = channel->terminal_mode};
         error = cp_transport_frame_motion(s->protocol, &channel->identity, s->body, frame.len,
                                           now_ms(), &s->response, &motion);
-        channel->motion_terminal = motion.enabled;
+        channel->terminal_mode = motion.mode;
         if (motion.accepted_key) {
             // Mark before the admission frame is written. Queued terminal work
             // can only run on this same HTTP owner after this handler returns.
