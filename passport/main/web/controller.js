@@ -591,6 +591,7 @@ function mount() {
       bucket = {at, dx:0, dy:0}; samples.push(bucket);
     }
     bucket.dx += dx; bucket.dy += dy;
+    movement.unread = true;
     sendMovement();
   }
   $('pad').onpointerdown = e => {
@@ -658,10 +659,18 @@ function mount() {
     e.preventDefault(); act(finishDrag);
   }, true);
   $('drag').onblur = () => { if (drag?.key) act(finishDrag); };
+  function retainFraction(samples, axis, remaining) {
+    for (let i = samples.length - 1; i >= 0; i--) {
+      const delta = samples[i][axis];
+      const kept = remaining * delta > 0 ? Math.sign(remaining) * Math.min(Math.abs(remaining), Math.abs(delta)) : 0;
+      samples[i][axis] = kept;
+      remaining -= kept;
+    }
+  }
   function sendMovement() {
     if (!client.controlled || client.busy || document.hidden) return;
     if (drag?.submitted && performance.now() - dragAt >= 400) return;
-    if (!movement?.samples.length || performance.now() - lastPadPost < PAD_BATCH_MS) return;
+    if (!movement?.unread || performance.now() - lastPadPost < PAD_BATCH_MS) return;
     if (performance.now() >= movement.samples.at(-1).at + PAD_LIFETIME_MS) { movement = null; return; }
     const pending = movement;
     act(() => client.run('mouse.move_relative', {}, undefined, {
@@ -672,6 +681,7 @@ function mount() {
         // Reserve a recent HTTP round trip for the state reply and POST
         // admission legs. Include only deltas with their original deadline.
         const headroom = Math.min(roundTrip, PAD_LIFETIME_MS);
+        pending.unread = false;
         const {samples} = pending;
         while (samples.length > 1 && now + headroom >= samples[0].at + PAD_LIFETIME_MS) samples.shift();
         // A single fresh delta can still arrive sooner than the estimate.
@@ -679,15 +689,23 @@ function mount() {
         const expiresAt = samples[0].at + PAD_LIFETIME_MS;
         let dx = 0, dy = 0;
         for (const bucket of samples) { dx += bucket.dx; dy += bucket.dy; }
-        samples.length = 0;
-        const axis = value => Math.max(-127, Math.min(127, Math.trunc(value)));
-        dx = axis(dx); dy = axis(dy);
-        return dx || dy ? {args:{dx,dy}, expiresAt} : null;
+        const x = Math.trunc(dx), y = Math.trunc(dy);
+        if (x === dx && y === dy) samples.length = 0;
+        else {
+          // Consume whole units from older contributions first. Any fractional
+          // remainder stays in its original signed bucket with its own expiry.
+          retainFraction(samples, 'dx', dx - x);
+          retainFraction(samples, 'dy', dy - y);
+          pending.samples = samples.filter(bucket => bucket.dx || bucket.dy);
+        }
+        if (!x && !y) return null; // Wait for a new event on this contact.
+        const axis = value => Math.max(-127, Math.min(127, value));
+        return {args:{dx:axis(x), dy:axis(y)}, expiresAt};
       },
     }));
   }
   client.onInputLaneReleased = () => {
-    if (movement?.samples.length) queueMicrotask(sendMovement);
+    if (movement?.unread) queueMicrotask(sendMovement);
   };
   setInterval(() => {
     if (!client.controlled || client.busy || document.hidden) return;

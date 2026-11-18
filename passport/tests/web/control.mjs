@@ -186,6 +186,47 @@ async function touchAcrossPadEdge(){
     console.log('PASS trusted touch continues outside pad after capture loss, lift and cancel discard, outside start ignored');
   }finally{await context.close();}
 }
+async function fractionalTouch(){
+  reset();touchTiming={trace:[],moves:[],firstAdmissionMs:1,stateReturnMs:0,inline:true};
+  const context=await browser.newContext({viewport:{width:390,height:844},isMobile:true,hasTouch:true});
+  try{
+    const page=await open(context);await connect(page);await acquire(page);
+    const touch=await padTouch(context,page);
+    for(const sign of [1,-1]){
+      const first=commands.length;
+      await touch('touchStart');
+      for(let i=1;i<=48;i++){
+        await touch('touchMove',sign*i/2);
+        await pause(25);
+      }
+      await pause(90);await touch('touchEnd');
+      const moves=commands.slice(first).filter(c=>c.op==='mouse.move_relative');
+      assert.equal(moves.reduce((n,c)=>n+c.args.dx,0),sign*24);
+      assert(moves.every(c=>c.args.dy===0 && Math.sign(c.args.dx)===sign));
+    }
+    // Once a reversal cancels a fraction, expiry cannot bring either half back.
+    const reversal=commands.length;
+    await touch('touchStart');await touch('touchMove',0.5);await pause(80);
+    await touch('touchMove',0);await pause(80);await touch('touchMove',-0.5);
+    await pause(35);
+    assert(!commands.slice(reversal).some(c=>c.op==='mouse.move_relative'));
+    await touch('touchMove',-1);await pause(70);await touch('touchEnd');
+    assert.deepEqual(commands.slice(reversal).filter(c=>c.op==='mouse.move_relative').map(c=>c.args),[{dx:-1,dy:0}]);
+    // Two half steps cannot combine across lift or after the first expires.
+    const first=commands.length;
+    await touch('touchStart');await touch('touchMove',0.5);await touch('touchEnd');
+    await touch('touchStart');await touch('touchMove',0.5);
+    await pause(190);await touch('touchMove',1);await pause(75);await touch('touchEnd');
+    assert(!commands.slice(first).some(c=>c.op==='mouse.move_relative'));
+    // Horizontal integer output must leave the original fractional Y intact.
+    await touch('touchStart');await touch('touchMove',1,0.5);await pause(55);
+    await touch('touchMove',2,1);await pause(90);await touch('touchEnd');
+    const mixed=commands.slice(first).filter(c=>c.op==='mouse.move_relative');
+    assert.equal(mixed.reduce((n,c)=>n+c.args.dx,0),2);
+    assert.equal(mixed.reduce((n,c)=>n+c.args.dy,0),1);
+    console.log('PASS fractional touch: 48 half pixels each way deliver +24/-24, mixed axes, reversal, lift and original expiry');
+  }finally{await context.close();}
+}
 // Motion during neutral release cannot become part of a later fresh delta.
 async function touchAcrossRelease(){
   reset();state.mode='keyboard';afterMode=()=>{state.release_pending=true;};
@@ -306,6 +347,7 @@ if(process.argv.includes('--trajectory')){
     await trajectory('left 40',20,45,i=>-2*i);
   }finally{await browser.close();await new Promise(r=>server.close(r));}
 }else try{
+  await fractionalTouch();
   await touchAcrossPadEdge();
   await touchAcrossRelease();
   await delayedTouch();
